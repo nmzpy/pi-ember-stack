@@ -39,7 +39,7 @@ the TUI. Restart pi after changing the list. The available plugins are:
 The Ember repository contains a project-local `.pi/settings.json` entry for:
 
 ```json
-"npm:@nmzpy/pi-ember-stack@0.1.1"
+"npm:@nmzpy/pi-ember-stack@0.1.2"
 ```
 
 On a new clone, start pi from the project directory. Pi will ask for a
