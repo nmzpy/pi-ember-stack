@@ -4,18 +4,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import devinAuthPlugin from "./devin-auth/extensions/index.ts";
 import piCompactToolsPlugin from "./pi-compact-tools/index.ts";
-import piCustomAgentsPlugin, {
-	type PiCustomAgentsOptions,
-} from "./pi-custom-agents/index.ts";
+import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 
 type PluginId = "pi-compact-tools" | "pi-custom-agents" | "devin-auth";
 type StackPlugin = {
 	id: PluginId;
 	description: string;
-	extension: (
-		pi: ExtensionAPI,
-		options?: PiCustomAgentsOptions,
-	) => void | Promise<void>;
+	extension: (pi: ExtensionAPI) => void | Promise<void>;
 };
 
 type StackPluginConfig = {
@@ -32,7 +27,7 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 const PLUGINS: readonly StackPlugin[] = [
 	{
 		id: "pi-compact-tools",
-		description: "Collapsed native edit rendering and questionnaire UI",
+		description: "Collapsed native edit rendering",
 		extension: piCompactToolsPlugin,
 	},
 	{
@@ -135,12 +130,9 @@ function registerPluginCommand(
 export default async function piEmberStackPlugin(pi: ExtensionAPI): Promise<void> {
 	const cwd = process.cwd();
 	const enabledPlugins = readEnabledPlugins(cwd);
-	const pluginOptions: PiCustomAgentsOptions = {
-		compactToolsEnabled: enabledPlugins.has("pi-compact-tools"),
-	};
 	for (const plugin of PLUGINS) {
 		if (!enabledPlugins.has(plugin.id)) continue;
-		await plugin.extension(pi, pluginOptions);
+		await plugin.extension(pi);
 	}
 	registerPluginCommand(pi, cwd, enabledPlugins);
 }

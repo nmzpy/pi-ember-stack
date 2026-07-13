@@ -24,7 +24,8 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	askQuestionnaire,
 	type QuestionnaireQuestion,
-} from "../pi-compact-tools/questionnaire-tool.ts";
+	registerQuestionnaireTool,
+} from "./questionnaire-tool.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 
 function formatTokens(count: number): string {
@@ -558,21 +559,11 @@ function getLastModeFromSession(ctx: any): string | null {
 	return null;
 }
 
-export type PiCustomAgentsOptions = {
-	compactToolsEnabled: boolean;
-};
-
-export default async function piCustomAgentsPlugin(
-	pi: any,
-	options: PiCustomAgentsOptions = { compactToolsEnabled: true },
-) {
+export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
-	const compactToolsEnabled = options.compactToolsEnabled;
-	const toolsForMode = (tools: string[]): string[] => compactToolsEnabled
-		? tools
-		: tools.filter((toolName) => toolName !== "questionnaire");
+	registerQuestionnaireTool(pi);
 
 	for (const modeId of MODE_IDS) {
 		const mode = MODES[modeId];
@@ -602,11 +593,11 @@ export default async function piCustomAgentsPlugin(
 		const mode = MODES[modeId];
 		if (!mode) return;
 		currentMode = modeId;
-		pi.setActiveTools(toolsForMode(mode.tools));
+		pi.setActiveTools(mode.tools);
 		if (modeId === DEFAULT_MODE) {
 			ctx.ui.notify("Coder mode. Full access restored.");
 		} else {
-			ctx.ui.notify(`${mode.label} mode enabled. Tools: ${toolsForMode(mode.tools).join(", ")}`);
+			ctx.ui.notify(`${mode.label} mode enabled. Tools: ${mode.tools.join(", ")}`);
 		}
 		updateStatus(ctx);
 	}
@@ -903,11 +894,11 @@ export default async function piCustomAgentsPlugin(
 		if (restored && restored !== DEFAULT_MODE) {
 			currentMode = restored;
 			lastMessagedMode = restored;
-			pi.setActiveTools(toolsForMode(MODES[restored].tools));
+			pi.setActiveTools(MODES[restored].tools);
 		} else {
 			currentMode = DEFAULT_MODE;
 			lastMessagedMode = null;
-			pi.setActiveTools(toolsForMode(FULL_TOOLS));
+			pi.setActiveTools(FULL_TOOLS);
 		}
 		installCustomFooter(ctx);
 		updateStatus(ctx);
@@ -918,11 +909,11 @@ export default async function piCustomAgentsPlugin(
 		if (restored && restored !== DEFAULT_MODE) {
 			currentMode = restored;
 			lastMessagedMode = restored;
-			pi.setActiveTools(toolsForMode(MODES[restored].tools));
+			pi.setActiveTools(MODES[restored].tools);
 		} else {
 			currentMode = DEFAULT_MODE;
 			lastMessagedMode = null;
-			pi.setActiveTools(toolsForMode(FULL_TOOLS));
+			pi.setActiveTools(FULL_TOOLS);
 		}
 		updateStatus(ctx);
 		installCustomFooter(ctx);

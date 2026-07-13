@@ -3,8 +3,6 @@ import { fileURLToPath } from "node:url";
 import { createEditTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-import { registerQuestionnaireTool } from "./questionnaire-tool.ts";
-
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 function registerCollapsedEditTool(extensionApi: any): void {
@@ -69,6 +67,5 @@ function registerCollapsedEditTool(extensionApi: any): void {
 }
 
 export default function piCompactToolsPlugin(pi: any): void {
-	registerQuestionnaireTool(pi);
 	registerCollapsedEditTool(pi);
 }

@@ -1,6 +1,6 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Ember's configurable pi plugin stack with modes, questionnaire, compact edits, subagents, and Devin auth",
   "type": "module",
   "license": "MIT",

@@ -30,8 +30,8 @@ plugins under `plugins/`. Ember projects enable them in `.pi/ember-stack.json`:
 Remove a plugin ID to disable it, or use `/stack-plugins` to toggle one from
 the TUI. Restart pi after changing the list. The available plugins are:
 
-- `pi-compact-tools`: collapsed native edit rendering and questionnaire UI.
-- `pi-custom-agents`: primary modes, plans, subagent tool, and bundled agent definitions.
+- `pi-compact-tools`: collapsed native edit rendering.
+- `pi-custom-agents`: questionnaire UI, primary modes, plans, subagent tool, and bundled agent definitions.
 - `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
 
 ## Project setup
@@ -39,7 +39,7 @@ the TUI. Restart pi after changing the list. The available plugins are:
 The Ember repository contains a project-local `.pi/settings.json` entry for:
 
 ```json
-"npm:@nmzpy/pi-ember-stack@0.1.4"
+"npm:@nmzpy/pi-ember-stack@0.1.5"
 ```
 
 On a new clone, start pi from the project directory. Pi will ask for a
