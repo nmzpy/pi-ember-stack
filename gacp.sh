@@ -49,6 +49,10 @@ cd "$SCRIPT_DIR"
 
 if [[ "$RELEASE_MODE" == "1" ]]; then
 	command -v npm >/dev/null || { echo "ERROR: npm is required for releases." >&2; exit 1; }
+	npm whoami >/dev/null || {
+		echo "ERROR: Log in to npm with 'npm login' before creating a release." >&2
+		exit 1
+	}
 
 	VERSION="$(npm version patch --no-git-tag-version)"
 	VERSION="${VERSION#v}"
