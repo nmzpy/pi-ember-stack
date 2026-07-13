@@ -39,7 +39,7 @@ the TUI. Restart pi after changing the list. The available plugins are:
 The Ember repository contains a project-local `.pi/settings.json` entry for:
 
 ```json
-"npm:@nmzpy/pi-ember-stack@0.1.5"
+"npm:@nmzpy/pi-ember-stack@0.1.6"
 ```
 
 On a new clone, start pi from the project directory. Pi will ask for a
@@ -69,9 +69,9 @@ of this repository.
 ## Development
 
 The package entrypoint is `plugins/index.ts`. Compact tools are under
-`plugins/pi-compact-tools/`, while primary modes, plans, subagents, and bundled
-agents are under `plugins/pi-custom-agents/`. Devin auth is under
-`plugins/devin-auth/`.
+`plugins/pi-compact-tools/`, while questionnaire, primary modes, plans,
+subagents, and bundled agents are under `plugins/pi-custom-agents/`. Devin auth
+is under `plugins/devin-auth/`.
 
 Run the package typecheck with:
 

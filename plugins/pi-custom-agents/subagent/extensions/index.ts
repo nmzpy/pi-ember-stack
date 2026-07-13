@@ -756,6 +756,7 @@ export default function (pi: ExtensionAPI) {
 			// Chain
 			if (args.chain && args.chain.length > 0) {
 				let text =
+					fg("muted", "• ") +
 					fg("toolTitle", theme.bold("subagent ")) +
 					fg("accent", `chain (${args.chain.length} steps)`) +
 					fg("muted", ` [${scope}]`);
@@ -778,6 +779,7 @@ export default function (pi: ExtensionAPI) {
 			// Parallel
 			if (args.tasks && args.tasks.length > 0) {
 				let text =
+					fg("muted", "• ") +
 					fg("toolTitle", theme.bold("subagent ")) +
 					fg("accent", `parallel (${args.tasks.length} tasks)`) +
 					fg("muted", ` [${scope}]`);
@@ -798,6 +800,7 @@ export default function (pi: ExtensionAPI) {
 					: args.task
 				: "...";
 			let text =
+				fg("muted", "• ") +
 				fg("toolTitle", theme.bold("subagent ")) +
 				fg("accent", agentName) +
 				fg("muted", ` [${scope}]`);

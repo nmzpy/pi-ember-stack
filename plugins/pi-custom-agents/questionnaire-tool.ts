@@ -259,6 +259,7 @@ export function registerQuestionnaireTool(pi: any): void {
 		renderCall(args: { questions?: QuestionnaireQuestion[] }, theme: any): any {
 			const count = args.questions?.length ?? 0;
 			return new Text(
+				theme.fg("muted", "• ") +
 				theme.fg("toolTitle", theme.bold("questionnaire ")) +
 					theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`),
 				0,

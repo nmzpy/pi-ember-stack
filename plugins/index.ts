@@ -32,7 +32,7 @@ const PLUGINS: readonly StackPlugin[] = [
 	},
 	{
 		id: "pi-custom-agents",
-		description: "Primary modes, plans, subagents, and bundled agent definitions",
+		description: "Questionnaire, primary modes, plans, subagents, and bundled agent definitions",
 		extension: piCustomAgentsPlugin,
 	},
 	{
