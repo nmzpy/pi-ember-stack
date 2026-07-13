@@ -3,10 +3,10 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import devinAuthPlugin from "./devin-auth/extensions/index.ts";
-import emberPlugin from "./ember/index.ts";
+import piCompactToolsPlugin from "./pi-compact-tools/index.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 
-type PluginId = "ember" | "subagent" | "devin-auth";
+type PluginId = "pi-compact-tools" | "subagent" | "devin-auth";
 type StackPlugin = {
 	id: PluginId;
 	description: string;
@@ -19,16 +19,16 @@ type StackPluginConfig = {
 
 const CONFIG_RELATIVE_PATH = path.join(".pi", "ember-stack.json");
 const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
-	"ember",
+	"pi-compact-tools",
 	"subagent",
 	"devin-auth",
 ];
 
 const PLUGINS: readonly StackPlugin[] = [
 	{
-		id: "ember",
-		description: "Ember modes, questionnaire, footer, and compact edit rendering",
-		extension: emberPlugin,
+		id: "pi-compact-tools",
+		description: "Compact edit rendering, modes, questionnaire, and footer",
+		extension: piCompactToolsPlugin,
 	},
 	{
 		id: "subagent",
