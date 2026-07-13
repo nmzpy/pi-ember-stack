@@ -4,13 +4,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import devinAuthPlugin from "./devin-auth/extensions/index.ts";
 import piCompactToolsPlugin from "./pi-compact-tools/index.ts";
-import subagentPlugin from "./subagent/extensions/index.ts";
+import piCustomAgentsPlugin, {
+	type PiCustomAgentsOptions,
+} from "./pi-custom-agents/index.ts";
 
-type PluginId = "pi-compact-tools" | "subagent" | "devin-auth";
+type PluginId = "pi-compact-tools" | "pi-custom-agents" | "devin-auth";
 type StackPlugin = {
 	id: PluginId;
 	description: string;
-	extension: (pi: ExtensionAPI) => void | Promise<void>;
+	extension: (
+		pi: ExtensionAPI,
+		options?: PiCustomAgentsOptions,
+	) => void | Promise<void>;
 };
 
 type StackPluginConfig = {
@@ -20,20 +25,20 @@ type StackPluginConfig = {
 const CONFIG_RELATIVE_PATH = path.join(".pi", "ember-stack.json");
 const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-compact-tools",
-	"subagent",
+	"pi-custom-agents",
 	"devin-auth",
 ];
 
 const PLUGINS: readonly StackPlugin[] = [
 	{
 		id: "pi-compact-tools",
-		description: "Compact edit rendering, modes, questionnaire, and footer",
+		description: "Collapsed native edit rendering and questionnaire UI",
 		extension: piCompactToolsPlugin,
 	},
 	{
-		id: "subagent",
-		description: "Bundled subagent tool and agent definitions",
-		extension: subagentPlugin,
+		id: "pi-custom-agents",
+		description: "Primary modes, plans, subagents, and bundled agent definitions",
+		extension: piCustomAgentsPlugin,
 	},
 	{
 		id: "devin-auth",
@@ -130,9 +135,12 @@ function registerPluginCommand(
 export default async function piEmberStackPlugin(pi: ExtensionAPI): Promise<void> {
 	const cwd = process.cwd();
 	const enabledPlugins = readEnabledPlugins(cwd);
+	const pluginOptions: PiCustomAgentsOptions = {
+		compactToolsEnabled: enabledPlugins.has("pi-compact-tools"),
+	};
 	for (const plugin of PLUGINS) {
 		if (!enabledPlugins.has(plugin.id)) continue;
-		await plugin.extension(pi);
+		await plugin.extension(pi, pluginOptions);
 	}
 	registerPluginCommand(pi, cwd, enabledPlugins);
 }

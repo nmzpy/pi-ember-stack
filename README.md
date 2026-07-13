@@ -23,15 +23,15 @@ plugins under `plugins/`. Ember projects enable them in `.pi/ember-stack.json`:
 
 ```json
 {
-  "plugins": ["pi-compact-tools", "subagent", "devin-auth"]
+  "plugins": ["pi-compact-tools", "pi-custom-agents", "devin-auth"]
 }
 ```
 
 Remove a plugin ID to disable it, or use `/stack-plugins` to toggle one from
 the TUI. Restart pi after changing the list. The available plugins are:
 
-- `pi-compact-tools`: compact edit rendering, modes, questionnaire, and footer.
-- `subagent`: bundled subagent tool and agent definitions.
+- `pi-compact-tools`: collapsed native edit rendering and questionnaire UI.
+- `pi-custom-agents`: primary modes, plans, subagent tool, and bundled agent definitions.
 - `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
 
 ## Project setup
@@ -39,7 +39,7 @@ the TUI. Restart pi after changing the list. The available plugins are:
 The Ember repository contains a project-local `.pi/settings.json` entry for:
 
 ```json
-"npm:@nmzpy/pi-ember-stack@0.1.3"
+"npm:@nmzpy/pi-ember-stack@0.1.4"
 ```
 
 On a new clone, start pi from the project directory. Pi will ask for a
@@ -68,9 +68,10 @@ of this repository.
 
 ## Development
 
-The package entrypoint is `plugins/index.ts`. Compact tools and Ember modes are
-under `plugins/pi-compact-tools/`, subagents and bundled agents are under `plugins/subagent/`,
-and Devin auth is under `plugins/devin-auth/`.
+The package entrypoint is `plugins/index.ts`. Compact tools are under
+`plugins/pi-compact-tools/`, while primary modes, plans, subagents, and bundled
+agents are under `plugins/pi-custom-agents/`. Devin auth is under
+`plugins/devin-auth/`.
 
 Run the package typecheck with:
 
