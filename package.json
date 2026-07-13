@@ -1,6 +1,6 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Ember's primary modes, questionnaire UI, compact edit renderer, and subagents for pi",
   "type": "module",
   "license": "MIT",

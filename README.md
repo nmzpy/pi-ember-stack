@@ -58,6 +58,12 @@ npm install
 npm run typecheck
 ```
 
+## Release
+
+Run `./gacp.sh --release` to bump the patch version, typecheck, commit, tag,
+push, and publish the package to npm. This only publishes the package; update
+Ember's pinned package version separately when you want the project to install it.
+
 The package is cross-platform: bundled paths are resolved from `import.meta.url`
 and do not depend on a Windows home directory or the current working
 directory.
