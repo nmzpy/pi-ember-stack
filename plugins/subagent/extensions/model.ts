@@ -12,9 +12,19 @@
  * are tried before assuming Anthropic.
  */
 
-import { getModel } from "@earendil-works/pi-ai/compat";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+
+type BuiltInModelResolver = (provider: string, id: string) => Model<any> | undefined;
+
+interface ModelModule {
+	getModel: BuiltInModelResolver;
+}
+
+// Pi 0.80 exposes getModel from /compat; 0.79 exported it from the main entry.
+const { getModel } = (await import("@earendil-works/pi-ai/compat").catch(
+	() => import("@earendil-works/pi-ai"),
+)) as ModelModule;
 
 export interface ResolvedModel {
 	model: Model<any> | null;
