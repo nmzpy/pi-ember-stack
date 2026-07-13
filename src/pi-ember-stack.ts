@@ -1,5 +1,5 @@
 /**
- * Pi Agents — Primary Modes Extension
+ * Pi Ember Stack — Primary Modes Extension
  *
  * Toggleable primary modes for the Ember project, mirroring opencode's
  * mode: primary agents. Each mode is a slash command that:
@@ -19,7 +19,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { fileURLToPath } from "node:url";
+import { createEditTool } from "@earendil-works/pi-coding-agent";
+import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	askQuestionnaire,
+	registerQuestionnaireTool,
+	type QuestionnaireQuestion,
+} from "./questionnaire-tool.ts";
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -41,11 +48,12 @@ function formatCwdForFooter(cwd: string, home: string | undefined): string {
 }
 
 const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
-const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "questionnaire"];
 
+const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SUBAGENT_FILES: Record<string, string> = {
-	coder: path.join(process.cwd(), ".pi", "agents", "coder.md"),
-	architect: path.join(process.cwd(), ".pi", "agents", "architect.md"),
+	coder: path.join(SOURCE_ROOT, "subagent", "agents", "coder.md"),
+	architect: path.join(SOURCE_ROOT, "subagent", "agents", "architect.md"),
 };
 
 interface ModeConfig {
@@ -78,6 +86,7 @@ should be comprehensive yet concise, detailed enough to execute effectively whil
 avoiding unnecessary verbosity. Include the goal as first part of the plan.
 
 Ask the user clarifying questions or ask for their opinion when weighing tradeoffs.
+Use the questionnaire tool for decision-oriented questions so the user can answer inline.
 
 **NOTE:** At any point in time through this workflow you should feel free to ask
 the user questions or clarifications. Don't make large assumptions about user
@@ -550,10 +559,73 @@ function getLastModeFromSession(ctx: any): string | null {
 	return null;
 }
 
-export default function piAgentsExtension(pi: any) {
+export default function piEmberStackExtension(pi: any) {
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
+	registerQuestionnaireTool(pi);
+	registerCollapsedEditTool(pi);
+
+	function registerCollapsedEditTool(extensionApi: any): void {
+		const editDefinition = createEditTool(SOURCE_ROOT);
+		extensionApi.registerTool({
+			name: "edit",
+			label: "edit",
+			description: editDefinition.description,
+			parameters: editDefinition.parameters,
+			renderShell: "self",
+
+			async execute(
+				toolCallId: string,
+				params: any,
+				signal: AbortSignal,
+				onUpdate: any,
+				ctx: any,
+			) {
+				return createEditTool(ctx.cwd).execute(
+					toolCallId,
+					params,
+					signal,
+					onUpdate,
+				);
+			},
+
+			renderCall(args: any, theme: any): any {
+				const filePath = String(args?.path ?? args?.file_path ?? "");
+				return new Text(
+					theme.fg("toolTitle", theme.bold("edit ")) +
+						theme.fg("accent", filePath),
+					0,
+					0,
+				);
+			},
+
+			renderResult(result: any, { isPartial }: any, theme: any): any {
+				if (isPartial) return new Text(theme.fg("warning", "Editing..."), 0, 0);
+
+				const content = result.content?.find((item: any) => item.type === "text");
+				if (content?.text?.startsWith("Error")) {
+					return new Text(theme.fg("error", content.text.split("\n")[0]), 0, 0);
+				}
+
+				const diff = typeof result.details?.diff === "string" ? result.details.diff : "";
+				let additions = 0;
+				let removals = 0;
+				for (const line of diff.split("\n")) {
+					if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+					if (line.startsWith("-") && !line.startsWith("---")) removals++;
+				}
+
+				return new Text(
+					theme.fg("success", `+${additions}`) +
+						theme.fg("dim", " / ") +
+						theme.fg("error", `-${removals}`),
+					0,
+					0,
+				);
+			},
+		});
+	}
 
 	for (const modeId of MODE_IDS) {
 		const mode = MODES[modeId];
@@ -608,13 +680,19 @@ export default function piAgentsExtension(pi: any) {
 		});
 	}
 
+	const cycleMode = async (ctx: any): Promise<void> => {
+		const idx = CYCLE_ORDER.indexOf(currentMode);
+		const next = CYCLE_ORDER[(idx + 1) % CYCLE_ORDER.length];
+		switchMode(next, ctx);
+	};
+
+	pi.registerShortcut("ctrl+space", {
+		description: "Cycle agent mode",
+		handler: cycleMode,
+	});
 	pi.registerShortcut("tab", {
 		description: "Cycle agent mode",
-		handler: async (ctx: any) => {
-			const idx = CYCLE_ORDER.indexOf(currentMode);
-			const next = CYCLE_ORDER[(idx + 1) % CYCLE_ORDER.length];
-			switchMode(next, ctx);
-		},
+		handler: cycleMode,
 	});
 
 	pi.registerCommand("subagent-model", {
@@ -675,14 +753,25 @@ export default function piAgentsExtension(pi: any) {
 	});
 
 	async function showPlanReview(ctx: any): Promise<"implement" | "edit" | "reject" | undefined> {
-		if (!ctx.hasUI) return undefined;
-		const choice = await ctx.ui.select(
+		const questions: QuestionnaireQuestion[] = [{
+			id: "plan-review",
+			label: "Plan Review",
+			prompt: "Choose what to do with the plan.",
+			options: [
+				{ value: "implement", label: "Implement Plan" },
+				{ value: "edit", label: "Edit Plan" },
+				{ value: "reject", label: "Reject Plan" },
+			],
+		}];
+		const answers = await askQuestionnaire(
+			ctx,
 			"Plan Review",
-			["Implement Plan", "Edit Plan", "Reject Plan"],
+			questions,
 		);
-		if (choice === "Implement Plan") return "implement";
-		if (choice === "Edit Plan") return "edit";
-		if (choice === "Reject Plan") return "reject";
+		const choice = answers?.[0]?.value;
+		if (choice === "implement") return "implement";
+		if (choice === "edit") return "edit";
+		if (choice === "reject") return "reject";
 		return undefined;
 	}
 
@@ -745,6 +834,7 @@ export default function piAgentsExtension(pi: any) {
 			if (action === "implement") {
 				await handlePlanImplement(ctx);
 			} else if (action === "edit") {
+				waitingForPlan = true;
 				ctx.ui.notify("Edit your plan — type your changes and send.");
 			} else if (action === "reject") {
 				ctx.ui.notify("Plan rejected. Staying in architect mode.");
@@ -818,9 +908,7 @@ export default function piAgentsExtension(pi: any) {
 					const provider = model?.provider ?? "unknown";
 					const thinking = getThinkingLevelFromSession(ctx);
 					const variant = thinking !== "off" ? ` ${thinking}` : "";
-					const modeColor = currentMode === DEFAULT_MODE ? "success" : mode.color;
-					const rightSide = theme.fg(
-						modeColor,
+					const rightSide = theme.getThinkingBorderColor(thinking)(
 						`${modeLabel} \u2022 ${provider}: ${modelName}${variant}`,
 					);
 					const availableForRight = width - visibleWidth(statsLeft) - 2;
@@ -847,7 +935,11 @@ export default function piAgentsExtension(pi: any) {
 					];
 					const statuses = footerData.getExtensionStatuses();
 					if (statuses.size > 0) {
-						const statusLine = Array.from(statuses.entries())
+						const statusEntries = Array.from(statuses.entries()) as Array<[
+							string,
+							string,
+						]>;
+						const statusLine = statusEntries
 							.sort(([a], [b]) => a.localeCompare(b))
 							.map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim())
 							.join(" ");

@@ -1,7 +1,50 @@
 {
-  "name": "pi-agents",
+  "name": "@nmzpy/pi-ember-stack",
   "version": "0.1.0",
-  "private": true,
+  "description": "Ember's primary modes, questionnaire UI, compact edit renderer, and subagents for pi",
   "type": "module",
-  "description": "Toggleable primary agent modes for pi"
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "ember"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nmzpy/pi-ember-stack.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nmzpy/pi-ember-stack/issues"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "README.md",
+    "ATTRIBUTION.md",
+    "tsconfig.json",
+    "src"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/pi-ember-stack.ts",
+      "./src/subagent/extensions/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.6",
+    "@earendil-works/pi-agent-core": "^0.80.6",
+    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@earendil-works/pi-tui": "^0.80.6",
+    "@types/node": "^20.19.43",
+    "typebox": "^1.3.1",
+    "typescript": "^5.9.3"
+  }
 }

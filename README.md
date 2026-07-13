@@ -1,31 +1,63 @@
-# pi-agents
+# pi-ember-stack
 
-Personal pi extension providing toggleable primary agent modes for Ember:
+The Ember-owned pi package. It installs the complete Ember agent workflow as
+one package:
 
-- `/coder`: full implementation access.
-- `/architect`: read-only investigation and planning.
-- `/doctor`: read-only engineering health check.
-- `/orchestrator`: read-only task decomposition and delegation planning.
-- `/ui-doctor`: read-only PySide6/Qt UI diagnosis.
-- `/subagent-model`: choose the model for the project-local coder or architect subagent.
+- Primary modes: `/coder`, `/architect`, `/doctor`, `/orchestrator`, and
+  `/ui-doctor`.
+- Inline `questionnaire` UI for decision-oriented questions. Agents are told to
+  prefer it when they need a user choice.
+- A compact native `edit` renderer that shows the filename and a single
+  `+N / -N` result row.
+- Vendored subagent support with bundled `coder` and `architect` definitions,
+  plus the upstream bundled roles.
+- A self-contained `Ctrl+Space` mode-cycle shortcut and a footer showing the
+  active mode, model, and thinking variant.
+
+## Project setup
+
+The Ember repository contains a project-local `.pi/settings.json` entry for:
+
+```json
+"npm:@nmzpy/pi-ember-stack@0.1.0"
+```
+
+On a new clone, start pi from the project directory. Pi will ask for a
+one-time project trust decision before it installs the package into the
+project-local `.pi/npm/` directory. The same decision can be approved
+non-interactively with:
+
+```text
+pi --approve
+```
+
+Project trust is intentionally a user decision; a repository cannot safely
+bypass it. After trust, normal startup is just `pi` from the Ember directory.
+
+When a new version is intentionally released, update the pinned version in
+the project settings and run:
+
+```text
+pi update --extensions
+```
+
+Third-party utilities such as pi-fff, image paste, and Devin authentication
+remain separate package entries. Credentials and provider secrets stay in the
+machine-local pi configuration and are not part of this repository.
 
 ## Development
 
-The canonical extension source is `src/pi-agents.ts`.
+The package entrypoint is `src/pi-ember-stack.ts`. The vendored subagent
+entrypoint is `src/subagent/extensions/index.ts`; all bundled agent files are
+under `src/subagent/agents/`.
 
-Pi discovers the global loader at
-`C:\Users\nmz\.pi\agent\extensions\pi-agents.ts`, which re-exports this source
-file. Changes in this repository take effect after restarting pi or running
-`/reload`.
+Run the package typecheck with:
 
-The Ember-specific subagent definitions remain in:
+```text
+npm install
+npm run typecheck
+```
 
-- `C:\Work\Ember\.pi\agents\coder.md`
-- `C:\Work\Ember\.pi\agents\architect.md`
-
-## Validation
-
-Start pi from `C:\Work\Ember` after changing the extension and run `/reload`.
-Confirm the footer shows the active mode in the form:
-
-`Coder • openai-codex: GPT-5.5 high`
+The package is cross-platform: bundled paths are resolved from `import.meta.url`
+and do not depend on a Windows home directory or the current working
+directory.
