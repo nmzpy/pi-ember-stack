@@ -1,7 +1,7 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.1.0",
-  "description": "Ember's primary modes, questionnaire UI, compact edit renderer, and subagents for pi",
+  "version": "0.1.1",
+  "description": "Ember's configurable pi plugin stack with modes, questionnaire, compact edits, subagents, and Devin auth",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -23,12 +23,11 @@
     "README.md",
     "ATTRIBUTION.md",
     "tsconfig.json",
-    "src"
+    "plugins"
   ],
   "pi": {
     "extensions": [
-      "./src/pi-ember-stack.ts",
-      "./src/subagent/extensions/index.ts"
+      "./plugins/index.ts"
     ]
   },
   "peerDependencies": {

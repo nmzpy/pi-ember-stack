@@ -52,8 +52,8 @@ const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "ques
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SUBAGENT_FILES: Record<string, string> = {
-	coder: path.join(SOURCE_ROOT, "subagent", "agents", "coder.md"),
-	architect: path.join(SOURCE_ROOT, "subagent", "agents", "architect.md"),
+	coder: path.join(SOURCE_ROOT, "..", "subagent", "agents", "coder.md"),
+	architect: path.join(SOURCE_ROOT, "..", "subagent", "agents", "architect.md"),
 };
 
 interface ModeConfig {

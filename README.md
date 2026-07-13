@@ -11,15 +11,35 @@ one package:
   `+N / -N` result row.
 - Vendored subagent support with bundled `coder` and `architect` definitions,
   plus the upstream bundled roles.
+- Bundled Devin auth/provider support, including OAuth, model catalog refresh,
+  and streaming transport.
 - A self-contained `Ctrl+Space` mode-cycle shortcut and a footer showing the
   active mode, model, and thinking variant.
+
+## Plugin registry
+
+The package has one top-level pi extension which dispatches to the internal
+plugins under `plugins/`. Ember projects enable them in `.pi/ember-stack.json`:
+
+```json
+{
+  "plugins": ["ember", "subagent", "devin-auth"]
+}
+```
+
+Remove a plugin ID to disable it, or use `/stack-plugins` to toggle one from
+the TUI. Restart pi after changing the list. The available plugins are:
+
+- `ember`: modes, questionnaire, footer, and compact edit rendering.
+- `subagent`: bundled subagent tool and agent definitions.
+- `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
 
 ## Project setup
 
 The Ember repository contains a project-local `.pi/settings.json` entry for:
 
 ```json
-"npm:@nmzpy/pi-ember-stack@0.1.0"
+"npm:@nmzpy/pi-ember-stack@0.1.1"
 ```
 
 On a new clone, start pi from the project directory. Pi will ask for a
@@ -41,15 +61,16 @@ the project settings and run:
 pi update --extensions
 ```
 
-Third-party utilities such as pi-fff, image paste, and Devin authentication
-remain separate package entries. Credentials and provider secrets stay in the
-machine-local pi configuration and are not part of this repository.
+Third-party utilities such as pi-fff and image paste remain separate package
+entries. Devin auth is now bundled as a stack plugin, but credentials and
+provider secrets stay in the machine-local pi configuration and are not part
+of this repository.
 
 ## Development
 
-The package entrypoint is `src/pi-ember-stack.ts`. The vendored subagent
-entrypoint is `src/subagent/extensions/index.ts`; all bundled agent files are
-under `src/subagent/agents/`.
+The package entrypoint is `plugins/index.ts`. Ember functionality is under
+`plugins/ember/`, subagents and bundled agents are under `plugins/subagent/`,
+and Devin auth is under `plugins/devin-auth/`.
 
 Run the package typecheck with:
 
