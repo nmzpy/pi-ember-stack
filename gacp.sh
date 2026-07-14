@@ -4,6 +4,9 @@
 # Usage:
 #   ./gacp.sh "commit message"
 #   ./gacp.sh --release ["release commit message"]
+#
+# Every run auto-increments the npm patch version. --release additionally
+# tags the commit and publishes to npm.
 
 set -euo pipefail
 
@@ -28,8 +31,8 @@ Usage:
   ./gacp.sh "commit message"
   ./gacp.sh --release ["release commit message"]
 
-Release mode increments the npm patch version, typechecks, commits, tags, pushes,
-and publishes @nmzpy/pi-ember-stack to npm.
+Every run auto-increments the npm patch version, typechecks, commits, and pushes.
+Release mode additionally tags the commit and publishes @nmzpy/pi-ember-stack to npm.
 USAGE
 			exit 0
 			;;
@@ -47,44 +50,47 @@ done
 
 cd "$SCRIPT_DIR"
 
+command -v npm >/dev/null || { echo "ERROR: npm is required." >&2; exit 1; }
+
+echo "=== Typechecking ==="
+npm run typecheck
+
+echo "=== Bumping patch version ==="
+VERSION="$(npm version patch --no-git-tag-version)"
+VERSION="${VERSION#v}"
+
 if [[ "$RELEASE_MODE" == "1" ]]; then
-	command -v npm >/dev/null || { echo "ERROR: npm is required for releases." >&2; exit 1; }
 	npm whoami >/dev/null || {
 		echo "ERROR: Log in to npm with 'npm login' before creating a release." >&2
 		exit 1
 	}
-
-	VERSION="$(npm version patch --no-git-tag-version)"
-	VERSION="${VERSION#v}"
 	COMMIT_MSG="${COMMIT_MSG:-release: v$VERSION}"
+else
+	COMMIT_MSG="${COMMIT_MSG:-chore: v$VERSION}"
+fi
 
-	echo "=== Typechecking ==="
-	npm run typecheck
+echo "=== Staging ==="
+git add -A
 
-	echo "=== Staging ==="
-	git add package.json package-lock.json src README.md gacp.sh
+echo "=== Committing ==="
+git commit -m "$COMMIT_MSG"
 
-	echo "=== Committing ==="
-	git commit -m "$COMMIT_MSG"
-
+if [[ "$RELEASE_MODE" == "1" ]]; then
 	TAG_NAME="v$VERSION"
 	if git rev-parse -q --verify "refs/tags/$TAG_NAME" >/dev/null; then
 		echo "ERROR: Tag $TAG_NAME already exists." >&2
 		exit 1
 	fi
 	git tag "$TAG_NAME"
-
-	echo "=== Pushing ==="
-	git push
-	git push origin "$TAG_NAME"
-
-	echo "=== Publishing @nmzpy/pi-ember-stack@$VERSION ==="
-	npm publish --access public
-	echo "=== Release $TAG_NAME complete ==="
-	exit 0
 fi
 
-[[ -n "$COMMIT_MSG" ]] || { echo "ERROR: Commit message is required." >&2; exit 1; }
-git add -A
-git commit -m "$COMMIT_MSG"
+echo "=== Pushing ==="
 git push
+if [[ "$RELEASE_MODE" == "1" ]]; then
+	git push origin "v$VERSION"
+	echo "=== Publishing @nmzpy/pi-ember-stack@$VERSION ==="
+	npm publish --access public
+	echo "=== Release v$VERSION complete ==="
+else
+	echo "=== Pushed v$VERSION ==="
+fi

@@ -149,11 +149,11 @@ export default function (pi: ExtensionAPI) {
 	// Proactively steer agents toward sub-agent delegation when users mention it
 	pi.on("before_agent_start", async (event) => {
 		const prompt = event.prompt.toLowerCase();
-		if (/\b(delegate to|use a subagent|run in parallel|spawn an agent|scout|review this|chain|worker agent)\b/.test(prompt)) {
+		if (/\b(delegate to|use a subagent|run in parallel|spawn an agent|scout|explore|review this|chain|worker agent)\b/.test(prompt)) {
 			return {
 				systemPrompt:
 					event.systemPrompt +
-					"\n\nThe subagent tool is available for delegating tasks to specialized agents with isolated context. Use /subagent to list available agents. Bundled: scout (fast recon), reviewer (code review), worker (implementation), general-purpose (fallback). Modes: single, parallel (max 8), chain.",
+					"\n\nThe subagent tool is available for delegating tasks to specialized agents with isolated context. Use /subagent to list available agents. Bundled: scout (fast codebase exploration), coder (implementation), reviewer (code review), worker (general implementation), general-purpose (fallback). Modes: single, parallel (max 8), chain.",
 			};
 		}
 	});

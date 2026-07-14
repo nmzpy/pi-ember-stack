@@ -10,5 +10,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["plugins/**/*.ts"]
+  "include": ["plugins/**/*.ts"],
+  "exclude": ["plugins/**/test/**"]
 }

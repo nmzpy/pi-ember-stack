@@ -5,8 +5,10 @@
  * separate `pi` process. This eliminates cold-start overhead and allows
  * fine-grained control over token budget:
  *
- *   - Only the agent's system prompt is used (no pi defaults).
- *   - No AGENTS.md, no extensions, no skills, no prompt templates loaded.
+ *   - The agent's system prompt is prepended with project context files
+ *     (AGENTS.md from cwd and ancestors) so sub-agents share the same
+ *     codebase conventions as the main agent.
+ *   - No extensions, no skills, no prompt templates loaded.
  *   - Thinking disabled, compaction disabled, retry disabled.
  *   - In-memory session (no disk I/O).
  *   - Shared auth/model infrastructure (no re-connection).
@@ -20,11 +22,27 @@ import {
 	AuthStorage,
 	createAgentSession,
 	createExtensionRuntime,
+	getAgentDir,
+	loadProjectContextFiles,
 	ModelRegistry,
 	type ResourceLoader,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const PARALLEL_TOOL_CALL_GUIDANCE = `
+
+## Tool Call Efficiency
+
+When multiple independent tool calls are needed (e.g. reading several files,
+searching for different patterns), emit them all in a single response rather
+than one at a time. The runtime executes independent tool calls in parallel,
+so batching them saves round-trips and reduces latency.
+`;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -95,15 +113,23 @@ export async function runSubAgent(options: {
 		model: `${model.provider}/${model.id}`,
 	};
 
-	// Build a minimal resource loader. The sub-agent sees ONLY the agent's
-	// system prompt — no pi defaults, no AGENTS.md, no extensions, no skills.
+	// Load project context files (AGENTS.md from cwd and ancestors) so the
+	// sub-agent has the same codebase conventions as the main agent.
+	const contextFiles = loadProjectContextFiles({ cwd, agentDir: getAgentDir() });
+	const contextPrefix = contextFiles.length > 0
+		? contextFiles.map((f) => f.content).join("\n\n---\n\n") + "\n\n---\n\n"
+		: "";
+	const fullSystemPrompt = contextPrefix + systemPrompt + PARALLEL_TOOL_CALL_GUIDANCE;
+
+	// Build a minimal resource loader. The sub-agent sees the agent's system
+	// prompt plus project context files (AGENTS.md) — no extensions, no skills.
 	const resourceLoader: ResourceLoader = {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => systemPrompt,
+		getSystemPrompt: () => fullSystemPrompt,
 		getAppendSystemPrompt: () => [],
 		extendResources: () => {},
 		reload: async () => {},

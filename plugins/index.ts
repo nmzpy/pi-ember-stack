@@ -3,10 +3,15 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import devinAuthPlugin from "./devin-auth/extensions/index.ts";
-import piCompactToolsPlugin from "./pi-compact-tools/index.ts";
+import piCompactToolsPlugin, { getSharedRenderer } from "./pi-compact-tools/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
+import piEmberFffPlugin from "./pi-ember-fff/index.ts";
+import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
+import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 
-type PluginId = "pi-compact-tools" | "pi-custom-agents" | "devin-auth";
+export { getSharedRenderer };
+
+type PluginId = "pi-compact-tools" | "pi-custom-agents" | "devin-auth" | "pi-ember-fff" | "pi-ember-ui" | "pi-ember-tps";
 type StackPlugin = {
 	id: PluginId;
 	description: string;
@@ -20,8 +25,11 @@ type StackPluginConfig = {
 const CONFIG_RELATIVE_PATH = path.join(".pi", "ember-stack.json");
 const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-compact-tools",
-	"pi-custom-agents",
 	"devin-auth",
+	"pi-custom-agents",
+	"pi-ember-fff",
+	"pi-ember-ui",
+	"pi-ember-tps",
 ];
 
 const PLUGINS: readonly StackPlugin[] = [
@@ -31,14 +39,29 @@ const PLUGINS: readonly StackPlugin[] = [
 		extension: piCompactToolsPlugin,
 	},
 	{
+		id: "devin-auth",
+		description: "Devin OAuth provider, model catalog, and streaming transport",
+		extension: devinAuthPlugin,
+	},
+	{
 		id: "pi-custom-agents",
 		description: "Questionnaire, primary modes, plans, subagents, and bundled agent definitions",
 		extension: piCustomAgentsPlugin,
 	},
 	{
-		id: "devin-auth",
-		description: "Devin OAuth provider, model catalog, and streaming transport",
-		extension: devinAuthPlugin,
+		id: "pi-ember-fff",
+		description: "FFF-powered grep and find with compact rendering",
+		extension: piEmberFffPlugin,
+	},
+	{
+		id: "pi-ember-ui",
+		description: "Ember accent theme — orange reasoning colors, accent borders",
+		extension: piEmberUiPlugin,
+	},
+	{
+		id: "pi-ember-tps",
+		description: "Tokens-per-second meter with sparkline trend and live gauge",
+		extension: piEmberTpsPlugin,
 	},
 ];
 

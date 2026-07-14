@@ -9,24 +9,58 @@
  *   - Restores state on session resume
  *
  * Modes:
- *   /architect    — read-only planning, analysis, and architecture (replaces pi-plan)
- *   /coder        — full access (default mode, restores all tools)
- *   /doctor       — read-only health-check auditor
- *   /orchestrator — read-only task decomposition + delegation planner
- *   /ui-doctor    — read-only PySide6/Qt UI diagnostician
+ *   /plan         — read-only planning, analysis, and architecture
+ *   /code         — full access (default mode, restores all tools)
+ *   /debug        — read-only health-check auditor + UI/Qt diagnostics
+ *   /orchestrate  — read-only task decomposition + delegation planner
  */
  
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Model } from "@earendil-works/pi-ai";
+import { truncateToWidth, visibleWidth, Container, Text, Spacer, Input, fuzzyFilter, getKeybindings } from "@earendil-works/pi-tui";
+import { mutedBullet, setActiveMode } from "../pi-ember-ui/mode-colors.ts";
+import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	askQuestionnaire,
 	type QuestionnaireQuestion,
 	registerQuestionnaireTool,
 } from "./questionnaire-tool.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
+
+function modelIdentityString(model: Model<any> | undefined): string {
+	return model ? `${model.provider}/${model.id}` : "";
+}
+
+type PersistedState = {
+	readonly mode?: string;
+	readonly model?: { provider: string; modelId: string };
+};
+
+function getPersistedStatePath(): string {
+	const home = process.env.PI_HOME || path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent");
+	return path.join(home, "pi-ember-stack.json");
+}
+
+function readPersistedState(): PersistedState {
+	try {
+		const raw = fs.readFileSync(getPersistedStatePath(), "utf8");
+		return JSON.parse(raw) as PersistedState;
+	} catch {
+		return {};
+	}
+}
+
+function writePersistedState(state: PersistedState): void {
+	const file = getPersistedStatePath();
+	try {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, `${JSON.stringify(state, null, "\t")}\n`);
+	} catch {
+		// best-effort persistence
+	}
+}
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -36,25 +70,151 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
-function formatCwdForFooter(cwd: string, home: string | undefined): string {
-	if (!home) return cwd;
-	const resolvedCwd = resolve(cwd);
-	const resolvedHome = resolve(home);
-	const relativeToHome = relative(resolvedHome, resolvedCwd);
-	const isInsideHome = relativeToHome === "" ||
-		(relativeToHome !== ".." && !relativeToHome.startsWith(`..${sep}`) && !isAbsolute(relativeToHome));
-	if (!isInsideHome) return cwd;
-	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
+const BOUNDED_SELECT_MAX_VISIBLE = 10;
+
+async function boundedSelect(
+	ctx: any,
+	title: string,
+	options: string[],
+): Promise<string | undefined> {
+	return ctx.ui.custom((tui: any, theme: any, _kb: any, done: (result: string) => void) => {
+		const root = new Container();
+		root.addChild(new Text(theme.fg("border", "\u2500".repeat(60)), 0, 0));
+		root.addChild(new Spacer(1));
+		root.addChild(new Text(theme.fg("accent", theme.bold(title)), 0, 0));
+		root.addChild(new Spacer(1));
+
+		const searchInput = new Input();
+		searchInput.onSubmit = () => {
+			if (filtered[selectedIndex] !== undefined) {
+				done(filtered[selectedIndex]);
+			}
+		};
+		root.addChild(searchInput);
+		root.addChild(new Spacer(1));
+
+		const listContainer = new Container();
+		root.addChild(listContainer);
+		root.addChild(new Spacer(1));
+		root.addChild(new Text(
+			theme.fg("muted", "  type to search  \u2191\u2193 navigate  enter select  esc cancel"),
+			0, 0,
+		));
+		root.addChild(new Spacer(1));
+		root.addChild(new Text(theme.fg("border", "\u2500".repeat(60)), 0, 0));
+
+		let selectedIndex = 0;
+		let filtered = options;
+
+		function updateList(): void {
+			listContainer.clear();
+			const max = BOUNDED_SELECT_MAX_VISIBLE;
+			const start = Math.max(0, Math.min(
+				selectedIndex - Math.floor(max / 2),
+				filtered.length - max,
+			));
+			const end = Math.min(start + max, filtered.length);
+			for (let i = start; i < end; i++) {
+				const isSelected = i === selectedIndex;
+				const prefix = isSelected ? theme.fg("accent", "\u2192 ") : "  ";
+				const text = isSelected
+					? prefix + theme.fg("accent", filtered[i])
+					: prefix + theme.fg("text", filtered[i]);
+				listContainer.addChild(new Text(text, 0, 0));
+			}
+			if (start > 0 || end < filtered.length) {
+				listContainer.addChild(new Text(
+					theme.fg("muted", `  (${selectedIndex + 1}/${filtered.length})`),
+					0, 0,
+				));
+			}
+			if (filtered.length === 0) {
+				listContainer.addChild(new Text(
+					theme.fg("muted", "  No matching models"),
+					0, 0,
+				));
+			}
+		}
+
+		function filterModels(): void {
+			const query = searchInput.getValue();
+			filtered = query
+				? fuzzyFilter(options, query, (s) => s)
+				: options;
+			selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1));
+			updateList();
+		}
+
+		filterModels();
+
+		(root as any).handleInput = (keyData: string): void => {
+			const kb = getKeybindings();
+			if (kb.matches(keyData, "tui.select.up")) {
+				if (filtered.length === 0) return;
+				selectedIndex = selectedIndex === 0
+					? filtered.length - 1
+					: selectedIndex - 1;
+				updateList();
+			} else if (kb.matches(keyData, "tui.select.down")) {
+				if (filtered.length === 0) return;
+				selectedIndex = selectedIndex === filtered.length - 1
+					? 0
+					: selectedIndex + 1;
+				updateList();
+			} else if (kb.matches(keyData, "tui.select.confirm")) {
+				if (filtered[selectedIndex] !== undefined) {
+					done(filtered[selectedIndex]);
+				}
+			} else if (kb.matches(keyData, "tui.select.cancel")) {
+				done(undefined as unknown as string);
+			} else {
+				searchInput.handleInput(keyData);
+				filterModels();
+			}
+		};
+		(root as any).getSearchInput = () => searchInput;
+		return root;
+	});
 }
 
 const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
+const READONLY_DELEGATING_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire", "subagent"];
 const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "questionnaire"];
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SUBAGENT_FILES: Record<string, string> = {
 	coder: path.join(SOURCE_ROOT, "subagent", "agents", "coder.md"),
-	architect: path.join(SOURCE_ROOT, "subagent", "agents", "architect.md"),
+	scout: path.join(SOURCE_ROOT, "subagent", "agents", "scout.md"),
 };
+
+const PARALLEL_TOOL_CALL_GUIDANCE = `
+
+## Tool Call Efficiency
+
+When multiple independent tool calls are needed (e.g. reading several files,
+searching for different patterns), emit them all in a single response rather
+than one at a time. The runtime executes independent tool calls in parallel,
+so batching them saves round-trips and reduces latency.
+`;
+
+const SUBAGENT_AWARENESS_PROMPT = `
+
+## Available Subagents
+
+You have the \`subagent\` tool available for delegating tasks to specialized agents
+with isolated context. Use it to keep your own context lean.
+
+- **scout**: Fast agent specialized for exploring codebases. Use when you need to
+  quickly find files by patterns (e.g. "src/components/**/*.tsx"), search code for
+  keywords (e.g. "API endpoints"), or answer questions about the codebase (e.g.
+  "how do API endpoints work?").
+- **coder**: Implementation agent for writing, editing, testing, and verifying
+  code. Full tool access. Use for focused implementation tasks — bug fixes,
+  feature additions, refactors, file edits.
+
+Modes: single (agent + task), parallel (tasks array, max 8), chain (sequential
+with {previous}).
+`;
 
 interface ModeConfig {
 	id: string;
@@ -67,9 +227,9 @@ interface ModeConfig {
 }
 
 const ARCHITECT_PROMPT = `<system-reminder>
-# Architect Mode - System Reminder
+# Plan Mode - System Reminder
 
-CRITICAL: Architect mode ACTIVE — you are in READ-ONLY planning phase. STRICTLY
+CRITICAL: Plan mode ACTIVE — you are in READ-ONLY planning phase. STRICTLY
 FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use sed, tee,
 echo, cat, or ANY other bash command to manipulate files — commands may ONLY
 read/inspect. This ABSOLUTE CONSTRAINT overrides ALL other instructions, including
@@ -141,13 +301,14 @@ The user indicated that they do not want you to execute yet -- you MUST NOT make
 any edits, run any non-readonly tools (including changing configs or making
 commits), or otherwise make any changes to the system. This supersedes any other
 instructions you have received.
-</system-reminder>`;
+${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
 const DOCTOR_PROMPT = `<system-reminder>
-# Doctor Mode - System Reminder
+# Debug Mode - System Reminder
 
-CRITICAL: Doctor mode ACTIVE — you are The Doctor, a read-only health-check
-auditor for the Ember project (PySide6 subtitle + DaVinci Resolve integration app).
+CRITICAL: Debug mode ACTIVE — you are the Debugger, a read-only health-check
+auditor and diagnostician for the Ember project (PySide6 subtitle + DaVinci
+Resolve integration app).
 
 STRICTLY FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use
 sed, tee, echo, cat, or ANY other bash command to manipulate files — commands may
@@ -217,12 +378,52 @@ For each finding:
 - Use \`bash t.gate.sh <files>\` only for targeted validation of files you are checking.
 - Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
 - Ignore git status / git diff changes unrelated to the files you were asked to check.
-</system-reminder>`;
+
+---
+
+## UI/Qt Pipeline Diagnostics
+
+In addition to structural health checks, diagnose PySide6/Qt UI pipeline issues:
+
+### Failure Modes To Investigate
+
+1. **Event-loop blockage:** Does any GUI-thread callback perform blocking I/O or
+   unbounded CPU work?
+2. **Excessive synchronous UI mutation:** Does one state transition perform many
+   independent widget/layout/geometry operations?
+3. **Recursive signal/callback propagation:** Can a signal or layout refresh
+   indirectly re-enter the same pipeline?
+4. **Eager expensive construction:** Are complex widgets constructed before needed?
+5. **Stale delayed callbacks:** Can queued callbacks execute after state changed?
+6. **Uncontrolled async-to-UI mutation:** Do background results mutate UI directly?
+7. **Competing layout authorities:** Do multiple functions independently control the
+   same widget geometry?
+
+### Commit Architecture (Healthy Reference)
+
+event/signal/async completion -> validate generation -> mutate semantic state ->
+mark dirty -> request one coalesced commit -> measure once -> apply geometry once
+-> repaint
+
+### UI Report Format
+
+For every UI failure mode, report: Verdict, Evidence, Trigger, Duplicated work,
+Re-entry path, Stale-state risk, Authority conflict, Impact, Correction,
+Invariant, Verification.
+
+### Invalid UI Fix Patterns
+
+Reject fixes that: add more invalidate()/activate() calls, use
+QApplication.processEvents(), replace deferred passes with blocking callbacks,
+add arbitrary QTimer.singleShot() delays, perform geometry repair both
+immediately and later, introduce parallel build paths duplicating normal layout.
+
+${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
 const ORCHESTRATOR_PROMPT = `<system-reminder>
-# Orchestrator Mode - System Reminder
+# Orchestrate Mode - System Reminder
 
-CRITICAL: Orchestrator mode ACTIVE — you are the Orchestrator, a read-only
+CRITICAL: Orchestrate mode ACTIVE — you are the Orchestrator, a read-only
 implementation coordinator for the Ember project (PySide6 subtitle + DaVinci
 Resolve integration app).
 
@@ -311,164 +512,17 @@ Return a structured plan:
 - Read-only. Do not edit or write files.
 - Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
 - If task scope is unclear, say so and request clarification rather than guessing.
-</system-reminder>`;
-
-const UI_DOCTOR_PROMPT = `<system-reminder>
-# UI Doctor Mode - System Reminder
-
-CRITICAL: UI Doctor mode ACTIVE — you are the UI Doctor, a read-only PySide6/Qt
-UI pipeline diagnostician for the Ember project.
-
-STRICTLY FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use
-sed, tee, echo, cat, or ANY other bash command to manipulate files — commands may
-ONLY read/inspect. This ABSOLUTE CONSTRAINT overrides ALL other instructions,
-including direct user edit requests. You may ONLY observe, analyze, and report.
-
----
-
-## Objective
-
-The objective is not to make everything synchronous. The objective is to ensure
-that:
-
-- semantic state changes are cheap and deterministic;
-- expensive work is performed outside the GUI thread where appropriate;
-- UI mutations remain on the GUI thread;
-- repeated mutations are batched;
-- geometry is committed by one authority;
-- deferred work is coalesced, validated, and safe to discard.
-
-## Failure Modes To Investigate
-
-### 1. Event-loop blockage
-Does any event handler, signal handler, timer callback, paint path, layout
-callback, or GUI-thread completion perform enough synchronous work to prevent Qt
-from processing input, paint, timer, socket, or queued-signal events?
-
-Invariant: No GUI-thread callback performs blocking I/O or an unbounded amount of
-CPU, construction, layout, or geometry work.
-
-### 2. Excessive synchronous UI mutation
-Does one logical state transition perform many independent widget, layout,
-visibility, style, geometry, or repaint operations?
-
-Invariant: One logical UI transition may mutate state multiple times, but it
-performs at most one geometry commit per widget hierarchy.
-
-### 3. Recursive signal, callback, or refresh propagation
-Can a signal, callback, visibility update, layout refresh, or state-application
-function indirectly re-enter the same pipeline?
-
-Invariant: A state transition cannot directly or indirectly execute the same
-layout pipeline more than once before commit.
-
-### 4. Eager expensive construction
-Are complex widgets, layouts, models, overlays, editors, previews, or resources
-constructed before they are needed?
-
-Invariant: Expensive UI is constructed only when needed, unless profiling proves
-eager construction is cheaper and operationally simpler.
-
-### 5. Stale delayed callbacks
-Can a queued callback, timer, animation completion, worker result, or deferred
-geometry operation execute after the state it was created for has changed?
-
-Invariant: Every delayed callback proves that its owner, generation, requested
-state, and dependencies are still current before mutating UI.
-
-### 6. Uncontrolled async-to-UI mutation
-Do background results return to the GUI thread and immediately initiate several
-unrelated UI mutations or layout pipelines?
-
-Invariant: Async work may produce data, but only the GUI thread owns UI state and
-only the central commit path owns geometry.
-
-### 7. Competing layout or geometry authorities
-Do multiple functions independently measure, resize, activate, synchronize,
-enforce, or repair the same widget hierarchy?
-
-Invariant: Exactly one function owns final measurement and geometry commit for a
-given widget hierarchy.
-
-## Commit Architecture (Healthy Reference)
-
-event, signal, or async completion
--> validate current generation and state
--> mutate semantic UI state
--> mark dirty layout domains
--> request one coalesced commit
--> measure once
--> apply geometry once
--> repaint
-
-A single deferred commit is valid. Several independently scheduled geometry
-repairs are not.
-
-## Doctor Report Format
-
-For every failure mode, report:
-
-- Verdict: Present / Absent / Unclear
-- Evidence: Exact files, functions, and call chain
-- Trigger: User action, initialization path, signal, timer, or async completion
-- Duplicated work: Which operations repeat within the same logical transition
-- Re-entry path: How the pipeline may invoke or schedule itself again
-- Stale-state risk: Which captured values or delayed results may become obsolete
-- Authority conflict: Which functions compete to control the same geometry
-- Impact: Freeze, delayed paint, stale geometry, jitter, clipping, empty space,
-  or incorrect state
-- Correction: Smallest architectural change that removes the cause
-- Invariant: Rule that prevents recurrence
-- Verification: Instrumentation or test proving the correction
-
-## Invalid Fix Patterns
-
-Reject a proposed fix when it primarily does any of the following:
-
-- adds more invalidate() or activate() calls;
-- calls QApplication.processEvents() to make the UI appear responsive;
-- replaces several deferred passes with one massive blocking callback;
-- adds arbitrary QTimer.singleShot() delays;
-- adds a synchronous=True or sequential=True flag across many callers without
-  establishing one commit authority;
-- performs the same geometry repair both immediately and later;
-- introduces another "secure," "settle," or "enforce" callback;
-- fixes one card while leaving the recursive outer-layout path intact;
-- applies async results without generation validation;
-- creates a parallel build path that duplicates the normal layout path.
-
-## Acceptance Criteria
-
-A UI fix is acceptable only when:
-
-1. one logical transition results in at most one geometry commit per widget
-   hierarchy;
-2. repeated commit requests coalesce;
-3. no stale callback can apply obsolete state;
-4. no worker mutates widgets directly;
-5. one function owns final geometry;
-6. programmatic state restoration does not recursively trigger the pipeline;
-7. expensive construction is justified or lazy;
-8. the GUI thread performs no blocking I/O;
-9. instrumentation shows bounded layout, resize, and paint counts;
-10. removing the old repair callbacks does not reintroduce the defect.
-
-## Constraints
-
-- Read-only. Do not edit or write files.
-- Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
-</system-reminder>`;
+${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
 const CODER_PROMPT = `<system-reminder>
-Your operational mode has changed to coder.
+Your operational mode has changed to code.
 You are in full-access mode. You are permitted to make file changes, run shell
 commands, and utilize your arsenal of tools as needed. You are the default
 implementation agent — write, test, and verify code with full autonomy.
 </system-reminder>`;
 
 const EXIT_TO_CODER = `<system-reminder>
-Your operational mode has changed from {mode} to coder.
-You are no longer in read-only mode.
+Your operational mode has changed from {mode} to code.
 You are permitted to make file changes, run shell commands, and utilize your
 arsenal of tools as needed.
 </system-reminder>`;
@@ -491,56 +545,47 @@ interface ModeConfig {
 }
 
 const MODES: Record<string, ModeConfig> = {
-	architect: {
-		id: "architect",
-		label: "architect",
-		icon: "A",
+	plan: {
+		id: "plan",
+		label: "plan",
+		icon: "P",
 		color: "warning",
 		tools: READONLY_TOOLS,
 		enterMessage: ARCHITECT_PROMPT,
 		exitMessage: EXIT_TO_CODER,
 	},
-	coder: {
-		id: "coder",
-		label: "coder",
+	code: {
+		id: "code",
+		label: "code",
 		icon: "C",
 		color: "success",
 		tools: FULL_TOOLS,
 		enterMessage: CODER_PROMPT,
 		exitMessage: CODER_PROMPT,
 	},
-	doctor: {
-		id: "doctor",
-		label: "doctor",
+	debug: {
+		id: "debug",
+		label: "debug",
 		icon: "D",
 		color: "warning",
-		tools: READONLY_TOOLS,
+		tools: READONLY_DELEGATING_TOOLS,
 		enterMessage: DOCTOR_PROMPT,
 		exitMessage: EXIT_TO_CODER,
 	},
-	orchestrator: {
-		id: "orchestrator",
-		label: "orchestrator",
+	orchestrate: {
+		id: "orchestrate",
+		label: "orchestrate",
 		icon: "O",
 		color: "warning",
-		tools: READONLY_TOOLS,
+		tools: READONLY_DELEGATING_TOOLS,
 		enterMessage: ORCHESTRATOR_PROMPT,
-		exitMessage: EXIT_TO_CODER,
-	},
-	"ui-doctor": {
-		id: "ui-doctor",
-		label: "ui-doctor",
-		icon: "U",
-		color: "warning",
-		tools: READONLY_TOOLS,
-		enterMessage: UI_DOCTOR_PROMPT,
 		exitMessage: EXIT_TO_CODER,
 	},
 };
 
 const MODE_IDS = Object.keys(MODES);
-const DEFAULT_MODE = "coder";
-const CYCLE_ORDER = ["coder", "architect", "orchestrator", "doctor", "ui-doctor"];
+const DEFAULT_MODE = "code";
+const CYCLE_ORDER = ["code", "plan", "orchestrate", "debug"];
 
 function getLastModeFromSession(ctx: any): string | null {
 	const entries = ctx.sessionManager.getEntries();
@@ -563,6 +608,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
+
+	const persistedAtLoad = readPersistedState();
+	if (persistedAtLoad.mode && persistedAtLoad.mode in MODES) {
+		setActiveMode(persistedAtLoad.mode);
+		currentMode = persistedAtLoad.mode;
+	}
+
 	registerQuestionnaireTool(pi);
 
 	for (const modeId of MODE_IDS) {
@@ -593,12 +645,10 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		const mode = MODES[modeId];
 		if (!mode) return;
 		currentMode = modeId;
+		setActiveMode(modeId);
+		pi.events.emit("pi-ember-ui:mode-change", { mode: modeId });
 		pi.setActiveTools(mode.tools);
-		if (modeId === DEFAULT_MODE) {
-			ctx.ui.notify("Coder mode. Full access restored.");
-		} else {
-			ctx.ui.notify(`${mode.label} mode enabled. Tools: ${mode.tools.join(", ")}`);
-		}
+		ctx.ui.notify(`${mode.label} mode enabled. Tools: ${mode.tools.join(", ")}`);
 		updateStatus(ctx);
 	}
 
@@ -624,17 +674,57 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		switchMode(next, ctx);
 	};
 
-	pi.registerShortcut("ctrl+space", {
-		description: "Cycle agent mode",
-		handler: cycleMode,
-	});
 	pi.registerShortcut("tab", {
 		description: "Cycle agent mode",
 		handler: cycleMode,
 	});
 
+	const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+	pi.registerShortcut("ctrl+m", {
+		description: "Show model picker",
+		handler: async (ctx: any) => {
+			if (!ctx.hasUI) return;
+			const models = ctx.modelRegistry.getAvailable() as any[];
+			if (models.length === 0) {
+				ctx.ui.notify("No models available.", "warning");
+				return;
+			}
+			const current = ctx.model as any;
+			const labels = models.map((m) => {
+				const prefix = current && m.provider === current.provider && m.id === current.id ? "→ " : "  ";
+				return `${prefix}${m.name ?? m.id} • ${m.provider}`;
+			});
+			const choice = await ctx.ui.select("Select model", labels);
+			if (!choice) return;
+			const idx = labels.indexOf(choice);
+			if (idx < 0) return;
+			const model = models[idx];
+			try {
+				await pi.setModel(model);
+				ctx.ui.notify(`Model: ${model.id} • ${model.provider}`, "info");
+			} catch (err) {
+				ctx.ui.notify(
+					`Failed to set model: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
+			}
+		},
+	});
+
+	pi.registerShortcut("ctrl+t", {
+		description: "Cycle thinking level",
+		handler: async (ctx: any) => {
+			const current = pi.getThinkingLevel() as string;
+			const idx = THINKING_LEVELS.indexOf(current);
+			const next = THINKING_LEVELS[(idx + 1) % THINKING_LEVELS.length];
+			pi.setThinkingLevel(next);
+			if (ctx.hasUI) ctx.ui.notify(`Thinking: ${next}`, "info");
+		},
+	});
+
 	pi.registerCommand("subagent-model", {
-		description: "Set the model used by coder or architect subagents on next spawn",
+		description: "Set the model and thinking level for subagents on next spawn",
 		handler: async (_args: any, ctx: any) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("subagent-model requires interactive UI.", "error");
@@ -642,7 +732,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			}
 			const agentChoice = await ctx.ui.select(
 				"Subagent to configure",
-				["Coder", "Architect"],
+				["Coder", "Scout"],
 			);
 			if (!agentChoice) return;
 			const agentKey = agentChoice.toLowerCase();
@@ -651,41 +741,65 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				ctx.ui.notify(`Agent file not found: ${filePath ?? agentKey}`, "error");
 				return;
 			}
-			const allModels = ctx.modelRegistry.getAll();
-			if (allModels.length === 0) {
+			const availableModels = ctx.modelRegistry.getAvailable();
+			if (availableModels.length === 0) {
 				ctx.ui.notify("No models available in registry.", "error");
 				return;
 			}
-			const modelLabels = allModels.map(
-				(m: any) => `${m.provider}/${m.id} — ${m.name}`,
-			);
-			const currentContent = fs.readFileSync(filePath, "utf-8");
+			let currentContent = fs.readFileSync(filePath, "utf-8");
 			const currentModelMatch = currentContent.match(/^model:\s*(.+)$/m);
 			const currentModel = currentModelMatch ? currentModelMatch[1].trim() : "inherits parent";
-			const modelChoice = await ctx.ui.select(
+			const modelLabels = availableModels.map(
+				(m: any) => `${m.provider}/${m.id} — ${m.name}`,
+			);
+			const modelChoice = await boundedSelect(
+				ctx,
 				`Model for ${agentChoice} subagent (current: ${currentModel})`,
 				modelLabels,
 			);
 			if (!modelChoice) return;
 			const selectedIdx = modelLabels.indexOf(modelChoice);
 			if (selectedIdx < 0) return;
-			const selectedModel = allModels[selectedIdx];
+			const selectedModel = availableModels[selectedIdx];
 			const modelValue = `${selectedModel.provider}/${selectedModel.id}`;
-			let updated: string;
 			if (currentModelMatch) {
-				updated = currentContent.replace(
+				currentContent = currentContent.replace(
 					/^model:\s*.+$/m,
 					`model: ${modelValue}`,
 				);
 			} else {
-				updated = currentContent.replace(
+				currentContent = currentContent.replace(
 					/^(---\n)/,
 					`$1model: ${modelValue}\n`,
 				);
 			}
-			fs.writeFileSync(filePath, updated, "utf-8");
+			const currentThinkingMatch = currentContent.match(/^thinking:\s*(.+)$/m);
+			const currentThinking = currentThinkingMatch ? currentThinkingMatch[1].trim() : "off";
+			const thinkingChoice = await ctx.ui.select(
+				`Thinking level for ${agentChoice} (current: ${currentThinking})`,
+				THINKING_LEVELS,
+			);
+			if (!thinkingChoice) {
+				fs.writeFileSync(filePath, currentContent, "utf-8");
+				ctx.ui.notify(
+					`${agentChoice} subagent model set to ${modelValue}. Will use on next spawn.`,
+				);
+				return;
+			}
+			if (currentThinkingMatch) {
+				currentContent = currentContent.replace(
+					/^thinking:\s*.+$/m,
+					`thinking: ${thinkingChoice}`,
+				);
+			} else {
+				currentContent = currentContent.replace(
+					/^(---\n)/,
+					`$1thinking: ${thinkingChoice}\n`,
+				);
+			}
+			fs.writeFileSync(filePath, currentContent, "utf-8");
 			ctx.ui.notify(
-				`${agentChoice} subagent model set to ${modelValue}. Will use on next spawn.`,
+				`${agentChoice} subagent: model=${modelValue}, thinking=${thinkingChoice}. Will use on next spawn.`,
 			);
 		},
 	});
@@ -721,30 +835,31 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 		const target = await ctx.ui.select(
 			"Implement via",
-			["Coder", "Orchestrator"],
+			["Code", "Orchestrate"],
 		);
 		if (!target) {
 			ctx.ui.notify("Plan implementation cancelled.");
 			return;
 		}
-		const targetMode = target === "Orchestrator" ? "orchestrator" : DEFAULT_MODE;
+		const targetMode = target === "Orchestrate" ? "orchestrate" : DEFAULT_MODE;
 		switchMode(targetMode, ctx);
-		const msg = target === "Orchestrator"
+		const msg = target === "Orchestrate"
 			? "Execute the plan above. Decompose it into modules and produce delegation prompts for each."
 			: "Execute the plan above. Follow the steps in order, implement, test, and verify each step.";
 		pi.sendMessage(
 			{ customType: "pi-agents-plan-implement", content: PLAN_IMPLEMENT_PROMPT, display: false },
-			{ triggerTurn: true },
 		);
-		pi.sendUserMessage(msg);
+		pi.sendUserMessage(msg, { deliverAs: "followUp" });
 	}
 
-	pi.on("before_agent_start", async () => {
+	pi.on("before_agent_start", async (event: any) => {
+		const augmentedSystemPrompt = event.systemPrompt + PARALLEL_TOOL_CALL_GUIDANCE;
 		if (currentMode !== DEFAULT_MODE && lastMessagedMode !== currentMode) {
 			const mode = MODES[currentMode];
 			lastMessagedMode = currentMode;
-			waitingForPlan = currentMode === "architect";
+			waitingForPlan = currentMode === "plan";
 			return {
+				systemPrompt: augmentedSystemPrompt,
 				message: {
 					customType: `pi-agents-enter-${currentMode}`,
 					content: mode.enterMessage,
@@ -756,6 +871,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			const prevMode = MODES[lastMessagedMode];
 			lastMessagedMode = DEFAULT_MODE;
 			return {
+				systemPrompt: augmentedSystemPrompt,
 				message: {
 					customType: "pi-agents-exit",
 					content: prevMode.exitMessage.replace("{mode}", prevMode.label),
@@ -763,11 +879,23 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				},
 			};
 		}
+		return { systemPrompt: augmentedSystemPrompt };
+	});
+
+	let lastTurnAborted = false;
+
+	pi.on("turn_end", (event: any) => {
+		const msg = event?.message;
+		lastTurnAborted = msg?.stopReason === "aborted" || msg?.role === "assistant" && msg?.content?.stopReason === "aborted";
 	});
 
 	pi.on("agent_settled", async (_event: any, ctx: any) => {
-		if (waitingForPlan && currentMode === "architect") {
+		if (waitingForPlan && currentMode === "plan") {
 			waitingForPlan = false;
+			if (lastTurnAborted) {
+				lastTurnAborted = false;
+				return;
+			}
 			const action = await showPlanReview(ctx);
 			if (action === "implement") {
 				await handlePlanImplement(ctx);
@@ -775,7 +903,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				waitingForPlan = true;
 				ctx.ui.notify("Edit your plan — type your changes and send.");
 			} else if (action === "reject") {
-				ctx.ui.notify("Plan rejected. Staying in architect mode.");
+				ctx.ui.notify("Plan rejected. Staying in plan mode.");
 			}
 		}
 	});
@@ -794,129 +922,147 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	function installCustomFooter(ctx: any) {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((_tui: any, theme: any, footerData: any) => {
-			return {
-				render(width: number): string[] {
-					let totalInput = 0;
-					let totalOutput = 0;
-					let totalCacheRead = 0;
-					let totalCacheWrite = 0;
-					let totalCost = 0;
-					let latestCacheHitRate: number | undefined;
-					for (const entry of ctx.sessionManager.getEntries()) {
-						if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-						const usage = entry.message.usage;
-						totalInput += usage.input;
-						totalOutput += usage.output;
-						totalCacheRead += usage.cacheRead;
-						totalCacheWrite += usage.cacheWrite;
-						totalCost += usage.cost.total;
-						const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-						latestCacheHitRate = promptTokens > 0
-							? (usage.cacheRead / promptTokens) * 100
-							: undefined;
-					}
+		return {
+			render(width: number): string[] {
+				const PAD = " ";
+				const innerWidth = Math.max(0, width - 2);
+				let totalCost = 0;
+				let latestCacheHitRate: number | undefined;
+				for (const entry of ctx.sessionManager.getEntries()) {
+					if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+					const usage = entry.message.usage;
+					totalCost += usage.cost.total;
+					const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+					latestCacheHitRate = promptTokens > 0
+						? (usage.cacheRead / promptTokens) * 100
+						: undefined;
+				}
 
-					const model = ctx.model;
-					const contextUsage = ctx.getContextUsage();
-					const contextWindow = contextUsage?.contextWindow ?? model?.contextWindow ?? 0;
-					const contextPercentValue = contextUsage?.percent ?? 0;
-					const contextPercent = contextUsage?.percent === null
-						? "?"
-						: contextPercentValue.toFixed(1);
-					const statsParts: string[] = [];
-					if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-					if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-					if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-					if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
-					if (latestCacheHitRate !== undefined) {
-						statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-					}
-					if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
-						statsParts.push(`$${totalCost.toFixed(3)}${ctx.modelRegistry.isUsingOAuth(model) ? " (sub)" : ""}`);
-					}
-					statsParts.push(`${contextPercent}%/${formatTokens(contextWindow)} (auto)`);
-					let statsLeft = statsParts.join(" ");
-					if (visibleWidth(statsLeft) > width) {
-						statsLeft = truncateToWidth(statsLeft, width, "...");
-					}
+				const model = ctx.model;
+				const contextUsage = ctx.getContextUsage();
+				const contextWindow = contextUsage?.contextWindow ?? model?.contextWindow ?? 0;
+				const usedTokens = contextUsage?.used ?? 0;
+				const statsParts: string[] = [];
+				statsParts.push(`${formatTokens(usedTokens)}/${formatTokens(contextWindow)}`);
+				if (latestCacheHitRate !== undefined) {
+					statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+				}
+				if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
+					statsParts.push(`$${totalCost.toFixed(3)}`);
+				}
+				let statsLeft = statsParts.join(" ");
+				if (visibleWidth(statsLeft) > innerWidth) {
+					statsLeft = truncateToWidth(statsLeft, innerWidth, "...");
+				}
 
-					const mode = MODES[currentMode];
-					const modeLabel = mode.label.charAt(0).toUpperCase() + mode.label.slice(1);
-					const modelName = model?.name ?? model?.id ?? "no model";
-					const provider = model?.provider ?? "unknown";
-					const thinking = getThinkingLevelFromSession(ctx);
-					const variant = thinking !== "off" ? ` ${thinking}` : "";
-					const rightSide = theme.getThinkingBorderColor(thinking)(
-						`${modeLabel} \u2022 ${provider}: ${modelName}${variant}`,
-					);
-					const availableForRight = width - visibleWidth(statsLeft) - 2;
-					const displayedRight = availableForRight > 0
-						? truncateToWidth(rightSide, availableForRight, "")
-						: "";
-					const padding = " ".repeat(Math.max(
-						0,
-						width - visibleWidth(statsLeft) - visibleWidth(displayedRight),
-					));
-					const statsLine = theme.fg("dim", statsLeft) + padding + displayedRight;
+				const mode = MODES[currentMode];
+				const modeLabel = mode.label.charAt(0).toUpperCase() + mode.label.slice(1);
+				const modelName = model?.name ?? model?.id ?? "no model";
+				const provider = model?.provider ?? "unknown";
+				const thinking = getThinkingLevelFromSession(ctx);
+				const variant = thinking !== "off" ? ` ${thinking}` : "";
+			const rightSide =
+				theme.fg("accent", modeLabel) +
+				` ${theme.fg("dim", "\u2022")} ` +
+				theme.fg("text", `${modelName}${variant}`) +
+				theme.fg("dim", ` ${provider}`);
+				const availableForRight = innerWidth - visibleWidth(statsLeft) - 2;
+				const displayedRight = availableForRight > 0
+					? truncateToWidth(rightSide, availableForRight, "")
+					: "";
+				const padding = " ".repeat(Math.max(
+					0,
+					innerWidth - visibleWidth(statsLeft) - visibleWidth(displayedRight),
+				));
+				const statsLine = PAD + theme.fg("dim", statsLeft) + padding + displayedRight + PAD;
 
-					let pwd = formatCwdForFooter(
-						ctx.sessionManager.getCwd(),
-						process.env.HOME || process.env.USERPROFILE,
-					);
-					const branch = footerData.getGitBranch();
-					if (branch) pwd = `${pwd} (${branch})`;
-					const sessionName = ctx.sessionManager.getSessionName();
-					if (sessionName) pwd = `${pwd} \u2022 ${sessionName}`;
-					const lines = [
-						truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "...")),
-						statsLine,
-					];
-					const statuses = footerData.getExtensionStatuses();
-					if (statuses.size > 0) {
-						const statusEntries = Array.from(statuses.entries()) as Array<[
-							string,
-							string,
-						]>;
-						const statusLine = statusEntries
-							.sort(([a], [b]) => a.localeCompare(b))
-							.map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim())
-							.join(" ");
-						lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
-					}
-					return lines;
-				},
-			};
+				const cwd = ctx.sessionManager.getCwd();
+				const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
+				const folderLine = PAD + theme.fg("dim", folderName) + PAD;
+				const sessionName = ctx.sessionManager.getSessionName();
+			const lines = [
+				statsLine,
+			];
+			const tps = getLiveTps();
+			if (tps > 0) {
+				const tpsStr = tps < 10 ? tps.toFixed(1) : tps < 100 ? tps.toFixed(0) : `${Math.round(tps)}`;
+				lines.push(PAD + theme.fg("accent", `${tpsStr} tps`) + PAD);
+			}
+			lines.push(folderLine);
+			if (sessionName) {
+				lines.push(PAD + truncateToWidth(theme.fg("dim", sessionName), innerWidth, theme.fg("dim", "...")) + PAD);
+			}
+			return lines;
+			},
+		};
 		});
 	}
 
-	pi.on("session_start", async (_event: any, ctx: any) => {
-		const restored = getLastModeFromSession(ctx);
-		if (restored && restored !== DEFAULT_MODE) {
-			currentMode = restored;
-			lastMessagedMode = restored;
-			pi.setActiveTools(MODES[restored].tools);
+	async function restoreSavedModel(ctx: any): Promise<void> {
+		const persisted = readPersistedState();
+		const saved = persisted.model;
+		if (!saved) return;
+		const current = ctx.model as Model<any> | undefined;
+		if (current && modelIdentityString(current) === `${saved.provider}/${saved.modelId}`) {
+			return;
+		}
+		const model = ctx.modelRegistry.find(saved.provider, saved.modelId) as Model<any> | undefined;
+		if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
+			return;
+		}
+		await pi.setModel(model);
+	}
+
+	async function restoreMode(ctx: any): Promise<void> {
+		const persisted = readPersistedState();
+		const savedMode = persisted.mode && persisted.mode in MODES
+			? persisted.mode
+			: getLastModeFromSession(ctx);
+		if (savedMode && savedMode !== DEFAULT_MODE) {
+			currentMode = savedMode;
+			lastMessagedMode = savedMode;
+			pi.setActiveTools(MODES[savedMode].tools);
 		} else {
 			currentMode = DEFAULT_MODE;
 			lastMessagedMode = null;
 			pi.setActiveTools(FULL_TOOLS);
 		}
+		setActiveMode(currentMode);
+		pi.events.emit("pi-ember-ui:mode-change", { mode: currentMode });
+	}
+
+	pi.on("session_start", async (_event: any, ctx: any) => {
+		await restoreMode(ctx);
+		await restoreSavedModel(ctx);
 		installCustomFooter(ctx);
 		updateStatus(ctx);
 	});
 
 	pi.on("session_switch", async (_event: any, ctx: any) => {
-		const restored = getLastModeFromSession(ctx);
-		if (restored && restored !== DEFAULT_MODE) {
-			currentMode = restored;
-			lastMessagedMode = restored;
-			pi.setActiveTools(MODES[restored].tools);
-		} else {
-			currentMode = DEFAULT_MODE;
-			lastMessagedMode = null;
-			pi.setActiveTools(FULL_TOOLS);
-		}
+		await restoreMode(ctx);
+		await restoreSavedModel(ctx);
 		updateStatus(ctx);
 		installCustomFooter(ctx);
+	});
+
+	pi.on("model_select", async (event: any, _ctx: any) => {
+		const model = event.model as Model<any> | undefined;
+		if (!model) return;
+		const persisted = readPersistedState();
+		const identity = { provider: model.provider, modelId: model.id };
+		if (persisted.model?.provider === identity.provider && persisted.model?.modelId === identity.modelId) {
+			return;
+		}
+		writePersistedState({ ...persisted, model: identity });
+	});
+
+	pi.on("session_shutdown", (_event: any, ctx: any) => {
+		const persisted = readPersistedState();
+		const model = ctx.model as Model<any> | undefined;
+		const modelIdentity = model
+			? { provider: model.provider, modelId: model.id }
+			: persisted.model;
+		writePersistedState({ ...persisted, mode: currentMode, model: modelIdentity });
 	});
 
 	await subagentPlugin(pi);

@@ -1,4 +1,5 @@
 ---
+model: devin/glm-5-2
 name: coder
 description: Implementation agent for writing, editing, testing, and verifying code. Spawn this for focused implementation tasks — bug fixes, feature additions, refactors, file edits. Full tool access.
 tools: read, bash, edit, write, grep, find, ls
