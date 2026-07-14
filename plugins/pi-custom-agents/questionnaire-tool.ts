@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import {
+	Box,
 	Key,
 	Text,
 	matchesKey,
@@ -216,6 +217,7 @@ export function registerQuestionnaireTool(pi: any): void {
 		description: "Ask the user one or more decision questions inline before continuing.",
 		parameters: QuestionnaireParams,
 		executionMode: "sequential",
+		renderShell: "self",
 		async execute(
 			_toolCallId: string,
 			params: { questions: QuestionnaireQuestion[] },
@@ -258,22 +260,28 @@ export function registerQuestionnaireTool(pi: any): void {
 		},
 		renderCall(args: { questions?: QuestionnaireQuestion[] }, theme: any): any {
 			const count = args.questions?.length ?? 0;
-			return new Text(
+			const box = new Box(1, 1, (text: string) => theme.bg("userMessageBg", text));
+			box.addChild(new Text(
 				theme.fg("muted", "• ") +
 				theme.fg("toolTitle", theme.bold("questionnaire ")) +
 					theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`),
 				0,
 				0,
-			);
+			));
+			return box;
 		},
 		renderResult(result: any, _options: unknown, theme: any): any {
 			const details = result.details as {
 				answers?: QuestionnaireAnswer[];
 				cancelled?: boolean;
 			} | undefined;
-			if (details?.cancelled) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
+			const box = new Box(1, 1, (text: string) => theme.bg("userMessageBg", text));
+			if (details?.cancelled) {
+				box.addChild(new Text(theme.fg("warning", "Cancelled"), 0, 0));
+				return box;
+			}
 			const answers = details?.answers ?? [];
-			return new Text(
+			box.addChild(new Text(
 				answers
 					.map((answer) => {
 						const label = `${answer.id}: ${answer.label}`;
@@ -282,7 +290,8 @@ export function registerQuestionnaireTool(pi: any): void {
 					.join("\n"),
 				0,
 				0,
-			);
+			));
+			return box;
 		},
 	});
 }

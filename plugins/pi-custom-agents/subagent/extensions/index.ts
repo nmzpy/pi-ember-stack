@@ -23,10 +23,9 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	getAgentDir,
-	getMarkdownTheme,
 	ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, Container, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { type AgentConfig, type AgentScope, discoverAgents, formatAgentList, invalidateAgentCache } from "./agents.ts";
@@ -39,10 +38,13 @@ import {
 	runSubAgent,
 } from "./runner.ts";
 import {
-	aggregateUsage,
-	formatUsageStats,
-	renderSingleResult,
+	anySubagentRunning,
+	renderSubagentExpanded,
+	renderSubagentLayout,
+	SubagentCapLine,
 } from "./render.ts";
+import { PulseManager } from "../../../pi-compact-tools/renderer.ts";
+import { isLatestSubagentRunning } from "../../../pi-ember-ui/mode-colors.ts";
 import { type SubagentThread, threadStore } from "./threads.ts";
 import { SUBAGENT_REQUEST_EVENT, runNamedAgent, type SubagentRunRequest } from "./service.ts";
 import { ThreadViewer, type ThreadViewerCallbacks } from "./thread-viewer.ts";
@@ -139,11 +141,34 @@ interface SubagentDetails {
 export default function (pi: ExtensionAPI) {
 	let currentCtx: ExtensionContext | undefined;
 
+	// Shared pulse timer for subagent flashing bullets. Reset on session
+	// replacement so stale invalidate callbacks from the previous session
+	// do not fire into a dead TUI.
+	const subagentPulses = new PulseManager();
+
+	function update_subagent_pulse(context: any, running: boolean): void {
+		if (!context.invalidate) return;
+		// ToolExecutionComponent creates a fresh invalidate closure for every
+		// render. Keep one callback per row so completed rows can actually be
+		// removed from the shared timer instead of leaking stale TUI callbacks.
+		const invalidate = context.state.subagentPulseInvalidate ?? context.invalidate;
+		context.state.subagentPulseInvalidate = invalidate;
+		if (running) subagentPulses.add(invalidate);
+		else subagentPulses.remove(invalidate);
+	}
+
 	// Invalidate agent cache + clear thread store on session replacement.
 	pi.on("session_start", (event, ctx) => {
 		currentCtx = ctx;
 		if (event.reason === "reload") invalidateAgentCache();
 		threadStore.clear();
+		subagentPulses.clear();
+	});
+
+	pi.on("session_shutdown", () => {
+		currentCtx = undefined;
+		threadStore.clear();
+		subagentPulses.clear();
 	});
 
 	// Proactively steer agents toward sub-agent delegation when users mention it
@@ -165,7 +190,11 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on(SUBAGENT_REQUEST_EVENT, (raw) => {
 		const request = raw as SubagentRunRequest;
 		const ctx = currentCtx;
-		if (!ctx || !request?.id || typeof request.respond !== "function") return;
+		if (!request?.id || typeof request.respond !== "function") return;
+		if (!ctx) {
+			request.respond({ id: request.id, ok: false, error: "Subagent session is not active." });
+			return;
+		}
 		if (request.accept && !request.accept()) return;
 		const agent = discoverAgents(ctx.cwd, "user", bundledAgentsDir).agents.find((item) => item.name === request.agent);
 		if (!agent) {
@@ -279,6 +308,7 @@ export default function (pi: ExtensionAPI) {
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" or "project".`,
 		].join(" "),
 		parameters: SubagentParams,
+		renderShell: "self",
 		promptSnippet: "Delegate tasks to specialized sub-agents (scout, reviewer, worker, general-purpose)",
 		promptGuidelines: [
 			"Use subagent to delegate work that would flood the main context with search results or file contents.",
@@ -481,6 +511,22 @@ export default function (pi: ExtensionAPI) {
 						mode: "chain-step",
 						toolCallId: _toolCallId,
 					});
+					// Publish the active step before awaiting it so chain mode shows
+					// the running agent's gradient instead of an empty group header.
+					results.push({
+						agent: step.agent,
+						task: taskWithContext,
+						exitCode: -1,
+						messages: [],
+						stderr: "",
+						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+					});
+					if (onUpdate) {
+						onUpdate({
+							content: [{ type: "text", text: "Running..." }],
+							details: makeDetails("chain")(results),
+						});
+					}
 					const result = await runOne(
 						step.agent, taskWithContext, step.cwd,
 						signal, step.timeout ?? params.timeout,
@@ -490,7 +536,7 @@ export default function (pi: ExtensionAPI) {
 						status: isFailedResult(result) ? (result.stopReason === "aborted" ? "aborted" : "failed") : "completed",
 						result,
 					});
-					results.push(result);
+					results[i] = result;
 
 					const isError = isFailedResult(result);
 					if (isError) {
@@ -746,239 +792,85 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		// ------------------------------------------------------------------
-		// TUI rendering
+		// TUI rendering — compact grouped layout (Exploring-style)
 		// ------------------------------------------------------------------
 
-		renderCall(args, theme, _context) {
-			const scope: AgentScope = args.agentScope ?? "user";
-			const fg = theme.fg.bind(theme);
-
-			// Chain
-			if (args.chain && args.chain.length > 0) {
-				let text =
-					fg("muted", "• ") +
-					fg("toolTitle", theme.bold("subagent ")) +
-					fg("accent", `chain (${args.chain.length} steps)`) +
-					fg("muted", ` [${scope}]`);
-				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
-					const step = args.chain[i];
-					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
-					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
-					text +=
-						"\n  " +
-						fg("muted", `${i + 1}.`) +
-						" " +
-						fg("accent", step.agent) +
-						fg("dim", ` ${preview}`);
-				}
-				if (args.chain.length > 3)
-					text += `\n  ${fg("muted", `... +${args.chain.length - 3} more`)}`;
-				return new Text(text, 0, 0);
+		renderCall(args, theme, context) {
+			// The cap is a full-width sibling above the padded subagent box.
+			// Its render(width) reads the live viewport width and visibility state.
+			let shell = context.state.shell;
+			if (!(shell instanceof Container)) {
+				shell = new Container();
+				context.state.shell = shell;
 			}
+			shell.clear();
 
-			// Parallel
-			if (args.tasks && args.tasks.length > 0) {
-				let text =
-					fg("muted", "• ") +
-					fg("toolTitle", theme.bold("subagent ")) +
-					fg("accent", `parallel (${args.tasks.length} tasks)`) +
-					fg("muted", ` [${scope}]`);
-				for (const t of args.tasks.slice(0, 3)) {
-					const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
-					text += `\n  ${fg("accent", t.agent)}${fg("dim", ` ${preview}`)}`;
-				}
-				if (args.tasks.length > 3)
-					text += `\n  ${fg("muted", `... +${args.tasks.length - 3} more`)}`;
-				return new Text(text, 0, 0);
+			let capLine = context.state.capLine;
+			if (!(capLine instanceof SubagentCapLine)) {
+				capLine = new SubagentCapLine(
+					() => isLatestSubagentRunning(),
+					(theme.fg as any).bind(theme),
+				);
+				context.state.capLine = capLine;
+			} else {
+				capLine.setForeground((theme.fg as any).bind(theme));
 			}
+			shell.addChild(capLine);
 
-			// Single
-			const agentName = args.agent || "...";
-			const preview = args.task
-				? args.task.length > 60
-					? `${args.task.slice(0, 60)}...`
-					: args.task
-				: "...";
-			let text =
-				fg("muted", "• ") +
-				fg("toolTitle", theme.bold("subagent ")) +
-				fg("accent", agentName) +
-				fg("muted", ` [${scope}]`);
-			text += `\n  ${fg("dim", preview)}`;
-			return new Text(text, 0, 0);
+			// Reuse or create the self-rendered Box with the subagentBg token.
+			let box = context.state.box;
+			if (!(box instanceof Box)) {
+				box = new Box(1, 0);
+				context.state.box = box;
+			}
+			box.setBgFn((s: string) => (theme.bg as any)("subagentBg", s));
+			box.clear();
+
+			// Reuse or create the single Text child that carries the layout.
+			let callText = context.state.callText;
+			if (!(callText instanceof Text)) {
+				callText = new Text("", 0, 0);
+				context.state.callText = callText;
+			}
+			const results = context.state.results ?? [];
+			callText.setText(renderSubagentLayout(args, results, theme));
+			box.addChild(callText);
+			shell.addChild(box);
+
+			// Flash while any agent is running.
+			update_subagent_pulse(context, anySubagentRunning(args, results));
+			return shell;
 		},
 
-		renderResult(result, { expanded }, theme, _context) {
+		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as SubagentDetails | undefined;
-			if (!details || details.results.length === 0) {
-				const text = result.content[0];
-				return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+			const results = details?.results ?? [];
+			context.state.results = results;
+			update_subagent_pulse(context, details ? anySubagentRunning(context.args, results) : false);
+			if (!details) {
+				const outputBlock = result.content.find((item: any) => item.type === "text");
+				const output = outputBlock?.type === "text" ? outputBlock.text : "(no output)";
+				return new Text(output, 0, 0);
 			}
 
-			const fg = theme.fg.bind(theme);
-			const mdTheme = getMarkdownTheme();
-
-			// --- Single ---
-			if (details.mode === "single" && details.results.length === 1) {
-				return renderSingleResult(details.results[0], expanded, theme);
+			// Update the call-slot Text with the latest statuses. renderResult
+			// runs after renderCall in updateDisplay, so this wins the paint.
+			const callText = context.state.callText;
+			if (callText instanceof Text) {
+				callText.setText(renderSubagentLayout(context.args, results, theme));
 			}
 
-			// --- Chain ---
-			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
-				const icon =
-					successCount === details.results.length
-						? fg("success", "✓")
-						: fg("error", "✗");
+			const isRunning = anySubagentRunning(context.args, results);
 
-				if (expanded) {
-					const container = new Container();
-					container.addChild(
-						new Text(
-							icon +
-								" " +
-								fg("toolTitle", theme.bold("chain ")) +
-								fg("accent", `${successCount}/${details.results.length} steps`),
-							0,
-							0,
-						),
-					);
-					for (const r of details.results) {
-						container.addChild(new Spacer(1));
-						const stepIcon = isFailedResult(r) ? fg("error", "✗") : fg("success", "✓");
-						container.addChild(
-							new Text(
-								fg("muted", `─── Step ${r.exitCode !== -1 ? "" : "?"}: `) +
-									fg("accent", r.agent) +
-									` ${stepIcon}`,
-								0,
-								0,
-							),
-						);
-						if (r.errorMessage) {
-							container.addChild(
-								new Text(fg("error", `Error: ${r.errorMessage}`), 0, 0),
-							);
-						}
-						const finalOutput = getResultOutput(r);
-						if (finalOutput) {
-							container.addChild(new Spacer(1));
-							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-						}
-						const usageStr = formatUsageStats(r.usage, r.model);
-						if (usageStr)
-							container.addChild(new Text(fg("dim", usageStr), 0, 0));
-					}
-					const totalUsage = formatUsageStats(aggregateUsage(details.results));
-					if (totalUsage) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(fg("dim", `Total: ${totalUsage}`), 0, 0));
-					}
-					return container;
-				}
-
-				let text =
-					icon +
-					" " +
-					fg("toolTitle", theme.bold("chain ")) +
-					fg("accent", `${successCount}/${details.results.length} steps`);
-				for (const r of details.results) {
-					const stepIcon = isFailedResult(r) ? fg("error", "✗") : fg("success", "✓");
-					text += `\n  ${stepIcon} ${fg("accent", r.agent)}`;
-				}
-				const totalUsage = formatUsageStats(aggregateUsage(details.results));
-				if (totalUsage) text += `\n${fg("dim", totalUsage)}`;
-				text += `\n${fg("muted", "(Ctrl+O to expand)")}`;
-				return new Text(text, 0, 0);
+			// Expanded view (Ctrl+O): detailed per-agent output, wrapped in
+			// the subagentBg Box so it stays visually integrated.
+			if (expanded && !isRunning && details && details.results.length > 0) {
+				const expandedContent = renderSubagentExpanded(details, theme);
+				if (expandedContent) return expandedContent;
 			}
 
-			// --- Parallel ---
-			if (details.mode === "parallel") {
-				const running = details.results.filter((r) => r.exitCode === -1).length;
-				const successCount = details.results.filter(
-					(r) => r.exitCode !== -1 && !isFailedResult(r),
-				).length;
-				const failCount = details.results.filter(
-					(r) => r.exitCode !== -1 && isFailedResult(r),
-				).length;
-				const isRunning = running > 0;
-				const icon = isRunning
-					? fg("warning", "⏳")
-					: failCount > 0
-						? fg("warning", "◐")
-						: fg("success", "✓");
-				const status = isRunning
-					? `${successCount + failCount}/${details.results.length} done, ${running} running`
-					: `${successCount}/${details.results.length} tasks`;
-
-				if (expanded && !isRunning) {
-					const container = new Container();
-					container.addChild(
-						new Text(
-							`${icon} ${fg("toolTitle", theme.bold("parallel "))}${fg("accent", status)}`,
-							0,
-							0,
-						),
-					);
-					for (const r of details.results) {
-						container.addChild(new Spacer(1));
-						const taskIcon = isFailedResult(r)
-							? fg("error", "✗")
-							: fg("success", "✓");
-						container.addChild(
-							new Text(
-								fg("muted", "─── ") + fg("accent", r.agent) + ` ${taskIcon}`,
-								0,
-								0,
-							),
-						);
-						container.addChild(
-							new Text(fg("muted", "Task: ") + fg("dim", r.task), 0, 0),
-						);
-						if (r.errorMessage) {
-							container.addChild(
-								new Text(fg("error", `Error: ${r.errorMessage}`), 0, 0),
-							);
-						}
-						const finalOutput = getResultOutput(r);
-						if (finalOutput) {
-							container.addChild(new Spacer(1));
-							container.addChild(
-								new Markdown(finalOutput.trim(), 0, 0, mdTheme),
-							);
-						}
-						const taskUsage = formatUsageStats(r.usage, r.model);
-						if (taskUsage)
-							container.addChild(new Text(fg("dim", taskUsage), 0, 0));
-					}
-					const totalUsage = formatUsageStats(aggregateUsage(details.results));
-					if (totalUsage) {
-						container.addChild(new Spacer(1));
-						container.addChild(new Text(fg("dim", `Total: ${totalUsage}`), 0, 0));
-					}
-					return container;
-				}
-
-				let text = `${icon} ${fg("toolTitle", theme.bold("parallel "))}${fg("accent", status)}`;
-				for (const r of details.results) {
-					const taskIcon =
-						r.exitCode === -1
-							? fg("warning", "⏳")
-							: isFailedResult(r)
-								? fg("error", "✗")
-								: fg("success", "✓");
-					text += `\n  ${taskIcon} ${fg("accent", r.agent)}`;
-				}
-				if (!isRunning) {
-					const totalUsage = formatUsageStats(aggregateUsage(details.results));
-					if (totalUsage) text += `\n${fg("dim", totalUsage)}`;
-				}
-				if (!expanded) text += `\n${fg("muted", "(Ctrl+O to expand)")}`;
-				return new Text(text, 0, 0);
-			}
-
-			const fallback = result.content[0];
-			return new Text(fallback?.type === "text" ? fallback.text : "(no output)", 0, 0);
+			// Collapsed: the call-slot Box is the single visible component.
+			return new Text("", 0, 0);
 		},
 	});
 	// /agent command — switch between subagent threads.

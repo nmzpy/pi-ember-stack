@@ -8,9 +8,39 @@
 
 import * as os from "node:os";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { renderGradientLabel } from "../../../pi-ember-ui/index.ts";
+import { getActiveModeColor } from "../../../pi-ember-ui/mode-colors.ts";
+import { Box, Container, type Component, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import type { Message } from "@earendil-works/pi-ai";
 import { type SubAgentResult, isFailedResult, getResultOutput } from "./runner.ts";
+
+type Foreground = (color: string, text: string) => string;
+
+/**
+ * Width-aware cap for the running subagent shell. It renders at the width
+ * supplied by the TUI instead of baking a terminal width into the component.
+ */
+export class SubagentCapLine implements Component {
+	private foreground: Foreground;
+
+	constructor(
+		private readonly isVisible: () => boolean,
+		foreground: Foreground,
+	) {
+		this.foreground = foreground;
+	}
+
+	setForeground(foreground: Foreground): void {
+		this.foreground = foreground;
+	}
+
+	render(width: number): string[] {
+		if (!this.isVisible()) return [];
+		return [this.foreground("border", "\u2500".repeat(Math.max(0, width)))];
+	}
+
+	invalidate(): void {}
+}
 
 // ---------------------------------------------------------------------------
 // Safe type guards
@@ -275,4 +305,178 @@ export function aggregateUsage(results: SubAgentResult[]) {
 		total.turns += r.usage.turns;
 	}
 	return total;
+}
+
+// ---------------------------------------------------------------------------
+// Compact grouped layout (Exploring-style)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-agent status derived from a SubAgentResult.
+ * `exitCode === -1` means still running (no result yet).
+ */
+type AgentStatus = "running" | "completed" | "failed";
+
+function agentStatus(result: SubAgentResult | undefined): AgentStatus {
+	if (!result || result.exitCode === -1) return "running";
+	return isFailedResult(result) ? "failed" : "completed";
+}
+
+function agentIcon(status: AgentStatus, theme: any): string {
+	if (status === "failed") return theme.fg("error", "✗ ");
+	return theme.fg("success", "✓ ");
+}
+
+function hashPhase(name: string): number {
+	let n = 7;
+	for (const ch of name) n = (n * 31 + ch.charCodeAt(0)) >>> 0;
+	return (n % 1000) / 1000;
+}
+
+function renderAgentLabel(status: AgentStatus, agentName: string, theme: any, result?: SubAgentResult): string {
+	if (status === "running") return renderGradientLabel(agentName, getActiveModeColor(), hashPhase(agentName));
+	let suffix = "";
+	if (status === "failed" && result) {
+		const output = getResultOutput(result).trim();
+		if (output) {
+			const clipped = output.length > 60 ? `${output.slice(0, 60)}...` : output;
+			suffix = ` ${theme.fg("muted", clipped)}`;
+		}
+	}
+	return agentIcon(status, theme) + theme.fg("accent", agentName) + suffix;
+}
+
+function renderGroupLabel(
+	label: string,
+	_hasError: boolean,
+	_allDone: boolean,
+	theme: any,
+): string {
+	// Header is always plain dim/bold; never gradient.
+	return theme.fg("dim", theme.bold(label));
+}
+
+/**
+ * Render the compact grouped layout for a subagent tool call.
+ *
+ * - Single mode: running `agentName` uses the Thinking gradient; completed
+ *   and failed agents use green/red bullets.
+ * - Parallel mode: `Subagents` header + `└ agent` children with the same
+ *   running/completed/failed treatment.
+ * - Chain mode: same grouped structure, but only running + completed steps
+ *   appear (pending steps are hidden until they start).
+ *
+ * No `⏳`, no `[scope]`, no `parallel (N tasks)` — just bullets and names.
+ */
+export function renderSubagentLayout(
+	args: any,
+	results: SubAgentResult[],
+	theme: any,
+): string {
+	const fg = theme.fg.bind(theme);
+
+	// --- Single mode ---
+	if (args.agent && args.task && !(args.tasks?.length > 0) && !(args.chain?.length > 0)) {
+		const status = agentStatus(results[0]);
+		return renderAgentLabel(status, args.agent, theme, results[0]);
+	}
+
+	// --- Parallel mode ---
+	if (args.tasks && args.tasks.length > 0) {
+		const tasks = args.tasks as Array<{ agent: string }>;
+		const statuses = tasks.map((_, i) => agentStatus(results[i]));
+		const hasError = statuses.some((s) => s === "failed");
+		const allDone = statuses.every((s) => s !== "running");
+		const lines = [renderGroupLabel("Subagents", hasError, allDone, theme)];
+		for (const [i, t] of tasks.entries()) {
+			const prefix = i === 0 ? "  └ " : "    ";
+			lines.push(fg("dim", prefix) + renderAgentLabel(statuses[i], t.agent, theme, results[i]));
+		}
+		return lines.join("\n");
+	}
+
+	// --- Chain mode ---
+	if (args.chain && args.chain.length > 0) {
+		const chain = args.chain as Array<{ agent: string }>;
+		// Only show steps that have started (have a result entry).
+		const started = chain.slice(0, results.length);
+		const statuses = started.map((_, i) => agentStatus(results[i]));
+		const hasError = statuses.some((s) => s === "failed");
+		const allDone = statuses.length > 0 && statuses.every((s) => s !== "running");
+		const lines = [renderGroupLabel("Subagents", hasError, allDone, theme)];
+		for (const [i, step] of started.entries()) {
+			const prefix = i === 0 ? "  └ " : "    ";
+			lines.push(fg("dim", prefix) + renderAgentLabel(statuses[i], step.agent, theme, results[i]));
+		}
+		return lines.join("\n");
+	}
+
+	// Fallback (should not reach here)
+	return fg("dim", "subagent");
+}
+
+/**
+ * Whether any agent in the layout is still running (flashing).
+ */
+export function anySubagentRunning(args: any, results: SubAgentResult[]): boolean {
+	if (args.agent && args.task && !(args.tasks?.length > 0) && !(args.chain?.length > 0)) {
+		return agentStatus(results[0]) === "running";
+	}
+	if (args.tasks && args.tasks.length > 0) {
+		return args.tasks.some((_t: any, i: number) => agentStatus(results[i]) === "running");
+	}
+	if (args.chain && args.chain.length > 0) {
+		return args.chain.slice(0, results.length).some((_s: any, i: number) => agentStatus(results[i]) === "running");
+	}
+	return false;
+}
+
+// ---------------------------------------------------------------------------
+// Expanded view (Ctrl+O)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detailed per-agent output for the expanded view, wrapped in a
+ * subagentBg Box so it stays visually integrated with the collapsed row.
+ */
+export function renderSubagentExpanded(
+	details: { mode: "single" | "parallel" | "chain"; results: SubAgentResult[] },
+	theme: any,
+): Component | undefined {
+	const fg = theme.fg.bind(theme);
+	const mdTheme = getMarkdownTheme();
+	const box = new Box(1, 0, (s: string) => (theme.bg as any)("subagentBg", s));
+
+	if (details.mode === "single" && details.results.length === 1) {
+		const inner = renderSingleResult(details.results[0], true, theme);
+		if (inner instanceof Container) {
+			box.addChild(inner);
+		} else if (inner instanceof Text) {
+			box.addChild(inner);
+		}
+		return box;
+	}
+
+	const container = new Container();
+	for (const r of details.results) {
+		const stepIcon = isFailedResult(r) ? fg("error", "✗") : fg("success", "✓");
+		container.addChild(new Text(`${stepIcon} ${fg("accent", r.agent)}`, 0, 0));
+		if (r.errorMessage) {
+			container.addChild(new Text(fg("error", `Error: ${r.errorMessage}`), 0, 0));
+		}
+		const finalOutput = getResultOutput(r);
+		if (finalOutput) {
+			container.addChild(new Spacer(1));
+			container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+		}
+		const usageStr = formatUsageStats(r.usage, r.model);
+		if (usageStr) container.addChild(new Text(fg("dim", usageStr), 0, 0));
+		container.addChild(new Spacer(1));
+	}
+	const totalUsage = formatUsageStats(aggregateUsage(details.results));
+	if (totalUsage) {
+		container.addChild(new Text(fg("dim", `Total: ${totalUsage}`), 0, 0));
+	}
+	box.addChild(container);
+	return box;
 }

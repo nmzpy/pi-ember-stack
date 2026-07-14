@@ -31,11 +31,19 @@ export type CompactCall = {
 export type DiscoveryGroup = {
 	records: CompactCall[];
 	/**
-	 * The record whose component currently renders the group header.
-	 * The latest call to join the group becomes the owner so the
-	 * header always renders in the current turn's visible component.
+	 * The record whose component renders the group header. Set once at
+	 * group creation to the first member and never changed.
 	 */
 	renderOwner?: CompactCall;
+	hasNonDiscovery?: boolean;
+	/**
+	 * Shared visual handle for the group block. The owner re-binds this
+	 * to its live `Text` on every `renderCall`; members write into it
+	 * directly via `setText` in `renderResultInner` so the group stays
+	 * visible across Pi rebuilds (thinking-toggle, compaction, settings)
+	 * without relying on owner invalidation.
+	 */
+	callText?: Text;
 };
 
 function textValue(value: unknown, fallback = ""): string {
@@ -52,10 +60,37 @@ function bashCdDir(command: string): string | undefined {
 	return match?.[1];
 }
 
+/**
+ * Detect bash commands that are grep invocations (optionally preceded by
+ * `cd <dir> &&`). Returns the extracted pattern and path so the call
+ * can render as "Search" and join the discovery group.
+ */
+function bashGrepInfo(command: string): { pattern: string; path: string } | undefined {
+	const stripped = command.replace(/^\s*cd\s+([^\s&]+)\s*&&\s*/, "");
+	if (!/^\s*grep\b/.test(stripped)) return undefined;
+	const cdDir = bashCdDir(command);
+	const path = cdDir ?? ".";
+	const afterGrep = stripped.replace(/^\s*grep\s+/, "");
+	const cmdBeforePipe = afterGrep.split(/\s+[|>]/)[0];
+	const parts = cmdBeforePipe.trim().split(/\s+/);
+	let pattern: string | undefined;
+	for (const part of parts) {
+		if (!part.startsWith("-")) {
+			pattern = part;
+			break;
+		}
+	}
+	if (!pattern) return undefined;
+	pattern = pattern.replace(/^["']|["']$/g, "");
+	return { pattern, path };
+}
+
 function groupKey(name: string, args: any): string | undefined {
 	if (DISCOVERY_TOOLS.has(name)) return "__discovery__";
 	if (name === "bash") {
-		const dir = bashCdDir(textValue(args?.command));
+		const command = textValue(args?.command);
+		if (bashGrepInfo(command)) return "__discovery__";
+		const dir = bashCdDir(command);
 		return dir ? `bash:${dir}` : undefined;
 	}
 	return undefined;
@@ -123,13 +158,67 @@ function matchLabel(result: any, theme: any): string {
 	return theme.fg("dim", "  ") + theme.fg(color, label);
 }
 
-const PULSE_INTERVAL_MS = 600;
+export const PULSE_INTERVAL_MS = 600;
 
-function bulletColor(record: CompactCall, theme: any): string {
-	if (record.isError) return theme.fg("error", BULLET);
-	if (record._completed) return theme.fg("success", BULLET);
+/**
+ * Canonical status-bullet color: error→red, completed→green, else a
+ * flashing muted/dim bullet driven by PULSE_INTERVAL_MS. Shared by the
+ * compact renderer and the subagent renderer so the pulse stays in sync.
+ */
+export function statusBulletColor(isError: boolean, isCompleted: boolean, theme: any): string {
+	if (isError) return theme.fg("error", BULLET);
+	if (isCompleted) return theme.fg("success", BULLET);
 	const pulse = Math.floor(Date.now() / PULSE_INTERVAL_MS) % 2 === 0;
 	return pulse ? theme.fg("muted", BULLET) : theme.fg("dim", BULLET);
+}
+
+/**
+ * Canonical group-bullet color: any error→red, all completed→green,
+ * else flashing. Derived from statusBulletColor's pulse logic.
+ */
+export function groupBulletColorFromFlags(hasError: boolean, allCompleted: boolean, theme: any): string {
+	return statusBulletColor(hasError, allCompleted, theme);
+}
+
+/**
+ * Single shared pulse timer. Holds a set of invalidate callbacks and
+ * fires them all on one PULSE_INTERVAL_MS interval, starting on first
+ * add and stopping when the last callback is removed. One timer drives
+ * every flashing bullet in the session.
+ */
+export class PulseManager {
+	private readonly callbacks = new Set<() => void>();
+	private timer: ReturnType<typeof setInterval> | undefined;
+
+	add(cb: () => void): void {
+		this.callbacks.add(cb);
+		if (this.timer) return;
+		this.timer = setInterval(() => {
+			for (const cb of this.callbacks) {
+				try { cb(); } catch { /* best effort */ }
+			}
+		}, PULSE_INTERVAL_MS);
+	}
+
+	remove(cb: () => void): void {
+		this.callbacks.delete(cb);
+		if (this.callbacks.size === 0 && this.timer) {
+			clearInterval(this.timer);
+			this.timer = undefined;
+		}
+	}
+
+	clear(): void {
+		this.callbacks.clear();
+		if (this.timer) {
+			clearInterval(this.timer);
+			this.timer = undefined;
+		}
+	}
+}
+
+function bulletColor(record: CompactCall, theme: any): string {
+	return statusBulletColor(record.isError, record._completed === true, theme);
 }
 
 function formatEditStats(result: any, theme: any): string {
@@ -158,6 +247,12 @@ export function formatCallBody(name: string, args: any, theme: any, inGroup = fa
 				theme.fg("dim", ` ${pathName}`);
 		case "bash": {
 			const cmd = textValue(args?.command);
+			const grepInfo = bashGrepInfo(cmd);
+			if (grepInfo) {
+				return theme.fg("dim", theme.bold("Search")) +
+					theme.fg("dim", ` ${grepInfo.pattern}`) +
+					theme.fg("dim", ` in ${grepInfo.path}`);
+			}
 			const stripped = inGroup ? (cmd.replace(/^\s*cd\s+[^\s&]+\s*&&\s*/, "") || cmd) : cmd;
 			return theme.fg("dim", theme.bold("Run")) +
 				theme.fg("dim", ` $ ${stripped}`);
@@ -174,15 +269,14 @@ export function formatCallBody(name: string, args: any, theme: any, inGroup = fa
 }
 
 function groupBulletColor(group: DiscoveryGroup, theme: any): string {
-	if (group.records.some((r) => r.isError)) return theme.fg("error", BULLET);
-	if (group.records.every((r) => r._completed)) return theme.fg("success", BULLET);
-	const pulse = Math.floor(Date.now() / PULSE_INTERVAL_MS) % 2 === 0;
-	return pulse ? theme.fg("muted", BULLET) : theme.fg("dim", BULLET);
+	const hasError = group.records.some((r) => r.isError);
+	const allCompleted = group.records.every((r) => r._completed);
+	return groupBulletColorFromFlags(hasError, allCompleted, theme);
 }
 
 function groupHeaderLabel(group: DiscoveryGroup): string {
 	const allDone = group.records.every((r) => r._completed);
-	const verb = allDone ? "Explored" : "Exploring";
+	const verb = allDone && group.hasNonDiscovery ? "Explored" : "Exploring";
 	const first = group.records[0];
 	if (!first) return verb;
 	const key = groupKey(first.name, first.args);
@@ -204,7 +298,6 @@ function formatGroup(group: DiscoveryGroup, theme: any): string {
 			: "";
 		lines.push(
 			theme.fg("dim", prefix) +
-			bulletColor(record, theme) +
 			formatCallBody(record.name, record.args, theme, true) +
 			suffix,
 		);
@@ -216,40 +309,66 @@ export class CompactRenderer {
 	private readonly calls = new Map<string, CompactCall>();
 	private lastCall: CompactCall | undefined;
 	private lastGroupKey: string | undefined;
-	private pulseTimer: ReturnType<typeof setInterval> | null = null;
-	private readonly pendingPulses = new Set<CompactCall>();
+	private currentGroup: DiscoveryGroup | undefined;
+	/** The single discovery group persists until session replacement. */
+	private discoveryGroup: DiscoveryGroup | undefined;
+	private readonly pulses = new PulseManager();
 
-	private startPulse(record: CompactCall): void {
-		this.pendingPulses.add(record);
-		if (this.pulseTimer) return;
-		this.pulseTimer = setInterval(() => {
-			if (this.pendingPulses.size === 0) {
-				this.stopPulse();
-				return;
-			}
-			for (const r of this.pendingPulses) r.invalidate?.();
-		}, PULSE_INTERVAL_MS);
+	/** Whether the current turn has produced visible text output. When
+	 *  true, grouping state is reset so the next discovery call starts a
+	 *  fresh group. When false (thinking-only turns), discovery calls
+	 *  continue appending to the previous turn's group so exploration
+	 *  stays coherent with nothing visible between turns. */
+	private turnHasText = false;
+
+	beginTurn(): void {
+		// Do NOT reset grouping state here. A turn that only streams thinking
+		// tokens (no visible text) and then does discovery calls should
+		// append to the previous turn's group — there is nothing visible
+		// between them. Grouping is reset lazily in registerCall() once we
+		// know the current turn produced visible text (see noteVisibleText()).
+		this.turnHasText = false;
+		this.pulses.clear();
 	}
 
-	private stopPulse(): void {
-		if (this.pulseTimer) {
-			clearInterval(this.pulseTimer);
-			this.pulseTimer = null;
+	/** Called by the plugin when the current turn produces visible text
+	 *  output (text_start/text_delta). Marks the turn as having visible
+	 *  content so the next discovery call starts a fresh group instead
+	 *  of appending to the previous turn's group. */
+	noteVisibleText(): void {
+		this.turnHasText = true;
+	}
+
+	/** Clear all accumulated call state. Called on session replacement
+	 *  (/resume, /new, /fork) so stale rows from the previous session do
+	 *  not leak into the new one. */
+	resetForSession(): void {
+		this.calls.clear();
+		this.lastCall = undefined;
+		this.lastGroupKey = undefined;
+		this.currentGroup = undefined;
+		this.discoveryGroup = undefined;
+		this.pulses.clear();
+	}
+
+	private markNonDiscoveryGroups(): void {
+		const groups = new Set<DiscoveryGroup>();
+		if (this.currentGroup) groups.add(this.currentGroup);
+		if (this.discoveryGroup) groups.add(this.discoveryGroup);
+		for (const group of groups) {
+			group.hasNonDiscovery = true;
+			group.renderOwner?.invalidate?.();
 		}
 	}
 
-	beginTurn(): void {
-		// Do NOT reset lastCall / lastGroupKey here. Resetting breaks
-		// grouping when turn_start fires between renderCall registrations
-		// (e.g. parallel bash calls with the same cd dir). Consecutive
-		// calls with the same group key should always group, even across
-		// turn boundaries. Different keys naturally don't group.
-		this.pendingPulses.clear();
-		this.stopPulse();
-	}
-
-	observeCall(name: string, id: string, args: any): CompactCall {
-		return this.registerCall(name, id, args);
+	private appendToGroup(group: DiscoveryGroup, record: CompactCall): void {
+		// Attach every member only once the group has a second member. This
+		// keeps a lone discovery call rendered as a normal standalone row.
+		for (const member of group.records) member.group = group;
+		group.records.push(record);
+		record.group = group;
+		this.currentGroup = group;
+		group.renderOwner?.invalidate?.();
 	}
 
 	registerCall(
@@ -261,29 +380,62 @@ export class CompactRenderer {
 		const existing = this.calls.get(id);
 		if (existing) {
 			existing.args = args;
-			existing.invalidate = invalidate ?? existing.invalidate;
+			// On Pi rebuilds (thinking-toggle, compaction, settings) the
+			// ToolExecutionComponent is destroyed and recreated with a fresh
+			// invalidate callback. Swap the old callback out of the
+			// PulseManager and insert the live one so the pulse timer only
+			// fires live components. Completed records are not re-pulsed.
+			if (existing.invalidate && invalidate && existing.invalidate !== invalidate) {
+				this.pulses.remove(existing.invalidate);
+			}
+			existing.invalidate = invalidate;
+			if (invalidate && !existing._completed) this.pulses.add(invalidate);
 			return existing;
 		}
 
 		const record: CompactCall = { id, name, args, isError: false };
 		this.calls.set(id, record);
 		const key = groupKey(name, args);
-		if (key && this.lastCall && key === this.lastGroupKey) {
-			const group = this.lastCall.group ?? { records: [this.lastCall], renderOwner: this.lastCall };
+
+		// If the current turn produced visible text, reset grouping so this
+		// call starts a fresh group. Thinking-only turns do NOT reset —
+		// discovery calls append to the previous turn's group so exploration
+		// stays coherent when nothing visible separates the turns.
+		if (this.turnHasText && key !== undefined) {
+			this.lastCall = undefined;
+			this.lastGroupKey = undefined;
+			this.currentGroup = undefined;
+			this.discoveryGroup = undefined;
+			this.turnHasText = false;
+		}
+
+		if (key === undefined) {
+			this.markNonDiscoveryGroups();
+		}
+
+		if (key === "__discovery__") {
+			// Discovery is one persistent group. It intentionally survives
+			// turn boundaries and intervening non-discovery calls; the latter
+			// only makes the group label monotonic via hasNonDiscovery.
+			if (!this.discoveryGroup) {
+				this.discoveryGroup = {
+					records: [record],
+					renderOwner: record,
+				};
+				this.currentGroup = this.discoveryGroup;
+			} else {
+				this.appendToGroup(this.discoveryGroup, record);
+			}
+		} else if (key && this.lastCall && key === this.lastGroupKey) {
+			const group = this.lastCall.group ?? { records: [this.lastCall] };
 			this.lastCall.group = group;
-			// New record joins the group — become renderOwner so the group
-			// header renders in this call's (current-turn) component.
-			const prevOwner = group.renderOwner;
-			group.renderOwner = record;
-			if (prevOwner && prevOwner !== record) prevOwner.invalidate?.();
-			group.records.push(record);
-			record.group = group;
-			for (const groupedCall of group.records) groupedCall.invalidate?.();
+			if (!group.renderOwner) group.renderOwner = this.lastCall;
+			this.appendToGroup(group, record);
 		}
 		this.lastCall = record;
 		this.lastGroupKey = key;
 		record.invalidate = invalidate;
-		this.startPulse(record);
+		if (invalidate) this.pulses.add(invalidate);
 		return record;
 	}
 
@@ -292,11 +444,13 @@ export class CompactRenderer {
 		record.isError = isError;
 		record._completed = true;
 		record.result = result;
-		this.pendingPulses.delete(record);
-		if (this.pendingPulses.size === 0) this.stopPulse();
-		if (record.group) {
-			record.group.renderOwner?.invalidate?.();
-		}
+		if (record.invalidate) this.pulses.remove(record.invalidate);
+		// Do NOT invalidate the owner here. The group visual is updated
+		// directly via group.callText.setText() in renderResultInner so the
+		// owner's next render picks up the change. Invalidating the owner
+		// synchronously triggers updateDisplay -> renderResult -> setResult,
+		// which races during Pi rebuilds (thinking-toggle, compaction) when
+		// the owner component has been destroyed and recreated.
 	}
 
 	renderCall(
@@ -326,7 +480,17 @@ export class CompactRenderer {
 		const record = this.registerCall(name, context.toolCallId, args, context.invalidate);
 		if (record.group && record.group.records.length > 1) {
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
-			return new Text(formatGroup(record.group, theme), 0, 0);
+			const callText = context.state.callText instanceof Text
+				? context.state.callText
+				: new Text("", 0, 0);
+			context.state.callText = callText;
+			// Re-bind the group's shared visual handle to the owner's live
+			// Text on every render. On Pi rebuilds (thinking-toggle,
+			// compaction, settings) context.state is fresh, so a new Text is
+			// created and the group handle is repointed to the live owner.
+			record.group.callText = callText;
+			callText.setText(formatGroup(record.group, theme));
+			return callText;
 		}
 		const callText = context.state.callText instanceof Text
 			? context.state.callText
@@ -369,6 +533,12 @@ export class CompactRenderer {
 		const expanded = options.expanded === true;
 
 		if (record.group && record.group.records.length > 1) {
+			// Update the shared group visual directly so the owner's row
+			// reflects this member's completion (bullet color, match count,
+			// Explored label) without invalidating the owner. setText clears
+			// the Text cache; Pi's next requestRender re-renders the owner's
+			// selfRenderContainer with the updated Text.
+			record.group.callText?.setText(formatGroup(record.group, theme));
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
 			if (expanded && !options.isPartial) {
 				const output = formatExpandedOutput(result, theme);
@@ -416,4 +586,4 @@ export class CompactRenderer {
 	}
 }
 
-export { BULLET, DISCOVERY_TOOLS, GROUPABLE_TOOLS };
+export { BULLET, DISCOVERY_TOOLS, GROUPABLE_TOOLS, bashGrepInfo };

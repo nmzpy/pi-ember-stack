@@ -14,6 +14,7 @@ import { type Component } from "@earendil-works/pi-tui";
 import {
 	CompactRenderer,
 	GROUPABLE_TOOLS,
+	bashGrepInfo,
 	type ToolRenderContext,
 	type ToolRenderResultOptions,
 } from "./renderer.ts";
@@ -73,6 +74,8 @@ function registerCompactTool(
 
 let sharedRenderer: CompactRenderer | null = null;
 
+export { bashGrepInfo };
+
 export function getSharedRenderer(): CompactRenderer {
 	if (!sharedRenderer) sharedRenderer = new CompactRenderer();
 	return sharedRenderer;
@@ -81,11 +84,26 @@ export function getSharedRenderer(): CompactRenderer {
 export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	const renderer = getSharedRenderer();
 	pi.on("turn_start", () => renderer.beginTurn());
-	pi.on("tool_call", (event: any) => {
-		if (GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName]) {
-			renderer.observeCall(event.toolName, event.toolCallId, event.input);
+	pi.on("message_update", (event: any) => {
+		// When the model streams visible text (not just thinking tokens),
+		// mark the turn as having visible output so the next discovery
+		// call starts a fresh group instead of appending to the previous
+		// turn's group. Thinking-only turns keep grouping coherent.
+		const ev = event?.assistantMessageEvent;
+		if (ev && (ev.type === "text_start" || ev.type === "text_delta")) {
+			renderer.noteVisibleText();
 		}
 	});
+	pi.on("tool_call", (event: any) => {
+		if (GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName]) {
+			renderer.registerCall(event.toolName, event.toolCallId, event.input);
+		}
+	});
+	// Reset the shared renderer on session replacement so stale call rows
+	// from the previous session do not leak into the new one. The renderer
+	// is module-level (shared across sessions because jiti caches the
+	// module), so it must be explicitly cleared.
+	pi.on("session_start", () => renderer.resetForSession());
 	for (const [name, factory] of Object.entries(TOOL_FACTORIES)) {
 		registerCompactTool(pi, name, factory, renderer);
 	}

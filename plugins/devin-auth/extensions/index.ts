@@ -108,6 +108,28 @@ function registerDevinProvider(pi: ExtensionAPI, models: ProviderModelConfig[]):
 export default async function (pi: ExtensionAPI): Promise<void> {
     _pi = pi;
 
+    // Swallow AbortError unhandled rejections that arise when the user
+    // cancels an in-flight agent run (Escape during streaming). The agent's
+    // AbortController.abort() sets signal.reason to a DOMException
+    // [AbortError]; late rejections from fetch body streams, reader.cancel(),
+    // or the anySignal polyfill can surface as unhandled rejections that —
+    // on Node ≥15 with --unhandled-rejections=throw (the default in Node 25)
+    // — trigger pi's uncaughtException handler and crash the process.
+    // These are expected during cancellation, not real errors.
+    //
+    // Non-abort rejections are genuine bugs: temporarily remove the guard,
+    // re-emit so pi's crash handler surfaces them, then re-attach.
+    const abortRejectionHandler = (reason: unknown): void => {
+        const isAbort =
+            reason instanceof DOMException && reason.name === 'AbortError';
+        if (isAbort) return; // expected during cancellation
+        // Re-emit non-abort rejections so they are not silently swallowed.
+        process.off('unhandledRejection', abortRejectionHandler);
+        process.emit('unhandledRejection', reason, Promise.reject(reason));
+        process.on('unhandledRejection', abortRejectionHandler);
+    };
+    process.on('unhandledRejection', abortRejectionHandler);
+
     // Register with an empty model list first so the provider (and OAuth
     // login support) is known even before the catalog arrives. Then, if we
     // already have credentials in auth.json, fetch the live catalog now —
@@ -175,5 +197,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
     pi.on('session_shutdown', async () => {
         _pi = null;
+        process.off('unhandledRejection', abortRejectionHandler);
     });
 }

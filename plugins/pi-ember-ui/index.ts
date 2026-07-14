@@ -2,22 +2,27 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	AssistantMessageComponent,
 	Theme,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { Editor, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	buildCodeBgHex,
 	buildThemeBgColors,
 	buildThemeFgColors,
 	getActiveModeColor,
+	isShellMode,
+	MUTED_COLOR,
+	setLatestSubagentRunning,
+	setShellMode,
 } from "./mode-colors.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const THEME_JSON = path.join(SOURCE_ROOT, "ember.json");
 const THEME_NAME = "ember";
 
-const THINKING_FRAME_INTERVAL_MS = 60;
+const THINKING_FRAME_INTERVAL_MS = 33;
 const LOGO = [
 	"  ██████   ██",
 	"  ██   ██  ██",
@@ -40,6 +45,7 @@ let logoAnimating = false;
 let logoFrame = 0;
 let logoTimer: ReturnType<typeof setInterval> | undefined;
 let editorRenderPatched = false;
+let assistantMessagePatched = false;
 let requestRender: (() => void) | undefined;
 let sessionCtx: any;
 
@@ -47,6 +53,57 @@ type EditorWithBorder = Editor & {
 	borderColor: (text: string) => string;
 	getText: () => string;
 };
+
+/**
+ * Cached result of the subagent-running scan. The scan itself is O(n)
+ * over the session branch (getBranch + two passes), so it MUST NOT run
+ * inside the per-frame Editor.prototype.render path. It is recomputed
+ * only on tool_execution_start / tool_execution_end (which fire once
+ * per tool call) and reset on session replacement. The render path
+ * reads this cached flag via subagentRunningCached.
+ */
+let subagentRunningCached = false;
+
+/**
+ * Recompute whether the latest tool call in the session is a `subagent`
+ * that has not yet produced a toolResult. Scans session entries
+ * (available via module-level sessionCtx) and writes the result to both
+ * the shared mode-colors flag and the local cache. Called only from
+ * tool-execution event handlers — never from the render path.
+ */
+function recompute_latest_subagent_running(): boolean {
+	const entries = sessionCtx?.sessionManager?.getBranch?.() ?? [];
+	let latestSubagentCallId: string | undefined;
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry?.type !== "message") continue;
+		const msg = entry.message;
+		if (msg?.role !== "assistant") continue;
+		for (const part of msg.content ?? []) {
+			if (part?.type === "toolCall" && part?.name === "subagent") {
+				latestSubagentCallId = part.id;
+				break;
+			}
+		}
+		if (latestSubagentCallId) break;
+	}
+	let running = false;
+	if (latestSubagentCallId) {
+		running = true;
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry?.type !== "message") continue;
+			const msg = entry.message;
+			if (msg?.role === "toolResult" && msg?.toolCallId === latestSubagentCallId) {
+				running = false;
+				break;
+			}
+		}
+	}
+	subagentRunningCached = running;
+	setLatestSubagentRunning(running);
+	return running;
+}
 
 function currentLabelText(): string {
 	return thinkingActive ? "Thinking" : "Working";
@@ -66,7 +123,7 @@ function startThinkingAnimation(): void {
 	if (!thinkingInterval) {
 		thinkingFrame = 0;
 		thinkingInterval = setInterval(() => {
-			thinkingFrame += 0.06;
+			thinkingFrame += 0.09;
 			if (thinkingFrame > 1) thinkingFrame -= 1;
 			requestRender?.();
 		}, THINKING_FRAME_INTERVAL_MS);
@@ -78,7 +135,7 @@ function startWorkingAnimation(): void {
 	if (!thinkingInterval) {
 		thinkingFrame = 0;
 		thinkingInterval = setInterval(() => {
-			thinkingFrame += 0.06;
+			thinkingFrame += 0.09;
 			if (thinkingFrame > 1) thinkingFrame -= 1;
 			requestRender?.();
 		}, THINKING_FRAME_INTERVAL_MS);
@@ -146,7 +203,7 @@ function installProxiedTheme(fgColors: Record<string, string>, bgColors: Record<
 	(globalThis as any)[THEME_KEY_OLD] = wrapped;
 }
 
-function applyDynamicTheme(): void {
+function applyDynamicTheme(options: { invalidate?: boolean; render?: boolean } = {}): void {
 	const accent = getActiveModeColor();
 	const fgColors = buildThemeFgColors(accent);
 	const bgColors = buildThemeBgColors(accent);
@@ -155,12 +212,12 @@ function applyDynamicTheme(): void {
 	if (liveTheme) {
 		liveCodeBgAnsi = bgAnsi(codeBg);
 		updateLiveThemeColors(fgColors, bgColors);
-		(tuiRef as any)?.invalidate();
-		requestRender?.();
+		if (options.invalidate !== false) (tuiRef as any)?.invalidate();
+		if (options.render !== false) requestRender?.();
 		return;
 	}
 	installProxiedTheme(fgColors, bgColors, codeBg);
-	requestRender?.();
+	if (options.render !== false) requestRender?.();
 }
 
 function updateLiveThemeColors(fgColors: Record<string, string>, bgColors: Record<string, string>): void {
@@ -175,22 +232,31 @@ function updateLiveThemeColors(fgColors: Record<string, string>, bgColors: Recor
 	}
 }
 
-function renderGradientLabel(text: string, accent: string): string {
+function renderGradientLabel(text: string, accent: string, phaseOffset = 0): string {
 	const chars = [...text];
 	const len = chars.length;
 	if (len === 0) return "";
-	const textHex = "#808080";
+	const dimHex = blendToHex(accent, "#18181e", 0.4);
 	const result: string[] = [];
+	const phase = (thinkingFrame + phaseOffset) % 1;
 	for (let i = 0; i < len; i++) {
 		const charPos = i / Math.max(1, len - 1);
-		const dist = charPos - thinkingFrame;
+		const dist = charPos - phase;
 		const wrapped = dist < -0.5 ? dist + 1 : dist > 0.5 ? dist - 1 : dist;
 		const intensity = Math.exp(-(wrapped * wrapped) * 8);
-		const hex = blendToHex(textHex, accent, intensity);
+		const hex = blendToHex(dimHex, accent, intensity);
 		result.push(colorize(chars[i], hex));
 	}
 	return result.join("");
 }
+
+/** Render the same animated gradient used by the live Thinking label. */
+export function renderLiveThinkingGradient(text: string): string {
+	return renderGradientLabel(text, getActiveModeColor());
+}
+
+/** Render an animated gradient with a stable per-row phase offset. */
+export { renderGradientLabel };
 
 function installThinkingBorderOverride(): void {
 	if (editorRenderPatched) return;
@@ -199,7 +265,10 @@ function installThinkingBorderOverride(): void {
 	Editor.prototype.render = function renderThinkingBorder(this: EditorWithBorder, width: number): string[] {
 	const accent = getActiveModeColor();
 	const accentLight = lightenHex(accent, 0.5);
-	const accentBorder = (text: string): string => colorize(text, accentLight);
+	const borderColor = isShellMode() ? MUTED_COLOR : accentLight;
+	const accentBorder = (text: string): string => colorize(text, borderColor);
+	const dimInsetBorder = (): string =>
+		` ${colorWithOpacity("\u2500".repeat(Math.max(0, width - 2)), borderColor, 0.1875)} `;
 	const originalBorderColor = this.borderColor;
 	this.borderColor = accentBorder;
 	const innerWidth = Math.max(1, width - 2);
@@ -222,11 +291,16 @@ function installThinkingBorderOverride(): void {
 		if (i === bottomBorderIdx) continue;
 		lines[i] = ` ${lines[i]} `;
 	}
-	lines[topIdx] = accentBorder("\u2500".repeat(width));
+	const subagentActive = subagentRunningCached;
+	if (subagentActive) {
+		lines[topIdx] = dimInsetBorder();
+	} else {
+		lines[topIdx] = accentBorder("\u2500".repeat(width));
+	}
 	if (bottomBorderIdx >= 0) {
 		const inputText = this.getText?.() ?? "";
 		if (inputText.trimStart().startsWith("/")) {
-			lines[bottomBorderIdx] = ` ${colorWithOpacity("\u2500".repeat(width - 2), accentLight, 0.1875)} `;
+			lines[bottomBorderIdx] = dimInsetBorder();
 		} else {
 			lines[bottomBorderIdx] = accentBorder("\u2500".repeat(width));
 		}
@@ -236,6 +310,7 @@ function installThinkingBorderOverride(): void {
 			lines[lastLineIdx] = accentBorder("\u2500".repeat(width));
 		}
 		if (lines.length === 0) return lines;
+		if (subagentActive) return lines;
 		if (!thinkingActive && !workingActive) return lines;
 
 		const labelText = thinkingActive ? "Thinking" : "Working";
@@ -245,6 +320,105 @@ function installThinkingBorderOverride(): void {
 		lines[topIdx] = accentBorder("\u2500".repeat(2)) + label +
 			accentBorder("\u2500".repeat(remaining));
 		return lines;
+	};
+}
+
+function installAssistantMessagePatch(): void {
+	if (assistantMessagePatched) return;
+	assistantMessagePatched = true;
+
+	(AssistantMessageComponent as any).prototype.updateContent = function (this: any, message: any): void {
+		const hide = this.hideThinkingBlock;
+		const outputPad = this.outputPad;
+		// Skip the full rebuild when nothing that affects the rendered output
+		// has changed. invalidate() (from theme change, thinking toggle,
+		// output-pad change) calls updateContent with the SAME message —
+		// recreating every Markdown child and clearing contentContainer is
+		// O(blocks) per assistant message per rebuild, which freezes long
+		// transcripts on thinking-toggle. The child Markdown caches were
+		// already cleared by the invalidate() propagation, so the next
+		// render() will re-parse regardless — but we avoid the object
+		// churn and container rebuild.
+		const sameMessage = this._emberContentMessage === message;
+		const cacheKey = `${sameMessage ? "same" : "diff"}|${hide}|${outputPad}`;
+		if (sameMessage && this._emberContentKey === cacheKey) {
+			this.lastMessage = message;
+			return;
+		}
+		this._emberContentKey = cacheKey;
+		this._emberContentMessage = message;
+		this.lastMessage = message;
+
+		this.contentContainer.clear();
+
+		const isVisibleBlock = (c: any): boolean => {
+			if (c.type === "text" && c.text?.trim()) return true;
+			if (c.type === "thinking" && c.thinking?.trim() && !hide) return true;
+			return false;
+		};
+
+		const hasVisibleContent = message.content.some(isVisibleBlock);
+		if (hasVisibleContent) {
+			this.contentContainer.addChild(new Spacer(1));
+		}
+
+		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+
+		for (let i = 0; i < message.content.length; i++) {
+			const content = message.content[i];
+			if (content.type === "text" && content.text?.trim()) {
+				this.contentContainer.addChild(
+					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme),
+				);
+			} else if (content.type === "thinking" && content.thinking?.trim()) {
+				if (hide) continue;
+				const hasVisibleContentAfter = message.content.slice(i + 1).some(isVisibleBlock);
+				this.contentContainer.addChild(
+					new Markdown(
+						content.thinking.trim(),
+						this.outputPad,
+						0,
+						this.markdownTheme,
+						{
+							color: (text: string) => theme.fg("thinkingText", text),
+							italic: true,
+						},
+					),
+				);
+				if (hasVisibleContentAfter) {
+					this.contentContainer.addChild(new Spacer(1));
+				}
+			}
+		}
+
+		const hasToolCalls = message.content.some((c: any) => c.type === "toolCall");
+		this.hasToolCalls = hasToolCalls;
+		if (message.stopReason === "length") {
+			this.contentContainer.addChild(new Spacer(1));
+			this.contentContainer.addChild(
+				new Text(
+					theme.fg(
+						"error",
+						"Error: Model stopped because it reached the maximum output token limit. The response may be incomplete.",
+					),
+					this.outputPad,
+					0,
+				),
+			);
+		} else if (!hasToolCalls) {
+			if (message.stopReason === "aborted") {
+				const abortMessage =
+					message.errorMessage && message.errorMessage !== "Request was aborted"
+						? message.errorMessage
+						: "Operation aborted";
+				this.contentContainer.addChild(new Spacer(1));
+				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), this.outputPad, 0));
+			} else if (message.stopReason === "error") {
+				const errorMsg = message.errorMessage || "Unknown error";
+				this.contentContainer.addChild(new Spacer(1));
+				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
+			}
+		}
 	};
 }
 
@@ -498,11 +672,13 @@ function ensureThemeInstalled(): void {
 export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	ensureThemeInstalled();
 	installThinkingBorderOverride();
+	installAssistantMessagePatch();
 	applyDynamicTheme();
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		sessionCtx = ctx;
 		liveTheme = undefined;
+		subagentRunningCached = false;
 		if (ctx.mode === "tui") {
 			requestRender = () => ctx.ui.setStatus("pi-ember-ui-thinking-tick", undefined);
 			ctx.ui.setWorkingVisible(false);
@@ -521,11 +697,15 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 					}
 				}
 			}
-			startLogoAnimation();
-			ctx.ui.onTerminalInput((data: string) => {
-				if (logoAnimating && data !== "\t" && !data.startsWith("/")) stopLogoAnimation();
-				return undefined;
-			});
+			// Only animate the logo on genuinely fresh sessions where the
+			// header is visible. On /resume, /fork, and /reload the header
+			// is scrolled off-screen (or it's a hot reload) — the 60ms
+			// setInterval from startLogoAnimation would call requestRender()
+			// every tick, fighting the scrollarea's lazy-load and causing
+			// an infinite render glitch on long resumed sessions.
+			if (event.reason === "startup" || event.reason === "new") {
+				startLogoAnimation();
+			}
 		}
 	});
 
@@ -536,7 +716,14 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	// Re-render header/footer when the active agent mode changes. Emitted by
 	// pi-custom-agents (and any other extension) via the shared event bus.
-	pi.events.on("pi-ember-ui:mode-change", () => {
+	pi.events.on("pi-ember-ui:mode-change", (event: any) => {
+		if (event?.liveOnly === true) {
+			// Mode switches update the live editor/footer only. Invalidating the
+			// whole TUI makes a large resumed transcript re-render synchronously.
+			// The custom-agents extension supplies the single live render tick.
+			applyDynamicTheme({ invalidate: false, render: false });
+			return;
+		}
 		applyDynamicTheme();
 	});
 
@@ -568,11 +755,13 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("tool_execution_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		recompute_latest_subagent_running();
 		if (!thinkingActive) startWorkingAnimation();
 	});
 
 	pi.on("tool_execution_end", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		recompute_latest_subagent_running();
 		if (workingActive && !thinkingActive) requestRender?.();
 	});
 
@@ -594,25 +783,23 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerEntryRenderer("ember-turn-separator", (_entry, _opts, theme) => {
-		return {
-			render(width: number): string[] {
-				return [theme.fg("accent", "\u2500".repeat(Math.max(0, width)))];
-			},
-			invalidate() {},
-		} as any;
-	});
-
-	pi.on("turn_end", (_event, ctx) => {
-		if (ctx.mode !== "tui") return;
-		pi.appendEntry("ember-turn-separator");
-	});
-
+	// Reset ALL session-bound module state on shutdown so a subsequent
+	// /resume (which re-runs the factory against a fresh runtime but keeps
+	// the cached module) does not call into the dead session's TUI/ctx via
+	// stale closures. The factory body calls applyDynamicTheme() on load,
+	// which would otherwise invoke the old requestRender/tuiRef.
 	pi.on("session_shutdown", (_event, ctx) => {
 		sessionCtx = undefined;
+		requestRender = undefined;
+		tuiRef = undefined;
+		liveTheme = undefined;
+		liveCodeBgAnsi = "";
+		subagentRunningCached = false;
 		stopLogoAnimation();
 		stopThinkingAnimation();
 		stopWorkingAnimation();
+		setShellMode(false);
+		setLatestSubagentRunning(false);
 		if (ctx.hasUI) ctx.ui.setHeader(undefined);
 	});
 }

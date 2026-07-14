@@ -1,8 +1,8 @@
 /**
  * Ember TPS Meter — minimal tokens-per-second tracker
  *
- * Tracks output token rate during streaming and exposes the live value
- * via getLiveTps() for the custom footer to render.
+ * Tracks output plus thinking token rate during streaming and exposes the live
+ * value via getLiveTps() for the custom footer to render.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -12,6 +12,7 @@ const STREAM_INTERVAL_MS = 500;
 let streamStartMs = 0;
 let firstTokenMs = 0;
 let streamChars = 0;
+let streamThinkingChars = 0;
 let streamTokens = 0;
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 let streaming = false;
@@ -61,6 +62,7 @@ export default function piEmberTps(pi: ExtensionAPI): void {
 		streamStartMs = now();
 		firstTokenMs = 0;
 		streamChars = 0;
+		streamThinkingChars = 0;
 		streamTokens = 0;
 		liveTps = 0;
 		streaming = true;
@@ -79,6 +81,7 @@ export default function piEmberTps(pi: ExtensionAPI): void {
 			if (!d) return;
 			if (firstTokenMs === 0) firstTokenMs = now();
 			streamChars += d.length;
+			if (evt.type === "thinking_delta") streamThinkingChars += d.length;
 			streamTokens = tokEst(streamChars);
 		}
 	});
@@ -88,9 +91,16 @@ export default function piEmberTps(pi: ExtensionAPI): void {
 		streaming = false;
 		stopTick();
 
-		const realOut = event.message?.usage?.output;
-		const tokens =
-			typeof realOut === "number" && realOut > 0 ? realOut : streamTokens;
+		const usage = event.message?.usage;
+		const realOut = usage?.output;
+		// Some providers report output tokens without their thinking tokens.
+		// Keep the streamed combined estimate in that case; providers that
+		// expose `reasoning` already include it in `usage.output`.
+		const tokens = typeof realOut === "number" && realOut > 0
+			? streamThinkingChars > 0 && usage?.reasoning === undefined
+				? Math.max(realOut, streamTokens)
+				: realOut
+			: streamTokens;
 
 		const ref = firstTokenMs > 0 ? firstTokenMs : streamStartMs;
 		const elapsed = (now() - ref) / 1000;
@@ -114,9 +124,21 @@ export default function piEmberTps(pi: ExtensionAPI): void {
 		streamStartMs = 0;
 		firstTokenMs = 0;
 		streamChars = 0;
+		streamThinkingChars = 0;
 		streamTokens = 0;
 		liveTps = 0;
 		renderTrigger = undefined;
 		ctx.ui.setStatus("tps", undefined);
+	});
+
+	// Clear the tick interval and stale render trigger on shutdown so a
+	// subsequent /resume does not keep a setInterval alive against the dead
+	// session's ctx.ui. Without this, the 500ms tick keeps firing and
+	// calls the old renderTrigger long after the session is gone.
+	pi.on("session_shutdown", async () => {
+		streaming = false;
+		stopTick();
+		renderTrigger = undefined;
+		liveTps = 0;
 	});
 }

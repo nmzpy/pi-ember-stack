@@ -959,7 +959,12 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
         readP.catch(() => { /* swallowed; outer promise already rejected */ });
 
         idleController.signal.addEventListener('abort', () => {
-          try { void resp.body?.cancel(idleController.signal.reason ?? new Error('idle abort')); } catch { /* */ }
+          // Cancel via the reader (not resp.body) — resp.body is locked
+          // by getReader(), so resp.body.cancel() throws
+          // ERR_INVALID_STATE synchronously. reader.cancel() releases the
+          // lock and cancels the stream safely. Swallow rejections: the
+          // outer race already rejected, nothing meaningful to do.
+          try { void reader.cancel(idleController.signal.reason ?? new Error('idle abort')).catch(() => { /* swallowed; outer race already rejected */ }); } catch { /* */ }
           settle(() => reject(idleController.signal.reason ?? new Error('idle abort')));
         }, { once: true });
 
@@ -1028,13 +1033,13 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
     // throw (idle timeout, gunzip error, trailer error, etc), keeping
     // the process from exiting promptly.
     if (idleTimer) clearTimeout(idleTimer);
-    // Cancel the underlying body stream on any non-clean exit so the TCP
-    // connection is released. `releaseLock` alone leaves the body in a
-    // dangling state; we have to call `cancel` on the response body
-    // itself (cancel-via-reader requires holding the lock). Fire and
-    // forget — there's nothing meaningful to do if cancel rejects.
-    try { reader.releaseLock(); } catch { /* */ }
-    try { void resp.body?.cancel(); } catch { /* */ }
+    // Release the underlying body stream so the TCP connection is freed.
+    // reader.cancel() works whether or not a read is pending and is the
+    // safe way to cancel a locked stream (resp.body.cancel() throws
+    // ERR_INVALID_STATE while the reader holds the lock). If the stream
+    // already completed normally, cancel() is a no-op. Fire and forget —
+    // there's nothing meaningful to do if cancel rejects.
+    try { void reader.cancel().catch(() => { /* swallowed; stream already closed or aborted */ }); } catch { /* */ }
   }
 
   if (trailerError) {

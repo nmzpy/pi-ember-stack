@@ -9,6 +9,7 @@
 		"emberAccent45": "#A8501F",
 		"emberAccent30": "#8F4627",
 		"emberAccent15": "#783C2F",
+		"emberAccent25": "#4D2E17",
 		"emberGray": "#808080",
 		"emberDarkGray": "#505050",
 		"cyan": "#00d7ff",
@@ -23,6 +24,7 @@
 		"accent": "#EB6E00",
 		"selectedBg": "#3a3a4a",
 		"userMsgBg": "#343541",
+		"subagentBg": "#32333f",
 		"toolPendingBg": "#282832",
 		"toolSuccessBg": "#283228",
 		"toolErrorBg": "#3c2828",
@@ -43,6 +45,7 @@
 
 		"selectedBg": "selectedBg",
 		"userMessageBg": "userMsgBg",
+		"subagentBg": "subagentBg",
 		"userMessageText": "text",
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "text",

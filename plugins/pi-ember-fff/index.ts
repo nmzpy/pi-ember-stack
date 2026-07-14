@@ -21,8 +21,14 @@ import type {
 } from "@ff-labs/fff-node";
 import { FileFinder } from "@ff-labs/fff-node";
 import { Type } from "@sinclair/typebox";
-import { buildQuery } from "./query.ts";
-import { getSharedRenderer } from "../pi-compact-tools/index.ts";
+import {
+	buildExternalAllowlist,
+	buildQuery,
+	resolveExternalTarget,
+	type ExternalAllowlist,
+	type ExternalTarget,
+} from "./query.ts";
+import { getSharedRenderer, bashGrepInfo } from "../pi-compact-tools/index.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,12 +43,17 @@ const MENTION_MAX_RESULTS = 20;
 // Cursor store — simple bounded Map for pagination cursors
 // ---------------------------------------------------------------------------
 
-const cursorCache = new Map<string, GrepCursor>();
+interface CachedGrepCursor {
+	cursor: GrepCursor;
+	externalDir?: string;
+}
+
+const cursorCache = new Map<string, CachedGrepCursor>();
 let cursorCounter = 0;
 
-function storeCursor(cursor: GrepCursor): string {
+function storeCursor(cursor: GrepCursor, externalDir?: string): string {
 	const id = `fff_c${++cursorCounter}`;
-	cursorCache.set(id, cursor);
+	cursorCache.set(id, { cursor, externalDir });
 	if (cursorCache.size > 200) {
 		const first = cursorCache.keys().next().value;
 		if (first) cursorCache.delete(first);
@@ -50,7 +61,7 @@ function storeCursor(cursor: GrepCursor): string {
 	return id;
 }
 
-function getCursor(id: string): GrepCursor | undefined {
+function getCursor(id: string): CachedGrepCursor | undefined {
 	return cursorCache.get(id);
 }
 
@@ -59,6 +70,7 @@ interface FindCursor {
 	pattern: string;
 	pageSize: number;
 	nextPageIndex: number;
+	externalDir?: string;
 }
 
 const findCursorCache = new Map<string, FindCursor>();
@@ -231,6 +243,11 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 	let finderPromise: Promise<FileFinder> | null = null;
 	let activeCwd = process.cwd();
 
+	let externalFinder: FileFinder | null = null;
+	let externalFinderDir: string | null = null;
+	let externalFinderPromise: Promise<FileFinder> | null = null;
+	let externalAllowlist: ExternalAllowlist = buildExternalAllowlist();
+
 	const frecencyDbPath =
 		(pi.getFlag("fff-frecency-db") as string | undefined) ??
 		process.env.FFF_FRECENCY_DB ??
@@ -251,6 +268,15 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		"fff-enable-root-scan",
 		"FFF_ENABLE_ROOT_SCAN",
 	);
+
+	const enableExternalAllow = (() => {
+		const flag = pi.getFlag("fff-external-allow");
+		if (typeof flag === "boolean") return flag;
+		if (typeof flag === "string") return flag === "true" || flag === "1";
+		const env = process.env.FFF_EXTERNAL_ALLOW;
+		if (env !== undefined) return env === "1" || env === "true";
+		return true; // default ON
+	})();
 
 	function ensureFinder(cwd: string): Promise<FileFinder> {
 		if (finder && !finder.isDestroyed && finderCwd === cwd)
@@ -293,6 +319,76 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 			finder = null;
 			finderCwd = null;
 		}
+	}
+
+	function ensureExternalFinder(dir: string): Promise<FileFinder> {
+		if (externalFinder && !externalFinder.isDestroyed && externalFinderDir === dir)
+			return Promise.resolve(externalFinder);
+		if (externalFinderPromise) return externalFinderPromise;
+
+		externalFinderPromise = (async () => {
+			if (externalFinder && !externalFinder.isDestroyed) {
+				externalFinder.destroy();
+				externalFinder = null;
+				externalFinderDir = null;
+			}
+
+			const result = FileFinder.create({
+				basePath: dir,
+				aiMode: true,
+				enableHomeDirScanning: false,
+				enableFsRootScanning: false,
+			});
+
+			if (!result.ok)
+				throw new Error(`Failed to create external FFF file finder: ${result.error}`);
+
+			externalFinder = result.value;
+			externalFinderDir = dir;
+			await externalFinder.waitForScan(15000);
+			return externalFinder;
+		})().finally(() => {
+			externalFinderPromise = null;
+		});
+
+		return externalFinderPromise;
+	}
+
+	function destroyExternalFinder() {
+		if (externalFinder && !externalFinder.isDestroyed) {
+			externalFinder.destroy();
+			externalFinder = null;
+			externalFinderDir = null;
+		}
+	}
+
+	/**
+	 * If params.path targets an allowlisted external directory, return the
+	 * external finder and the query scoped to that dir. Otherwise return
+	 * the workspace finder and workspace query.
+	 */
+	async function resolveFinderAndQuery(
+		pathParam: string | undefined,
+		pattern: string,
+		exclude: string | string[] | undefined,
+	): Promise<{ finder: FileFinder; query: string }> {
+		if (enableExternalAllow && externalAllowlist.entries.length > 0) {
+			const target = resolveExternalTarget(pathParam, externalAllowlist);
+			if (target) {
+				const f = await ensureExternalFinder(target.entry.dir);
+				const query = buildQuery(
+					target.relativePath || undefined,
+					pattern,
+					exclude,
+					target.entry.dir,
+					externalAllowlist,
+				);
+				return { finder: f, query };
+			}
+		}
+		const f = await ensureFinder(activeCwd);
+		const query = buildQuery(pathParam, pattern, exclude, activeCwd, externalAllowlist);
+		return { finder: f, query };
 	}
 
 	async function getMentionItems(
@@ -379,6 +475,12 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		type: "boolean",
 	});
 
+	pi.registerFlag("fff-external-allow", {
+		description:
+			"Allow grep/find to search the auto-detected @earendil-works/pi-coding-agent package directory via the ./pi-coding-agent alias (also: FFF_EXTERNAL_ALLOW env; default: true)",
+		type: "boolean",
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			activeCwd = ctx.cwd;
@@ -394,6 +496,134 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		destroyFinder();
+		destroyExternalFinder();
+	});
+
+	// --- bash grep → ripgrep rewrite ---
+
+	/**
+	 * Rewrite a bash grep command to an equivalent rg (ripgrep) command.
+	 * Returns the rewritten command, or undefined if the command is not a
+	 * simple grep invocation that can be safely converted.
+	 */
+	function rewriteGrepToRg(command: string): string | undefined {
+		const cdMatch = /^(\s*cd\s+([^\s&]+)\s*&&\s*)(.*)$/.exec(command);
+		const prefix = cdMatch?.[1] ?? "";
+		const body = cdMatch?.[3] ?? command;
+		if (!/^\s*grep\b/.test(body)) return undefined;
+		const beforePipe = body.split(/\s+\|/)[0].trim();
+		const afterGrep = beforePipe.replace(/^\s*grep\s+/, "");
+		// Strip stderr redirects (2>/dev/null, 2>&1, etc.) so they don't
+		// become false path arguments.
+		const cleaned = afterGrep.replace(/\s+2>(?:&\d+|\/dev\/null|\S+)/g, "").trim();
+		const tokens = cleaned.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+		if (!tokens) return undefined;
+
+		const rgArgs: string[] = ["rg"];
+		let pattern: string | undefined;
+		let paths: string[] = [];
+		let includeGlobs: string[] = [];
+		let excludeGlobs: string[] = [];
+		let caseInsensitive = false;
+		let fixedStrings = false;
+		let wordRegex = false;
+		let countOnly = false;
+		let filesOnly = false;
+		let invertMatch = false;
+		let contextAfter = 0;
+		let contextBefore = 0;
+		let contextBoth = 0;
+		let lineNumber = false;
+		let noFilename = false;
+
+		for (let i = 0; i < tokens.length; i++) {
+			const tok = tokens[i];
+			if (tok === "-i" || tok === "--ignore-case") { caseInsensitive = true; continue; }
+			if (tok === "-F" || tok === "--fixed-strings") { fixedStrings = true; continue; }
+			if (tok === "-w" || tok === "--word-regexp") { wordRegex = true; continue; }
+			if (tok === "-c" || tok === "--count") { countOnly = true; continue; }
+			if (tok === "-l" || tok === "--files-with-matches") { filesOnly = true; continue; }
+			if (tok === "-v" || tok === "--invert-match") { invertMatch = true; continue; }
+			if (tok === "-n" || tok === "--line-number") { lineNumber = true; continue; }
+			if (tok === "-h" || tok === "--no-filename") { noFilename = true; continue; }
+			if (tok === "-E" || tok === "--extended-regexp") { continue; }
+			if (tok === "-r" || tok === "-R" || tok === "--recursive") { continue; }
+			if (tok === "-s" || tok === "--no-messages") { continue; }
+			if (tok === "-A") { contextAfter = parseInt(tokens[++i] ?? "0", 10) || 0; continue; }
+			if (tok === "-B") { contextBefore = parseInt(tokens[++i] ?? "0", 10) || 0; continue; }
+			if (tok === "-C") { contextBoth = parseInt(tokens[++i] ?? "0", 10) || 0; continue; }
+			if (tok.startsWith("-A")) { contextAfter = parseInt(tok.slice(2), 10) || 0; continue; }
+			if (tok.startsWith("-B")) { contextBefore = parseInt(tok.slice(2), 10) || 0; continue; }
+			if (tok.startsWith("-C")) { contextBoth = parseInt(tok.slice(2), 10) || 0; continue; }
+			if (tok === "--include") { includeGlobs.push(tokens[++i] ?? ""); continue; }
+			if (tok.startsWith("--include=")) { includeGlobs.push(tok.slice(10)); continue; }
+			if (tok === "--exclude") { excludeGlobs.push(tokens[++i] ?? ""); continue; }
+			if (tok.startsWith("--exclude=")) { excludeGlobs.push(tok.slice(10)); continue; }
+			if (tok === "--exclude-dir") { excludeGlobs.push(`${tokens[++i] ?? ""}/`); continue; }
+			if (tok.startsWith("--exclude-dir=")) { excludeGlobs.push(`${tok.slice(13)}/`); continue; }
+			// Handle combined short flags like -rn, -in, -rnI, etc.
+			if (/^-[a-zA-Z]{2,}$/.test(tok)) {
+				let bail = false;
+				for (const ch of tok.slice(1)) {
+					switch (ch) {
+						case "i": caseInsensitive = true; break;
+						case "F": fixedStrings = true; break;
+						case "w": wordRegex = true; break;
+						case "c": countOnly = true; break;
+						case "l": filesOnly = true; break;
+						case "v": invertMatch = true; break;
+						case "n": lineNumber = true; break;
+						case "h": noFilename = true; break;
+						case "E": case "r": case "R": case "s": break;
+						default: bail = true; break;
+					}
+					if (bail) break;
+					}
+				if (bail) return undefined;
+					continue;
+			}
+			if (tok.startsWith("-")) {
+				// Unknown flag — bail to be safe.
+				return undefined;
+			}
+			if (pattern === undefined) {
+				pattern = tok.replace(/^["']|["']$/g, "");
+			} else {
+				paths.push(tok.replace(/^["']|["']$/g, ""));
+			}
+		}
+		if (pattern === undefined) return undefined;
+
+		if (caseInsensitive) rgArgs.push("-i");
+		if (fixedStrings) rgArgs.push("-F");
+		if (wordRegex) rgArgs.push("-w");
+		if (countOnly) rgArgs.push("-c");
+		if (filesOnly) rgArgs.push("-l");
+		if (invertMatch) rgArgs.push("-v");
+		if (lineNumber || noFilename) rgArgs.push("-n");
+		if (noFilename) rgArgs.push("--no-filename");
+		if (contextAfter > 0) rgArgs.push("-A", String(contextAfter));
+		if (contextBefore > 0) rgArgs.push("-B", String(contextBefore));
+		if (contextBoth > 0) rgArgs.push("-C", String(contextBoth));
+		for (const g of includeGlobs) rgArgs.push("-g", g);
+		for (const g of excludeGlobs) rgArgs.push("-g", `!${g}`);
+		// rg is recursive by default; add -- to separate pattern from paths.
+		rgArgs.push("--", pattern);
+		for (const p of paths) rgArgs.push(p);
+
+		const rgCmd = rgArgs.map((a) => {
+			return /[\s'"!]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a;
+		}).join(" ");
+		return prefix + rgCmd;
+	}
+
+	pi.on("tool_call", (event: any) => {
+		if (event.toolName !== "bash") return;
+		const command = event.input?.command;
+		if (typeof command !== "string") return;
+		if (!bashGrepInfo(command)) return;
+		const rewritten = rewriteGrepToRg(command);
+		if (rewritten) event.input.command = rewritten;
 	});
 
 	// --- grep tool ---
@@ -405,7 +635,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		path: Type.Optional(
 			Type.String({
 				description:
-					"Repo-relative path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path.",
+					"Repo-relative path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path. Use ./pi-coding-agent to search the installed @earendil-works/pi-coding-agent package docs and examples.",
 			}),
 		),
 		exclude: Type.Optional(
@@ -450,9 +680,24 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal) {
 			if (signal?.aborted) throw new Error("Operation aborted");
 
-			const f = await ensureFinder(activeCwd);
+			const cachedGrepCursor = params.cursor ? getCursor(params.cursor) : undefined;
+			let f: FileFinder;
+			let query: string;
+			if (cachedGrepCursor) {
+				f = cachedGrepCursor.externalDir
+					? await ensureExternalFinder(cachedGrepCursor.externalDir)
+					: await ensureFinder(activeCwd);
+				query = buildQuery(params.path, params.pattern, params.exclude, activeCwd, externalAllowlist);
+			} else {
+				const resolved = await resolveFinderAndQuery(
+					params.path,
+					params.pattern,
+					params.exclude,
+				);
+				f = resolved.finder;
+				query = resolved.query;
+			}
 			const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
-			const query = buildQuery(params.path, params.pattern, params.exclude, activeCwd);
 			const hasRegexSyntax =
 				params.pattern !== params.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			let mode: GrepMode = hasRegexSyntax ? "regex" : "plain";
@@ -489,7 +734,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 				mode,
 				smartCase,
 				maxMatchesPerFile: Math.min(effectiveLimit, 50),
-				cursor: (params.cursor ? getCursor(params.cursor) : null) ?? null,
+				cursor: cachedGrepCursor?.cursor ?? null,
 				beforeContext: params.context ?? 0,
 				afterContext: params.context ?? 0,
 				classifyDefinitions: true,
@@ -523,7 +768,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 				notices.push(`Invalid regex: ${result.regexFallbackError}, used literal match`);
 			}
 			if (result.nextCursor) {
-				notices.push(`Continue with cursor="${storeCursor(result.nextCursor)}"`);
+				notices.push(`Continue with cursor="${storeCursor(result.nextCursor, f === externalFinder ? externalFinderDir ?? undefined : undefined)}"`);
 			}
 
 			if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
@@ -557,7 +802,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		path: Type.Optional(
 			Type.String({
 				description:
-					"Repo-relative path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path.",
+					"Repo-relative path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path. Use ./pi-coding-agent to search the installed @earendil-works/pi-coding-agent package docs and examples.",
 			}),
 		),
 		exclude: Type.Optional(
@@ -595,15 +840,27 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal) {
 			if (signal?.aborted) throw new Error("Operation aborted");
 
-			const f = await ensureFinder(activeCwd);
-
 			const resumed = params.cursor ? getFindCursor(params.cursor) : undefined;
 			const effectiveLimit = resumed
 				? resumed.pageSize
 				: Math.max(1, params.limit ?? DEFAULT_FIND_LIMIT);
-			const query = resumed
-				? resumed.query
-				: buildQuery(params.path, params.pattern, params.exclude, activeCwd);
+
+			let f: FileFinder;
+			let query: string;
+			if (resumed) {
+				f = resumed.externalDir
+					? await ensureExternalFinder(resumed.externalDir)
+					: await ensureFinder(activeCwd);
+				query = resumed.query;
+			} else {
+				const resolved = await resolveFinderAndQuery(
+					params.path,
+					params.pattern,
+					params.exclude,
+				);
+				f = resolved.finder;
+				query = resolved.query;
+			}
 			const pattern = resumed ? resumed.pattern : params.pattern;
 			const pageIndex = resumed?.nextPageIndex ?? 0;
 
@@ -634,6 +891,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 					pattern,
 					pageSize: effectiveLimit,
 					nextPageIndex: pageIndex + 1,
+					externalDir: f === externalFinder ? externalFinderDir ?? undefined : undefined,
 				});
 				notices.push(
 					`${remaining} more match${remaining === 1 ? "" : "es"} available. cursor="${cursorId}" to continue`,

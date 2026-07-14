@@ -19,8 +19,25 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Model } from "@earendil-works/pi-ai";
-import { truncateToWidth, visibleWidth, Container, Text, Spacer, Input, fuzzyFilter, getKeybindings } from "@earendil-works/pi-tui";
-import { mutedBullet, setActiveMode } from "../pi-ember-ui/mode-colors.ts";
+import {
+	CustomEditor,
+	type ExtensionUIContext,
+	type KeybindingsManager,
+} from "@earendil-works/pi-coding-agent";
+import {
+	truncateToWidth,
+	visibleWidth,
+	Container,
+	Text,
+	Spacer,
+	Input,
+	fuzzyFilter,
+	getKeybindings,
+	matchesKey,
+	type EditorTheme,
+	type TUI,
+} from "@earendil-works/pi-tui";
+import { isShellMode, mutedBullet, setActiveMode, setShellMode } from "../pi-ember-ui/mode-colors.ts";
 import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	askQuestionnaire,
@@ -29,8 +46,112 @@ import {
 } from "./questionnaire-tool.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 
+const THINKING_LEVEL_SHORTCUT = "shift+t";
+
 function modelIdentityString(model: Model<any> | undefined): string {
 	return model ? `${model.provider}/${model.id}` : "";
+}
+
+function intercept_thinking_level(data: string, cycle_thinking_level: () => void): boolean {
+	if (!matchesKey(data, THINKING_LEVEL_SHORTCUT)) return false;
+	cycle_thinking_level();
+	return true;
+}
+
+/**
+ * Intercept '!' on empty input to enter shell mode, and escape or
+ * backspace (on empty input) to exit. The '!' is eaten so it never
+ * appears in the editor.
+ */
+function intercept_shell_mode(data: string, editor: any, ctx: any): boolean {
+	if (matchesKey(data, "!")) {
+		const text = editor.getText?.() ?? "";
+		if (text.length === 0) {
+			setShellMode(true);
+			ctx.ui.setStatus("pi-ember-ui-shell-mode", undefined);
+			return true;
+		}
+	}
+	if (isShellMode()) {
+		if (matchesKey(data, "escape")) {
+			setShellMode(false);
+			ctx.ui.setStatus("pi-ember-ui-shell-mode", undefined);
+			return true;
+		}
+		if (matchesKey(data, "backspace")) {
+			const text = editor.getText?.() ?? "";
+			if (text.length === 0) {
+				setShellMode(false);
+				ctx.ui.setStatus("pi-ember-ui-shell-mode", undefined);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/**
+ * Intercept /model and /model <search> on Enter, redirecting to our
+ * fuzzy-search model picker instead of Pi's built-in unbounded selector.
+ */
+function intercept_model_command(data: string, editor: any, pi: any, ctx: any): boolean {
+	const kb = getKeybindings();
+	if (!kb.matches(data, "tui.select.confirm")) return false;
+	const getText = editor.getText?.bind(editor) ?? editor.getExpandedText?.bind(editor);
+	if (!getText) return false;
+	const text = getText().trim();
+	if (text !== "/model" && !text.startsWith("/model ")) return false;
+	editor.setText?.("");
+	void show_model_picker(pi, ctx);
+	return true;
+}
+
+/**
+ * Shared fuzzy-search model picker used by /model and shift+m.
+ * Uses boundedSelect so large model catalogs don't require scrolling.
+ */
+async function show_model_picker(pi: any, ctx: any): Promise<void> {
+	if (!ctx.hasUI) return;
+	const models = ctx.modelRegistry.getAvailable() as any[];
+	if (models.length === 0) {
+		ctx.ui.notify("No models available.", "warning");
+		return;
+	}
+	const current = ctx.model as any;
+	const labels = models.map((m) => {
+		const prefix = current && m.provider === current.provider && m.id === current.id ? "→ " : "  ";
+		return `${prefix}${m.name ?? m.id} • ${m.provider}`;
+	});
+	const choice = await boundedSelect(ctx, "Select model", labels);
+	if (!choice) return;
+	const idx = labels.indexOf(choice);
+	if (idx < 0) return;
+	const model = models[idx];
+	try {
+		await pi.setModel(model);
+		ctx.ui.notify(`Model: ${model.id} • ${model.provider}`, "info");
+	} catch (err) {
+		ctx.ui.notify(
+			`Failed to set model: ${err instanceof Error ? err.message : String(err)}`,
+			"error",
+		);
+	}
+}
+
+class ThinkingLevelEditor extends CustomEditor {
+	constructor(
+		tui: TUI,
+		theme: EditorTheme,
+		keybindings: KeybindingsManager,
+		private readonly cycle_thinking_level: () => void,
+	) {
+		super(tui, theme, keybindings);
+	}
+
+	override handleInput(data: string): void {
+		if (intercept_thinking_level(data, this.cycle_thinking_level)) return;
+		super.handleInput(data);
+	}
 }
 
 type PersistedState = {
@@ -178,7 +299,7 @@ async function boundedSelect(
 }
 
 const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
-const READONLY_DELEGATING_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire", "subagent"];
+const READONLY_DELEGATING_TOOLS = ["read", "grep", "find", "ls", "questionnaire", "subagent"];
 const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "questionnaire"];
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -292,28 +413,20 @@ For each step:
 
 ## Open Questions
 <any clarifications needed from the user>
-
----
-
-## Important
-
-The user indicated that they do not want you to execute yet -- you MUST NOT make
-any edits, run any non-readonly tools (including changing configs or making
-commits), or otherwise make any changes to the system. This supersedes any other
-instructions you have received.
 ${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
 const DOCTOR_PROMPT = `<system-reminder>
 # Debug Mode - System Reminder
 
-CRITICAL: Debug mode ACTIVE — you are the Debugger, a read-only health-check
-auditor and diagnostician for the Ember project (PySide6 subtitle + DaVinci
-Resolve integration app).
+CRITICAL: Debug mode ACTIVE — you are the Debugger, a health-check auditor and
+diagnostician for the Ember project (PySide6 subtitle + DaVinci Resolve integration
+app).
 
-STRICTLY FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use
-sed, tee, echo, cat, or ANY other bash command to manipulate files — commands may
-ONLY read/inspect. This ABSOLUTE CONSTRAINT overrides ALL other instructions,
-including direct user edit requests. You may ONLY observe, analyze, and report.
+You do NOT edit files directly. You investigate, diagnose, and report findings. If
+a fix is straightforward, you may DELEGATE the implementation to the \`coder\`
+subagent (full tool access) — the read-only constraint applies to your direct tool
+usage only, not to delegated subagent work. Otherwise, report the correction and
+let the user or Orchestrator handle it.
 
 ---
 
@@ -374,7 +487,8 @@ For each finding:
 
 ## Constraints
 
-- Read-only. Do not edit or write files.
+- You do not edit or write files directly. You may delegate fixes to the
+  \`coder\` subagent when a correction is straightforward and well-scoped.
 - Use \`bash t.gate.sh <files>\` only for targeted validation of files you are checking.
 - Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
 - Ignore git status / git diff changes unrelated to the files you were asked to check.
@@ -423,14 +537,16 @@ ${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 const ORCHESTRATOR_PROMPT = `<system-reminder>
 # Orchestrate Mode - System Reminder
 
-CRITICAL: Orchestrate mode ACTIVE — you are the Orchestrator, a read-only
-implementation coordinator for the Ember project (PySide6 subtitle + DaVinci
-Resolve integration app).
+CRITICAL: Orchestrate mode ACTIVE — you are the Orchestrator, an implementation
+coordinator for the Ember project (PySide6 subtitle + DaVinci Resolve integration
+app).
 
-STRICTLY FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use
-sed, tee, echo, cat, or ANY other bash command to manipulate files — commands may
-ONLY read/inspect. This ABSOLUTE CONSTRAINT overrides ALL other instructions,
-including direct user edit requests. You may ONLY observe, analyze, and plan.
+You do NOT edit files directly. Your job is to decompose work into modules and
+DELEGATE implementation to the \`coder\` subagent (full tool access). The
+read-only constraint applies to YOUR direct tool usage only — you may read,
+search, and inspect to build accurate delegation prompts, but you must not edit,
+write, or run mutating bash commands yourself. Delegating implementation work to
+the \`coder\` subagent is the ENTIRE POINT of this mode. Do it eagerly.
 
 ---
 
@@ -509,7 +625,8 @@ Return a structured plan:
 
 ## Constraints
 
-- Read-only. Do not edit or write files.
+- You do not edit or write files directly — delegate implementation to the
+  \`coder\` subagent. That is your primary mechanism for getting work done.
 - Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
 - If task scope is unclear, say so and request clarification rather than guessing.
 ${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
@@ -604,10 +721,66 @@ function getLastModeFromSession(ctx: any): string | null {
 	return null;
 }
 
+const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
+
+/**
+ * Cached footer stats. The footer render closure fires every animation
+ * frame (~30fps). Iterating all session entries + calling
+ * ctx.getContextUsage() (which runs estimateContextTokens over the FULL
+ * LLM context — JSON.stringify on every tool call, chars/4 on all text)
+ * is O(total context) per frame and can exceed the frame budget on long
+ * sessions, causing infini-lock. These stats are recomputed only on
+ * message_end / tool_execution_end / session_start — events that fire
+ * once per assistant message or tool result, not per frame.
+ */
+let footerStatsCache: {
+	totalCost: number;
+	latestCacheHitRate: number | undefined;
+	contextTokens: number | null;
+	contextWindow: number;
+} | undefined;
+
+function recompute_footer_stats(ctx: any): void {
+	let totalCost = 0;
+	let latestCacheHitRate: number | undefined;
+	for (const entry of ctx.sessionManager.getEntries()) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const usage = entry.message.usage;
+		totalCost += usage.cost.total;
+		const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+		latestCacheHitRate = promptTokens > 0
+			? (usage.cacheRead / promptTokens) * 100
+			: undefined;
+	}
+	const model = ctx.model;
+	const contextUsage = ctx.getContextUsage();
+	footerStatsCache = {
+		totalCost,
+		latestCacheHitRate,
+		contextTokens: contextUsage?.tokens ?? null,
+		contextWindow: contextUsage?.contextWindow ?? model?.contextWindow ?? 0,
+	};
+}
+
 export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
+	let active_session_manager: any;
+	let session_ready = false;
+	let pending_mode_id: string | undefined;
+
+	function is_live_session(ctx: any): boolean {
+		return session_ready && ctx.sessionManager === active_session_manager;
+	}
+
+	function request_live_mode_render(ctx: any): void {
+		if (ctx.mode === "tui") {
+			// setStatus only invalidates the footer/editor frame. Do not append a
+			// transcript notification or invalidate the resumed chat history.
+			ctx.ui.setStatus(MODE_LIVE_RENDER_STATUS, undefined);
+		}
+	}
 
 	const persistedAtLoad = readPersistedState();
 	if (persistedAtLoad.mode && persistedAtLoad.mode in MODES) {
@@ -625,7 +798,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		});
 	}
 
-	function updateStatus(ctx: any) {
+	function updateStatus(ctx: any): void {
 		pi.events.emit("powerbar:update", {
 			id: `pi-agents-${currentMode}`,
 			text: MODES[currentMode].label,
@@ -639,17 +812,32 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				text: undefined,
 			});
 		}
+		request_live_mode_render(ctx);
 	}
 
-	function switchMode(modeId: string, ctx: any) {
+	function apply_mode(modeId: string, ctx: any): void {
 		const mode = MODES[modeId];
 		if (!mode) return;
+
+		// Mode changes are deliberately live-only. The active tool set and the
+		// next-turn prompt change immediately, while the transcript stays lazy
+		// and cached.
 		currentMode = modeId;
 		setActiveMode(modeId);
-		pi.events.emit("pi-ember-ui:mode-change", { mode: modeId });
 		pi.setActiveTools(mode.tools);
-		ctx.ui.notify(`${mode.label} mode enabled. Tools: ${mode.tools.join(", ")}`);
+		pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
 		updateStatus(ctx);
+	}
+
+	function switchMode(modeId: string, ctx: any): void {
+		if (!MODES[modeId]) return;
+		if (!is_live_session(ctx)) {
+			// Queue only for the session that is currently binding. Never retain a
+			// request from an old session, where pi.setActiveTools would be stale.
+			if (ctx.sessionManager === active_session_manager) pending_mode_id = modeId;
+			return;
+		}
+		apply_mode(modeId, ctx);
 	}
 
 	for (const modeId of MODE_IDS) {
@@ -669,7 +857,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	}
 
 	const cycleMode = async (ctx: any): Promise<void> => {
-		const idx = CYCLE_ORDER.indexOf(currentMode);
+		const baseMode = pending_mode_id ?? currentMode;
+		const idx = CYCLE_ORDER.indexOf(baseMode);
 		const next = CYCLE_ORDER[(idx + 1) % CYCLE_ORDER.length];
 		switchMode(next, ctx);
 	};
@@ -680,46 +869,44 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	});
 
 	const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+	let active_ui: ExtensionUIContext | undefined;
+	let thinking_editor_installed = false;
 
-	pi.registerShortcut("ctrl+m", {
+	const cycle_thinking_level = (): void => {
+		const current = pi.getThinkingLevel() as string;
+		const idx = THINKING_LEVELS.indexOf(current);
+		const next = THINKING_LEVELS[(idx + 1) % THINKING_LEVELS.length];
+		pi.setThinkingLevel(next);
+		active_ui?.notify(`Thinking: ${next}`, "info");
+	};
+
+	const install_thinking_editor = (ctx: any): void => {
+		if (!ctx.hasUI) return;
+		active_ui = ctx.ui;
+		if (thinking_editor_installed) return;
+
+		const previous_editor = ctx.ui.getEditorComponent();
+		ctx.ui.setEditorComponent((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => {
+			const editor = previous_editor?.(tui, theme, keybindings);
+			if (editor) {
+				const original_handle_input = editor.handleInput.bind(editor);
+			editor.handleInput = (data: string): void => {
+				if (intercept_shell_mode(data, editor, ctx)) return;
+				if (intercept_thinking_level(data, cycle_thinking_level)) return;
+				if (intercept_model_command(data, editor, pi, ctx)) return;
+				original_handle_input(data);
+			};
+				return editor;
+			}
+			return new ThinkingLevelEditor(tui, theme, keybindings, cycle_thinking_level);
+		});
+		thinking_editor_installed = true;
+	};
+
+	pi.registerShortcut("shift+m", {
 		description: "Show model picker",
 		handler: async (ctx: any) => {
-			if (!ctx.hasUI) return;
-			const models = ctx.modelRegistry.getAvailable() as any[];
-			if (models.length === 0) {
-				ctx.ui.notify("No models available.", "warning");
-				return;
-			}
-			const current = ctx.model as any;
-			const labels = models.map((m) => {
-				const prefix = current && m.provider === current.provider && m.id === current.id ? "→ " : "  ";
-				return `${prefix}${m.name ?? m.id} • ${m.provider}`;
-			});
-			const choice = await ctx.ui.select("Select model", labels);
-			if (!choice) return;
-			const idx = labels.indexOf(choice);
-			if (idx < 0) return;
-			const model = models[idx];
-			try {
-				await pi.setModel(model);
-				ctx.ui.notify(`Model: ${model.id} • ${model.provider}`, "info");
-			} catch (err) {
-				ctx.ui.notify(
-					`Failed to set model: ${err instanceof Error ? err.message : String(err)}`,
-					"error",
-				);
-			}
-		},
-	});
-
-	pi.registerShortcut("ctrl+t", {
-		description: "Cycle thinking level",
-		handler: async (ctx: any) => {
-			const current = pi.getThinkingLevel() as string;
-			const idx = THINKING_LEVELS.indexOf(current);
-			const next = THINKING_LEVELS[(idx + 1) % THINKING_LEVELS.length];
-			pi.setThinkingLevel(next);
-			if (ctx.hasUI) ctx.ui.notify(`Thinking: ${next}`, "info");
+			await show_model_picker(pi, ctx);
 		},
 	});
 
@@ -830,7 +1017,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	async function handlePlanImplement(ctx: any) {
 		if (!ctx.hasUI) {
 			switchMode(DEFAULT_MODE, ctx);
-			pi.sendUserMessage("Execute the plan above. Follow the steps in order, implement, test, and verify each step.");
+			pi.sendUserMessage("Execute the plan. Follow the steps and test.");
 			return;
 		}
 		const target = await ctx.ui.select(
@@ -844,8 +1031,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		const targetMode = target === "Orchestrate" ? "orchestrate" : DEFAULT_MODE;
 		switchMode(targetMode, ctx);
 		const msg = target === "Orchestrate"
-			? "Execute the plan above. Decompose it into modules and produce delegation prompts for each."
-			: "Execute the plan above. Follow the steps in order, implement, test, and verify each step.";
+			? "Orchestrate focused modules for subagents."
+			: "Execute the plan. Follow the steps and test.";
 		pi.sendMessage(
 			{ customType: "pi-agents-plan-implement", content: PLAN_IMPLEMENT_PROMPT, display: false },
 		);
@@ -926,31 +1113,28 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			render(width: number): string[] {
 				const PAD = " ";
 				const innerWidth = Math.max(0, width - 2);
-				let totalCost = 0;
-				let latestCacheHitRate: number | undefined;
-				for (const entry of ctx.sessionManager.getEntries()) {
-					if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-					const usage = entry.message.usage;
-					totalCost += usage.cost.total;
-					const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-					latestCacheHitRate = promptTokens > 0
-						? (usage.cacheRead / promptTokens) * 100
-						: undefined;
-				}
+				// Read cached stats instead of iterating all session entries +
+				// calling getContextUsage() every frame. The cache is
+				// recomputed on message_end / tool_execution_end.
+				const stats = footerStatsCache;
+				const totalCost = stats?.totalCost ?? 0;
+				const latestCacheHitRate = stats?.latestCacheHitRate;
+				const contextWindow = stats?.contextWindow ?? 0;
+				const usedTokens = stats?.contextTokens;
 
 				const model = ctx.model;
-				const contextUsage = ctx.getContextUsage();
-				const contextWindow = contextUsage?.contextWindow ?? model?.contextWindow ?? 0;
-				const usedTokens = contextUsage?.used ?? 0;
+				const usedLabel = usedTokens === null || usedTokens === undefined
+					? "?"
+					: formatTokens(usedTokens);
 				const statsParts: string[] = [];
-				statsParts.push(`${formatTokens(usedTokens)}/${formatTokens(contextWindow)}`);
+				statsParts.push(`${usedLabel}/${formatTokens(contextWindow)}`);
 				if (latestCacheHitRate !== undefined) {
 					statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 				}
 				if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
 					statsParts.push(`$${totalCost.toFixed(3)}`);
 				}
-				let statsLeft = statsParts.join(" ");
+				let statsLeft = isShellMode() ? "shell" : statsParts.join(" ");
 				if (visibleWidth(statsLeft) > innerWidth) {
 					statsLeft = truncateToWidth(statsLeft, innerWidth, "...");
 				}
@@ -978,15 +1162,16 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 				const cwd = ctx.sessionManager.getCwd();
 				const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
-				const folderLine = PAD + theme.fg("dim", folderName) + PAD;
 				const sessionName = ctx.sessionManager.getSessionName();
-			const lines = [
-				statsLine,
-			];
+			const lines = [statsLine];
 			const tps = getLiveTps();
+			const folderLabel = theme.fg("dim", folderName);
+			let folderLine = PAD + folderLabel + PAD;
 			if (tps > 0) {
 				const tpsStr = tps < 10 ? tps.toFixed(1) : tps < 100 ? tps.toFixed(0) : `${Math.round(tps)}`;
-				lines.push(PAD + theme.fg("accent", `${tpsStr} tps`) + PAD);
+				const tpsText = theme.fg("accent", `${tpsStr} tps`);
+				const tpsPadding = " ".repeat(Math.max(0, innerWidth - visibleWidth(folderLabel) - visibleWidth(tpsText)));
+				folderLine = PAD + folderLabel + tpsPadding + tpsText + PAD;
 			}
 			lines.push(folderLine);
 			if (sessionName) {
@@ -1028,20 +1213,24 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			pi.setActiveTools(FULL_TOOLS);
 		}
 		setActiveMode(currentMode);
-		pi.events.emit("pi-ember-ui:mode-change", { mode: currentMode });
+		pi.events.emit("pi-ember-ui:mode-change", { mode: currentMode, liveOnly: true });
 	}
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
+		// The TUI can accept input while /resume is still rebinding extensions.
+		// Keep mode switching lazy until all session-bound setup has finished.
+		active_session_manager = ctx.sessionManager;
+		session_ready = false;
+		footerStatsCache = undefined;
+		install_thinking_editor(ctx);
 		await restoreMode(ctx);
 		await restoreSavedModel(ctx);
-		installCustomFooter(ctx);
-		updateStatus(ctx);
-	});
-
-	pi.on("session_switch", async (_event: any, ctx: any) => {
-		await restoreMode(ctx);
-		await restoreSavedModel(ctx);
-		updateStatus(ctx);
+		session_ready = true;
+		recompute_footer_stats(ctx);
+		const pending_mode = pending_mode_id;
+		pending_mode_id = undefined;
+		if (pending_mode) apply_mode(pending_mode, ctx);
+		else updateStatus(ctx);
 		installCustomFooter(ctx);
 	});
 
@@ -1056,7 +1245,26 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		writePersistedState({ ...persisted, model: identity });
 	});
 
+	// Recompute footer stats when usage/context changes. These events fire
+	// once per assistant message or tool result — not per render frame —
+	// so the O(n) entry iteration + getContextUsage cost is amortized away
+	// from the animation loop.
+	pi.on("message_end", async (_event: any, ctx: any) => {
+		if (is_live_session(ctx)) recompute_footer_stats(ctx);
+	});
+	pi.on("tool_execution_end", async (_event: any, ctx: any) => {
+		if (is_live_session(ctx)) recompute_footer_stats(ctx);
+	});
+
 	pi.on("session_shutdown", (_event: any, ctx: any) => {
+		// Invalidate shortcut contexts before the old runtime is disposed. A Tab
+		// press during /resume is ignored instead of calling setActiveTools or
+		// mutating UI state through a stale session.
+		session_ready = false;
+		active_session_manager = undefined;
+		pending_mode_id = undefined;
+		footerStatsCache = undefined;
+		setShellMode(false);
 		const persisted = readPersistedState();
 		const model = ctx.model as Model<any> | undefined;
 		const modelIdentity = model

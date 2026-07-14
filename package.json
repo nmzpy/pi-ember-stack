@@ -1,6 +1,6 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Ember's configurable pi plugin stack with modes, questionnaire, compact edits, subagents, and Devin auth",
   "type": "module",
   "license": "MIT",
@@ -17,7 +17,10 @@
     "url": "https://github.com/nmzpy/pi-ember-stack/issues"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint",
+    "format": "biome format --write",
+    "check": "biome check"
   },
   "files": [
     "README.md",
@@ -39,15 +42,16 @@
     "@sinclair/typebox": "^0.34.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.6",
+    "@biomejs/biome": "^2.5.3",
     "@earendil-works/pi-agent-core": "^0.80.6",
+    "@earendil-works/pi-ai": "^0.80.6",
     "@earendil-works/pi-coding-agent": "^0.80.6",
     "@earendil-works/pi-tui": "^0.80.6",
     "@ff-labs/fff-node": "0.9.6",

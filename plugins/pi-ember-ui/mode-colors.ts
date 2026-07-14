@@ -6,6 +6,7 @@ export const MODE_COLORS: Record<string, string> = {
 };
 
 export const MUTED_BULLET_COLOR = "#666666";
+export const MUTED_COLOR = "#808080";
 
 export const PAGE_BG = "#18181e";
 
@@ -21,6 +22,32 @@ export function getActiveModeColor(): string {
 
 export function setActiveMode(modeId: string): void {
 	activeModeId = modeId in MODE_COLORS ? modeId : "code";
+}
+
+let shellModeActive = false;
+
+export function isShellMode(): boolean {
+	return shellModeActive;
+}
+
+export function setShellMode(active: boolean): void {
+	shellModeActive = active;
+}
+
+let latestSubagentRunningFlag = false;
+
+/**
+ * Whether the latest tool call in the session is a running subagent.
+ * Set by pi-ember-ui's editor border patch (which has session access)
+ * and read by both the border patch and the subagent renderer (via
+ * this shared module) to draw the integrated border + cap line.
+ */
+export function isLatestSubagentRunning(): boolean {
+	return latestSubagentRunningFlag;
+}
+
+export function setLatestSubagentRunning(active: boolean): void {
+	latestSubagentRunningFlag = active;
 }
 
 export function hexToRgb(hex: string): string {
@@ -126,22 +153,22 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		success: "#b5bd68",
 		error: "#cc6666",
 		warning: "#ffff00",
-		muted: "#808080",
+		muted: MUTED_COLOR,
 		dim: "#666666",
 		text: "#d4d4d4",
-		thinkingText: "#808080",
+		thinkingText: MUTED_COLOR,
 		userMessageText: "#d4d4d4",
 		customMessageText: "#d4d4d4",
-		toolOutput: "#808080",
+		toolOutput: MUTED_COLOR,
 		mdLinkUrl: "#666666",
 		mdCodeBlock: "#b5bd68",
-		mdCodeBlockBorder: "#808080",
-		mdQuote: "#808080",
-		mdQuoteBorder: "#808080",
-		mdHr: "#808080",
+		mdCodeBlockBorder: MUTED_COLOR,
+		mdQuote: MUTED_COLOR,
+		mdQuoteBorder: MUTED_COLOR,
+		mdHr: MUTED_COLOR,
 		toolDiffAdded: "#b5bd68",
 		toolDiffRemoved: "#cc6666",
-		toolDiffContext: "#808080",
+		toolDiffContext: MUTED_COLOR,
 		syntaxComment: "#6A9955",
 		syntaxKeyword: "#569CD6",
 		syntaxFunction: "#DCDCAA",
@@ -160,6 +187,7 @@ export function buildThemeBgColors(accentHex: string): Record<string, string> {
 	return {
 		selectedBg: "#3a3a4a",
 		userMessageBg: userMsgBg,
+		subagentBg: blendToHex(accentHex, PAGE_BG, 0.09),
 		customMessageBg: "#2d2838",
 		toolPendingBg: "#282832",
 		toolSuccessBg: "#283228",

@@ -38,7 +38,16 @@ interface AgentCache {
 	projectAgentsDir: string | null;
 	/** File-level signature per directory (name:mtime:size for each .md file) */
 	dirSignatures: Map<string, string>;
+	/** Monotonic timestamp (ms) of the last fs-based signature validation.
+	 *  Within the TTL, cache hits skip dirSignature() entirely so no
+	 *  synchronous fs (readdirSync + statSync) hits the UI thread. */
+	validatedAt: number;
 }
+
+/** Cache TTL: skip fs-based signature validation for this long after a
+ *  successful validation. Agent .md edits within the window are not
+ *  detected until the TTL expires or /subagent reload is invoked. */
+const CACHE_VALIDATION_TTL_MS = 2000;
 
 let _cache: AgentCache | null = null;
 
@@ -153,7 +162,9 @@ export function discoverAgents(
 	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
-	// Check cache (with file-signature invalidation so editing agent .md files auto-detects changes)
+	// Check cache (with file-signature invalidation so editing agent .md files auto-detects changes).
+	// Within the TTL, skip the fs-based dirSignature() check entirely so
+	// cache hits do zero synchronous fs (readdirSync + statSync per file).
 	if (
 		_cache &&
 		_cache.userDir === userDir &&
@@ -161,6 +172,10 @@ export function discoverAgents(
 		_cache.bundledDir === bundledAgentsDir &&
 		_cache.scope === scope
 	) {
+		const withinTtl = Date.now() - _cache.validatedAt < CACHE_VALIDATION_TTL_MS;
+		if (withinTtl) {
+			return { agents: _cache.agents, projectAgentsDir: _cache.projectAgentsDir };
+		}
 		let stale = false;
 		for (const [dir, cachedSig] of _cache.dirSignatures) {
 			if (dirSignature(dir) !== cachedSig) {
@@ -169,6 +184,7 @@ export function discoverAgents(
 			}
 		}
 		if (!stale) {
+			_cache.validatedAt = Date.now();
 			return { agents: _cache.agents, projectAgentsDir: _cache.projectAgentsDir };
 		}
 		// Cache is stale — rebuild below
@@ -207,6 +223,7 @@ export function discoverAgents(
 		agents,
 		projectAgentsDir,
 		dirSignatures,
+		validatedAt: Date.now(),
 	};
 
 	return { agents, projectAgentsDir };

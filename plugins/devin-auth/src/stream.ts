@@ -265,7 +265,7 @@ export function streamDevin(
                     output.usage.cacheRead = ev.cachedInputTokens ?? 0;
                     output.usage.cacheWrite = ev.cacheCreationInputTokens ?? 0;
                     output.usage.totalTokens =
-                        ev.totalTokens ?? output.usage.input + output.usage.output;
+                        output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
                     // calculateCost mutates output.usage.cost in place.
                     calculateCost(model, output.usage);
                     break;
