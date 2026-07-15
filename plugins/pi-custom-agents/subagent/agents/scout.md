@@ -1,7 +1,7 @@
 ---
 thinking: high
 model: devin/glm-5-2
-name: scout
+name: Scout
 description: Fast agent specialized for exploring codebases. Use when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase.
 tools: read, bash, grep, find, ls
 ---

@@ -16,6 +16,10 @@ export function getModeColor(modeId: string): string {
 	return MODE_COLORS[modeId] ?? MODE_COLORS.code;
 }
 
+export function getActiveModeId(): string {
+	return activeModeId;
+}
+
 export function getActiveModeColor(): string {
 	return getModeColor(activeModeId);
 }
@@ -48,6 +52,44 @@ export function isLatestSubagentRunning(): boolean {
 
 export function setLatestSubagentRunning(active: boolean): void {
 	latestSubagentRunningFlag = active;
+}
+
+let toolGroupActive = false;
+
+/**
+ * Whether any compact tool group (Exploring or Working) currently has at
+ * least one running member. Set by pi-compact-tools lifecycle handlers and
+ * read by the pi-ember-ui thinking widget render closure so the
+ * Thinking/Working row can be hidden while a group header carries the
+ * gradient.
+ */
+export function isToolGroupActive(): boolean {
+	return toolGroupActive;
+}
+
+export function setToolGroupActive(active: boolean): void {
+	toolGroupActive = active;
+}
+
+let thinkingBlocksHidden = false;
+
+export function isThinkingBlocksHidden(): boolean {
+	return thinkingBlocksHidden;
+}
+
+export function setThinkingBlocksHidden(hidden: boolean): void {
+	thinkingBlocksHidden = hidden;
+}
+
+let planAutoContinuing = false;
+
+/** Whether the plan-mode auto-continue (output-limit recovery) is in progress. */
+export function isPlanAutoContinuing(): boolean {
+	return planAutoContinuing;
+}
+
+export function setPlanAutoContinuing(active: boolean): void {
+	planAutoContinuing = active;
 }
 
 export function hexToRgb(hex: string): string {
@@ -129,9 +171,9 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		borderAccent: accent90,
 		customMessageLabel: accent90,
 		toolTitle: accentDesat,
-		mdHeading: "#d4d4d4",
-		mdListBullet: "#d4d4d4",
-		mdLink: "#d4d4d4",
+		mdHeading: accent90,
+		mdListBullet: accent90,
+		mdLink: accent90,
 
 		// Inline code foreground uses normal text color; only the
 		// background rectangle (buildCodeBgHex) carries the accent tint.

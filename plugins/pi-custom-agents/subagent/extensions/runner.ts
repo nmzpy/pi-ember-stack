@@ -80,8 +80,6 @@ interface WorkerInput {
 const WORKER_SCRIPT = `
 const { parentPort, workerData } = require("node:worker_threads");
 
-const { createAgentSession, getAgentDir, loadProjectContextFiles, AuthStorage, ModelRegistry, SessionManager, SettingsManager } = require("@earendil-works/pi-coding-agent");
-
 function post(type, payload) {
 	parentPort?.postMessage({ type, payload });
 }
@@ -97,6 +95,10 @@ const result = {
 };
 
 async function main() {
+// @earendil-works/pi-coding-agent is ESM-only (\"type\": \"module\", exports
+// map has no require condition), so use dynamic import() instead of require().
+const { createAgentSession, getAgentDir, loadProjectContextFiles, AuthStorage, ModelRegistry, SessionManager, SettingsManager } = await import("@earendil-works/pi-coding-agent");
+
 	const authStorage = AuthStorage.create(workerData.authPath);
 	const modelRegistry = ModelRegistry.create(authStorage, workerData.modelsPath);
 	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
@@ -223,7 +225,7 @@ export async function runSubAgent(options: {
 	const authPath = getAuthStoragePath(authStorage);
 	const modelsPath = getModelsPath(modelRegistry);
 
-	const contextFiles = loadProjectContextFilesCompat({ cwd, agentDir });
+	const contextFiles = await loadProjectContextFilesCompat({ cwd, agentDir });
 	const contextPrefix = contextFiles.length > 0
 		? contextFiles.map((f) => f.content).join("\n\n---\n\n") + "\n\n---\n\n"
 		: "";
@@ -335,9 +337,10 @@ function getModelsPath(modelRegistry: ModelRegistry): string | undefined {
 	return undefined;
 }
 
-function loadProjectContextFilesCompat({ cwd, agentDir }: { cwd: string; agentDir: string }): { content: string }[] {
+async function loadProjectContextFilesCompat({ cwd, agentDir }: { cwd: string; agentDir: string }): Promise<{ content: string }[]> {
 	try {
-		const { loadProjectContextFiles } = require("@earendil-works/pi-coding-agent");
+		// @earendil-works/pi-coding-agent is ESM-only, so use dynamic import().
+		const { loadProjectContextFiles } = await import("@earendil-works/pi-coding-agent");
 		return loadProjectContextFiles({ cwd, agentDir });
 	} catch {
 		return [];

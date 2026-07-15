@@ -37,7 +37,7 @@ import {
 	type EditorTheme,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import { isShellMode, mutedBullet, setActiveMode, setShellMode } from "../pi-ember-ui/mode-colors.ts";
+import { isShellMode, mutedBullet, setActiveMode, setPlanAutoContinuing, setShellMode } from "../pi-ember-ui/mode-colors.ts";
 import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	askQuestionnaire,
@@ -298,9 +298,13 @@ async function boundedSelect(
 	});
 }
 
-const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
-const READONLY_DELEGATING_TOOLS = ["read", "grep", "find", "ls", "questionnaire", "subagent"];
-const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "questionnaire"];
+// Web-access tools are read-only research tools (web_search, fetch_content,
+// get_search_content) registered by the pi-web-access plugin. They belong in
+// every mode so the agent can do web research regardless of mode.
+const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
+const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire", ...WEB_ACCESS_TOOLS];
+const READONLY_DELEGATING_TOOLS = ["read", "grep", "find", "ls", "questionnaire", "subagent", ...WEB_ACCESS_TOOLS];
+const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "questionnaire", ...WEB_ACCESS_TOOLS];
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SUBAGENT_FILES: Record<string, string> = {
@@ -325,11 +329,11 @@ const SUBAGENT_AWARENESS_PROMPT = `
 You have the \`subagent\` tool available for delegating tasks to specialized agents
 with isolated context. Use it to keep your own context lean.
 
-- **scout**: Fast agent specialized for exploring codebases. Use when you need to
+- **Scout**: Fast agent specialized for exploring codebases. Use when you need to
   quickly find files by patterns (e.g. "src/components/**/*.tsx"), search code for
   keywords (e.g. "API endpoints"), or answer questions about the codebase (e.g.
   "how do API endpoints work?").
-- **coder**: Implementation agent for writing, editing, testing, and verifying
+- **Coder**: Implementation agent for writing, editing, testing, and verifying
   code. Full tool access. Use for focused implementation tasks — bug fixes,
   feature additions, refactors, file edits.
 
@@ -378,11 +382,11 @@ loose ends before implementation begins.
 
 ## Planning Requirements
 
-The plan must be explicit — concrete, sequential steps that map directly to single
+The plan must be explicit — concrete, sequential modules that map directly to single
 logical changes.
 
-For each step:
-- Step N: <action>
+For each module:
+- Module N: <action>
 - Files: <full paths to read or modify>
 - What: <precise change>
 - Why: <user-facing or architectural rationale>
@@ -399,14 +403,14 @@ For each step:
 
 ## Plan
 
-### Step 1: <action>
+### Module 1: <action>
 - Files: <paths>
 - What: <change>
 - Why: <rationale>
 - Risks: <surfaces>
 - Validation: bash t.gate.sh <files>
 
-### Step 2: ...
+### Module 2: ...
 
 ## Acceptance Criteria
 <what done looks like>
@@ -423,7 +427,7 @@ diagnostician for the Ember project (PySide6 subtitle + DaVinci Resolve integrat
 app).
 
 You do NOT edit files directly. You investigate, diagnose, and report findings. If
-a fix is straightforward, you may DELEGATE the implementation to the \`coder\`
+a fix is straightforward, you may DELEGATE the implementation to the \`Coder\`
 subagent (full tool access) — the read-only constraint applies to your direct tool
 usage only, not to delegated subagent work. Otherwise, report the correction and
 let the user or Orchestrator handle it.
@@ -488,7 +492,7 @@ For each finding:
 ## Constraints
 
 - You do not edit or write files directly. You may delegate fixes to the
-  \`coder\` subagent when a correction is straightforward and well-scoped.
+  \`Coder\` subagent when a correction is straightforward and well-scoped.
 - Use \`bash t.gate.sh <files>\` only for targeted validation of files you are checking.
 - Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
 - Ignore git status / git diff changes unrelated to the files you were asked to check.
@@ -542,11 +546,11 @@ coordinator for the Ember project (PySide6 subtitle + DaVinci Resolve integratio
 app).
 
 You do NOT edit files directly. Your job is to decompose work into modules and
-DELEGATE implementation to the \`coder\` subagent (full tool access). The
+DELEGATE implementation to the \`Coder\` subagent (full tool access). The
 read-only constraint applies to YOUR direct tool usage only — you may read,
 search, and inspect to build accurate delegation prompts, but you must not edit,
 write, or run mutating bash commands yourself. Delegating implementation work to
-the \`coder\` subagent is the ENTIRE POINT of this mode. Do it eagerly.
+the \`Coder\` subagent is the ENTIRE POINT of this mode. Do it eagerly.
 
 ---
 
@@ -626,7 +630,7 @@ Return a structured plan:
 ## Constraints
 
 - You do not edit or write files directly — delegate implementation to the
-  \`coder\` subagent. That is your primary mechanism for getting work done.
+  \`Coder\` subagent. That is your primary mechanism for getting work done.
 - Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
 - If task scope is unclear, say so and request clarification rather than guessing.
 ${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
@@ -646,7 +650,7 @@ arsenal of tools as needed.
 
 const PLAN_IMPLEMENT_PROMPT = `<system-reminder>
 The user has approved the plan above. Execute it now in full.
-Follow the plan steps in order. Implement, test, and verify each step before
+Follow the plan modules in order. Implement, test, and verify each module before
 moving to the next. Run \`bash t.gate.sh <files>\` after each logical change.
 Report what you did and any deviations from the plan.
 </system-reminder>`;
@@ -729,9 +733,9 @@ const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
  * ctx.getContextUsage() (which runs estimateContextTokens over the FULL
  * LLM context — JSON.stringify on every tool call, chars/4 on all text)
  * is O(total context) per frame and can exceed the frame budget on long
- * sessions, causing infini-lock. These stats are recomputed only on
- * message_end / tool_execution_end / session_start — events that fire
- * once per assistant message or tool result, not per frame.
+ * sessions, causing infini-lock. These stats are recomputed on session_start
+ * and through one zero-delay dirty timer shared by message_end and
+ * tool_execution_end events, never from the footer render path.
  */
 let footerStatsCache: {
 	totalCost: number;
@@ -739,6 +743,7 @@ let footerStatsCache: {
 	contextTokens: number | null;
 	contextWindow: number;
 } | undefined;
+let footerThinkingLevel = "off";
 
 function recompute_footer_stats(ctx: any): void {
 	let totalCost = 0;
@@ -769,6 +774,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let active_session_manager: any;
 	let session_ready = false;
 	let pending_mode_id: string | undefined;
+	let footer_stats_timer: ReturnType<typeof setTimeout> | undefined;
+	let footer_stats_dirty = false;
 
 	function is_live_session(ctx: any): boolean {
 		return session_ready && ctx.sessionManager === active_session_manager;
@@ -780,6 +787,24 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			// transcript notification or invalidate the resumed chat history.
 			ctx.ui.setStatus(MODE_LIVE_RENDER_STATUS, undefined);
 		}
+	}
+
+	function schedule_footer_stats(ctx: any): void {
+		if (!is_live_session(ctx)) return;
+		footer_stats_dirty = true;
+		if (footer_stats_timer !== undefined) return;
+		footer_stats_timer = setTimeout(() => {
+			footer_stats_timer = undefined;
+			if (!footer_stats_dirty) return;
+			footer_stats_dirty = false;
+			if (is_live_session(ctx)) recompute_footer_stats(ctx);
+		}, 0);
+	}
+
+	function cancel_footer_stats_schedule(): void {
+		if (footer_stats_timer !== undefined) clearTimeout(footer_stats_timer);
+		footer_stats_timer = undefined;
+		footer_stats_dirty = false;
 	}
 
 	const persistedAtLoad = readPersistedState();
@@ -1070,13 +1095,46 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	});
 
 	let lastTurnAborted = false;
+	let lastTurnLengthStopped = false;
+	/** Max consecutive auto-continues before giving up and surfacing the error. */
+	const PLAN_AUTO_CONTINUE_MAX = 5;
+	let planAutoContinueCount = 0;
 
 	pi.on("turn_end", (event: any) => {
 		const msg = event?.message;
 		lastTurnAborted = msg?.stopReason === "aborted" || msg?.role === "assistant" && msg?.content?.stopReason === "aborted";
+		lastTurnLengthStopped = msg?.stopReason === "length";
 	});
 
 	pi.on("agent_settled", async (_event: any, ctx: any) => {
+		// Plan-mode output-limit recovery: when the model hits the max output
+		// token limit while generating a plan, silently send "continue" as a
+		// hidden custom message so the user never sees the error message or
+		// the recovery prompt. The suppression flag in mode-colors.ts is set
+		// in the message_end handler (before the TUI renders the error row).
+		if (
+			waitingForPlan &&
+			currentMode === "plan" &&
+			lastTurnLengthStopped &&
+			!lastTurnAborted &&
+			planAutoContinueCount < PLAN_AUTO_CONTINUE_MAX
+		) {
+			planAutoContinueCount++;
+			lastTurnLengthStopped = false;
+			// Hidden custom message: participates in LLM context as a user
+			// turn (convertToLlm maps role "custom" → "user") but is not
+			// rendered in the TUI, so the user never sees "continue".
+			pi.sendMessage(
+				{ customType: "pi-agents-plan-continue", content: "continue", display: false },
+				{ triggerTurn: true },
+			);
+			return;
+		}
+		// Reset auto-continue state once the turn completes normally.
+		setPlanAutoContinuing(false);
+		planAutoContinueCount = 0;
+		lastTurnLengthStopped = false;
+
 		if (waitingForPlan && currentMode === "plan") {
 			waitingForPlan = false;
 			if (lastTurnAborted) {
@@ -1095,17 +1153,6 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	});
 
-	function getThinkingLevelFromSession(ctx: any): string {
-		const entries = ctx.sessionManager.getEntries();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (entry.type === "thinking_level_change") {
-				return (entry as any).thinkingLevel || "off";
-			}
-		}
-		return "off";
-	}
-
 	function installCustomFooter(ctx: any) {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((_tui: any, theme: any, footerData: any) => {
@@ -1115,7 +1162,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				const innerWidth = Math.max(0, width - 2);
 				// Read cached stats instead of iterating all session entries +
 				// calling getContextUsage() every frame. The cache is
-				// recomputed on message_end / tool_execution_end.
+				// recomputed by the coalesced lifecycle-event timer.
 				const stats = footerStatsCache;
 				const totalCost = stats?.totalCost ?? 0;
 				const latestCacheHitRate = stats?.latestCacheHitRate;
@@ -1143,8 +1190,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				const modeLabel = mode.label.charAt(0).toUpperCase() + mode.label.slice(1);
 				const modelName = model?.name ?? model?.id ?? "no model";
 				const provider = model?.provider ?? "unknown";
-				const thinking = getThinkingLevelFromSession(ctx);
-				const variant = thinking !== "off" ? ` ${thinking}` : "";
+				const variant = footerThinkingLevel !== "off" ? ` ${footerThinkingLevel}` : "";
 			const rightSide =
 				theme.fg("accent", modeLabel) +
 				` ${theme.fg("dim", "\u2022")} ` +
@@ -1221,10 +1267,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		// Keep mode switching lazy until all session-bound setup has finished.
 		active_session_manager = ctx.sessionManager;
 		session_ready = false;
+		cancel_footer_stats_schedule();
 		footerStatsCache = undefined;
+		footerThinkingLevel = "off";
 		install_thinking_editor(ctx);
 		await restoreMode(ctx);
 		await restoreSavedModel(ctx);
+		footerThinkingLevel = pi.getThinkingLevel() ?? "off";
 		session_ready = true;
 		recompute_footer_stats(ctx);
 		const pending_mode = pending_mode_id;
@@ -1245,15 +1294,36 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		writePersistedState({ ...persisted, model: identity });
 	});
 
-	// Recompute footer stats when usage/context changes. These events fire
-	// once per assistant message or tool result — not per render frame —
-	// so the O(n) entry iteration + getContextUsage cost is amortized away
-	// from the animation loop.
-	pi.on("message_end", async (_event: any, ctx: any) => {
-		if (is_live_session(ctx)) recompute_footer_stats(ctx);
+	pi.on("thinking_level_select", (event: any, ctx: any) => {
+		if (!is_live_session(ctx)) return;
+		footerThinkingLevel = event.level ?? "off";
+		request_live_mode_render(ctx);
 	});
-	pi.on("tool_execution_end", async (_event: any, ctx: any) => {
-		if (is_live_session(ctx)) recompute_footer_stats(ctx);
+
+	// Mark footer stats dirty when usage/context changes. A zero-delay timer
+	// coalesces parallel tool completions into one O(n) recomputation per
+	// event-loop burst, away from the footer render closure.
+	pi.on("message_end", (event: any, ctx: any) => {
+		schedule_footer_stats(ctx);
+		// Set the plan-auto-continue suppression flag BEFORE the TUI renders
+		// the assistant message (extension message_end fires before the
+		// interactive-mode handler that calls updateContent). When the model
+		// hits the output token limit in plan mode and we haven't exhausted
+		// the retry budget, suppress the error row — agent_settled will send
+		// the hidden "continue" message to resume generation.
+		const msg = event?.message;
+		if (
+			msg?.role === "assistant" &&
+			msg?.stopReason === "length" &&
+			currentMode === "plan" &&
+			waitingForPlan &&
+			planAutoContinueCount < PLAN_AUTO_CONTINUE_MAX
+		) {
+			setPlanAutoContinuing(true);
+		}
+	});
+	pi.on("tool_execution_end", (_event: any, ctx: any) => {
+		schedule_footer_stats(ctx);
 	});
 
 	pi.on("session_shutdown", (_event: any, ctx: any) => {
@@ -1263,8 +1333,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		session_ready = false;
 		active_session_manager = undefined;
 		pending_mode_id = undefined;
+		cancel_footer_stats_schedule();
 		footerStatsCache = undefined;
+		footerThinkingLevel = "off";
 		setShellMode(false);
+		setPlanAutoContinuing(false);
+		planAutoContinueCount = 0;
+		lastTurnLengthStopped = false;
 		const persisted = readPersistedState();
 		const model = ctx.model as Model<any> | undefined;
 		const modelIdentity = model

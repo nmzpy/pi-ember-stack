@@ -6,7 +6,7 @@
 		"useIgnoreFile": true
 	},
 	"files": {
-		"includes": ["plugins/**/*.ts", "!**/node_modules/**", "!**/dist/**", "!plugins/**/test/**"]
+		"includes": ["plugins/**/*.ts", "!**/node_modules/**", "!**/dist/**", "!plugins/**/test/**", "!plugins/pi-web-access/*.ts"]
 	},
 	"formatter": {
 		"enabled": true,

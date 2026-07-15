@@ -6,23 +6,43 @@ import {
 	Theme,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { Editor, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	Editor,
+	Markdown,
+	Spacer,
+	Text,
+	type DefaultTextStyle,
+	type MarkdownTheme,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
 	buildCodeBgHex,
 	buildThemeBgColors,
 	buildThemeFgColors,
 	getActiveModeColor,
+	getActiveModeId,
+	isPlanAutoContinuing,
 	isShellMode,
+	isToolGroupActive,
 	MUTED_COLOR,
+	PAGE_BG,
 	setLatestSubagentRunning,
+	setPlanAutoContinuing,
 	setShellMode,
+	setThinkingBlocksHidden,
+	setToolGroupActive,
 } from "./mode-colors.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const THEME_JSON = path.join(SOURCE_ROOT, "ember.json");
 const THEME_NAME = "ember";
 
-const THINKING_FRAME_INTERVAL_MS = 33;
+const LOGO_FRAME_INTERVAL_MS = 100;
+const LOGO_ANIMATION_FRAMES = 20;
+const MIN_RENDER_INTERVAL_MS = 100;
+const THINKING_TICK_MS = 72;
+const THINKING_FRAME_STEP = 0.048;
 const LOGO = [
 	"  ██████   ██",
 	"  ██   ██  ██",
@@ -40,13 +60,18 @@ const SHADOW_OPACITY = 0.4;
 let thinkingActive = false;
 let workingActive = false;
 let thinkingFrame = 0;
-let thinkingInterval: ReturnType<typeof setInterval> | undefined;
 let logoAnimating = false;
+let logoStatic = false;
 let logoFrame = 0;
+let logoAnimationFrameCount = 0;
 let logoTimer: ReturnType<typeof setInterval> | undefined;
 let editorRenderPatched = false;
 let assistantMessagePatched = false;
 let requestRender: (() => void) | undefined;
+let renderCallback: (() => void) | undefined;
+let renderTimer: ReturnType<typeof setTimeout> | undefined;
+let renderGeneration = 0;
+let lastRenderAt = 0;
 let sessionCtx: any;
 
 type EditorWithBorder = Editor & {
@@ -58,9 +83,9 @@ type EditorWithBorder = Editor & {
  * Cached result of the subagent-running scan. The scan itself is O(n)
  * over the session branch (getBranch + two passes), so it MUST NOT run
  * inside the per-frame Editor.prototype.render path. It is recomputed
- * only on tool_execution_start / tool_execution_end (which fire once
- * per tool call) and reset on session replacement. The render path
- * reads this cached flag via subagentRunningCached.
+ * only on subagent tool_execution_start / tool_execution_end events and reset
+ * on session replacement. The render path reads this cached flag via
+ * subagentRunningCached.
  */
 let subagentRunningCached = false;
 
@@ -105,49 +130,95 @@ function recompute_latest_subagent_running(): boolean {
 	return running;
 }
 
-function currentLabelText(): string {
-	return thinkingActive ? "Thinking" : "Working";
+function resetRenderScheduler(): void {
+	renderGeneration += 1;
+	if (renderTimer !== undefined) clearTimeout(renderTimer);
+	renderTimer = undefined;
+	renderCallback = undefined;
+	lastRenderAt = 0;
+}
+
+function scheduleRender(): void {
+	if (renderCallback === undefined || renderTimer !== undefined) return;
+
+	const generation = renderGeneration;
+	const elapsed = Date.now() - lastRenderAt;
+	const delay = Math.max(0, MIN_RENDER_INTERVAL_MS - elapsed);
+	renderTimer = setTimeout(() => {
+		renderTimer = undefined;
+		if (generation !== renderGeneration || renderCallback === undefined) return;
+		renderCallback();
+		lastRenderAt = Date.now();
+	}, delay);
+}
+
+let thinkingTimer: ReturnType<typeof setInterval> | undefined;
+
+/** Group-header tick subscribers. The compact renderer registers the
+ *  active group owner's invalidate here so the group header gradient
+ *  sweeps at the same THINKING_TICK_MS cadence as the Thinking/Working
+ *  widget. The tick timer stays alive while any subscriber is active,
+ *  even if thinking/working are inactive. */
+const groupTickCallbacks = new Set<() => void>();
+
+export function subscribeGroupTick(cb: () => void): void {
+	groupTickCallbacks.add(cb);
+	startThinkingTick();
+}
+
+export function unsubscribeGroupTick(cb: () => void): void {
+	groupTickCallbacks.delete(cb);
+	maybeStopThinkingTick();
+}
+
+function startThinkingTick(): void {
+	if (thinkingTimer) return;
+	thinkingTimer = setInterval(() => {
+		thinkingFrame += THINKING_FRAME_STEP;
+		if (thinkingFrame > 1) thinkingFrame -= 1;
+		requestRender?.();
+		for (const cb of groupTickCallbacks) {
+			try { cb(); } catch { /* best effort */ }
+		}
+	}, THINKING_TICK_MS);
+}
+
+function stopThinkingTick(): void {
+	if (thinkingTimer) {
+		clearInterval(thinkingTimer);
+		thinkingTimer = undefined;
+	}
+}
+
+/** Stop the tick timer only when no animation and no group subscribers
+ *  are active. */
+function maybeStopThinkingTick(): void {
+	if (!thinkingActive && !workingActive && groupTickCallbacks.size === 0) {
+		stopThinkingTick();
+	}
 }
 
 function stopThinkingAnimation(): void {
 	thinkingActive = false;
-	if (!workingActive) {
-		if (thinkingInterval) clearInterval(thinkingInterval);
-		thinkingInterval = undefined;
-	}
+	maybeStopThinkingTick();
 	requestRender?.();
 }
 
 function startThinkingAnimation(): void {
+	if (!thinkingActive && !workingActive) thinkingFrame = 0;
 	thinkingActive = true;
-	if (!thinkingInterval) {
-		thinkingFrame = 0;
-		thinkingInterval = setInterval(() => {
-			thinkingFrame += 0.09;
-			if (thinkingFrame > 1) thinkingFrame -= 1;
-			requestRender?.();
-		}, THINKING_FRAME_INTERVAL_MS);
-	}
+	startThinkingTick();
 }
 
 function startWorkingAnimation(): void {
+	if (!thinkingActive && !workingActive) thinkingFrame = 0;
 	workingActive = true;
-	if (!thinkingInterval) {
-		thinkingFrame = 0;
-		thinkingInterval = setInterval(() => {
-			thinkingFrame += 0.09;
-			if (thinkingFrame > 1) thinkingFrame -= 1;
-			requestRender?.();
-		}, THINKING_FRAME_INTERVAL_MS);
-	}
+	startThinkingTick();
 }
 
 function stopWorkingAnimation(): void {
 	workingActive = false;
-	if (!thinkingActive && thinkingInterval) {
-		clearInterval(thinkingInterval);
-		thinkingInterval = undefined;
-	}
+	maybeStopThinkingTick();
 	requestRender?.();
 }
 
@@ -189,6 +260,137 @@ const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
 let liveTheme: Theme | undefined;
 let liveCodeBgAnsi = "";
 
+const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 512;
+const MARKDOWN_RENDER_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+
+type MarkdownBlockType = "text" | "thinking";
+
+type MarkdownRenderCacheEntry = {
+	lines: string[];
+	bytes: number;
+};
+
+/**
+ * Markdown instances are recreated when Pi rebuilds assistant components. Keep
+ * the rendered result shared across those instances so a thinking-toggle does
+ * not re-lex every historical block. Width is part of the key because Markdown
+ * wrapping is width-dependent; the generation changes whenever the live theme
+ * changes so cached ANSI output can never outlive its theme.
+ */
+const markdownRenderCache = new Map<string, MarkdownRenderCacheEntry>();
+let markdownRenderCacheBytes = 0;
+let markdownThemeGeneration = 0;
+
+function clearMarkdownRenderCache(): void {
+	markdownRenderCache.clear();
+	markdownRenderCacheBytes = 0;
+}
+
+function getCachedMarkdownLines(key: string): string[] | undefined {
+	const entry = markdownRenderCache.get(key);
+	if (!entry) return undefined;
+	markdownRenderCache.delete(key);
+	markdownRenderCache.set(key, entry);
+	return entry.lines;
+}
+
+function setCachedMarkdownLines(key: string, lines: string[]): void {
+	const bytes = key.length + lines.reduce((total, line) => total + line.length, 0);
+	if (bytes > MARKDOWN_RENDER_CACHE_MAX_BYTES) return;
+
+	const previous = markdownRenderCache.get(key);
+	if (previous) {
+		markdownRenderCacheBytes -= previous.bytes;
+		markdownRenderCache.delete(key);
+	}
+	while (
+		markdownRenderCache.size >= MARKDOWN_RENDER_CACHE_MAX_ENTRIES ||
+		markdownRenderCacheBytes + bytes > MARKDOWN_RENDER_CACHE_MAX_BYTES
+	) {
+		const oldestKey = markdownRenderCache.keys().next().value;
+		if (oldestKey === undefined) break;
+		const oldest = markdownRenderCache.get(oldestKey);
+		if (oldest) markdownRenderCacheBytes -= oldest.bytes;
+		markdownRenderCache.delete(oldestKey);
+	}
+	markdownRenderCache.set(key, { lines, bytes });
+	markdownRenderCacheBytes += bytes;
+}
+
+class CachedMarkdown {
+	private readonly text: string;
+	private readonly paddingX: number;
+	private readonly paddingY: number;
+	private readonly markdownTheme: MarkdownTheme;
+	private readonly defaultTextStyle: DefaultTextStyle | undefined;
+	private readonly blockType: MarkdownBlockType;
+	private cachedGeneration: number | undefined;
+	private cachedWidth: number | undefined;
+	private cachedLines: string[] | undefined;
+
+	constructor(
+		text: string,
+		paddingX: number,
+		paddingY: number,
+		markdownTheme: MarkdownTheme,
+		defaultTextStyle: DefaultTextStyle | undefined,
+		blockType: MarkdownBlockType,
+	) {
+		this.text = text;
+		this.paddingX = paddingX;
+		this.paddingY = paddingY;
+		this.markdownTheme = markdownTheme;
+		this.defaultTextStyle = defaultTextStyle;
+		this.blockType = blockType;
+	}
+
+	render(width: number): string[] {
+		if (
+			this.cachedLines !== undefined &&
+			this.cachedGeneration === markdownThemeGeneration &&
+			this.cachedWidth === width
+		) {
+			return this.cachedLines;
+		}
+
+		const key = JSON.stringify([
+			markdownThemeGeneration,
+			this.blockType,
+			this.text,
+			this.paddingX,
+			this.paddingY,
+			width,
+		]);
+		const cached = getCachedMarkdownLines(key);
+		if (cached !== undefined) {
+			this.cachedGeneration = markdownThemeGeneration;
+			this.cachedWidth = width;
+			this.cachedLines = cached;
+			return cached;
+		}
+
+		const markdown = new Markdown(
+			this.text,
+			this.paddingX,
+			this.paddingY,
+			this.markdownTheme,
+			this.defaultTextStyle,
+		);
+		const lines = markdown.render(width);
+		setCachedMarkdownLines(key, lines);
+		this.cachedGeneration = markdownThemeGeneration;
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
+
+	invalidate(): void {
+		this.cachedGeneration = undefined;
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+}
+
 function installProxiedTheme(fgColors: Record<string, string>, bgColors: Record<string, string>, codeBg: string): void {
 	const base = new Theme(
 		fgColors as any,
@@ -204,6 +406,8 @@ function installProxiedTheme(fgColors: Record<string, string>, bgColors: Record<
 }
 
 function applyDynamicTheme(options: { invalidate?: boolean; render?: boolean } = {}): void {
+	markdownThemeGeneration += 1;
+	clearMarkdownRenderCache();
 	const accent = getActiveModeColor();
 	const fgColors = buildThemeFgColors(accent);
 	const bgColors = buildThemeBgColors(accent);
@@ -232,11 +436,52 @@ function updateLiveThemeColors(fgColors: Record<string, string>, bgColors: Recor
 	}
 }
 
+/** Linear interpolation between two RGB triplets. */
+function lerpRgb(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
+	return [
+		Math.round(a[0] + (b[0] - a[0]) * t),
+		Math.round(a[1] + (b[1] - a[1]) * t),
+		Math.round(a[2] + (b[2] - a[2]) * t),
+	];
+}
+
+/** Gradient RGB cache. Invalidated when the theme generation changes so
+ *  cached ANSI output can never outlive its theme. O(1) per render call. */
+let gradientCacheGeneration = -1;
+let gradientAccentCache = new Map<string, [number, number, number]>();
+let gradientBgRgb: [number, number, number] | undefined;
+
+function cachedAccentRgb(accentHex: string): [number, number, number] {
+	if (gradientCacheGeneration !== markdownThemeGeneration) {
+		gradientAccentCache = new Map();
+		gradientBgRgb = undefined;
+		gradientCacheGeneration = markdownThemeGeneration;
+	}
+	let rgb = gradientAccentCache.get(accentHex);
+	if (!rgb) {
+		rgb = hexToRgbTriplet(accentHex);
+		gradientAccentCache.set(accentHex, rgb);
+	}
+	return rgb;
+}
+
+function cachedBgRgb(): [number, number, number] {
+	if (!gradientBgRgb) {
+		gradientBgRgb = hexToRgbTriplet(PAGE_BG);
+	}
+	return gradientBgRgb;
+}
+
 function renderGradientLabel(text: string, accent: string, phaseOffset = 0): string {
 	const chars = [...text];
 	const len = chars.length;
 	if (len === 0) return "";
-	const dimHex = blendToHex(accent, "#18181e", 0.4);
+	const accentRgb = cachedAccentRgb(accent);
+	const bgRgb = cachedBgRgb();
+	// 3 stops: muted 10% tail, dim 40%, accent peak — all in RGB space.
+	const mutedTail = lerpRgb(bgRgb, accentRgb, 0.1);
+	const dim = lerpRgb(bgRgb, accentRgb, 0.4);
+	const peak = accentRgb;
 	const result: string[] = [];
 	const phase = (thinkingFrame + phaseOffset) % 1;
 	for (let i = 0; i < len; i++) {
@@ -244,8 +489,10 @@ function renderGradientLabel(text: string, accent: string, phaseOffset = 0): str
 		const dist = charPos - phase;
 		const wrapped = dist < -0.5 ? dist + 1 : dist > 0.5 ? dist - 1 : dist;
 		const intensity = Math.exp(-(wrapped * wrapped) * 8);
-		const hex = blendToHex(dimHex, accent, intensity);
-		result.push(colorize(chars[i], hex));
+		// Piecewise 3-stop blend: muted tail -> dim mid -> accent peak.
+		const lower = lerpRgb(mutedTail, dim, Math.min(1, intensity * 2));
+		const rgb = lerpRgb(lower, peak, Math.max(0, Math.min(1, (intensity - 0.5) * 2)));
+		result.push(`\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${chars[i]}\x1b[39m`);
 	}
 	return result.join("");
 }
@@ -310,15 +557,6 @@ function installThinkingBorderOverride(): void {
 			lines[lastLineIdx] = accentBorder("\u2500".repeat(width));
 		}
 		if (lines.length === 0) return lines;
-		if (subagentActive) return lines;
-		if (!thinkingActive && !workingActive) return lines;
-
-		const labelText = thinkingActive ? "Thinking" : "Working";
-		const label = ` ${renderGradientLabel(labelText, accent)} `;
-		const prefixLen = 2 + visibleWidth(label);
-		const remaining = Math.max(0, width - prefixLen);
-		lines[topIdx] = accentBorder("\u2500".repeat(2)) + label +
-			accentBorder("\u2500".repeat(remaining));
 		return lines;
 	};
 }
@@ -327,8 +565,18 @@ function installAssistantMessagePatch(): void {
 	if (assistantMessagePatched) return;
 	assistantMessagePatched = true;
 
-	(AssistantMessageComponent as any).prototype.updateContent = function (this: any, message: any): void {
+	const assistantPrototype = (AssistantMessageComponent as any).prototype;
+	const originalSetHideThinkingBlock = assistantPrototype.setHideThinkingBlock;
+	if (typeof originalSetHideThinkingBlock === "function") {
+		assistantPrototype.setHideThinkingBlock = function (this: any, hide: boolean): void {
+			setThinkingBlocksHidden(hide === true);
+			originalSetHideThinkingBlock.call(this, hide);
+		};
+	}
+
+	assistantPrototype.updateContent = function (this: any, message: any): void {
 		const hide = this.hideThinkingBlock;
+		setThinkingBlocksHidden(hide === true);
 		const outputPad = this.outputPad;
 		// Skip the full rebuild when nothing that affects the rendered output
 		// has changed. invalidate() (from theme change, thinking toggle,
@@ -364,25 +612,48 @@ function installAssistantMessagePatch(): void {
 
 		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
 
+		// Override the heading function so that when a heading contains a
+		// colon, only the portion before (and including) the colon is
+		// accent-colored — the remainder reverts to plain text. This makes
+		// headings like "### Module 3: Implementation" render with
+		// "Module 3:" in accent and " Implementation" in plain text.
+		if (!this._emberMarkdownTheme || this._emberMarkdownThemeBase !== this.markdownTheme) {
+			const base = this.markdownTheme;
+			this._emberMarkdownThemeBase = base;
+			this._emberMarkdownTheme = {
+				...base,
+				heading: (text: string) => emberHeadingStyle(text, theme),
+			};
+		}
+		const mdTheme = this._emberMarkdownTheme;
+
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text?.trim()) {
 				this.contentContainer.addChild(
-					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme),
+					new CachedMarkdown(
+						content.text.trim(),
+						this.outputPad,
+						0,
+						mdTheme,
+						undefined,
+						"text",
+					),
 				);
 			} else if (content.type === "thinking" && content.thinking?.trim()) {
 				if (hide) continue;
 				const hasVisibleContentAfter = message.content.slice(i + 1).some(isVisibleBlock);
 				this.contentContainer.addChild(
-					new Markdown(
+					new CachedMarkdown(
 						content.thinking.trim(),
 						this.outputPad,
 						0,
-						this.markdownTheme,
+						mdTheme,
 						{
 							color: (text: string) => theme.fg("thinkingText", text),
 							italic: true,
 						},
+						"thinking",
 					),
 				);
 				if (hasVisibleContentAfter) {
@@ -393,7 +664,14 @@ function installAssistantMessagePatch(): void {
 
 		const hasToolCalls = message.content.some((c: any) => c.type === "toolCall");
 		this.hasToolCalls = hasToolCalls;
-		if (message.stopReason === "length") {
+		// Suppress the output-limit error when plan-mode auto-continue is
+		// active — the extension silently sends "continue" so the user never
+		// sees this error or the recovery message.
+		const suppressLengthError =
+			message.stopReason === "length" &&
+			getActiveModeId() === "plan" &&
+			isPlanAutoContinuing();
+		if (message.stopReason === "length" && !suppressLengthError) {
 			this.contentContainer.addChild(new Spacer(1));
 			this.contentContainer.addChild(
 				new Text(
@@ -463,6 +741,78 @@ function colorize(text: string, hex: string): string {
 	return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
 }
 
+const ANSI_STRIP = /\x1b\[[0-9;]*m/g;
+
+/**
+ * Split an ANSI-laden string at the first visible occurrence of `sep`,
+ * returning the two halves with their ANSI codes intact.
+ * Returns `[full, ""]` when the separator is not found.
+ */
+function splitAtVisibleChar(text: string, sep: string): [string, string] {
+	let visiblePos = 0;
+	let i = 0;
+	while (i < text.length) {
+		if (text[i] === "\x1b") {
+			// Skip the full escape sequence
+			const m = /^\x1b\[[0-9;]*m/.exec(text.slice(i));
+			if (m) {
+				i += m[0].length;
+				continue;
+			}
+		}
+		if (text[i] === sep) {
+			// Include the separator in the prefix
+			const prefix = text.slice(0, i + 1);
+			const suffix = text.slice(i + 1);
+			return [prefix, suffix];
+		}
+		visiblePos++;
+		i++;
+	}
+	return [text, ""];
+}
+
+/**
+ * Custom markdown heading style: when the heading text contains a colon,
+ * only the portion up to and including the first colon is accent-colored;
+ * the remainder reverts to plain text color. When there is no colon the
+ * entire heading is accent-colored (the default behavior).
+ *
+ * The input `text` may already carry ANSI codes (bold, underline) applied
+ * by the markdown renderer before calling `heading()`. We strip ANSI to
+ * detect the colon, split at that visible position, then re-apply colors.
+ */
+function emberHeadingStyle(text: string, theme: any): string {
+	const visible = text.replace(ANSI_STRIP, "");
+	// Hide the leading hash prefix ("### ", "## ", etc.) that pi-tui's
+	// markdown renderer prepends for h3+ headings. The heading text
+	// itself is rendered as a separate call, so suppressing the prefix
+	// here removes the raw hashes from the rendered row.
+	if (/^#+\s*$/.test(visible)) {
+		return "";
+	}
+	const colonIdx = visible.indexOf(":");
+	if (colonIdx < 0) {
+		return theme.fg("mdHeading", text);
+	}
+	const [prefix, suffix] = splitAtVisibleChar(text, ":");
+	// prefix includes the colon; suffix is the rest (may start with a space).
+	// Re-color: accent for prefix, plain text for suffix. We strip any
+	// existing foreground ANSI from each part first to avoid color stacking.
+	const prefixStripped = prefix.replace(ANSI_STRIP, "");
+	const suffixStripped = suffix.replace(ANSI_STRIP, "");
+	// Preserve bold/underline from the original by re-applying via theme.
+	// The markdown renderer wraps h1 as bold+underline, h2+ as bold.
+	// We re-apply bold to both parts; underline only if it was in the original.
+	const hasUnderline = text.includes("\x1b[4m") || text.includes("\x1b[1;4m") || text.includes("\x1b[4;1m");
+	const stylePrefix = (s: string): string => {
+		let styled = theme.bold(s);
+		if (hasUnderline) styled = theme.underline(styled);
+		return styled;
+	};
+	return theme.fg("mdHeading", stylePrefix(prefixStripped)) + theme.fg("text", stylePrefix(suffixStripped));
+}
+
 function folderNameFromCwd(cwd: string): string {
 	return cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
 }
@@ -514,23 +864,64 @@ function radialColorForCell(x: number, y: number, points: RadialPoint[]): [numbe
 function startLogoAnimation(): void {
 	if (logoTimer) return;
 	logoAnimating = true;
+	logoStatic = false;
 	logoFrame = 0;
+	logoAnimationFrameCount = 0;
 	logoTimer = setInterval(() => {
 		logoFrame += 0.04;
 		if (logoFrame > 1) logoFrame -= 1;
+		logoAnimationFrameCount += 1;
 		requestRender?.();
-	}, 60);
+		if (logoAnimationFrameCount >= LOGO_ANIMATION_FRAMES) stopLogoAnimation();
+	}, LOGO_FRAME_INTERVAL_MS);
 }
 
 function stopLogoAnimation(): void {
 	logoAnimating = false;
+	logoStatic = true;
+	logoAnimationFrameCount = 0;
 	if (logoTimer) {
 		clearInterval(logoTimer);
 		logoTimer = undefined;
 	}
+	requestRender?.();
 }
 
 function renderLogoWithGradient(accent: string): string[] {
+	const logoRows = LOGO.length;
+	const logoCols = LOGO[0].length;
+	const gridCols = logoCols + SHADOW_OFFSET_X;
+	const gridRows = logoRows + Math.ceil(SHADOW_OFFSET_Y);
+
+	// Static state: 2-stop vertical gradient (top = muted #808080, bottom =
+	// text #d4d4d4). No radial points, no per-frame sweep.
+	if (!logoAnimating && logoStatic) {
+		const mutedRgb = hexToRgbTriplet(MUTED_COLOR);
+		const textRgb = hexToRgbTriplet("#d4d4d4");
+		const grid: Array<Array<{ ch: string; rgb?: [number, number, number] }>> = [];
+		for (let row = 0; row < gridRows; row++) {
+			grid.push(new Array(gridCols).fill(null).map(() => ({ ch: " " })));
+		}
+		for (let row = 0; row < logoRows; row++) {
+			const t = logoRows > 1 ? row / (logoRows - 1) : 0;
+			const rgb = lerpRgb(mutedRgb, textRgb, t);
+			for (let col = 0; col < LOGO[row].length; col++) {
+				if (LOGO[row][col] === "\u2588") {
+					grid[row][col] = { ch: "\u2588", rgb };
+				}
+			}
+		}
+		return grid.map((rowCells) =>
+			rowCells.map((cell) => {
+				if (cell.rgb) {
+					const [r, g, b] = cell.rgb;
+					return `\x1b[38;2;${r};${g};${b}m${cell.ch}\x1b[39m`;
+				}
+				return cell.ch;
+			}).join("")
+		);
+	}
+
 	const [ar, ag, ab] = hexToRgbTriplet(accent);
 	const accent70 = blendToHex(accent, "#18181e", 0.7);
 	const [s7r, s7g, s7b] = hexToRgbTriplet(accent70);
@@ -543,11 +934,6 @@ function renderLogoWithGradient(accent: string): string[] {
 		{ x: 11, y: 5, r: s4r, g: s4g, b: s4b, falloff: 2.5 },
 		{ x: 0, y: 4, r: 200, g: 180, b: 140, falloff: 2 },
 	];
-
-	const logoRows = LOGO.length;
-	const logoCols = LOGO[0].length;
-	const gridCols = logoCols + SHADOW_OFFSET_X;
-	const gridRows = logoRows + Math.ceil(SHADOW_OFFSET_Y);
 
 	const grid: Array<Array<{ ch: string; rgb?: [number, number, number] }>> = [];
 	for (let row = 0; row < gridRows; row++) {
@@ -669,6 +1055,26 @@ function ensureThemeInstalled(): void {
 	}
 }
 
+/**
+ * Install the Thinking/Working widget one row above the editor. The widget
+ * renders the live animated gradient label while the agent is reasoning or
+ * executing tools, and hides itself (returns []) when a compact tool group
+ * (Exploring or Working) is active — the group header carries the gradient
+ * in that case, so the two never compete for the same visual slot.
+ */
+function installThinkingWidget(ctx: any): void {
+	if (ctx.mode !== "tui") return;
+	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
+		render(_width: number): string[] {
+			if (isToolGroupActive()) return [];
+			if (!thinkingActive && !workingActive) return [];
+			const labelText = thinkingActive ? "Thinking" : "Working";
+			return [renderGradientLabel(labelText, getActiveModeColor())];
+		},
+		invalidate() {},
+	}));
+}
+
 export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	ensureThemeInstalled();
 	installThinkingBorderOverride();
@@ -676,13 +1082,24 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	applyDynamicTheme();
 
 	pi.on("session_start", (event, ctx) => {
+		resetRenderScheduler();
 		sessionCtx = ctx;
+		tuiRef = undefined;
+		requestRender = undefined;
 		liveTheme = undefined;
 		subagentRunningCached = false;
 		if (ctx.mode === "tui") {
-			requestRender = () => ctx.ui.setStatus("pi-ember-ui-thinking-tick", undefined);
+			renderCallback = () => {
+				if (tuiRef?.requestRender) {
+					tuiRef.requestRender();
+					return;
+				}
+				ctx.ui.setStatus("pi-ember-ui-thinking-tick", undefined);
+			};
+			requestRender = scheduleRender;
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHiddenThinkingLabel("");
+			installThinkingWidget(ctx);
 		}
 		applyDynamicTheme();
 		if (ctx.mode === "tui") {
@@ -699,10 +1116,8 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			}
 			// Only animate the logo on genuinely fresh sessions where the
 			// header is visible. On /resume, /fork, and /reload the header
-			// is scrolled off-screen (or it's a hot reload) — the 60ms
-			// setInterval from startLogoAnimation would call requestRender()
-			// every tick, fighting the scrollarea's lazy-load and causing
-			// an infinite render glitch on long resumed sessions.
+			// is scrolled off-screen (or it is a hot reload); even the
+			// bounded logo timer would otherwise add needless full renders.
 			if (event.reason === "startup" || event.reason === "new") {
 				startLogoAnimation();
 			}
@@ -739,29 +1154,38 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		stopThinkingAnimation();
 	});
 
-	pi.on("message_start", () => {
-		stopLogoAnimation();
-	});
-
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		stopLogoAnimation();
 		startWorkingAnimation();
 	});
 
 	pi.on("agent_end", () => {
 		stopThinkingAnimation();
 		stopWorkingAnimation();
+		// When the agent loop ends (including after abort/cancel/error), no
+		// subagent can still be running. Reset the flag so the editor border
+		// reverts from the dim inset to the full-opacity accent line.
+		subagentRunningCached = false;
+		setLatestSubagentRunning(false);
+		requestRender?.();
 	});
 
-	pi.on("tool_execution_start", (_event, ctx) => {
+	pi.on("tool_execution_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		recompute_latest_subagent_running();
+		if (event.toolName === "subagent") recompute_latest_subagent_running();
 		if (!thinkingActive) startWorkingAnimation();
 	});
 
-	pi.on("tool_execution_end", (_event, ctx) => {
+	pi.on("tool_execution_end", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		recompute_latest_subagent_running();
+		if (event.toolName === "subagent") {
+			recompute_latest_subagent_running();
+			// Always request a render after a subagent finishes so the editor
+			// border updates from dim-inset back to the accent line.
+			requestRender?.();
+			return;
+		}
 		if (workingActive && !thinkingActive) requestRender?.();
 	});
 
@@ -789,17 +1213,28 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// stale closures. The factory body calls applyDynamicTheme() on load,
 	// which would otherwise invoke the old requestRender/tuiRef.
 	pi.on("session_shutdown", (_event, ctx) => {
+		resetRenderScheduler();
 		sessionCtx = undefined;
 		requestRender = undefined;
 		tuiRef = undefined;
 		liveTheme = undefined;
 		liveCodeBgAnsi = "";
+		markdownThemeGeneration = 0;
+		clearMarkdownRenderCache();
 		subagentRunningCached = false;
+		groupTickCallbacks.clear();
 		stopLogoAnimation();
+		stopThinkingTick();
 		stopThinkingAnimation();
 		stopWorkingAnimation();
 		setShellMode(false);
 		setLatestSubagentRunning(false);
-		if (ctx.hasUI) ctx.ui.setHeader(undefined);
+		setThinkingBlocksHidden(false);
+		setToolGroupActive(false);
+		setPlanAutoContinuing(false);
+		if (ctx.hasUI) {
+			ctx.ui.setWidget("ember-thinking", undefined);
+			ctx.ui.setHeader(undefined);
+		}
 	});
 }

@@ -33,6 +33,9 @@
   - The subagent-running flag (`isLatestSubagentRunning`/
     `setLatestSubagentRunning`) lives in `pi-ember-ui/mode-colors.ts` — never
     duplicate the session-scan logic that sets it.
+  - The plan-auto-continue flag (`isPlanAutoContinuing`/
+    `setPlanAutoContinuing`) lives in `pi-ember-ui/mode-colors.ts` — never
+    duplicate the output-limit suppression logic that sets it.
 - **DRY:** Keep one canonical implementation for each tool, mode, provider, and
   configuration rule. Do not recreate functionality in parallel plugin folders.
 - **Cross-Platform by Default:** Never introduce Windows-only paths, shell syntax,
@@ -59,20 +62,23 @@
   `liveOnly` event path: update the editor/footer viewport without invalidating
   the resumed transcript.
 - **Editor Patch Discipline:** The `Editor.prototype.render` monkey-patch is the
-  single place where border, thinking animation, and content inset logic lives.
-  Detect border lines structurally (by character content), not by fragile index
-  arithmetic. Slash-command dimming gates on `getText()` content, not on external
-  flags. When the latest tool call is a running `subagent`, the editor top border
-  becomes a dim inset line (1 column left/right, 0.1875 opacity) and the
-  Thinking/Working gradient label is suppressed — the subagent box above shows
-  live progress via flashing bullets. The `recompute_latest_subagent_running()`
-  helper scans `sessionCtx.sessionManager` entries and writes the result to both
-  the shared `isLatestSubagentRunning()`/`setLatestSubagentRunning()` flag in
+  single place where border and content inset logic lives. Detect border lines
+  structurally (by character content), not by fragile index arithmetic.
+  Slash-command dimming gates on `getText()` content, not on external flags.
+  When the latest tool call is a running `subagent`, the editor top border
+  becomes a dim inset line (1 column left/right, 0.1875 opacity) — the subagent
+  box above shows live progress via flashing bullets. The
+  `recompute_latest_subagent_running()` helper scans
+  `sessionCtx.sessionManager` entries and writes the result to both the
+  shared `isLatestSubagentRunning()`/`setLatestSubagentRunning()` flag in
   `pi-ember-ui/mode-colors.ts` and a local `subagentRunningCached` flag. It is
   called ONLY from `tool_execution_start`/`tool_execution_end` handlers — never
   from the render path. The editor border patch reads `subagentRunningCached`
   (O(1)) instead of scanning the session every frame. Never duplicate this
-  session-scan logic and never call it from a render closure.
+  session-scan logic and never call it from a render closure. The
+  Thinking/Working gradient label is NO LONGER rendered inside the editor
+  border — it lives in a `setWidget("ember-thinking", …)` row above the editor
+  (see Thinking Widget below).
 - **Per-Frame Render Budget:** No render closure (editor render, header render,
   footer render, tool renderCall/renderResult, PulseManager timer) may call
   `sessionManager.getEntries()`, `sessionManager.getBranch()`,
@@ -90,7 +96,10 @@
   call). `invalidate()` (theme change, thinking toggle) calls `updateContent`
   with the same message — without the guard, every assistant message in the
   transcript rebuilds all its Markdown children synchronously, freezing long
-  transcripts on `ctrl+t`.
+  transcripts on `ctrl+t`. A bounded shared Markdown render cache, keyed by
+  content, block type, padding, width, and theme generation, also serves fresh
+  assistant components created during Pi rebuilds; it is cleared on dynamic
+  theme changes and session shutdown.
 - **discoverAgents Cache TTL:** `agents.ts` `discoverAgents()` skips the
   fs-based `dirSignature()` validation for `CACHE_VALIDATION_TTL_MS` (2s)
   after a successful validation, so cache hits do zero synchronous fs. Agent
@@ -98,9 +107,43 @@
   TTL expires.
 - **Animation Compliance:** Thinking animation frames, intervals, and opacity
   progressions are defined once as constants at the top of `pi-ember-ui/index.ts`.
-  Never duplicate or hardcode animation timing in other files. The shared
-  `PULSE_INTERVAL_MS` constant lives in `pi-compact-tools/renderer.ts` and is
-  reused by the subagent renderer via `PulseManager`.
+  Never duplicate or hardcode animation timing in other files. The gradient is
+  timer-driven: `THINKING_TICK_MS` (60) and `THINKING_FRAME_STEP` (0.06) drive a
+  single `setInterval` started by `startThinkingTick()` and stopped by
+  `maybeStopThinkingTick()` when `thinkingActive`, `workingActive`, and group
+  tick subscribers are all inactive. The sweep advances
+  continuously (~1s cycle) regardless of token arrival, so it never freezes
+  during tool execution. The gradient uses a 3-stop RGB-space blend (muted 10%
+  tail → dim 40% → accent peak) with a per-generation RGB cache — no per-char
+  hex parsing. The same `renderGradientLabel` drives the Thinking/Working
+  widget, group headers (via the group tick subscription), and subagent
+  running-agent labels. The Pi logo gradient animation runs for a bounded
+  `LOGO_ANIMATION_FRAMES` (20) × `LOGO_FRAME_INTERVAL_MS` (100) = 2s on fresh
+  sessions (`startup`/`new`). It is stopped by `agent_start` (not
+  `message_start`) so the full intro plays until the agent actually begins;
+  once stopped it renders as a static 2-stop vertical gradient (top muted
+  `#808080`, bottom text `#d4d4d4`). The bounded auto-stop and
+  `session_shutdown` are the safety floors. The shared `PULSE_INTERVAL_MS` constant lives in
+  `pi-compact-tools/renderer.ts` and is reused by the subagent renderer via
+  `PulseManager`.
+- **Thinking Widget & Tool Group Precedence:** The Thinking/Working gradient
+  label is rendered in a `setWidget("ember-thinking", …)` row above the editor
+  (default `aboveEditor` placement), NOT inside the editor top border. The
+  widget render closure is O(1): it reads `thinkingActive`, `workingActive`,
+  and `isToolGroupActive()` from `pi-ember-ui/mode-colors.ts`. When any compact
+  tool group (Exploring or Working) is active — i.e. has a running member OR
+  all members complete but the group is not yet settled (agent hasn't moved
+  on) — `isToolGroupActive()` is true and the widget returns `[]` (hidden) —
+  the group header in the transcript carries the live gradient via
+  `renderLiveThinkingGradient` instead. When the group settles (visible text,
+  non-group/other-group tool, or `turn_end`), the header reverts to plain
+  bold `Explored` or `Worked` and the Thinking/Working widget returns. The
+  `isToolGroupActive`/`setToolGroupActive` flag lives in
+  `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools` lifecycle
+  handlers (`tool_call`, `tool_execution_end`, `turn_end`, `session_start`) via
+  `CompactRenderer.hasActiveGroups()` — never from a render closure. The
+  widget, the thinking tick timer, and the group tick subscriptions are
+  cleared on `session_shutdown`.
 - **Subagent Background Token:** The `subagentBg` theme token (defined once in
   `mode-colors.ts` `buildThemeBgColors` and seeded in `ember.json`) is the
   single source for the subagent box background — userMessage color at 10% less
@@ -134,8 +177,10 @@ Pi
     │   └── subagent implementation and bundled agent definitions
     ├── plugins/devin-auth/
     │   └── Devin provider, OAuth, catalog, and streaming
-    └── plugins/pi-ember-fff/
-        └── FFF-powered grep/find with external allowlist
+    ├── plugins/pi-ember-fff/
+    │   └── FFF-powered grep/find with external allowlist
+    └── plugins/pi-web-access/
+        └── Web search, URL fetching, GitHub cloning, PDF/YouTube/video extraction
 ```
 
 The project-local registry is `.pi/ember-stack.json`. The package entrypoint is
@@ -153,28 +198,46 @@ mechanisms aligned with the actual plugin folders.
   `grep` invocations) fold into one inset `Exploring`/`Explored` group
   with compact, bullet-free child rows; only the group header carries the
   bullet. Bash grep calls display as "Search" and join the discovery
-  group. The grouping contract is:
+  group. Consecutive working calls (`edit`, `write`, and non-grep `bash`)
+  fold into a `Working`/`Worked` group with the same structure. The
+  grouping contract is:
   - **First-member ownership:** The first discovery call that creates a
     group anchors the group header (`renderOwner`) and keeps it for the
     rest of the turn. Ownership never migrates to later calls. New
     discovery calls append as child rows under the existing header.
-  - **Per-turn grouping with thinking-only continuity:** Discovery calls
-    group within a single turn. `beginTurn()` (fired on `turn_start`)
-    does NOT reset grouping state — instead, grouping is reset lazily in
-    `registerCall()` only when the current turn has produced visible text
-    output (tracked via `noteVisibleText()`, called from `message_update`
-    on `text_start`/`text_delta`). A turn that only streams thinking
-    tokens and then does discovery calls appends to the previous turn's
-    group so exploration stays coherent when nothing visible separates
-    the turns. Cross-turn grouping was removed because new-turn discovery
-    calls joined the previous turn's group as non-owners, rendering empty
-    and vanishing below thinking traces; the thinking-only exception
-    preserves coherent grouping when there is genuinely nothing visible
-    between turns.
-  - **Monotonic group-scoped label:** The `Exploring`→`Explored` label is
-    driven by a group-scoped `hasNonDiscovery` flag. Once a non-discovery
-    tool call appears in the group, the flag is sticky for the rest of
-    the turn. The label does not flip back.
+  - **Per-turn grouping with hidden-thinking continuity:** Discovery calls
+    group within a single turn. At `turn_end`, the renderer permits the
+    next turn to continue the previous group only when thinking blocks are
+    hidden, the assistant emitted no visible text, and no user message was
+    injected. Otherwise `beginTurn()` (fired on `turn_start`) clears the
+    grouping state before the next discovery call. This prevents agent
+    replies and user messages from causing a later tool call to rewrite an
+    old `Exploring` block. The hidden-thinking state is shared by
+    `pi-ember-ui` and `pi-compact-tools`; assistant text and user-message
+    boundaries come from lifecycle events.
+  - **Monotonic group-scoped label (settled-gated):** The `Exploring`→`Explored` and
+    `Working`→`Worked` labels flip to the past tense only when **all members
+    have completed AND the group is settled** — i.e. the agent has
+    demonstrably moved on. A group settles when the agent emits visible
+    text (`noteVisibleText`), starts a non-group tool
+    (`markNonDiscoveryGroups`), starts a tool in the *other* group
+    (cross-group settling: discovery settles working and vice versa), or
+    the turn ends (`endTurn`). While all members are complete but the group
+    is not yet settled, the label stays present tense with the live
+    gradient and `hasActiveGroups()` remains true so the Thinking/Working
+    widget stays hidden (no duplication). The `hasNonDiscovery` flag is
+    retained for backward compatibility but no longer gates the label —
+    `allDone && settled` is sufficient. The `settled` flag lives on
+    `DiscoveryGroup`; `settleGroup`/`settleGroups` are the single setters.
+  - **Group-header gradient tick:** While a group is not settled, the
+    owner's `invalidate` is subscribed to the thinking tick via
+    `subscribeGroupTick`/`unsubscribeGroupTick` (exported from
+    `pi-ember-ui/index.ts`, backed by the single `thinkingTimer`). This
+    makes the group header gradient sweep at the same `THINKING_TICK_MS`
+    cadence as the Thinking/Working widget. The tick timer stays alive
+    while any group subscriber is active even if thinking/working are
+    inactive (`maybeStopThinkingTick` guards all three). Subscriptions
+    are removed on settle and session reset.
   - **Owner-only invalidation:** Joining a group invalidates only the
     group owner (one invalidation), not all members. This eliminates
     duplicate-header flicker and extra blank lines. This invalidation
@@ -212,13 +275,33 @@ mechanisms aligned with the actual plugin folders.
   `PULSE_INTERVAL_MS`, `statusBulletColor`, `groupBulletColorFromFlags`,
   `PulseManager`, and `BULLET` for reuse by other plugins (notably the
   subagent renderer). Never duplicate pulse timing or bullet-color logic;
-  import from here.
+  import from here. `renderer.ts` also exports `hasActiveGroups()` on
+  `CompactRenderer` and imports `renderLiveThinkingGradient` from
+  `pi-ember-ui/index.ts` to render the live gradient on the `Exploring`/
+  `Working` group header while any member is running (reverting to plain
+  bold `Explored`/`Worked` when all complete). The `isToolGroupActive`
+  flag in `pi-ember-ui/mode-colors.ts` is driven from this plugin's
+  lifecycle handlers via `hasActiveGroups()`.
 
 ### `pi-custom-agents`
 
 - Owns `/coder`, `/architect`, `/doctor`, `/orchestrator`, and `/ui-doctor`.
 - Owns the plan-review flow, questionnaire tool, footer, mode cycling, and
   `/subagent-model`.
+- **Plan-mode output-limit auto-continue:** When the model hits the maximum
+  output token limit (`stopReason === "length"`) while generating a plan in
+  plan mode, the extension silently sends a hidden `"continue"` custom
+  message (`pi-agents-plan-continue`, `display: false`) via `pi.sendMessage()`
+  so the user never sees the error row or the recovery prompt. The
+  suppression flag (`isPlanAutoContinuing`/`setPlanAutoContinuing`) lives in
+  `pi-ember-ui/mode-colors.ts` (SSOT) and is set in the `message_end` handler
+  (before the TUI renders the error row) and cleared in `agent_settled` /
+  `session_shutdown`. The `pi-ember-ui` `AssistantMessageComponent` patch
+  suppresses the length-error row when the flag is active and the active mode
+  is `plan`. A max-continue budget (`PLAN_AUTO_CONTINUE_MAX`, 5) prevents
+  infinite loops; after the budget is exhausted the error surfaces normally.
+  Never duplicate the suppression flag or the auto-continue logic in other
+  plugins.
 - Owns the `shift+t` thinking-level cycle through the extension editor. `ctrl+t`
   remains Pi's built-in thinking visibility toggle.
 - The model picker uses `shift+m`; never bind `ctrl+m`, because macOS/Linux
@@ -241,6 +324,12 @@ mechanisms aligned with the actual plugin folders.
   and `PulseManager` from `pi-compact-tools/renderer.ts` — never duplicate
   them. The runner owns completion through `session.prompt()` and disposes
   only after that promise settles; never race `agent_end` against disposal.
+  The worker script is inline JS executed via `new Worker(code, { eval: true })`.
+  `@earendil-works/pi-coding-agent` is ESM-only (`"type": "module"`, exports
+  map has no `require` condition), so the worker and
+  `loadProjectContextFilesCompat` MUST use dynamic `await import()` — never
+  `require()` — to load the package. A `require()` call fails with
+  `No "exports" main defined` and crashes the worker before it can start.
   When the subagent is the latest running tool call, a full-opacity
   `border`-colored horizontal cap line is drawn above the box (visually
   extending the chatbox upward), gated on `isLatestSubagentRunning()` from
@@ -302,6 +391,30 @@ mechanisms aligned with the actual plugin folders.
 - Path constraint normalization (`normalizePathConstraint`,
   `normalizeExcludes`, `buildQuery`) lives in `query.ts` — never duplicate
   path-mapping logic in the tool execute functions.
+
+### `pi-web-access`
+
+- Vendored from `pi-web-access` by Nico Bailon (MIT License, see
+  `plugins/pi-web-access/LICENSE`). Original source:
+  https://github.com/nicobailon/pi-web-access
+- Provides `web_search`, `fetch_content`, and `get_search_content` tools,
+  plus `/websearch`, `/curator`, `/google-account`, and `/search` commands.
+- Supports multiple search providers: OpenAI, Brave, Parallel, Tavily, Exa,
+  Perplexity, and Gemini.
+- The bundled `librarian` skill lives in `plugins/pi-web-access/skills/` and
+  is registered via `resources_discover` from the extension wrapper.
+- The extension wrapper (`extensions/index.ts`) dynamically imports the
+  vendored `index.ts` so the vendored source — which has type drift against
+  pi 0.80 — is not pulled into our strict `tsc` compilation. The vendored
+  `.ts` files are excluded from `tsconfig.json` and `biome.json` until they
+  are brought into compliance. The runtime import works correctly via jiti.
+- The vendored tests (`test/*.test.mjs`) use `node:test`, not `bun:test`, so
+  they are excluded from the bun test gate in `t.gate.sh`.
+- Runtime dependencies (`@mozilla/readability`, `linkedom`, `p-limit`,
+  `turndown`, `unpdf`) are declared in the root `package.json`.
+- When customizing vendored files, bring them into compliance with our
+  TypeScript strict mode and Biome lint rules, then remove them from the
+  `tsconfig.json` and `biome.json` exclude lists.
 
 ## Non-Negotiable Code Rules
 

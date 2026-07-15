@@ -388,9 +388,12 @@ export function renderSubagentLayout(
 		const hasError = statuses.some((s) => s === "failed");
 		const allDone = statuses.every((s) => s !== "running");
 		const lines = [renderGroupLabel("Subagents", hasError, allDone, theme)];
-		for (const [i, t] of tasks.entries()) {
+		for (const [i] of tasks.entries()) {
 			const prefix = i === 0 ? "  └ " : "    ";
-			lines.push(fg("dim", prefix) + renderAgentLabel(statuses[i], t.agent, theme, results[i]));
+			// Use the lettered display name from the result (e.g. "Coder A"),
+			// not the bare type name from the args.
+			const name = results[i]?.agent ?? tasks[i].agent;
+			lines.push(fg("dim", prefix) + renderAgentLabel(statuses[i], name, theme, results[i]));
 		}
 		return lines.join("\n");
 	}
@@ -404,9 +407,12 @@ export function renderSubagentLayout(
 		const hasError = statuses.some((s) => s === "failed");
 		const allDone = statuses.length > 0 && statuses.every((s) => s !== "running");
 		const lines = [renderGroupLabel("Subagents", hasError, allDone, theme)];
-		for (const [i, step] of started.entries()) {
+		for (const [i] of started.entries()) {
 			const prefix = i === 0 ? "  └ " : "    ";
-			lines.push(fg("dim", prefix) + renderAgentLabel(statuses[i], step.agent, theme, results[i]));
+			// Use the lettered display name from the result (e.g. "Coder A"),
+			// not the bare type name from the args.
+			const name = results[i]?.agent ?? chain[i].agent;
+			lines.push(fg("dim", prefix) + renderAgentLabel(statuses[i], name, theme, results[i]));
 		}
 		return lines.join("\n");
 	}

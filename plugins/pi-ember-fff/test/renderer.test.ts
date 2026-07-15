@@ -1,5 +1,14 @@
 import { describe, expect, mock, test } from "bun:test";
-import { CompactRenderer, formatCallBody, DISCOVERY_TOOLS } from "../../pi-compact-tools/renderer.ts";
+import {
+	CompactRenderer,
+	DISCOVERY_TOOLS,
+	formatCallBody,
+	PULSE_INTERVAL_MS,
+} from "../../pi-compact-tools/renderer.ts";
+
+function stripAnsi(s: string): string {
+	return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
 
 function makeTheme() {
 	const fg = mock((tag: string, text: string) => `[${tag}:${text}]`);
@@ -19,13 +28,13 @@ function makeContext(id: string, state: Record<string, any> = {}) {
 }
 
 describe("CompactRenderer", () => {
-	test("beginTurn alone does not reset grouping — thinking-only turns stay grouped", () => {
+	test("hidden thinking with no text carries grouping across turns", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const ctx1 = makeContext("a");
 		r.renderCall("read", { file_path: "foo.ts" }, theme, ctx1 as any);
+		r.endTurn(true);
 		r.beginTurn();
-		// No visible text in this turn — discovery calls should join the previous group
 		const ctx2 = makeContext("b");
 		r.renderCall("read", { file_path: "bar.ts" }, theme, ctx2 as any);
 		const record = (r as any).calls.get("b");
@@ -38,6 +47,7 @@ describe("CompactRenderer", () => {
 		const theme = makeTheme() as any;
 		const ctx1 = makeContext("a");
 		r.renderCall("read", { file_path: "foo.ts" }, theme, ctx1 as any);
+		r.endTurn(true);
 		r.beginTurn();
 		// Simulate visible text output in the new turn
 		r.noteVisibleText();
@@ -45,6 +55,27 @@ describe("CompactRenderer", () => {
 		r.renderCall("read", { file_path: "bar.ts" }, theme, ctx2 as any);
 		const record = (r as any).calls.get("b");
 		expect(record.group).toBeUndefined();
+	});
+
+	test("visible thinking blocks do not carry grouping across turns", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		r.renderCall("read", { file_path: "foo.ts" }, theme, makeContext("a") as any);
+		r.endTurn(false);
+		r.beginTurn();
+		r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
+		expect((r as any).calls.get("b").group).toBeUndefined();
+	});
+
+	test("a user message prevents hidden-thinking carry-over", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		r.renderCall("read", { file_path: "foo.ts" }, theme, makeContext("a") as any);
+		r.endTurn(true);
+		r.beginTurn();
+		r.noteUserMessage();
+		r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
+		expect((r as any).calls.get("b").group).toBeUndefined();
 	});
 
 	test("discovery group within a turn persists after an intervening non-discovery tool", () => {
@@ -68,7 +99,7 @@ describe("CompactRenderer", () => {
 		r.renderCall("grep", { pattern: "foo", path: "src/" }, theme, memberContext as any);
 
 		const owner = r.renderCall("read", { file_path: "a.ts" }, theme, ownerContext as any) as any;
-		expect(owner.text).toContain("Exploring");
+		expect(stripAnsi(owner.text)).toContain("Exploring");
 		expect(owner.text).toContain("a.ts");
 		expect(owner.text).toContain("foo");
 		expect(owner.text.match(/•/g)?.length).toBe(1);
@@ -109,7 +140,7 @@ describe("CompactRenderer", () => {
 		// The owner (A, the first call) renders the full group
 		const groupCall = r.renderCall("read", { file_path: "a.ts" }, theme, readContext as any) as any;
 
-		expect(groupCall.text).toContain("Exploring");
+		expect(stripAnsi(groupCall.text)).toContain("Exploring");
 		expect(groupCall.text).toContain("Search");
 		expect(groupCall.text).toContain("Read");
 		expect(groupCall.text.match(/•/g)?.length).toBe(1);
@@ -134,15 +165,16 @@ describe("CompactRenderer", () => {
 		expect(groupCall.text).toContain("Search");
 	});
 
-	test("non-discovery tools do not group", () => {
+	test("non-discovery tools group under Working", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		r.renderCall("bash", { command: "ls" }, theme, makeContext("a") as any);
 		r.renderCall("edit", { file_path: "x.ts" }, theme, makeContext("b") as any);
 		const recA = (r as any).calls.get("a");
 		const recB = (r as any).calls.get("b");
-		expect(recA.group).toBeUndefined();
-		expect(recB.group).toBeUndefined();
+		// Non-grep bash and edit now group under the Working group.
+		expect(recA.group).toBeDefined();
+		expect(recB.group).toBe(recA.group);
 	});
 
 	test("renderResult returns empty for bash on success", () => {
@@ -334,7 +366,7 @@ describe("CompactRenderer", () => {
 		expect((compB2 as any).text).toBe("");
 		// Re-rendering the owner A renders the full group with both children
 		const compA2 = r.renderCall("read", { file_path: "a.ts" }, theme, ctx1 as any);
-		expect((compA2 as any).text).toContain("Exploring");
+		expect(stripAnsi((compA2 as any).text)).toContain("Exploring");
 		expect((compA2 as any).text).toContain("a.ts");
 		expect((compA2 as any).text).toContain("b.ts");
 	});
@@ -478,7 +510,7 @@ describe("CompactRenderer", () => {
 		expect((comp as any).text).toContain("Error: not found");
 	});
 
-	test("group stays 'Exploring' after all discovery calls complete (no non-discovery call yet)", () => {
+	test("group flips to 'Explored' when all discovery calls complete", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const stateA: Record<string, any> = {};
@@ -501,10 +533,13 @@ describe("CompactRenderer", () => {
 			theme,
 			{ ...makeContext("b", stateB), isError: false } as any,
 		);
-		// Re-render the owner (A) to see the group label
+		// Settle the group (turn end) so the label flips to past tense —
+		// all members complete AND the agent has moved on.
+		r.endTurn(true);
+		// Re-render the owner (A) to see the group label — all done → Explored
 		const groupCall = r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any) as any;
-		expect(groupCall.text).toContain("Exploring");
-		expect(groupCall.text).not.toContain("Explored");
+		expect(stripAnsi(groupCall.text)).toContain("Explored");
+		expect(stripAnsi(groupCall.text)).not.toContain("Exploring");
 	});
 
 	test("group flips to 'Explored' after a non-discovery tool call", () => {
@@ -572,8 +607,8 @@ describe("CompactRenderer", () => {
 		const theme = makeTheme() as any;
 		const stateA: Record<string, any> = {};
 		r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any);
+		r.endTurn(true);
 		r.beginTurn();
-		// No noteVisibleText() — thinking-only turn
 		r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
 		const recA = (r as any).calls.get("a");
 		const recB = (r as any).calls.get("b");
@@ -613,7 +648,7 @@ describe("CompactRenderer", () => {
 		expect(ownerComp.text).not.toContain("Exploring");
 	});
 
-	test("joining a group invalidates only the owner", () => {
+	test("joining a group invalidates only the owner after the render stack", async () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const invalidateA = mock(() => {});
@@ -623,12 +658,52 @@ describe("CompactRenderer", () => {
 		r.renderCall("read", { file_path: "a.ts" }, theme, ctxA as any);
 		// B joins the group
 		r.renderCall("grep", { pattern: "foo" }, theme, ctxB as any);
+		expect(invalidateA).not.toHaveBeenCalled();
+		await Promise.resolve();
 		// After B joins, re-render A (the owner) to confirm the group is intact
 		const ownerComp = r.renderCall("read", { file_path: "a.ts" }, theme, ctxA as any) as any;
 		expect(ownerComp.text).toContain("a.ts");
 		expect(ownerComp.text).toContain("foo");
 		expect(invalidateA).toHaveBeenCalledTimes(1);
 		expect(invalidateB).not.toHaveBeenCalled();
+	});
+
+	test("native tool rows do not keep a pulse timer", async () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const firstInvalidate = mock(() => {});
+		const replacementInvalidate = mock(() => {});
+		const args = { file_path: "a.ts" };
+
+		r.renderCall("read", args, theme, {
+			args,
+			toolCallId: "a",
+			invalidate: firstInvalidate,
+			state: {},
+		} as any);
+
+		// This is the compact plugin's tool_call hook, which has no component
+		// invalidator because Pi has not exposed one at that lifecycle point.
+		r.registerCall("read", "a", args);
+
+		r.renderResult(
+			"read",
+			args,
+			{ content: [{ type: "text", text: "ok" }] },
+			{ isPartial: false },
+			theme,
+			{
+				args,
+				toolCallId: "a",
+				invalidate: replacementInvalidate,
+				state: {},
+				isError: false,
+			} as any,
+		);
+
+		await new Promise((resolve) => setTimeout(resolve, PULSE_INTERVAL_MS + 50));
+		expect(firstInvalidate).not.toHaveBeenCalled();
+		expect(replacementInvalidate).not.toHaveBeenCalled();
 	});
 
 	test("group survives Pi rebuild (thinking-toggle) with fresh context.state and invalidate", () => {
@@ -662,6 +737,9 @@ describe("CompactRenderer", () => {
 			{ ...ctxB1, isError: false } as any,
 		);
 
+		// Settle the group (turn end) before rebuild so the label is past tense.
+		r.endTurn(true);
+
 		const recA = (r as any).calls.get("a");
 		const recB = (r as any).calls.get("b");
 		expect(recA.group).toBeDefined();
@@ -680,7 +758,7 @@ describe("CompactRenderer", () => {
 
 		// Owner re-renders the full group into a fresh Text
 		const ownerComp = r.renderCall("read", { file_path: "a.ts" }, theme, ctxA2 as any) as any;
-		expect(ownerComp.text).toContain("Exploring");
+		expect(stripAnsi(ownerComp.text)).toContain("Explored");
 		expect(ownerComp.text).toContain("a.ts");
 		expect(ownerComp.text).toContain("foo");
 		expect(ownerComp.text.match(/•/g)?.length).toBe(1);

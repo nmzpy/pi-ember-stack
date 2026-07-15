@@ -8,10 +8,11 @@ import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
+import piWebAccessPlugin from "./pi-web-access/extensions/index.ts";
 
 export { getSharedRenderer };
 
-type PluginId = "pi-compact-tools" | "pi-custom-agents" | "devin-auth" | "pi-ember-fff" | "pi-ember-ui" | "pi-ember-tps";
+type PluginId = "pi-compact-tools" | "pi-custom-agents" | "devin-auth" | "pi-ember-fff" | "pi-ember-ui" | "pi-ember-tps" | "pi-web-access";
 type StackPlugin = {
 	id: PluginId;
 	description: string;
@@ -30,6 +31,7 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-ember-fff",
 	"pi-ember-ui",
 	"pi-ember-tps",
+	"pi-web-access",
 ];
 
 const PLUGINS: readonly StackPlugin[] = [
@@ -62,6 +64,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-ember-tps",
 		description: "Tokens-per-second meter with sparkline trend and live gauge",
 		extension: piEmberTpsPlugin,
+	},
+	{
+		id: "pi-web-access",
+		description: "Web search, URL fetching, GitHub cloning, PDF/YouTube/video extraction",
+		extension: piWebAccessPlugin,
 	},
 ];
 

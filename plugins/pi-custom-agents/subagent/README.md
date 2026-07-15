@@ -14,12 +14,15 @@ pi install ./pi-subagent
 
 | Role | Model | Thinking | Tools |
 | --- | --- | --- | --- |
-| `scout` | parent model | low | read, grep, find, ls |
-| `reviewer` | parent model | high | read, grep, find, ls |
-| `worker` | parent model | medium | standard coding tools |
-| `general-purpose` | parent model | off | standard coding tools |
+| `Scout` | parent model | high | read, bash, grep, find, ls |
+| `Coder` | parent model | medium | read, bash, edit, write, grep, find, ls |
 
 Bundled roles inherit the parent model so they work with the account already active in Pi. User/project agent files may override `model` and `thinking`.
+
+## Agent naming
+
+- **Single mode** shows the bare agent name: `Scout` or `Coder`.
+- **Parallel/chain mode** assigns a session-global per-type letter so individual agents are easy to track: `Coder A`, `Coder B`, `Scout A`, `Scout B`, etc. The letter persists across tool calls within a session and resets on session replacement (`/resume`, `/new`, `/fork`, `/reload`). The lettered name appears in the TUI render, the thread viewer, and the tool result text returned to the orchestrating agent.
 
 ## Agent files
 
@@ -27,7 +30,7 @@ Create `~/.pi/agent/agents/*.md` or `.pi/agents/*.md`:
 
 ```markdown
 ---
-name: scout-fast
+name: Scout-fast
 description: Locate relevant files and symbols
 tools: read, grep, find, ls
 thinking: low

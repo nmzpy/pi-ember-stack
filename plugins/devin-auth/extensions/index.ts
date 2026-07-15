@@ -117,16 +117,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     // — trigger pi's uncaughtException handler and crash the process.
     // These are expected during cancellation, not real errors.
     //
-    // Non-abort rejections are genuine bugs: temporarily remove the guard,
-    // re-emit so pi's crash handler surfaces them, then re-attach.
+    // Non-abort rejections are genuine bugs. Re-throw them through the normal
+    // uncaught-exception path without creating another rejected promise.
     const abortRejectionHandler = (reason: unknown): void => {
-        const isAbort =
-            reason instanceof DOMException && reason.name === 'AbortError';
+        const reasonName =
+            typeof reason === 'object' && reason !== null
+                ? (reason as { name?: unknown }).name
+                : undefined;
+        const isAbort = reasonName === 'AbortError';
         if (isAbort) return; // expected during cancellation
-        // Re-emit non-abort rejections so they are not silently swallowed.
-        process.off('unhandledRejection', abortRejectionHandler);
-        process.emit('unhandledRejection', reason, Promise.reject(reason));
-        process.on('unhandledRejection', abortRejectionHandler);
+        queueMicrotask(() => {
+            throw reason;
+        });
     };
     process.on('unhandledRejection', abortRejectionHandler);
 

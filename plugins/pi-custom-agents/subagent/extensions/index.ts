@@ -4,9 +4,9 @@
  * Provides a `subagent` tool that delegates tasks to specialized agents
  * running in isolated in-process SDK sessions. Supports three modes:
  *
- *   - Single:  { agent: "scout", task: "find auth code" }
- *   - Parallel: { tasks: [{ agent: "scout", task: "..." }, ...] }
- *   - Chain:    { chain: [{ agent: "scout", task: "..." }, ...] }
+ *   - Single:  { agent: "Scout", task: "find auth code" }
+ *   - Parallel: { tasks: [{ agent: "Scout", task: "..." }, ...] }
+ *   - Chain:    { chain: [{ agent: "Scout", task: "..." }, ...] }
  *
  * Compared to process-spawning, this saves ~4-11K tokens per sub-agent
  * by using the pi SDK directly with a minimal system prompt, no AGENTS.md,
@@ -157,28 +157,51 @@ export default function (pi: ExtensionAPI) {
 		else subagentPulses.remove(invalidate);
 	}
 
+	// Session-global per-type letter counters for parallel/chain agents.
+	// Each agent type (e.g. "Coder", "Scout") gets its own A, B, C… sequence
+	// that persists across tool calls within a session and resets on session
+	// replacement. Single-mode calls do NOT get a letter.
+	const agentLetterCounters = new Map<string, number>();
+
+	function assign_agent_letter(agentName: string): string {
+		const index = agentLetterCounters.get(agentName) ?? 0;
+		agentLetterCounters.set(agentName, index + 1);
+		// A-Z for 0-25, then AA, AB, AC… for 26+
+		let letter: string;
+		if (index < 26) {
+			letter = String.fromCharCode(65 + index);
+		} else {
+			const first = Math.floor(index / 26) - 1;
+			const second = index % 26;
+			letter = String.fromCharCode(65 + first) + String.fromCharCode(65 + second);
+		}
+		return `${agentName} ${letter}`;
+	}
+
 	// Invalidate agent cache + clear thread store on session replacement.
 	pi.on("session_start", (event, ctx) => {
 		currentCtx = ctx;
 		if (event.reason === "reload") invalidateAgentCache();
 		threadStore.clear();
 		subagentPulses.clear();
+		agentLetterCounters.clear();
 	});
 
 	pi.on("session_shutdown", () => {
 		currentCtx = undefined;
 		threadStore.clear();
 		subagentPulses.clear();
+		agentLetterCounters.clear();
 	});
 
 	// Proactively steer agents toward sub-agent delegation when users mention it
 	pi.on("before_agent_start", async (event) => {
 		const prompt = event.prompt.toLowerCase();
-		if (/\b(delegate to|use a subagent|run in parallel|spawn an agent|scout|explore|review this|chain|worker agent)\b/.test(prompt)) {
+		if (/\b(delegate to|use a subagent|run in parallel|spawn an agent|scout|coder|explore|review this|chain)\b/.test(prompt)) {
 			return {
 				systemPrompt:
 					event.systemPrompt +
-					"\n\nThe subagent tool is available for delegating tasks to specialized agents with isolated context. Use /subagent to list available agents. Bundled: scout (fast codebase exploration), coder (implementation), reviewer (code review), worker (general implementation), general-purpose (fallback). Modes: single, parallel (max 8), chain.",
+					"\n\nThe subagent tool is available for delegating tasks to specialized agents with isolated context. Use /subagent to list available agents. Bundled: Scout (fast codebase exploration), Coder (implementation). Modes: single, parallel (max 8), chain.",
 			};
 		}
 	});
@@ -309,11 +332,11 @@ export default function (pi: ExtensionAPI) {
 		].join(" "),
 		parameters: SubagentParams,
 		renderShell: "self",
-		promptSnippet: "Delegate tasks to specialized sub-agents (scout, reviewer, worker, general-purpose)",
+		promptSnippet: "Delegate tasks to specialized sub-agents (Scout, Coder)",
 		promptGuidelines: [
 			"Use subagent to delegate work that would flood the main context with search results or file contents.",
 			"Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}).",
-			"Bundled agents: scout (fast recon), reviewer (code review), worker (implementation), general-purpose (fallback).",
+			"Bundled agents: Scout (fast recon), Coder (implementation).",
 			"Use /subagent to list all available agents or /subagent <name> for agent details.",
 		],
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -419,14 +442,19 @@ export default function (pi: ExtensionAPI) {
 				cwd: string | undefined,
 				parentSignal?: AbortSignal,
 				timeoutMs?: number,
-			onProgress?: (partial: SubAgentResult) => void,
+				onProgress?: (partial: SubAgentResult) => void,
+				displayName?: string,
 			): Promise<SubAgentResult> {
 				const agent = agents.find((a) => a.name === agentName);
+
+				// Use the provided display name (lettered for parallel/chain) or
+				// fall back to the bare agent name (single mode).
+				const label = displayName ?? agentName;
 
 				if (!agent) {
 					const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
 					return {
-						agent: agentName,
+						agent: label,
 						task,
 						exitCode: 1,
 						messages: [],
@@ -441,7 +469,7 @@ export default function (pi: ExtensionAPI) {
 					const tried = resolved.attempted.join(", ") || "none";
 					const parentInfo = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
 					return {
-						agent: agentName,
+						agent: label,
 						task,
 						exitCode: 1,
 						messages: [],
@@ -481,7 +509,7 @@ export default function (pi: ExtensionAPI) {
 						authStorage,
 						modelRegistry,
 						signal: combinedSignal,
-						agentName,
+						agentName: label,
 						thinkingLevel: agent.thinking,
 						onMessage: onProgress,
 					});
@@ -511,10 +539,13 @@ export default function (pi: ExtensionAPI) {
 						mode: "chain-step",
 						toolCallId: _toolCallId,
 					});
+					// Assign a session-global letter for chain mode so the user and
+					// orchestrating agent can track individual agents.
+					const stepDisplayName = assign_agent_letter(step.agent);
 					// Publish the active step before awaiting it so chain mode shows
 					// the running agent's gradient instead of an empty group header.
 					results.push({
-						agent: step.agent,
+						agent: stepDisplayName,
 						task: taskWithContext,
 						exitCode: -1,
 						messages: [],
@@ -531,6 +562,7 @@ export default function (pi: ExtensionAPI) {
 						step.agent, taskWithContext, step.cwd,
 						signal, step.timeout ?? params.timeout,
 						(partial) => threadStore.updateThread(thread.id, { result: partial }),
+						stepDisplayName,
 					);
 					threadStore.updateThread(thread.id, {
 						status: isFailedResult(result) ? (result.stopReason === "aborted" ? "aborted" : "failed") : "completed",
@@ -625,9 +657,10 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// Pre-create threads for all parallel tasks
-				const parallelThreads = params.tasks.map((t) =>
+				const parallelDisplayNames = params.tasks.map((t) => assign_agent_letter(t.agent));
+				const parallelThreads = params.tasks.map((t, i) =>
 					threadStore.createThread({
-						agentName: t.agent,
+						agentName: parallelDisplayNames[i],
 						task: t.task,
 						mode: "parallel-task",
 						toolCallId: _toolCallId,
@@ -638,7 +671,7 @@ export default function (pi: ExtensionAPI) {
 				// Initialize placeholder results for streaming
 				for (let i = 0; i < params.tasks.length; i++) {
 					allResults[i] = {
-						agent: params.tasks[i].agent,
+						agent: parallelDisplayNames[i],
 						task: params.tasks[i].task,
 						exitCode: -1,
 						messages: [],
@@ -670,7 +703,7 @@ export default function (pi: ExtensionAPI) {
 						// Skip if already aborted by sibling failure or parent abort
 						if (parallelSignal.aborted || parallelController.signal.aborted) {
 							const skippedResult: SubAgentResult = {
-								agent: t.agent,
+								agent: parallelDisplayNames[index],
 								task: t.task,
 								exitCode: 1,
 								messages: [],
@@ -693,7 +726,8 @@ export default function (pi: ExtensionAPI) {
 						const result = await runOne(
 							t.agent, t.task, t.cwd,
 							parallelSignal, t.timeout ?? params.timeout,
-						(partial) => threadStore.updateThread(parallelThreads[index].id, { result: partial }),
+							(partial) => threadStore.updateThread(parallelThreads[index].id, { result: partial }),
+							parallelDisplayNames[index],
 						);
 						allResults[index] = result;
 						threadStore.updateThread(parallelThreads[index].id, {

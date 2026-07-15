@@ -18,6 +18,7 @@ import {
 	type ToolRenderContext,
 	type ToolRenderResultOptions,
 } from "./renderer.ts";
+import { isThinkingBlocksHidden, setToolGroupActive } from "../pi-ember-ui/mode-colors.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,8 +45,12 @@ function registerCompactTool(
 		name,
 		label: name,
 		description: definition.description,
+		promptSnippet: definition.promptSnippet,
+		promptGuidelines: definition.promptGuidelines,
 		parameters: definition.parameters,
 		renderShell: "self",
+		prepareArguments: definition.prepareArguments,
+		executionMode: definition.executionMode,
 
 		async execute(
 			toolCallId: string,
@@ -84,6 +89,13 @@ export function getSharedRenderer(): CompactRenderer {
 export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	const renderer = getSharedRenderer();
 	pi.on("turn_start", () => renderer.beginTurn());
+	pi.on("turn_end", (event: any) => {
+		renderer.endTurn(isThinkingBlocksHidden(), event?.message);
+		setToolGroupActive(false);
+	});
+	pi.on("message_start", (event: any) => {
+		if (event?.message?.role === "user") renderer.noteUserMessage();
+	});
 	pi.on("message_update", (event: any) => {
 		// When the model streams visible text (not just thinking tokens),
 		// mark the turn as having visible output so the next discovery
@@ -97,13 +109,23 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event: any) => {
 		if (GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName]) {
 			renderer.registerCall(event.toolName, event.toolCallId, event.input);
+			setToolGroupActive(renderer.hasActiveGroups());
 		}
+	});
+	// A completed group member may flip the group-active flag to false
+	// (all members done) — update the shared flag so the Thinking/Working
+	// widget can return and the group header reverts to plain bold.
+	pi.on("tool_execution_end", () => {
+		setToolGroupActive(renderer.hasActiveGroups());
 	});
 	// Reset the shared renderer on session replacement so stale call rows
 	// from the previous session do not leak into the new one. The renderer
 	// is module-level (shared across sessions because jiti caches the
 	// module), so it must be explicitly cleared.
-	pi.on("session_start", () => renderer.resetForSession());
+	pi.on("session_start", () => {
+		renderer.resetForSession();
+		setToolGroupActive(false);
+	});
 	for (const [name, factory] of Object.entries(TOOL_FACTORIES)) {
 		registerCompactTool(pi, name, factory, renderer);
 	}

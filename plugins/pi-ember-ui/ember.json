@@ -56,8 +56,8 @@
 		"toolTitle": "text",
 		"toolOutput": "gray",
 
-		"mdHeading": "#f0c674",
-		"mdLink": "#81a2be",
+		"mdHeading": "emberAccent90",
+		"mdLink": "emberAccent90",
 		"mdLinkUrl": "dimGray",
 		"mdCode": "text",
 		"mdCodeBlock": "green",

@@ -11,5 +11,8 @@
     "types": ["node"]
   },
   "include": ["plugins/**/*.ts"],
-  "exclude": ["plugins/**/test/**"]
+  "exclude": [
+    "plugins/**/test/**",
+    "plugins/pi-web-access/*.ts"
+  ]
 }

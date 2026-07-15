@@ -1,4 +1,9 @@
 import { Text, type Component } from "@earendil-works/pi-tui";
+import {
+	renderLiveThinkingGradient,
+	subscribeGroupTick,
+	unsubscribeGroupTick,
+} from "../pi-ember-ui/index.ts";
 
 const BULLET = "• ";
 const DISCOVERY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -30,12 +35,23 @@ export type CompactCall = {
 
 export type DiscoveryGroup = {
 	records: CompactCall[];
+	/** Group type: "discovery" (Exploring/Explored) or "working" (Working/Worked). */
+	type?: "discovery" | "working";
 	/**
 	 * The record whose component renders the group header. Set once at
 	 * group creation to the first member and never changed.
 	 */
 	renderOwner?: CompactCall;
 	hasNonDiscovery?: boolean;
+	/**
+	 * Whether the agent has demonstrably moved on from this group (emitted
+	 * visible text, started a non-group tool, or the turn ended). The label
+	 * only flips to past tense (Explored/Worked) when both all members are
+	 * complete AND the group is settled. While complete-but-unsettled, the
+	 * group stays active (gradient + present tense) so the Thinking/Working
+	 * widget stays hidden and there is no premature past-tense label.
+	 */
+	settled?: boolean;
 	/**
 	 * Shared visual handle for the group block. The owner re-binds this
 	 * to its live `Text` on every `renderCall`; members write into it
@@ -87,11 +103,12 @@ function bashGrepInfo(command: string): { pattern: string; path: string } | unde
 
 function groupKey(name: string, args: any): string | undefined {
 	if (DISCOVERY_TOOLS.has(name)) return "__discovery__";
+	if (name === "edit" || name === "write") return "__working__";
 	if (name === "bash") {
 		const command = textValue(args?.command);
 		if (bashGrepInfo(command)) return "__discovery__";
 		const dir = bashCdDir(command);
-		return dir ? `bash:${dir}` : undefined;
+		return dir ? `bash:${dir}` : "__working__";
 	}
 	return undefined;
 }
@@ -163,7 +180,7 @@ export const PULSE_INTERVAL_MS = 600;
 /**
  * Canonical status-bullet color: error→red, completed→green, else a
  * flashing muted/dim bullet driven by PULSE_INTERVAL_MS. Shared by the
- * compact renderer and the subagent renderer so the pulse stays in sync.
+ * compact and subagent renderers; only subagent rows own a pulse timer.
  */
 export function statusBulletColor(isError: boolean, isCompleted: boolean, theme: any): string {
 	if (isError) return theme.fg("error", BULLET);
@@ -181,10 +198,11 @@ export function groupBulletColorFromFlags(hasError: boolean, allCompleted: boole
 }
 
 /**
- * Single shared pulse timer. Holds a set of invalidate callbacks and
- * fires them all on one PULSE_INTERVAL_MS interval, starting on first
- * add and stopping when the last callback is removed. One timer drives
- * every flashing bullet in the session.
+ * Shared pulse timer for renderers that need live status animation. Holds
+ * a set of invalidate callbacks and fires them on one PULSE_INTERVAL_MS
+ * interval, starting on first add and stopping when the last callback is
+ * removed. Compact native-tool rows intentionally do not register here:
+ * invalidating a tool row also requests a full TUI render.
  */
 export class PulseManager {
 	private readonly callbacks = new Set<() => void>();
@@ -275,8 +293,11 @@ function groupBulletColor(group: DiscoveryGroup, theme: any): string {
 }
 
 function groupHeaderLabel(group: DiscoveryGroup): string {
-	const allDone = group.records.every((r) => r._completed);
-	const verb = allDone && group.hasNonDiscovery ? "Explored" : "Exploring";
+	const allDone = group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
+	const isWorking = group.type === "working";
+	const verb = allDone
+		? (isWorking ? "Worked" : "Explored")
+		: (isWorking ? "Working" : "Exploring");
 	const first = group.records[0];
 	if (!first) return verb;
 	const key = groupKey(first.name, first.args);
@@ -288,8 +309,13 @@ function groupHeaderLabel(group: DiscoveryGroup): string {
 }
 
 function formatGroup(group: DiscoveryGroup, theme: any): string {
+	const allCompleted = group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
+	const headerLabel = groupHeaderLabel(group);
+	const headerText = allCompleted
+		? theme.fg("text", theme.bold(headerLabel))
+		: renderLiveThinkingGradient(headerLabel);
 	const lines = [
-		groupBulletColor(group, theme) + theme.fg("text", theme.bold(groupHeaderLabel(group))),
+		groupBulletColor(group, theme) + headerText,
 	];
 	for (const [index, record] of group.records.entries()) {
 		const prefix = index === 0 ? "  └ " : "    ";
@@ -312,53 +338,142 @@ export class CompactRenderer {
 	private currentGroup: DiscoveryGroup | undefined;
 	/** The single discovery group persists until session replacement. */
 	private discoveryGroup: DiscoveryGroup | undefined;
-	private readonly pulses = new PulseManager();
+	/** The single working group (edit/write/non-grep bash) persists until session replacement. */
+	private workingGroup: DiscoveryGroup | undefined;
+	private readonly pendingGroupInvalidations = new Set<DiscoveryGroup>();
 
-	/** Whether the current turn has produced visible text output. When
-	 *  true, grouping state is reset so the next discovery call starts a
-	 *  fresh group. When false (thinking-only turns), discovery calls
-	 *  continue appending to the previous turn's group so exploration
-	 *  stays coherent with nothing visible between turns. */
+	/** Tick callback that re-renders the active group owner so the group
+	 *  header gradient sweeps in lockstep with the Thinking/Working
+	 *  widget. Subscribed while any group is unsettled (active); removed
+	 *  on settle or session reset. */
+	private groupTickCb: (() => void) | undefined;
+
+	/** Whether the current turn has produced visible text output. */
 	private turnHasText = false;
+	private turnHasUserMessage = false;
+	private canCarryPreviousGroup = false;
 
 	beginTurn(): void {
-		// Do NOT reset grouping state here. A turn that only streams thinking
-		// tokens (no visible text) and then does discovery calls should
-		// append to the previous turn's group — there is nothing visible
-		// between them. Grouping is reset lazily in registerCall() once we
-		// know the current turn produced visible text (see noteVisibleText()).
+		if (!this.canCarryPreviousGroup) this.resetGroupingState();
+		this.canCarryPreviousGroup = false;
 		this.turnHasText = false;
-		this.pulses.clear();
+		this.turnHasUserMessage = false;
+	}
+
+	endTurn(thinkingHidden: boolean, message?: any): void {
+		this.settleGroups();
+		const messageHasText = Array.isArray(message?.content) && message.content.some(
+			(part: any) => part?.type === "text" && typeof part.text === "string" && part.text.trim(),
+		);
+		this.canCarryPreviousGroup = thinkingHidden && !this.turnHasText && !messageHasText && !this.turnHasUserMessage;
 	}
 
 	/** Called by the plugin when the current turn produces visible text
-	 *  output (text_start/text_delta). Marks the turn as having visible
-	 *  content so the next discovery call starts a fresh group instead
-	 *  of appending to the previous turn's group. */
+	 *  output (text_start/text_delta). Break the old group immediately so
+	 *  an intervening non-discovery tool cannot update it. */
 	noteVisibleText(): void {
+		if (!this.turnHasText) this.settleGroups();
+		if (!this.turnHasText) this.resetGroupingState();
 		this.turnHasText = true;
+	}
+
+	noteUserMessage(): void {
+		if (!this.turnHasUserMessage) this.resetGroupingState();
+		this.turnHasUserMessage = true;
 	}
 
 	/** Clear all accumulated call state. Called on session replacement
 	 *  (/resume, /new, /fork) so stale rows from the previous session do
 	 *  not leak into the new one. */
 	resetForSession(): void {
+		this.unsubscribeGroupTick();
 		this.calls.clear();
 		this.lastCall = undefined;
 		this.lastGroupKey = undefined;
 		this.currentGroup = undefined;
 		this.discoveryGroup = undefined;
-		this.pulses.clear();
+		this.workingGroup = undefined;
+		this.pendingGroupInvalidations.clear();
+		this.turnHasText = false;
+		this.turnHasUserMessage = false;
+		this.canCarryPreviousGroup = false;
+	}
+
+	/** Whether any tool group (discovery or working) currently has at
+	 *  least one running member. Read by pi-compact-tools lifecycle handlers
+	 *  to drive the shared `isToolGroupActive` flag in
+	 *  pi-ember-ui/mode-colors.ts, which suppresses the Thinking/Working
+	 *  widget while a group header carries the live gradient. */
+	hasActiveGroups(): boolean {
+		const groups = [this.discoveryGroup, this.workingGroup, this.currentGroup];
+		for (const group of groups) {
+			if (!group || group.records.length === 0) continue;
+			const allComplete = group.records.every((r) => r._completed);
+			if (group.records.some((r) => !r._completed)) return true;
+			if (allComplete && !group.settled) return true;
+		}
+		return false;
+	}
+
+	/** Settle a single group so its label flips to past tense. No-op if
+	 *  the group is missing, empty, or already settled. */
+	private settleGroup(group: DiscoveryGroup | undefined): void {
+		if (!group || group.records.length === 0 || group.settled) return;
+		group.settled = true;
+		this.scheduleGroupInvalidation(group);
+	}
+
+	/** Settle all live groups so their labels flip to past tense
+	 *  (Explored/Worked). Called when the agent demonstrably moves on:
+	 *  visible text, a non-group tool, or turn end. Idempotent per group
+	 *  via scheduleGroupInvalidation. */
+	private settleGroups(): void {
+		this.settleGroup(this.discoveryGroup);
+		this.settleGroup(this.workingGroup);
+		this.unsubscribeGroupTick();
+	}
+
+	/** Subscribe the group owner to the thinking tick so the group header
+	 *  gradient animates at the same cadence as the Thinking/Working
+	 *  widget. Idempotent — only subscribes once. */
+	private subscribeGroupTick(ownerInvalidate: (() => void) | undefined): void {
+		if (!ownerInvalidate) return;
+		if (this.groupTickCb) return;
+		const cb = (): void => {
+			ownerInvalidate();
+		};
+		this.groupTickCb = cb;
+		subscribeGroupTick(cb);
+	}
+
+	/** Unsubscribe the group tick callback if one is active. */
+	private unsubscribeGroupTick(): void {
+		if (!this.groupTickCb) return;
+		unsubscribeGroupTick(this.groupTickCb);
+		this.groupTickCb = undefined;
+	}
+
+	private resetGroupingState(): void {
+		this.lastCall = undefined;
+		this.lastGroupKey = undefined;
+		this.currentGroup = undefined;
+		this.discoveryGroup = undefined;
+		this.workingGroup = undefined;
+	}
+
+	private scheduleGroupInvalidation(group: DiscoveryGroup): void {
+		if (this.pendingGroupInvalidations.has(group)) return;
+		this.pendingGroupInvalidations.add(group);
+		queueMicrotask(() => {
+			if (!this.pendingGroupInvalidations.delete(group)) return;
+			group.renderOwner?.invalidate?.();
+		});
 	}
 
 	private markNonDiscoveryGroups(): void {
-		const groups = new Set<DiscoveryGroup>();
-		if (this.currentGroup) groups.add(this.currentGroup);
-		if (this.discoveryGroup) groups.add(this.discoveryGroup);
-		for (const group of groups) {
-			group.hasNonDiscovery = true;
-			group.renderOwner?.invalidate?.();
-		}
+		// A non-group tool means the agent moved on from both discovery and
+		// working — settle both so their labels flip to past tense.
+		this.settleGroups();
 	}
 
 	private appendToGroup(group: DiscoveryGroup, record: CompactCall): void {
@@ -368,7 +483,7 @@ export class CompactRenderer {
 		group.records.push(record);
 		record.group = group;
 		this.currentGroup = group;
-		group.renderOwner?.invalidate?.();
+		this.scheduleGroupInvalidation(group);
 	}
 
 	registerCall(
@@ -380,16 +495,12 @@ export class CompactRenderer {
 		const existing = this.calls.get(id);
 		if (existing) {
 			existing.args = args;
-			// On Pi rebuilds (thinking-toggle, compaction, settings) the
-			// ToolExecutionComponent is destroyed and recreated with a fresh
-			// invalidate callback. Swap the old callback out of the
-			// PulseManager and insert the live one so the pulse timer only
-			// fires live components. Completed records are not re-pulsed.
-			if (existing.invalidate && invalidate && existing.invalidate !== invalidate) {
-				this.pulses.remove(existing.invalidate);
+			// Keep the live callback for one-shot group-owner updates. The
+			// tool_call lifecycle hook re-registers existing calls without a
+			// component invalidator, so do not erase it there.
+			if (invalidate) {
+				existing.invalidate = invalidate;
 			}
-			existing.invalidate = invalidate;
-			if (invalidate && !existing._completed) this.pulses.add(invalidate);
 			return existing;
 		}
 
@@ -397,16 +508,12 @@ export class CompactRenderer {
 		this.calls.set(id, record);
 		const key = groupKey(name, args);
 
-		// If the current turn produced visible text, reset grouping so this
-		// call starts a fresh group. Thinking-only turns do NOT reset —
-		// discovery calls append to the previous turn's group so exploration
-		// stays coherent when nothing visible separates the turns.
-		if (this.turnHasText && key !== undefined) {
-			this.lastCall = undefined;
-			this.lastGroupKey = undefined;
-			this.currentGroup = undefined;
-			this.discoveryGroup = undefined;
+		// A visible assistant message or user message separates this turn from
+		// the old group. Reset lazily so a turn can still group its own calls.
+		if ((this.turnHasText || this.turnHasUserMessage) && key !== undefined) {
+			this.resetGroupingState();
 			this.turnHasText = false;
+			this.turnHasUserMessage = false;
 		}
 
 		if (key === undefined) {
@@ -417,14 +524,33 @@ export class CompactRenderer {
 			// Discovery is one persistent group. It intentionally survives
 			// turn boundaries and intervening non-discovery calls; the latter
 			// only makes the group label monotonic via hasNonDiscovery.
+			// Starting/continuing discovery settles the working group — the
+			// agent has moved on from working.
+			this.settleGroup(this.workingGroup);
 			if (!this.discoveryGroup) {
 				this.discoveryGroup = {
 					records: [record],
 					renderOwner: record,
+					type: "discovery",
 				};
 				this.currentGroup = this.discoveryGroup;
 			} else {
 				this.appendToGroup(this.discoveryGroup, record);
+			}
+		} else if (key === "__working__") {
+			// Working group (edit/write/non-grep bash) — same persistent-group
+			// semantics as discovery. Starting/continuing working settles the
+			// discovery group — the agent has moved on from exploring.
+			this.settleGroup(this.discoveryGroup);
+			if (!this.workingGroup) {
+				this.workingGroup = {
+					records: [record],
+					renderOwner: record,
+					type: "working",
+				};
+				this.currentGroup = this.workingGroup;
+			} else {
+				this.appendToGroup(this.workingGroup, record);
 			}
 		} else if (key && this.lastCall && key === this.lastGroupKey) {
 			const group = this.lastCall.group ?? { records: [this.lastCall] };
@@ -435,7 +561,6 @@ export class CompactRenderer {
 		this.lastCall = record;
 		this.lastGroupKey = key;
 		record.invalidate = invalidate;
-		if (invalidate) this.pulses.add(invalidate);
 		return record;
 	}
 
@@ -444,7 +569,6 @@ export class CompactRenderer {
 		record.isError = isError;
 		record._completed = true;
 		record.result = result;
-		if (record.invalidate) this.pulses.remove(record.invalidate);
 		// Do NOT invalidate the owner here. The group visual is updated
 		// directly via group.callText.setText() in renderResultInner so the
 		// owner's next render picks up the change. Invalidating the owner
@@ -490,6 +614,14 @@ export class CompactRenderer {
 			// created and the group handle is repointed to the live owner.
 			record.group.callText = callText;
 			callText.setText(formatGroup(record.group, theme));
+			// While the group is not settled (agent hasn't moved on), subscribe
+			// the owner's invalidate to the thinking tick so the gradient
+			// header sweeps in lockstep with the Thinking/Working widget.
+			if (!record.group.settled) {
+				this.subscribeGroupTick(record.invalidate);
+			} else {
+				this.unsubscribeGroupTick();
+			}
 			return callText;
 		}
 		const callText = context.state.callText instanceof Text

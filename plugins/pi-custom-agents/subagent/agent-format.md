@@ -58,7 +58,7 @@ Each sub-agent runs with:
 - **System prompt**: agent body only (~200-1K tokens typical)
 - **No AGENTS.md**: saves 500-5K tokens
 - **No extensions/skills loaded**: saves 200-1K tokens
-- **Thinking per role**: defaults off; bundled scout/reviewer/worker choose low/high/medium
+- **Thinking per role**: defaults off; bundled Scout/Coder choose high/medium
 - **No compaction**: avoids compaction token cost
 
 This is ~10x leaner than spawning a full `pi` process.
