@@ -13,17 +13,19 @@ one package:
   plus the upstream bundled roles.
 - Bundled Devin auth/provider support, including OAuth, model catalog refresh,
   and streaming transport.
+- Cursor subscription support through the official Cursor Agent CLI, with Pi
+  retaining its native session and tool loop.
 - A self-contained `Ctrl+Space` mode-cycle shortcut and a footer showing the
   active mode, model, and thinking variant.
 
 ## Plugin registry
 
 The package has one top-level pi extension which dispatches to the internal
-plugins under `plugins/`. Ember projects enable them in `.pi/ember-stack.json`:
+plugins under `plugins/`. Enable them globally in `PI_HOME/pi-ember-stack.json`:
 
 ```json
 {
-  "plugins": ["pi-compact-tools", "pi-custom-agents", "devin-auth"]
+  "plugins": ["pi-compact-tools", "pi-custom-agents", "devin-auth", "pi-cursor-auth"]
 }
 ```
 
@@ -33,6 +35,7 @@ the TUI. Restart pi after changing the list. The available plugins are:
 - `pi-compact-tools`: collapsed native edit rendering.
 - `pi-custom-agents`: questionnaire UI, primary modes, plans, subagent tool, and bundled agent definitions.
 - `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
+- `pi-cursor-auth`: Cursor subscription auth, model refresh, and native Pi streaming.
 
 ## Project setup
 
@@ -70,8 +73,9 @@ of this repository.
 
 The package entrypoint is `plugins/index.ts`. Compact tools are under
 `plugins/pi-compact-tools/`, while questionnaire, primary modes, plans,
-subagents, and bundled agents are under `plugins/pi-custom-agents/`. Devin auth
-is under `plugins/devin-auth/`.
+subagents, and bundled agents are under `plugins/pi-custom-agents/`. Provider
+plugins are under `plugins/devin-auth/`, `plugins/pi-cursor-auth/`, and
+`plugins/xai-auth/`.
 
 Run the package typecheck with:
 

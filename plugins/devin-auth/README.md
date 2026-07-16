@@ -5,7 +5,7 @@ A [pi](https://pi.dev) coding agent extension that adds the **Devin** (Cognition
 ## Installation in pi-ember-stack
 
 This implementation is bundled by `@nmzpy/pi-ember-stack` and enabled through
-the project's `.pi/ember-stack.json` plugin list. Toggle it with `/stack-plugins`
+the global `PI_HOME/pi-ember-stack.json` plugin list. Toggle it with `/stack-plugins`
 or remove `devin-auth` from that list, then restart pi.
 
 ### Manual / local development

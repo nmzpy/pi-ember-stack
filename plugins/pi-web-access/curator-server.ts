@@ -1,4 +1,4 @@
-import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { generateCuratorPage } from "./curator-page.ts";
 import type { SummaryMeta } from "./summary-review.ts";
 
@@ -12,18 +12,29 @@ export interface CuratorServerOptions {
 	queries: string[];
 	sessionToken: string;
 	timeout: number;
-	availableProviders: { openai: boolean; brave: boolean; parallel: boolean; tavily: boolean; perplexity: boolean; exa: boolean; gemini: boolean };
+	availableProviders: { openai: boolean; exa: boolean };
 	defaultProvider: string;
 	searchProvider: string;
 	summaryModels: Array<{ value: string; label: string }>;
 	defaultSummaryModel: string | null;
+	accentColor?: string;
+	pageBg?: string;
 }
 
 export interface CuratorServerCallbacks {
-	onSubmit: (payload: { selectedQueryIndices: number[]; summary?: string; summaryMeta?: SummaryMeta; rawResults?: boolean }) => void;
+	onSubmit: (payload: {
+		selectedQueryIndices: number[];
+		summary?: string;
+		summaryMeta?: SummaryMeta;
+		rawResults?: boolean;
+	}) => void;
 	onCancel: (reason: "user" | "timeout" | "stale") => void;
 	onProviderChange: (provider: string) => void;
-	onAddSearch: (query: string, queryIndex: number, provider?: string) => Promise<{
+	onAddSearch: (
+		query: string,
+		queryIndex: number,
+		provider?: string,
+	) => Promise<{
 		answer: string;
 		results: Array<{ title: string; url: string; domain: string }>;
 		provider: string;
@@ -38,10 +49,17 @@ export interface CuratorServerCallbacks {
 }
 
 export interface CuratorServerHandle {
-	server: http.Server;
+	server: Server;
 	url: string;
 	close: () => void;
-	pushResult: (queryIndex: number, data: { answer: string; results: Array<{ title: string; url: string; domain: string }>; provider: string }) => void;
+	pushResult: (
+		queryIndex: number,
+		data: {
+			answer: string;
+			results: Array<{ title: string; url: string; domain: string }>;
+			provider: string;
+		},
+	) => void;
 	pushError: (queryIndex: number, error: string, provider?: string) => void;
 	searchesDone: () => void;
 	/** Reports browser connection state so a cancelled search can surface WHY it
@@ -139,7 +157,8 @@ function normalizeSummaryMeta(value: unknown): SummaryMeta | null {
 	if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) return null;
 
 	const tokenEstimate = meta.tokenEstimate;
-	if (typeof tokenEstimate !== "number" || !Number.isFinite(tokenEstimate) || tokenEstimate < 0) return null;
+	if (typeof tokenEstimate !== "number" || !Number.isFinite(tokenEstimate) || tokenEstimate < 0)
+		return null;
 
 	const fallbackUsed = meta.fallbackUsed;
 	if (typeof fallbackUsed !== "boolean") return null;
@@ -173,6 +192,8 @@ export function startCuratorServer(
 		searchProvider,
 		summaryModels,
 		defaultSummaryModel,
+		accentColor,
+		pageBg,
 	} = options;
 	let browserConnected = false;
 	let lastHeartbeatAt = Date.now();
@@ -211,7 +232,9 @@ export function startCuratorServer(
 		}
 		abortInFlightSummarize();
 		if (sseResponse) {
-			try { sseResponse.end(); } catch {}
+			try {
+				sseResponse.end();
+			} catch {}
 			sseResponse = null;
 		}
 		return true;
@@ -222,13 +245,13 @@ export function startCuratorServer(
 		browserConnected = true;
 	};
 
-	const getEffectiveTimeoutMs = (): number => Math.max(1000, Math.floor(clientTimeoutSeconds) * 1000);
+	const getEffectiveTimeoutMs = (): number =>
+		Math.max(1000, Math.floor(clientTimeoutSeconds) * 1000);
 
-	const shouldTimeoutFromClientIdle = (): boolean => (
+	const shouldTimeoutFromClientIdle = (): boolean =>
 		state === "RESULT_SELECTION" &&
 		clientIdleMs !== null &&
-		clientIdleMs >= getEffectiveTimeoutMs()
-	);
+		clientIdleMs >= getEffectiveTimeoutMs();
 
 	function validateToken(body: unknown, res: ServerResponse): boolean {
 		if (!body || typeof body !== "object") {
@@ -244,12 +267,7 @@ export function startCuratorServer(
 
 	function isAvailableProvider(provider: string): boolean {
 		if (provider === "openai") return availableProviders.openai;
-		if (provider === "brave") return availableProviders.brave;
-		if (provider === "parallel") return availableProviders.parallel;
-		if (provider === "tavily") return availableProviders.tavily;
-		if (provider === "perplexity") return availableProviders.perplexity;
 		if (provider === "exa") return availableProviders.exa;
-		if (provider === "gemini") return availableProviders.gemini;
 		return false;
 	}
 
@@ -257,7 +275,10 @@ export function startCuratorServer(
 		const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 		const res = sseResponse;
 		if (res && !res.writableEnded && res.socket && !res.socket.destroyed) {
-			try { res.write(payload); return; } catch {}
+			try {
+				res.write(payload);
+				return;
+			} catch {}
 		}
 		sseBuffer.push(payload);
 	}
@@ -271,9 +292,11 @@ export function startCuratorServer(
 		searchProvider,
 		summaryModels,
 		defaultSummaryModel,
+		accentColor,
+		pageBg,
 	);
 
-	const server = http.createServer(async (req, res) => {
+	const server = createServer(async (req, res) => {
 		try {
 			const method = req.method || "GET";
 			const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
@@ -306,7 +329,9 @@ export function startCuratorServer(
 					return;
 				}
 				if (sseResponse) {
-					try { sseResponse.end(); } catch {}
+					try {
+						sseResponse.end();
+					} catch {}
 				}
 				res.writeHead(200, {
 					"Content-Type": "text/event-stream",
@@ -332,7 +357,9 @@ export function startCuratorServer(
 				if (sseKeepalive) clearInterval(sseKeepalive);
 				sseKeepalive = setInterval(() => {
 					if (sseResponse) {
-						try { sseResponse.write(":keepalive\n\n"); } catch {}
+						try {
+							sseResponse.write(":keepalive\n\n");
+						} catch {}
 					}
 				}, 15000);
 				req.on("close", () => {
@@ -347,10 +374,18 @@ export function startCuratorServer(
 				if (!validateToken(body, res)) return;
 				touchHeartbeat();
 				const heartbeat = body as { idleMs?: unknown; timeoutSec?: unknown };
-				if (typeof heartbeat.timeoutSec === "number" && Number.isFinite(heartbeat.timeoutSec) && heartbeat.timeoutSec > 0) {
+				if (
+					typeof heartbeat.timeoutSec === "number" &&
+					Number.isFinite(heartbeat.timeoutSec) &&
+					heartbeat.timeoutSec > 0
+				) {
 					clientTimeoutSeconds = Math.min(600, Math.floor(heartbeat.timeoutSec));
 				}
-				if (typeof heartbeat.idleMs === "number" && Number.isFinite(heartbeat.idleMs) && heartbeat.idleMs >= 0) {
+				if (
+					typeof heartbeat.idleMs === "number" &&
+					Number.isFinite(heartbeat.idleMs) &&
+					heartbeat.idleMs >= 0
+				) {
 					clientIdleMs = Math.floor(heartbeat.idleMs);
 				}
 				const timedOut = shouldTimeoutFromClientIdle();
@@ -455,9 +490,10 @@ export function startCuratorServer(
 				}
 
 				const bodyFeedback = (body as { feedback?: unknown }).feedback;
-				const feedback = typeof bodyFeedback === "string" && bodyFeedback.trim().length > 0
-					? bodyFeedback.trim()
-					: undefined;
+				const feedback =
+					typeof bodyFeedback === "string" && bodyFeedback.trim().length > 0
+						? bodyFeedback.trim()
+						: undefined;
 
 				abortInFlightSummarize();
 				const controller = new AbortController();
@@ -465,8 +501,13 @@ export function startCuratorServer(
 				const requestId = ++summarizeRequestSeq;
 
 				try {
-					const result = await callbacks.onSummarize(parsed.indices, controller.signal, model, feedback);
-					if (requestId !== summarizeRequestSeq || state === "COMPLETED") {
+					const result = await callbacks.onSummarize(
+						parsed.indices,
+						controller.signal,
+						model,
+						feedback,
+					);
+					if (requestId !== summarizeRequestSeq || (state as ServerState) === "COMPLETED") {
 						sendJson(res, 409, { ok: false, error: "Summarize request superseded" });
 						return;
 					}
@@ -560,7 +601,14 @@ export function startCuratorServer(
 				}
 				const rawResults = (body as { rawResults?: unknown }).rawResults === true;
 				sendJson(res, 200, { ok: true });
-				setImmediate(() => callbacks.onSubmit({ selectedQueryIndices: parsed.indices, summary, summaryMeta, rawResults }));
+				setImmediate(() =>
+					callbacks.onSubmit({
+						selectedQueryIndices: parsed.indices,
+						summary,
+						summaryMeta,
+						rawResults,
+					}),
+				);
 				return;
 			}
 
@@ -628,7 +676,9 @@ export function startCuratorServer(
 				url,
 				close: () => {
 					const wasOpen = markCompleted();
-					try { server.close(); } catch {}
+					try {
+						server.close();
+					} catch {}
 					if (wasOpen) {
 						setImmediate(() => callbacks.onCancel("stale"));
 					}
@@ -639,7 +689,12 @@ export function startCuratorServer(
 				},
 				pushError: (queryIndex, error, provider) => {
 					if (completed) return;
-					sendSSE("search-error", { queryIndex, query: queries[queryIndex] ?? "", error, provider });
+					sendSSE("search-error", {
+						queryIndex,
+						query: queries[queryIndex] ?? "",
+						error,
+						provider,
+					});
 				},
 				searchesDone: () => {
 					if (completed) return;

@@ -1,0 +1,32 @@
+---
+pid: 29348
+cwd: "C:\Work\pi-ember-stack"
+command: "cd C:\\Work\\pi-ember-stack && bash ./t.gate.sh plugins/pi-ember-ui/model-picker.ts plugins/pi-ember-ui/index.ts plugins/pi-custom-agents/index.ts plugins/pi-ember-ui/test/model-picker.test.ts 2>&1 | tail -25"
+started_at: 2026-07-16T09:43:11.029Z
+running_for_ms: 11225011 
+---
+       Γöé      ^^^^^^^^^^^^^^^
+    30 Γöé 
+    31 Γöé const generateTextSchema = Type.Object({
+  
+  i Unused variables are often the result of typos, incomplete refactors, or other sources of bugs.
+  
+
+Checked 73 files in 106ms. No fixes applied.
+Found 260 warnings.
+Found 13 infos.
+  Γ£ô biome lint
+
+Γû╢ typecheck (tsc)
+
+> @nmzpy/pi-ember-stack@0.2.3 typecheck
+> tsc --noEmit
+
+plugins/pi-ember-ui/model-picker.ts(96,21): error TS2345: Argument of type '{ provider: string; id: string; }' is not assignable to parameter of type 'Model<any>'.
+  Type '{ provider: string; id: string; }' is missing the following properties from type 'Model<any>': name, api, baseUrl, reasoning, and 4 more.
+plugins/pi-ember-ui/model-picker.ts(181,5): error TS2345: Argument of type 'unknown' is not assignable to parameter of type 'SelectItem[]'.
+plugins/pi-ember-ui/model-picker.ts(216,33): error TS2345: Argument of type 'import("C:/Work/pi-ember-stack/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/keybindings", { with: { "resolution-mode": "import" } }).KeybindingsManager' is not assignable to parameter of type 'import("C:/Work/pi-ember-stack/node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings", { with: { "resolution-mode": "import" } }).KeybindingsManager'.
+  Type 'KeybindingsManager' is missing the following properties from type 'KeybindingsManager': configPath, reload, getEffectiveConfig
+  Γ£ù tsc typecheck
+
+1 gate(s) failed, 1 passed

@@ -1,7 +1,7 @@
 import { complete, type Message, type Model } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
 import type { QueryResultData } from "./storage.ts";
+import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
 
 const PREFERRED_SUMMARY_MODELS = [
 	{ provider: "anthropic", id: "claude-haiku-4-5" },
@@ -17,7 +17,10 @@ export interface SummaryMeta {
 	edited?: boolean;
 }
 
-export type SummaryGenerationContext = Pick<ExtensionContext, "model" | "modelRegistry" | "cwd" | "isProjectTrusted">;
+export type SummaryGenerationContext = Pick<
+	ExtensionContext,
+	"model" | "modelRegistry" | "cwd" | "isProjectTrusted"
+>;
 
 function estimateTokens(text: string): number {
 	const trimmed = text.trim();
@@ -59,7 +62,7 @@ export function buildSummaryPrompt(results: QueryResultData[], feedback?: string
 		"- Include key findings and caveats.",
 		"- Do not invent sources or claims.",
 		"- If evidence is weak or conflicting, say so explicitly.",
-		"- End with a short \"Sources\" section listing the most relevant URLs.",
+		'- End with a short "Sources" section listing the most relevant URLs.',
 	];
 
 	if (feedback) {
@@ -107,10 +110,7 @@ function buildDeterministicSummaryLines(results: QueryResultData[]): string[] {
 		];
 	}
 
-	const lines: string[] = [
-		"Summary based on the currently selected search results.",
-		"",
-	];
+	const lines: string[] = ["Summary based on the currently selected search results.", ""];
 
 	const sourceUrls: string[] = [];
 	let successful = 0;
@@ -128,7 +128,9 @@ function buildDeterministicSummaryLines(results: QueryResultData[]): string[] {
 		if (preview.length > 0) {
 			lines.push(`- ${result.query}: ${preview}`);
 		} else {
-			lines.push(`- ${result.query}: returned ${result.results.length} source${result.results.length === 1 ? "" : "s"} without answer text.`);
+			lines.push(
+				`- ${result.query}: returned ${result.results.length} source${result.results.length === 1 ? "" : "s"} without answer text.`,
+			);
 		}
 
 		for (const source of result.results) {
@@ -159,11 +161,15 @@ function buildDeterministicSummaryLines(results: QueryResultData[]): string[] {
 	return lines;
 }
 
-export function buildDeterministicSummary(results: QueryResultData[]): { summary: string; meta: SummaryMeta } {
+export function buildDeterministicSummary(results: QueryResultData[]): {
+	summary: string;
+	meta: SummaryMeta;
+} {
 	const summary = buildDeterministicSummaryLines(results).join("\n").trim();
-	const nonEmptySummary = summary.length > 0
-		? summary
-		: "No completed search results were available when the curator session finished.\n\nSources\n- None";
+	const nonEmptySummary =
+		summary.length > 0
+			? summary
+			: "No completed search results were available when the curator session finished.\n\nSources\n- None";
 
 	return {
 		summary: nonEmptySummary,
@@ -192,14 +198,27 @@ function parseModelSelector(value: string): { provider: string; id: string } {
 async function resolveSummaryModelCandidates(
 	ctx: SummaryGenerationContext,
 	modelOverride?: string,
-): Promise<{ candidates: Array<{ model: Model; apiKey: string; headers?: Record<string, string> }>; errors: string[] }> {
+): Promise<{
+	candidates: Array<{
+		// biome-ignore lint/suspicious/noExplicitAny: Model generic requires an API type; any is the Pi convention for model registry lookups
+		model: Model<any>;
+		apiKey: string;
+		headers?: Record<string, string>;
+	}>;
+	errors: string[];
+}> {
 	const enabledModelPatterns = loadEnabledModelPatterns(ctx);
 	const specs: Array<{ provider: string; id: string }> = [];
 	const normalizedOverride = typeof modelOverride === "string" ? modelOverride.trim() : "";
 	if (normalizedOverride.length > 0) specs.push(parseModelSelector(normalizedOverride));
 	specs.push(...PREFERRED_SUMMARY_MODELS);
 
-	const candidates: Array<{ model: Model; apiKey: string; headers?: Record<string, string> }> = [];
+	const candidates: Array<{
+		// biome-ignore lint/suspicious/noExplicitAny: Model generic requires an API type; any is the Pi convention for model registry lookups
+		model: Model<any>;
+		apiKey: string;
+		headers?: Record<string, string>;
+	}> = [];
 	const errors: string[] = [];
 	const seen = new Set<string>();
 	for (const spec of specs) {
@@ -226,7 +245,10 @@ async function resolveSummaryModelCandidates(
 	return { candidates, errors };
 }
 
-function buildFallbackSummary(results: QueryResultData[], fallbackReason: string): { summary: string; meta: SummaryMeta } {
+function buildFallbackSummary(
+	results: QueryResultData[],
+	fallbackReason: string,
+): { summary: string; meta: SummaryMeta } {
 	const deterministic = buildDeterministicSummary(results);
 	return {
 		summary: deterministic.summary,
@@ -241,7 +263,10 @@ function isAbortError(err: unknown): boolean {
 	if (!err || typeof err !== "object") return false;
 	const name = (err as { name?: unknown }).name;
 	const message = (err as { message?: unknown }).message;
-	return name === "AbortError" || (typeof message === "string" && message.toLowerCase().includes("abort"));
+	return (
+		name === "AbortError" ||
+		(typeof message === "string" && message.toLowerCase().includes("abort"))
+	);
 }
 
 function getTextFromContentPart(part: unknown): string {
@@ -265,7 +290,7 @@ export async function generateSummaryDraft(
 	modelOverride?: string,
 	feedback?: string,
 ): Promise<{ summary: string; meta: SummaryMeta }> {
-	if (!ctx || !ctx.modelRegistry) {
+	if (!ctx?.modelRegistry) {
 		throw new Error("Summary generation context unavailable");
 	}
 
@@ -288,20 +313,24 @@ export async function generateSummaryDraft(
 				timestamp: Date.now(),
 			};
 
-			const response = await complete(model, { messages: [userMessage] }, { apiKey, headers, signal });
+			const response = await complete(
+				model,
+				{ messages: [userMessage] },
+				{ apiKey, headers, signal },
+			);
 			if (response.stopReason === "aborted") {
 				throw new Error("Aborted");
 			}
 
 			const contentParts = Array.isArray(response.content) ? response.content : [];
 			const summary = contentParts
-				.map(part => getTextFromContentPart(part))
-				.filter(text => text.trim().length > 0)
+				.map((part) => getTextFromContentPart(part))
+				.filter((text) => text.trim().length > 0)
 				.join("\n")
 				.trim();
 
 			if (summary.length === 0) {
-				const partTypes = contentParts.map(part => getContentPartType(part));
+				const partTypes = contentParts.map((part) => getContentPartType(part));
 				const typesLabel = partTypes.length > 0 ? partTypes.join(", ") : "none";
 				throw new Error(`Summary model returned empty response (content parts: ${typesLabel})`);
 			}
@@ -322,5 +351,8 @@ export async function generateSummaryDraft(
 		}
 	}
 
-	return buildFallbackSummary(results, lastError ? `summary-model-unavailable: ${lastError}` : "summary-model-unavailable");
+	return buildFallbackSummary(
+		results,
+		lastError ? `summary-model-unavailable: ${lastError}` : "summary-model-unavailable",
+	);
 }

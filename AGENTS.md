@@ -22,14 +22,29 @@
   - Tool factories live in `pi-compact-tools/index.ts` `TOOL_FACTORIES` — never
     re-import or re-register a tool from a second location.
   - Theme color tokens are defined once in `ember.json` (static) or
-    `buildThemeFgColors`/`buildThemeBgColors` (dynamic) — never inline hex in
-    component code.
+    `buildThemeFgColors`/`buildThemeBgColors`/`buildThemeExportColors`
+    (dynamic) — never inline hex in component code. Export colors
+    (pageBg, cardBg, infoBg) are derived from `PAGE_BG` and the accent via
+    `buildThemeExportColors` in `mode-colors.ts` and written to the
+    installed `ember.json` only at install time (`ensureThemeInstalled`).
+    Never write the theme JSON mid-session: Pi's theme file watcher
+    reloads via `createTheme()`, which drops custom bg keys
+    (`subagentBg`) and crashes `theme.bg("subagentBg")`. Live mode
+    switches update the in-memory Theme only; `reassertLiveTheme` +
+    `scheduleThemeReassert` reclaim the global theme after any
+    install-time write races the watcher.
   - Grouping keys (`groupKey`) and groupable tool sets (`GROUPABLE_TOOLS`) are
     defined once in `renderer.ts` — never duplicate the membership check.
   - Pulse timing (`PULSE_INTERVAL_MS`), bullet-color logic
     (`statusBulletColor`, `groupBulletColorFromFlags`), and the pulse timer
     (`PulseManager`) are defined once in `pi-compact-tools/renderer.ts` — never
-    duplicate pulse timing or bullet-color logic in other plugins.
+    duplicate pulse timing or bullet-color logic in other plugins. The
+    subagent renderer no longer uses `PulseManager`; it subscribes to the
+    shared gradient clock instead (see Animation Compliance).
+  - Terminal gradient rendering (Gaussian sweep, RGB interpolation, Chalk
+    colorization, semantic presets, and the 20 FPS shared clock) lives once
+    in `pi-ember-ui/gradient.ts` — never duplicate gradient math, animation
+    timing, or color constants in other files.
   - The subagent-running flag (`isLatestSubagentRunning`/
     `setLatestSubagentRunning`) lives in `pi-ember-ui/mode-colors.ts` — never
     duplicate the session-scan logic that sets it.
@@ -59,26 +74,59 @@
   `Theme` instance from `mode-colors.ts` on every mode change. The static
   `ember.json` is the install-time seed only. Never patch individual theme fields
   ad-hoc; rebuild through the canonical pipeline. Live mode switches use the
-  `liveOnly` event path: update the editor/footer viewport without invalidating
-  the resumed transcript.
+  `liveOnly` event path: update the theme color maps, bump
+  `markdownThemeGeneration`, invalidate the TUI so each
+  `AssistantMessageComponent.updateContent` rebuilds its `CachedMarkdown`
+  children (the skip-guard keys on the theme generation — mode switches
+  recolor MD headers/links/bullets; identical invalidate inputs still
+  skip), invalidate the loaded-resources container
+  (`invalidateLoadedResources`), and request a render. Heading color
+  always resolves via the live Theme at call time (`emberHeadingStyle` →
+  `mdHeading`), never a closed-over Theme from construction. The
+  `ExpandableText.prototype.invalidate` patch (installed by
+  `installExpandableTextPatch`) re-evaluates the `getCollapsedText`/
+  `getExpandedText` callbacks on invalidate so the `[Context]`/`[Skills]`/
+  `[Extensions]`/`[Themes]` section headers and bodies refresh their ANSI
+  codes with the live accent. Never bypass this patch by baking
+  `theme.fg(...)` output into a `Text` without a re-evaluation path.
 - **Editor Patch Discipline:** The `Editor.prototype.render` monkey-patch is the
   single place where border and content inset logic lives. Detect border lines
   structurally (by character content), not by fragile index arithmetic.
   Slash-command dimming gates on `getText()` content, not on external flags.
-  When the latest tool call is a running `subagent`, the editor top border
-  becomes a dim inset line (1 column left/right, 0.1875 opacity) — the subagent
-  box above shows live progress via flashing bullets. The
-  `recompute_latest_subagent_running()` helper scans
-  `sessionCtx.sessionManager` entries and writes the result to both the
+  The editor border is a **chat pill**: 2-column inset on all sides, rounded
+  corners (`╭╮╰╯`), vertical pipes (`│`) on interior lines that grow with the
+  editor height, and `TEXT_COLOR` (not accent) for all border glyphs. The
+  editor content has 1-col inner padding (`INNER_PAD = 1`) on each side
+  between the text and the vertical pipe borders. The `innerWidth` passed to
+  Pi's original render subtracts `INSET * 2 + 2 + INNER_PAD * 2` from the
+  terminal width. Top/bottom border dashes span `innerWidth + INNER_PAD * 2`.
+  When the agent is in Working state (`workingActive`, from `agent_start` to
+  `agent_end`), all editor border lines (top corners, vertical pipes, bottom
+  corners) use `MUTED_COLOR` instead of `TEXT_COLOR`, giving the chatbox a
+  dimmed appearance while the agent is running. Shell mode also uses
+  `MUTED_COLOR`. The border color logic is
+  `(isShellMode() || workingActive) ? MUTED_COLOR : TEXT_COLOR`. In
+  slash-command mode, the middle border line is rendered as a dim inset
+  horizontal rule (`──` repeated at 0.1875 opacity, inset 1 col from the
+  inner content area) with no inner junction or segment glyph. The previous
+  slash-mode bottom border dimming is removed. Pi's native TUI render path is
+  left unpatched — content flows top-down and scrolls when it exceeds the
+  terminal height. The `recompute_latest_subagent_running()` helper
+  scans `sessionCtx.sessionManager` entries and writes the result to the
   shared `isLatestSubagentRunning()`/`setLatestSubagentRunning()` flag in
-  `pi-ember-ui/mode-colors.ts` and a local `subagentRunningCached` flag. It is
-  called ONLY from `tool_execution_start`/`tool_execution_end` handlers — never
-  from the render path. The editor border patch reads `subagentRunningCached`
-  (O(1)) instead of scanning the session every frame. Never duplicate this
+  `pi-ember-ui/mode-colors.ts`. It is called ONLY from
+  `tool_execution_start`/`tool_execution_end` handlers — never from the
+  render path. The local subagent-running cache has been removed; the
+  editor border no longer reads subagent state. Never duplicate this
   session-scan logic and never call it from a render closure. The
   Thinking/Working gradient label is NO LONGER rendered inside the editor
   border — it lives in a `setWidget("ember-thinking", …)` row above the editor
-  (see Thinking Widget below).
+  (see Thinking Widget below). The editor fake cursor (Pi's `\x1b[7m` reverse
+  video) is blinked at 500ms via `cursorBlinkTimer` (`CURSOR_BLINK_INTERVAL_MS`).
+  The `Editor.prototype.render` override strips `\x1b[7m...\x1b[0m` from all
+  rendered lines when `cursorVisible` is false, leaving the zero-width
+  `CURSOR_MARKER` intact so IME positioning still works. The blink timer is
+  started in `session_start` (TUI mode) and cleared in `session_shutdown`.
 - **Per-Frame Render Budget:** No render closure (editor render, header render,
   footer render, tool renderCall/renderResult, PulseManager timer) may call
   `sessionManager.getEntries()`, `sessionManager.getBranch()`,
@@ -106,38 +154,66 @@
   `.md` edits within the TTL are not detected until `/subagent reload` or the
   TTL expires.
 - **Animation Compliance:** Thinking animation frames, intervals, and opacity
-  progressions are defined once as constants at the top of `pi-ember-ui/index.ts`.
+  progressions are defined once as constants in `pi-ember-ui/gradient.ts`.
   Never duplicate or hardcode animation timing in other files. The gradient is
-  timer-driven: `THINKING_TICK_MS` (60) and `THINKING_FRAME_STEP` (0.06) drive a
-  single `setInterval` started by `startThinkingTick()` and stopped by
-  `maybeStopThinkingTick()` when `thinkingActive`, `workingActive`, and group
-  tick subscribers are all inactive. The sweep advances
-  continuously (~1s cycle) regardless of token arrival, so it never freezes
-  during tool execution. The gradient uses a 3-stop RGB-space blend (muted 10%
-  tail → dim 40% → accent peak) with a per-generation RGB cache — no per-char
-  hex parsing. The same `renderGradientLabel` drives the Thinking/Working
-  widget, group headers (via the group tick subscription), and subagent
-  running-agent labels. The Pi logo gradient animation runs for a bounded
-  `LOGO_ANIMATION_FRAMES` (20) × `LOGO_FRAME_INTERVAL_MS` (100) = 2s on fresh
-  sessions (`startup`/`new`). It is stopped by `agent_start` (not
-  `message_start`) so the full intro plays until the agent actually begins;
-  once stopped it renders as a static 2-stop vertical gradient (top muted
-  `#808080`, bottom text `#d4d4d4`). The bounded auto-stop and
-  `session_shutdown` are the safety floors. The shared `PULSE_INTERVAL_MS` constant lives in
-  `pi-compact-tools/renderer.ts` and is reused by the subagent renderer via
-  `PulseManager`.
+  timer-driven: a single 20 FPS `setInterval` (`GRADIENT_TICK_MS` = 50) in
+  `gradient.ts` advances a phase computed from elapsed monotonic time
+  (`performance.now()`), not incremental frame steps — so lag catches up
+  instead of slowing the animation. The render scheduler
+  (`MIN_RENDER_INTERVAL_MS` = 50) matches the clock tick rate so no ticks
+  are wasted. The sweep cycle is `GRADIENT_DURATION_MS` = 1600 ms (20%
+  faster than the original 2 s); the logo round-trip is
+  `LOGO_DURATION_MS` = 3200 ms. The sweep uses an offscreen-to-offscreen
+  Gaussian center (`compute_sweep_center`) with unified edge padding
+  (`EDGE_PADDING` = `Math.ceil(3 * GRADIENT_SIGMA)` = 9 cells) for all
+  presets — no preset-specific padding branching — ensuring the Gaussian
+  fully exits before the phase wraps, preventing visible snap-restart on
+  short labels. No circular wrap. The accent palette is a 3-stop
+  RGB-space blend (muted 10% tail → dim 40% → accent peak) with a
+  per-generation RGB cache — no per-char hex parsing. Semantic presets
+  (`thinking`, `working`, `exploringGroup`, `workingGroup`, `subagent`)
+  reference shared base palette definitions; `thinking`/`working`/`subagent`
+  share the accent palette, `exploringGroup`/`workingGroup` share the
+  muted→text palette. `renderLiveGradient(text, preset)` drives the
+  Thinking/Working widget, subagent running-agent labels, and compact group
+  headers. The Pi logo gradient animation runs indefinitely on
+  fresh sessions (`startup`/`new`) until the first streamed assistant token
+  (`thinking_delta` or `text_delta`), so turn-start lifecycle events never
+  prematurely stop the intro. The logo shares the same phase/Gaussian
+  helper/clock but preserves its radial base design. Once stopped it renders
+  as a static 2-stop vertical gradient
+  (top muted `#808080`, bottom text `TEXT_COLOR` from `mode-colors.ts`) with
+  a box-drawing drop-shadow contour (`─│┌┐└┘├┤┬┴┼` glyphs at 25% opacity,
+  offset one cell down and right).
+  `session_shutdown` is the safety floor. The shared `PULSE_INTERVAL_MS`
+  constant lives in `pi-compact-tools/renderer.ts` and is used by
+  `PulseManager` for compact-tool bullet flashing only; the subagent
+  renderer subscribes to the shared gradient clock via
+  `subscribeGradientTick`/`unsubscribeGradientTick` from
+  `pi-ember-ui/index.ts` (re-exported from `gradient.ts`). The clock
+  dispatches a stable snapshot of subscribers each tick — callbacks added
+  or removed during dispatch are not visited until the next tick, preventing
+  same-tick re-addition loops.
 - **Thinking Widget & Tool Group Precedence:** The Thinking/Working gradient
-  label is rendered in a `setWidget("ember-thinking", …)` row above the editor
-  (default `aboveEditor` placement), NOT inside the editor top border. The
+  label is rendered in a `setWidget("ember-thinking", …)` row directly above the
+  editor (default `aboveEditor` placement; `CHATBOX_LEADING_ROWS` in `layout.ts`
+  is 1 blank row above the label when visible, or above the chatbox when hidden;
+  the label is flush to the editor), NOT
+  inside the editor top border. The widget row has a 3-column inset on left and
+  right. The
   widget render closure is O(1): it reads `thinkingActive`, `workingActive`,
   and `isToolGroupActive()` from `pi-ember-ui/mode-colors.ts`. When any compact
-  tool group (Exploring or Working) is active — i.e. has a running member OR
+  tool group (Exploring, Editing, Writing, or Bashing) is active — i.e. has a running member OR
   all members complete but the group is not yet settled (agent hasn't moved
   on) — `isToolGroupActive()` is true and the widget returns `[]` (hidden) —
-  the group header in the transcript carries the live gradient via
-  `renderLiveThinkingGradient` instead. When the group settles (visible text,
-  non-group/other-group tool, or `turn_end`), the header reverts to plain
-  bold `Explored` or `Worked` and the Thinking/Working widget returns. The
+  the group header in the transcript carries a muted/text gradient sweep via
+  `renderLiveGradient(label, "exploringGroup")` or `"workingGroup"` (no accent
+  color — just muted→text) instead. When the group settles (visible text,
+  thinking text, a non-group or different-group tool, or a user message),
+  the header reverts to plain bold final summary and the Thinking/Working
+  widget returns. `turn_end` itself does not settle a group; settlement only
+  happens when the assistant also produced no visible text/thinking in the
+  current turn and the next turn would otherwise continue the same group. The
   `isToolGroupActive`/`setToolGroupActive` flag lives in
   `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools` lifecycle
   handlers (`tool_call`, `tool_execution_end`, `turn_end`, `session_start`) via
@@ -146,8 +222,16 @@
   cleared on `session_shutdown`.
 - **Subagent Background Token:** The `subagentBg` theme token (defined once in
   `mode-colors.ts` `buildThemeBgColors` and seeded in `ember.json`) is the
-  single source for the subagent box background — userMessage color at 10% less
-  opacity. Never inline a hex value for subagent backgrounds.
+  single source for the subagent row background — userMessage color at 10% less
+  opacity. Never inline a hex value for subagent backgrounds. The background
+  is applied per completed/failed row only; running rows and the `Subagents`
+  header remain transparent.
+- **Custom Message Background Token:** The `customMessageBg` theme token
+  (defined in `buildThemeBgColors`) is accent-derived — the same value as
+  `userMessageBg` (accent at 10% opacity over `PAGE_BG`). This covers
+  compaction messages (`CompactionSummaryMessageComponent`) and custom
+  messages. Never hardcode a separate hex value for `customMessageBg`; it
+  references the same `userMsgBg` SSOT value.
 - **Fail Fast, No Fallbacks:** If a plugin cannot register its tools, apply its
   theme, or resolve its bundled agents, surface the error — do not silently
   degrade to a partial experience.
@@ -177,15 +261,24 @@ Pi
     │   └── subagent implementation and bundled agent definitions
     ├── plugins/devin-auth/
     │   └── Devin provider, OAuth, catalog, and streaming
+    ├── plugins/pi-cursor-auth/
+    │   └── Cursor subscription auth, model discovery, and Pi-native streaming
+    ├── plugins/xai-auth/
+    │   └── xAI (Grok) OAuth provider, catalog, streaming, custom tools, CLI shims
     ├── plugins/pi-ember-fff/
     │   └── FFF-powered grep/find with external allowlist
     └── plugins/pi-web-access/
         └── Web search, URL fetching, GitHub cloning, PDF/YouTube/video extraction
 ```
 
-The project-local registry is `.pi/ember-stack.json`. The package entrypoint is
-declared in `package.json` through the `pi.extensions` field. Keep those two
-mechanisms aligned with the actual plugin folders.
+The global plugin registry is `PI_HOME/pi-ember-stack.json` (resolved from
+`PI_HOME` or `~/.pi/agent/`). It is the single source of truth for both the
+enabled plugin list (the `plugins` array, owned by `plugins/index.ts`) and the
+persisted mode/model state (owned by `pi-custom-agents/index.ts`). Both writers
+use read-merge-write so neither clobbers the other's fields. There is no
+project-local `ember-stack.json` — the plugin list is global, not per-project.
+The package entrypoint is declared in `package.json` through the `pi.extensions`
+field. Keep that mechanism aligned with the actual plugin folders.
 
 ## Plugin Boundaries
 
@@ -195,57 +288,83 @@ mechanisms aligned with the actual plugin folders.
 - Every standalone tool-call row uses the compact bullet prefix: `• `.
 - Edit calls show `+N / -N` inline on the same row as the filename.
 - Consecutive discovery calls (`read`, `grep`, `find`, `ls`, and bash
-  `grep` invocations) fold into one inset `Exploring`/`Explored` group
+  `grep` invocations) fold into one inset `Exploring`/`Explored N files` group
   with compact, bullet-free child rows; only the group header carries the
   bullet. Bash grep calls display as "Search" and join the discovery
-  group. Consecutive working calls (`edit`, `write`, and non-grep `bash`)
-  fold into a `Working`/`Worked` group with the same structure. The
+  group. Consecutive `edit`, `write`, and non-grep `bash` calls form separate
+  `Editing`/`Edited N files`, `Writing`/`Written N files`, and
+  `Bashing`/`Bashed N commands` groups. Grouped edit children show only their
+  path plus `+N / -N`; grouped write children show only their path; grouped
+  Bash children show only a `$` command preview. Grouped read children include
+  their supplied offset and line limit. Final file counts use distinct
+  tool-call target paths; Bash counts all command entries. Every group header
+  and child is one ANSI-aware, width-truncated terminal row. The
   grouping contract is:
-  - **First-member ownership:** The first discovery call that creates a
-    group anchors the group header (`renderOwner`) and keeps it for the
-    rest of the turn. Ownership never migrates to later calls. New
-    discovery calls append as child rows under the existing header.
-  - **Per-turn grouping with hidden-thinking continuity:** Discovery calls
+  - **First-member ownership:** The first call that creates a group
+    anchors the group header (`renderOwner`) and keeps it for the
+    rest of the group's lifetime. Ownership never migrates to later calls.
+    New same-type calls append as child rows under the existing header.
+  - **Single live group:** The renderer tracks one `currentGroup` at a
+    time. When a groupable tool arrives whose `groupKey` differs from the
+    current group's key, the current group is settled (label flips to
+    past tense) and dropped as the active target. A fresh group is
+    started at the new call's transcript position. This prevents a later
+    same-type call from reopening a settled group and rendering above
+    intervening blocks — groups are chronological. The old
+    `discoveryGroup`/`workingGroup` dual-slot model was removed; there is
+    no cross-group settling because settling + starting fresh is
+    equivalent and simpler.
+  - **Per-turn grouping with hidden-thinking continuity:** Calls
     group within a single turn. At `turn_end`, the renderer permits the
     next turn to continue the previous group only when thinking blocks are
-    hidden, the assistant emitted no visible text, and no user message was
-    injected. Otherwise `beginTurn()` (fired on `turn_start`) clears the
-    grouping state before the next discovery call. This prevents agent
-    replies and user messages from causing a later tool call to rewrite an
-    old `Exploring` block. The hidden-thinking state is shared by
+    hidden, the assistant emitted no visible text and no thinking text, and
+    no user message was injected. Otherwise `beginTurn()` (fired on
+    `turn_start`) clears the grouping state before the next call. This prevents
+    agent replies and user messages from causing a later tool call to rewrite
+    an old compact group block. The hidden-thinking state is shared by
     `pi-ember-ui` and `pi-compact-tools`; assistant text and user-message
     boundaries come from lifecycle events.
-  - **Monotonic group-scoped label (settled-gated):** The `Exploring`→`Explored` and
-    `Working`→`Worked` labels flip to the past tense only when **all members
+  - **Monotonic group-scoped label (settled-gated):** Group labels flip to their
+    past tense summary only when **all members
     have completed AND the group is settled** — i.e. the agent has
     demonstrably moved on. A group settles when the agent emits visible
-    text (`noteVisibleText`), starts a non-group tool
-    (`markNonDiscoveryGroups`), starts a tool in the *other* group
-    (cross-group settling: discovery settles working and vice versa), or
-    the turn ends (`endTurn`). While all members are complete but the group
-    is not yet settled, the label stays present tense with the live
-    gradient and `hasActiveGroups()` remains true so the Thinking/Working
-    widget stays hidden (no duplication). The `hasNonDiscovery` flag is
-    retained for backward compatibility but no longer gates the label —
-    `allDone && settled` is sufficient. The `settled` flag lives on
-    `DiscoveryGroup`; `settleGroup`/`settleGroups` are the single setters.
+    text or thinking text (`noteVisibleText`), starts a non-group or
+    different-type groupable tool, or a user message arrives. `turn_end`
+    does **not** settle a group on its own; settlement only happens when the
+    assistant also produced no visible text/thinking in the current turn and
+    the next turn would otherwise continue the same group. While all members
+    are complete but the group is not yet settled, the label stays present
+    tense with the live gradient and `hasActiveGroups()` remains true so the
+    Thinking/Working widget stays hidden (no duplication). The `settled` flag
+    lives on `DiscoveryGroup`; `settleGroup`/`settleGroups` are the single
+    setters. A new member joining an already-settled group un-settles it
+    (`appendToGroup` sets `group.settled = false`) so the label stays
+    present tense until the agent truly moves on from the expanded group.
+    Settled groups are never reopened — a later same-type call starts a
+    new group at its own position.
   - **Group-header gradient tick:** While a group is not settled, the
-    owner's `invalidate` is subscribed to the thinking tick via
-    `subscribeGroupTick`/`unsubscribeGroupTick` (exported from
-    `pi-ember-ui/index.ts`, backed by the single `thinkingTimer`). This
-    makes the group header gradient sweep at the same `THINKING_TICK_MS`
-    cadence as the Thinking/Working widget. The tick timer stays alive
+    owner's `invalidate` is subscribed to the shared gradient tick via
+    `subscribeGradientTick`/`unsubscribeGradientTick` (exported from
+    `pi-ember-ui/index.ts`, backed by the single 20 FPS clock in
+    `gradient.ts`). This
+    makes the group header gradient sweep at the same `GRADIENT_TICK_MS`
+    cadence as the Thinking/Working widget. The sweep uses
+    `renderLiveGradient(label, "exploringGroup")` or `"actionGroup"`
+    (muted→text only, no accent color). The tick timer stays alive
     while any group subscriber is active even if thinking/working are
-    inactive (`maybeStopThinkingTick` guards all three). Subscriptions
-    are removed on settle and session reset.
+    inactive. Subscriptions
+    are removed on settle and session reset. The subscription uses a stable
+    callback identity with a mutable invalidate target so Pi rebuilds (which
+    provide fresh invalidate closures) rebind the target without churning the
+    subscriber Set.
   - **Owner-only invalidation:** Joining a group invalidates only the
     group owner (one invalidation), not all members. This eliminates
     duplicate-header flicker and extra blank lines. This invalidation
     only runs from `registerCall` for *new* calls (never during Pi
     rebuilds, which early-return for existing ids).
-  - **Shared group visual handle:** The group's `callText` (`Text`) is
+  - **Shared group visual handle:** The group's `callText` (`CompactGroupText`) is
     the single persistent visual for the group block. The owner re-binds
-    it to its live `Text` on every `renderCall`; members write into it
+    it to its live component on every `renderCall`; members write into it
     directly via `setText` in `renderResultInner` so completions (bullet
     color, match count, `Explored` label) appear without invalidating the
     owner. `setResult` does NOT invalidate the owner — direct `callText`
@@ -258,7 +377,11 @@ mechanisms aligned with the actual plugin folders.
     existing `toolCallId` swaps the destroyed component's invalidate out
     of the `PulseManager` and inserts the live one, so the pulse timer
     only fires live components and destroyed owners cannot hijack
-    `record.invalidate` back to dead components.
+    `record.invalidate` back to dead components. The subagent renderer
+    uses the same stable-callback pattern for gradient tick subscriptions:
+    one `SubagentTickRecord` per `toolCallId` with a stable callback and a
+    mutable `invalidateTarget` that is rebound on each render without
+    churning the subscriber Set.
   - **Non-owner rendering:** Non-owner group members render an empty
     `Text` (zero vertical space) so only the owner hosts the visible
     group block.
@@ -276,10 +399,11 @@ mechanisms aligned with the actual plugin folders.
   `PulseManager`, and `BULLET` for reuse by other plugins (notably the
   subagent renderer). Never duplicate pulse timing or bullet-color logic;
   import from here. `renderer.ts` also exports `hasActiveGroups()` on
-  `CompactRenderer` and imports `renderLiveThinkingGradient` from
-  `pi-ember-ui/index.ts` to render the live gradient on the `Exploring`/
-  `Working` group header while any member is running (reverting to plain
-  bold `Explored`/`Worked` when all complete). The `isToolGroupActive`
+  `CompactRenderer` and imports `renderLiveGradient` from
+  `pi-ember-ui/index.ts` to render a muted/text gradient sweep on the
+  compact group header while any member is running or the
+  group is not yet settled (reverting to plain
+  bold final summaries when all complete and settled). The `isToolGroupActive`
   flag in `pi-ember-ui/mode-colors.ts` is driven from this plugin's
   lifecycle handlers via `hasActiveGroups()`.
 
@@ -288,6 +412,25 @@ mechanisms aligned with the actual plugin folders.
 - Owns `/coder`, `/architect`, `/doctor`, `/orchestrator`, and `/ui-doctor`.
 - Owns the plan-review flow, questionnaire tool, footer, mode cycling, and
   `/subagent-model`.
+- **Questionnaire "None" option:** Every question rendered by the
+  questionnaire tool automatically appends a user-only "None" option
+  (value `__none__`, description "Specify the proper answer") that is not
+  part of the tool schema or model-supplied options. Selecting it replaces
+  the description with an inline multiline `Editor` (from `@earendil-works/pi-tui`)
+  so the user can type a custom answer. Enter commits the typed text as the
+  answer (`wasCustom: true`); Escape returns to the option list. The typed
+  text flows to the model as the answer value/label. The
+  `QuestionnaireAnsweredCallback` (fired only on successful completion, not
+  cancellation) is wired from `registerQuestionnaireTool` in
+  `pi-custom-agents/index.ts` to set `questionnaireAnsweredThisPlan` when
+  the active mode is `plan` and `waitingForPlan` is true.
+- **Plan-review suppression after questionnaire:** When the agent settles
+  after a plan turn in which a model-invoked questionnaire was successfully
+  answered, the `agent_settled` handler skips the `showPlanReview()` prompt
+  (Implement/Edit/Reject) and instead notifies the user that the plan is
+  complete. The plan-review prompt still appears when no questionnaire was
+  answered. The `questionnaireAnsweredThisPlan` flag is reset on plan
+  entry, "edit" re-entry, and `session_shutdown`.
 - **Plan-mode output-limit auto-continue:** When the model hits the maximum
   output token limit (`stopReason === "length"`) while generating a plan in
   plan mode, the extension silently sends a hidden `"continue"` custom
@@ -302,39 +445,93 @@ mechanisms aligned with the actual plugin folders.
   infinite loops; after the budget is exhausted the error surfaces normally.
   Never duplicate the suppression flag or the auto-continue logic in other
   plugins.
-- Owns the `shift+t` thinking-level cycle through the extension editor. `ctrl+t`
-  remains Pi's built-in thinking visibility toggle.
-- The model picker uses `shift+m`; never bind `ctrl+m`, because macOS/Linux
-  terminals encode Enter as carriage return (`Ctrl+M`).
-- `/model` is intercepted in the extension editor's `handleInput` and redirected
-  to the shared fuzzy-search `show_model_picker` (same as `shift+m`), so Pi's
-  built-in unbounded model selector never appears.
+- `ctrl+t` remains Pi's built-in thinking visibility toggle.
+- `/model` and `/resume` picking is owned by `pi-ember-ui/model-picker.ts`: it
+  intercepts the editor `handleInput` / `submitValue` / keybindings, opens
+  Pi's in-editor slash-argument autocomplete (chat-pill popup via
+  `Editor.prototype.render` + autocomplete layout patch), and applies the
+  choice on submit — same pattern for both, **without** `registerCommand`
+  (registering a built-in name like `resume`/`model` conflicts and surfaces
+  under Extension issues). `/model` calls `pi.setModel()` on exact
+  `provider/id`; `/resume` (and `app.session.resume`) uses a captured
+  `switchSession` from `ExtensionRunner.bindCommandContext` and session
+  completions via `ctx.ui.addAutocompleteProvider`. Without `pi-ember-ui`,
+  Pi's built-in overlay selectors still work. `/subagent-model` reuses
+  `pickModelInEditor()` from the same module.
+- **Slash-command exit render snap:** When the editor transitions out of a
+  slash-command state (input no longer starts with `/` via Escape or
+  backspace), `intercept_slash_command_exit` calls `requestTuiRender(true)` — the
+  shared throttled render scheduler from `pi-ember-ui/index.ts`
+  (`MIN_RENDER_INTERVAL_MS`). The exit path uses a forced render so Pi clears
+  differential-render rows left below the collapsed chatbox. This snaps the
+  TUI layout back to its allocated space instead of leaving the expanded
+  slash-command overlay hole below the chatbox. The `was_slash_command` flag
+  is reset on `session_start` and `session_shutdown`. The check is O(1) (one
+  `getText()` + string prefix test) and the render is throttled, so it never
+  exceeds the per-frame budget.
+- **Shell mode:** Pressing `!` on empty input enters shell mode (the `!` is
+  eaten so it never appears in the editor). The `interceptShellInput` function
+  lives in `pi-ember-ui/shell-mode.ts` (SSOT) and is called from the
+  `pi-custom-agents` editor `handleInput` wrapper. Escape exits and clears the
+  editor; backspace on empty exits. Enter prepends `!` to the editor text and
+  returns `false` (falls through to Pi's normal `submitValue` → `onSubmit`),
+  so Pi's built-in bash handler (`text.startsWith("!")` in
+  `interactive-mode.js`) runs the command through the standard bash pipeline.
+  Enter on empty command exits shell mode without submitting. The
+  `isShellMode`/`setShellMode` flag lives in `pi-ember-ui/mode-colors.ts`
+  (SSOT); the footer reads it to display "shell", and the editor border uses
+  `MUTED_COLOR` while active.
 - Resolves bundled definitions from `import.meta.url`; never use an absolute user
   home path or a Windows-only source path.
 - Contains the vendored subagent implementation and bundled `.md` agent definitions.
+- Agent requests resolve through the single `subagent/extensions/agents.ts`
+  `resolveAgent()` helper; names are case-insensitive and surrounding whitespace
+  is ignored, while the resolved frontmatter name is used for display and threads.
 - **Subagent rendering:** The `subagent` tool uses `renderShell: "self"` and
-  renders a compact, Exploring-style grouped layout inside a `Box` with the
-  `subagentBg` theme token (userMessage color at 10% less opacity). Running
-  agent names use the same gradient sweep as the Thinking header; completed
-  agents use green bullets and failed agents use red bullets. Parallel/chain
-  mode shows a `Subagents` header + `└ agent` children with the same status
-  treatment. No `⏳`, `[scope]`, or `parallel (N tasks)` labels. Chain mode
-  only shows running + completed steps (pending steps hidden until they start).
-  The completed/failed bullet logic and pulse timer reuse `statusBulletColor`
-  and `PulseManager` from `pi-compact-tools/renderer.ts` — never duplicate
-  them. The runner owns completion through `session.prompt()` and disposes
+  renders a compact, Exploring-style grouped layout. Running agent names use
+  the same gradient sweep as the Thinking header via
+  `renderLiveGradient(agentName, "subagent")`; completed agents use green
+  bullets and failed agents use red bullets. Parallel/chain mode shows a
+  `Subagents` header + `└ agent` children with the same status treatment. No
+  `⏳`, `[scope]`, or `parallel (N tasks)` labels. Chain mode only shows
+  running + completed steps (pending steps hidden until they start).
+  The completed/failed bullet logic reuses `statusBulletColor` from
+  `pi-compact-tools/renderer.ts` — never duplicate it. The subagent
+  renderer no longer uses `PulseManager`; it subscribes to the shared
+  gradient clock via `subscribeGradientTick`/`unsubscribeGradientTick`
+  with a stable per-`toolCallId` callback record (see Rebuild-safe
+  invalidate rebind above). The runner owns completion through
+  `session.prompt()` and disposes
   only after that promise settles; never race `agent_end` against disposal.
-  The worker script is inline JS executed via `new Worker(code, { eval: true })`.
-  `@earendil-works/pi-coding-agent` is ESM-only (`"type": "module"`, exports
-  map has no `require` condition), so the worker and
-  `loadProjectContextFilesCompat` MUST use dynamic `await import()` — never
-  `require()` — to load the package. A `require()` call fails with
-  `No "exports" main defined` and crashes the worker before it can start.
-  When the subagent is the latest running tool call, a full-opacity
-  `border`-colored horizontal cap line is drawn above the box (visually
-  extending the chatbox upward), gated on `isLatestSubagentRunning()` from
-  `pi-ember-ui/mode-colors.ts`. The expanded view (Ctrl+O) wraps detailed
-  per-agent output in the same `subagentBg` Box.
+  The subagent runs **in-process** on the main thread — not in a
+  `worker_thread`. The runner reuses the parent's `ModelRegistry` and
+  `AuthStorage` directly so every registered provider (Devin, xAI,
+  built-ins, custom `models.json` entries) is available without
+  re-registration. `session.prompt()` is async and does not block the TUI
+  render loop. The empty resource loader uses `createExtensionRuntime()`
+  (from `@earendil-works/pi-coding-agent`) so the `ExtensionRuntime` shape
+  (`pendingProviderRegistrations`, `flagValues`, `assertActive`, ...) is
+  valid for `createAgentSession`'s `ExtensionRunner.bindCore()`. Never
+  hardcode model or provider names in the subagent runner — resolve the
+  model from the parent context and let the inherited registry provide
+  the API provider.
+  Running rows and the `Subagents` header remain transparent; only
+  completed/failed rows receive a full-width `subagentBg` `Box`
+  background. The expanded view (Ctrl+O) wraps each terminal agent's
+  detailed output in its own independent `subagentBg` Box — no aggregate
+  outer box.
+  The nested latest-tool-call preview row under a running subagent uses
+  `SubagentToolText` (a `Component` defined in `render.ts`) — not pi-tui's
+  wrapping `Text`. `SubagentToolText` truncates to half the viewport width
+  (`TOOL_ROW_WIDTH_FRACTION` = 0.5) with an ANSI-aware ellipsis via
+  `truncateToWidth` from `@earendil-works/pi-tui`, so a long bash command
+  never spans more than one terminal row. This follows the `CompactGroupText`
+  pattern from `pi-compact-tools/renderer.ts` (truncate, don't wrap) but at
+  half width to keep the nested preview visually compact. Never use plain
+  `Text` for the subagent tool row — it wraps long content across multiple
+  rows. `truncateToWidth` is the SSOT lever for ANSI-aware truncation; the
+  `TOOL_ROW_WIDTH_FRACTION` constant is the single source for the half-width
+  threshold.
 - Keep read-only modes read-only through their active-tool allowlists.
 - Does **not** persist or restore the active model. Pi core already writes the
   selected model to `settings.json` (`defaultProvider`/`defaultModel`) and the
@@ -365,6 +562,88 @@ mechanisms aligned with the actual plugin folders.
   `anySignal` polyfill can escape as unhandled rejections. Non-abort
   rejections are re-emitted so genuine bugs still surface. The guard is
   removed on `session_shutdown`.
+
+### `pi-cursor-auth`
+
+- Owns the `cursor` provider backed exclusively by the official Cursor Agent
+  CLI's browser-authenticated subscription session. It does not use Cursor SDK
+  API keys and does not fall back to the ambiguous `agent` executable name.
+  `CURSOR_AGENT_EXECUTABLE` is the explicit executable override.
+- `/login cursor` delegates browser authentication to `cursor-agent login`.
+  Cursor remains the credential authority; Pi stores only a non-secret auth
+  marker. `/cursor-status`, `/cursor-refresh-models`, and `/cursor-logout` own
+  diagnostics, live model refresh, and coordinated logout.
+- The provider serializes Pi's existing system prompt, ordered messages, and
+  active tool schemas into one neutral CLI request envelope. Never inject a
+  Cursor/Composer persona, replace Pi's system prompt, add role-play text, or
+  import the OpenCode HTTP proxy/prompt builder.
+- Pi owns the tool loop. Cursor `stream-json` tool events are accepted only
+  when they resolve to a tool in `context.tools`; accepted events become native
+  Pi tool calls, while unknown or malformed tools terminate the request with an
+  error. Keep native argument repair in `src/context.ts` as its SSOT.
+- **Cursor-style tool name advertising:** The provider advertises Cursor-style
+  tool names (`Read`, `Write`, `Edit`, `Shell`, `LS`, `Grep`, `Glob`) and
+  Cursor-style argument names (`file_path`, `old_string`, `new_string`,
+  `include`, `glob`) in the serialized prompt so the Cursor-trained model
+  calls tools it recognizes. The `PI_TO_CURSOR_TOOL_NAME` map and
+  `PI_TO_CURSOR_ARG_NAMES` remap table in `src/context.ts` are the single
+  sources for the forward (Pi→Cursor) schema translation. The existing
+  `TOOL_ALIASES` + `normalize_tool_arguments` handle the reverse
+  (Cursor→Pi) mapping when the model responds. Never duplicate these
+  maps in other files.
+- Each provider turn uses a fresh CLI process so Cursor-side conversation state
+  cannot diverge from Pi sessions, compaction, forks, or tool results. Abort and
+  `session_shutdown` terminate all owned child processes.
+- The provider advertises text input only. Images and image-bearing tool results
+  fail explicitly rather than being silently omitted.
+- Integration patterns are informed by `Nomadcxx/opencode-cursor`
+  (BSD-3-Clause, see `plugins/pi-cursor-auth/LICENSE`), with attribution and
+  provenance retained.
+
+### `xai-auth`
+
+- Owns the xAI (Grok) OAuth provider, model catalog, streaming transport,
+  custom xAI tools, and Cursor/Grok CLI tool shims.
+- Forked from [pi-xai-oauth](https://github.com/BlockedPath/pi-xai-oauth)
+  (MIT License, see `plugins/xai-auth/LICENSE`). Original source attribution
+  retained; adapted for the `pi-ember-stack` plugin architecture.
+- Registers the `xai-auth` provider with a static model catalog (Grok 4.5,
+  4.3, Build, Composer 2.5 Fast, 4.20 variants). Models are defined once in
+  `src/models.ts` (SSOT) — never duplicate model definitions elsewhere.
+- All OAuth constants (issuer URL, client ID, scopes, redirect port, refresh
+  skew, API base URLs, CLI proxy URL, Grok client version) live in
+  `src/constants.ts` — never hardcode these values in other files.
+- OAuth login uses PKCE with a local callback server (`127.0.0.1:56121`) and
+  manual-paste fallback for WSL/remote environments. Token refresh rotates
+  automatically before expiry. Reuses `~/.grok/auth.json` from the official
+  Grok CLI when present.
+- Streaming delegates to pi's built-in OpenAI Responses transport
+  (`openAIResponsesApi().streamSimple`) with xAI-specific payload rewriting
+  (`rewriteXaiResponsesPayload`): system/developer text → top-level
+  `instructions`, image-bearing `function_call_output` → text + replay,
+  reasoning effort normalization, and `prompt_cache_key` routing. Grok Build
+  and Composer route through `cli-chat-proxy.grok.com` with Grok CLI proxy
+  headers; all other models hit `api.x.ai` directly.
+- Custom xAI tools (`xai_generate_text`, `xai_web_search`, `xai_x_search`,
+  `xai_multi_agent`, `xai_code_execution`, `xai_generate_image`,
+  `xai_analyze_image`, `xai_critique`, `xai_deep_research`) use the xAI
+  Responses API directly with OAuth credentials. Tool names are fixed —
+  installing duplicate copies of this plugin causes registration conflicts.
+- Cursor/Grok CLI tool shims (`Read`, `Write`, `StrReplace`, `Edit`, `Delete`,
+  `LS`, `Grep`, `Glob`, `Shell`, `WebSearch`) are automatically enabled when
+  a Grok CLI proxy model (`grok-build` or `grok-composer-2.5-fast`) is
+  selected and disabled when switching back. The shims map Cursor-style
+  argument names onto pi's built-in tools.
+- Improvements adopted from `devin-auth`:
+  - **AbortError guard**: `unhandledRejection` handler swallows
+    `DOMException [AbortError]` rejections from cancelled agent runs.
+    Non-abort rejections are re-emitted. Removed on `session_shutdown`.
+  - **Session-replacement discipline**: `session_shutdown` clears
+    module-level `_pi` and removes the rejection handler so jiti-cached
+    modules don't survive across sessions with stale references.
+  - **`/xai-status` command**: Quick auth diagnostics.
+- Credentials, tokens, and provider secrets remain machine-local.
+- Never commit `auth.json`, OAuth tokens, or generated credential files.
 
 ### `pi-ember-fff`
 
@@ -415,6 +694,15 @@ mechanisms aligned with the actual plugin folders.
 - When customizing vendored files, bring them into compliance with our
   TypeScript strict mode and Biome lint rules, then remove them from the
   `tsconfig.json` and `biome.json` exclude lists.
+- **Curator page accent propagation:** The curator HTML page
+  (`curator-page.ts`) derives its CSS accent variables (`--accent`,
+  `--accent-hover`, `--accent-muted`, `--accent-subtle`, `--bg`,
+  `--btn-primary-fg`, etc.) from the active mode color and `PAGE_BG`
+  via `buildAccentVars()`. The accent color and page bg are passed from
+  `index.ts` through `startCuratorServer` → `generateCuratorPage` at
+  runtime, sourced from `getActiveModeColor()` and `PAGE_BG` in
+  `mode-colors.ts`. Never hardcode hex accent or page-bg values in the
+  curator CSS — always flow them through the SSOT accent pipeline.
 
 ## Non-Negotiable Code Rules
 

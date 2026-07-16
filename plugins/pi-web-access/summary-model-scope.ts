@@ -41,7 +41,7 @@ export function loadEnabledModelPatterns(ctx: SummaryModelScopeContext): string[
 	if (!Array.isArray(value)) throw new Error("enabledModels must be an array");
 	return value
 		.filter((item): item is string => typeof item === "string")
-		.map(item => item.trim())
+		.map((item) => item.trim())
 		.filter(Boolean);
 }
 

@@ -8,44 +8,104 @@ function safeInlineJSON(data: unknown): string {
 }
 
 function buildProviderButtons(
-	available: { openai: boolean; brave: boolean; parallel: boolean; tavily: boolean; perplexity: boolean; exa: boolean; gemini: boolean },
+	available: { openai: boolean; exa: boolean },
 	selected: string,
 	hasInitialQueries: boolean,
 ): string {
 	const providers = [
 		{ value: "openai", label: "OpenAI", available: available.openai },
 		{ value: "exa", label: "Exa", available: available.exa },
-		{ value: "brave", label: "Brave", available: available.brave },
-		{ value: "parallel", label: "Parallel", available: available.parallel },
-		{ value: "tavily", label: "Tavily", available: available.tavily },
-		{ value: "perplexity", label: "Perplexity", available: available.perplexity },
-		{ value: "gemini", label: "Gemini", available: available.gemini },
 	];
 
 	return providers
-		.filter(p => p.available)
+		.filter((p) => p.available)
 		.map((p) => {
 			const isDefault = p.value === selected;
 			const state = isDefault && hasInitialQueries ? "loading" : "idle";
-			const classes = ["provider-btn", state, isDefault ? "is-default" : ""].filter(Boolean).join(" ");
+			const classes = ["provider-btn", state, isDefault ? "is-default" : ""]
+				.filter(Boolean)
+				.join(" ");
 			const disabled = state === "loading" ? " disabled" : "";
 			return `<button type="button" class="${classes}" data-provider="${p.value}" data-state="${state}"${disabled}>${p.label}</button>`;
 		})
 		.join("");
 }
 
+function hexToRgb(hex: string): [number, number, number] {
+	const r = parseInt(hex.slice(1, 3), 16);
+	const g = parseInt(hex.slice(3, 5), 16);
+	const b = parseInt(hex.slice(5, 7), 16);
+	return [r, g, b];
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+	return `#${[r, g, b]
+		.map((v) =>
+			Math.max(0, Math.min(255, Math.round(v)))
+				.toString(16)
+				.padStart(2, "0"),
+		)
+		.join("")}`;
+}
+
+function lightenHex(hex: string, amount: number): string {
+	const [r, g, b] = hexToRgb(hex);
+	return rgbToHex(r + (255 - r) * amount, g + (255 - g) * amount, b + (255 - b) * amount);
+}
+
+/** Build the dark-mode CSS custom properties that depend on the live
+ *  accent color. The static base CSS provides all non-accent variables;
+ *  this block overrides only the accent-derived ones so the curator page
+ *  matches the active agent mode color. */
+function buildAccentVars(accentHex: string, pageBgHex: string): string {
+	const [r, g, b] = hexToRgb(accentHex);
+	const accentHover = lightenHex(accentHex, 0.12);
+	const [_hr, _hg, _hb] = hexToRgb(accentHover);
+	return [
+		`  --accent: ${accentHex};`,
+		`  --accent-hover: ${accentHover};`,
+		`  --accent-muted: rgba(${r}, ${g}, ${b}, 0.15);`,
+		`  --accent-subtle: rgba(${r}, ${g}, ${b}, 0.08);`,
+		`  --border-checked: ${accentHex};`,
+		`  --check-bg: ${accentHex};`,
+		`  --btn-primary: ${accentHex};`,
+		`  --btn-primary-hover: ${accentHover};`,
+		`  --btn-primary-fg: ${pageBgHex};`,
+		`  --bg: ${pageBgHex};`,
+		`  --overlay-bg: rgba(${hexToRgb(pageBgHex).join(", ")}, 0.92);`,
+	].join("\n");
+}
+
 export function generateCuratorPage(
 	queries: string[],
 	sessionToken: string,
 	timeout: number,
-	availableProviders: { openai: boolean; brave: boolean; parallel: boolean; tavily: boolean; perplexity: boolean; exa: boolean; gemini: boolean },
+	availableProviders: { openai: boolean; exa: boolean },
 	defaultProvider: string,
 	searchProvider: string,
 	summaryModels: Array<{ value: string; label: string }>,
 	defaultSummaryModel: string | null,
+	accentColor?: string,
+	pageBg?: string,
 ): string {
-	const providerButtonsHtml = buildProviderButtons(availableProviders, defaultProvider, queries.length > 0);
-	const inlineData = safeInlineJSON({ queries, sessionToken, timeout, defaultProvider, searchProvider, summaryModels, defaultSummaryModel, availableProviders });
+	const providerButtonsHtml = buildProviderButtons(
+		availableProviders,
+		defaultProvider,
+		queries.length > 0,
+	);
+	const inlineData = safeInlineJSON({
+		queries,
+		sessionToken,
+		timeout,
+		defaultProvider,
+		searchProvider,
+		summaryModels,
+		defaultSummaryModel,
+		availableProviders,
+	});
+
+	const accentVars =
+		accentColor && pageBg ? `\n:root {\n${buildAccentVars(accentColor, pageBg)}\n}` : "";
 
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -56,9 +116,10 @@ export function generateCuratorPage(
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <style>
 ${CSS}
+${accentVars}
 </style>
 </head>
 <body>
@@ -636,32 +697,7 @@ main {
   background: rgba(141, 211, 255, 0.14);
   border-color: rgba(141, 211, 255, 0.3);
 }
-.provider-tag.provider-perplexity {
-  color: #cba6f7;
-  background: rgba(203, 166, 247, 0.14);
-  border-color: rgba(203, 166, 247, 0.3);
-}
-.provider-tag.provider-gemini {
-  color: #f5c27b;
-  background: rgba(245, 194, 123, 0.14);
-  border-color: rgba(245, 194, 123, 0.3);
-}
 .provider-tag.provider-openai {
-  color: #a6e3a1;
-  background: rgba(166, 227, 161, 0.14);
-  border-color: rgba(166, 227, 161, 0.3);
-}
-.provider-tag.provider-brave {
-  color: #f38ba8;
-  background: rgba(243, 139, 168, 0.14);
-  border-color: rgba(243, 139, 168, 0.3);
-}
-.provider-tag.provider-parallel {
-  color: #89dceb;
-  background: rgba(137, 220, 235, 0.14);
-  border-color: rgba(137, 220, 235, 0.3);
-}
-.provider-tag.provider-tavily {
   color: #a6e3a1;
   background: rgba(166, 227, 161, 0.14);
   border-color: rgba(166, 227, 161, 0.3);
@@ -1389,7 +1425,7 @@ const SCRIPT = `(function() {
   var token = DATA.sessionToken;
   var timeoutSec = DATA.timeout;
   var queries = Array.isArray(DATA.queries) ? DATA.queries : [];
-  var providers = ["openai", "exa", "brave", "parallel", "tavily", "perplexity", "gemini"];
+  var providers = ["openai", "exa"];
   var availProviders = DATA.availableProviders && typeof DATA.availableProviders === "object" ? DATA.availableProviders : {};
   var workflow = "summary-review";
   var initialDefaultProvider = typeof DATA.defaultProvider === "string" ? DATA.defaultProvider : "exa";
@@ -1490,12 +1526,12 @@ const SCRIPT = `(function() {
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
-      .replace(/\"/g, "&quot;");
+      .replace(/"/g, "&quot;");
   }
 
   function sanitizeHref(url) {
     var value = typeof url === "string" ? url.trim() : "";
-    return /^https?:\/\//i.test(value) ? value : "#";
+    return /^https?:///i.test(value) ? value : "#";
   }
 
   function sanitizeMarkdownHtml(html) {
@@ -1590,12 +1626,7 @@ const SCRIPT = `(function() {
 
   function providerLabel(provider) {
     if (provider === "openai") return "OpenAI";
-    if (provider === "brave") return "Brave";
-    if (provider === "parallel") return "Parallel";
-    if (provider === "tavily") return "Tavily";
-    if (provider === "perplexity") return "Perplexity";
     if (provider === "exa") return "Exa";
-    if (provider === "gemini") return "Gemini";
     return "Unknown";
   }
 

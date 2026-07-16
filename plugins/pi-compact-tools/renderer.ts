@@ -1,13 +1,27 @@
-import { Text, type Component } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import {
-	renderLiveThinkingGradient,
-	subscribeGroupTick,
-	unsubscribeGroupTick,
+	MUTED_GROUP_GRADIENT_PRESET,
+	renderLiveGradient,
+	subscribeGradientTick,
+	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
+import { TOOL_MATCH_COUNT_FG } from "../pi-ember-ui/mode-colors.ts";
 
 const BULLET = "• ";
+
+/** Exploring-style child tree gutter — SSOT for compact groups and subagents. */
+export const TREE_BRANCH_PIPE = "  │ ";
+/** Tee branch for non-terminal subagent rows (vertical continues + opens right). */
+export const TREE_BRANCH_TEE = "  ├ ";
+export const TREE_BRANCH_LAST = "  └ ";
+/** Nested subagent tool rows — the └ sits on the agent-name column
+ *  (`  ├ ` / `  └ ` place the name at column 4; tool └ goes there too). */
+export const TREE_NESTED_PIPE = "  │ └";
+export const TREE_NESTED_LAST = "    └";
+/** Single subagent tool row — └ on the agent-name column after `• `. */
+export const TREE_SINGLE_TOOL = "  └";
 const DISCOVERY_TOOLS = new Set(["read", "grep", "find", "ls"]);
-const GROUPABLE_TOOLS = new Set([...DISCOVERY_TOOLS, "bash"]);
+const GROUPABLE_TOOLS = new Set([...DISCOVERY_TOOLS, "edit", "write", "bash"]);
 
 export type ToolRenderContext = {
 	args: any;
@@ -31,12 +45,16 @@ export type CompactCall = {
 	isError: boolean;
 	_completed?: boolean;
 	result?: any;
+	/** Standalone (non-group-owner) call row visual — repainted on theme change. */
+	callText?: Text;
 };
 
 export type DiscoveryGroup = {
 	records: CompactCall[];
-	/** Group type: "discovery" (Exploring/Explored) or "working" (Working/Worked). */
-	type?: "discovery" | "working";
+	/** Group type and its matching present/past-tense label pair. */
+	type?: "discovery" | "editing" | "writing" | "bashing";
+	/** The groupKey value that created this group. */
+	key?: string;
 	/**
 	 * The record whose component renders the group header. Set once at
 	 * group creation to the first member and never changed.
@@ -45,11 +63,12 @@ export type DiscoveryGroup = {
 	hasNonDiscovery?: boolean;
 	/**
 	 * Whether the agent has demonstrably moved on from this group (emitted
-	 * visible text, started a non-group tool, or the turn ended). The label
-	 * only flips to past tense (Explored/Worked) when both all members are
-	 * complete AND the group is settled. While complete-but-unsettled, the
-	 * group stays active (gradient + present tense) so the Thinking/Working
-	 * widget stays hidden and there is no premature past-tense label.
+	 * visible text, emitted thinking text, started a non-group tool, or
+	 * started a tool in a different group). The label only flips to past
+	 * tense when both all members are complete AND the group is settled.
+	 * While complete-but-unsettled, the group stays active (gradient + present
+	 * tense) so the Thinking widget stays hidden and there is no premature
+	 * past-tense label.
 	 */
 	settled?: boolean;
 	/**
@@ -59,8 +78,28 @@ export type DiscoveryGroup = {
 	 * visible across Pi rebuilds (thinking-toggle, compaction, settings)
 	 * without relying on owner invalidation.
 	 */
-	callText?: Text;
+	callText?: CompactGroupText;
 };
+
+/**
+ * Group rows must never wrap: wrapping child previews produces visually noisy
+ * blocks. The TUI supplies the authoritative available width on every render,
+ * so truncate each independently styled line at that boundary.
+ */
+class CompactGroupText implements Component {
+	text = "";
+
+	setText(text: string): void {
+		this.text = text;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const availableWidth = Math.max(1, width);
+		return this.text.split("\n").map((line) => truncateToWidth(line, availableWidth));
+	}
+}
 
 function textValue(value: unknown, fallback = ""): string {
 	if (value === undefined || value === null) return fallback;
@@ -69,6 +108,27 @@ function textValue(value: unknown, fallback = ""): string {
 
 function toolPath(args: any): string {
 	return textValue(args?.file_path ?? args?.path, ".");
+}
+
+function normalizedTargetPath(args: any): string {
+	const target = toolPath(args).replace(/\\/g, "/").replace(/\/+$/, "");
+	return target || ".";
+}
+
+function targetPathForRecord(record: CompactCall): string {
+	if (record.name === "bash") {
+		return bashGrepInfo(textValue(record.args?.command))?.path ?? normalizedTargetPath(record.args);
+	}
+	return normalizedTargetPath(record.args);
+}
+
+function readRangeLabel(args: any): string {
+	const parts: string[] = [];
+	if (typeof args?.offset === "number") parts.push(`offset ${args.offset}`);
+	if (typeof args?.limit === "number") {
+		parts.push(`${args.limit} ${args.limit === 1 ? "line" : "lines"}`);
+	}
+	return parts.length > 0 ? ` (${parts.join(", ")})` : "";
 }
 
 function bashCdDir(command: string): string | undefined {
@@ -103,12 +163,12 @@ function bashGrepInfo(command: string): { pattern: string; path: string } | unde
 
 function groupKey(name: string, args: any): string | undefined {
 	if (DISCOVERY_TOOLS.has(name)) return "__discovery__";
-	if (name === "edit" || name === "write") return "__working__";
+	if (name === "edit") return "__editing__";
+	if (name === "write") return "__writing__";
 	if (name === "bash") {
 		const command = textValue(args?.command);
 		if (bashGrepInfo(command)) return "__discovery__";
-		const dir = bashCdDir(command);
-		return dir ? `bash:${dir}` : "__working__";
+		return "__bashing__";
 	}
 	return undefined;
 }
@@ -129,7 +189,13 @@ function fullOutputText(result: any): string {
 function formatExpandedOutput(result: any, theme: any): string {
 	const text = fullOutputText(result).trimEnd();
 	if (!text) return "";
-	return "\n" + text.split("\n").map((line) => theme.fg("text", line)).join("\n");
+	return (
+		"\n" +
+		text
+			.split("\n")
+			.map((line) => theme.fg("text", line))
+			.join("\n")
+	);
 }
 
 function bashLastLine(result: any): string | undefined {
@@ -171,7 +237,7 @@ function matchLabel(result: any, theme: any): string {
 	const total = matchCount(result);
 	if (total === undefined) return "";
 	const label = total === 1 ? "1 match" : `${total} matches`;
-	const color = total > 0 ? "success" : "muted";
+	const color = total > 0 ? TOOL_MATCH_COUNT_FG : "muted";
 	return theme.fg("dim", "  ") + theme.fg(color, label);
 }
 
@@ -193,7 +259,11 @@ export function statusBulletColor(isError: boolean, isCompleted: boolean, theme:
  * Canonical group-bullet color: any error→red, all completed→green,
  * else flashing. Derived from statusBulletColor's pulse logic.
  */
-export function groupBulletColorFromFlags(hasError: boolean, allCompleted: boolean, theme: any): string {
+export function groupBulletColorFromFlags(
+	hasError: boolean,
+	allCompleted: boolean,
+	theme: any,
+): string {
 	return statusBulletColor(hasError, allCompleted, theme);
 }
 
@@ -213,7 +283,11 @@ export class PulseManager {
 		if (this.timer) return;
 		this.timer = setInterval(() => {
 			for (const cb of this.callbacks) {
-				try { cb(); } catch { /* best effort */ }
+				try {
+					cb();
+				} catch {
+					/* best effort */
+				}
 			}
 		}, PULSE_INTERVAL_MS);
 	}
@@ -239,48 +313,74 @@ function bulletColor(record: CompactCall, theme: any): string {
 	return statusBulletColor(record.isError, record._completed === true, theme);
 }
 
+function formatStandaloneCallRow(record: CompactCall, theme: any): string {
+	const { name, args, result } = record;
+	const prefix = bulletColor(record, theme) + formatCallBody(name, args, theme);
+	if (!record._completed || result === undefined) return prefix;
+	if (name === "edit") {
+		return prefix + theme.fg("dim", "  ") + formatEditStats(result, theme);
+	}
+	if (name === "grep" || name === "find") {
+		return prefix + matchLabel(result, theme);
+	}
+	if (name === "bash") {
+		return prefix + formatBashResultLine(result, theme);
+	}
+	return prefix;
+}
+
 function formatEditStats(result: any, theme: any): string {
 	const { additions, removals } = diffStats(result);
-	return theme.fg("success", `+${additions}`) +
+	return (
+		theme.fg("success", `+${additions}`) +
 		theme.fg("dim", " / ") +
-		theme.fg("error", `-${removals}`);
+		theme.fg("error", `-${removals}`)
+	);
 }
 
 export function formatCallBody(name: string, args: any, theme: any, inGroup = false): string {
 	const pathName = toolPath(args);
 	switch (name) {
 		case "read":
-			return theme.fg("dim", theme.bold("Read")) +
-				theme.fg("dim", ` ${pathName}`);
+			return (
+				theme.fg("dim", theme.bold("Read")) + theme.fg("dim", ` ${pathName}${readRangeLabel(args)}`)
+			);
 		case "grep":
-			return theme.fg("dim", theme.bold("Search")) +
+			return (
+				theme.fg("dim", theme.bold("Search")) +
 				theme.fg("dim", ` ${textValue(args?.pattern)}`) +
-				theme.fg("dim", ` in ${pathName}`);
+				theme.fg("dim", ` in ${pathName}`)
+			);
 		case "find":
-			return theme.fg("dim", theme.bold("Find")) +
+			return (
+				theme.fg("dim", theme.bold("Find")) +
 				theme.fg("dim", ` ${textValue(args?.pattern)}`) +
-				theme.fg("dim", ` in ${pathName}`);
+				theme.fg("dim", ` in ${pathName}`)
+			);
 		case "ls":
-			return theme.fg("dim", theme.bold("List")) +
-				theme.fg("dim", ` ${pathName}`);
+			return theme.fg("dim", theme.bold("List")) + theme.fg("dim", ` ${pathName}`);
 		case "bash": {
 			const cmd = textValue(args?.command);
 			const grepInfo = bashGrepInfo(cmd);
 			if (grepInfo) {
-				return theme.fg("dim", theme.bold("Search")) +
+				return (
+					theme.fg("dim", theme.bold("Search")) +
 					theme.fg("dim", ` ${grepInfo.pattern}`) +
-					theme.fg("dim", ` in ${grepInfo.path}`);
+					theme.fg("dim", ` in ${grepInfo.path}`)
+				);
 			}
-			const stripped = inGroup ? (cmd.replace(/^\s*cd\s+[^\s&]+\s*&&\s*/, "") || cmd) : cmd;
-			return theme.fg("dim", theme.bold("Run")) +
-				theme.fg("dim", ` $ ${stripped}`);
+			const stripped = inGroup ? cmd.replace(/^\s*cd\s+[^\s&]+\s*&&\s*/, "") || cmd : cmd;
+			if (inGroup) return theme.fg("dim", `$ ${stripped}`);
+			return theme.fg("dim", theme.bold("Bash")) + theme.fg("dim", ` $ ${stripped}`);
 		}
 		case "edit":
-			return theme.fg("dim", theme.bold("edit")) +
-				theme.fg("dim", ` ${pathName}`);
+			return inGroup
+				? theme.fg("dim", pathName)
+				: theme.fg("dim", theme.bold("Edit")) + theme.fg("dim", ` ${pathName}`);
 		case "write":
-			return theme.fg("dim", theme.bold("write")) +
-				theme.fg("dim", ` ${pathName}`);
+			return inGroup
+				? theme.fg("dim", pathName)
+				: theme.fg("dim", theme.bold("Write")) + theme.fg("dim", ` ${pathName}`);
 		default:
 			return theme.fg("dim", theme.bold(name));
 	}
@@ -293,92 +393,113 @@ function groupBulletColor(group: DiscoveryGroup, theme: any): string {
 }
 
 function groupHeaderLabel(group: DiscoveryGroup): string {
-	const allDone = group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
-	const isWorking = group.type === "working";
-	const verb = allDone
-		? (isWorking ? "Worked" : "Explored")
-		: (isWorking ? "Working" : "Exploring");
-	const first = group.records[0];
-	if (!first) return verb;
-	const key = groupKey(first.name, first.args);
-	if (key?.startsWith("bash:")) {
-		const dir = key.slice(5);
-		return `${verb} ${dir}`;
-	}
-	return verb;
+	const allDone =
+		group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
+	const labels =
+		group.type === "editing"
+			? { present: "Editing", past: "Edited", noun: "file" }
+			: group.type === "writing"
+				? { present: "Writing", past: "Written", noun: "file" }
+				: group.type === "bashing"
+					? { present: "Bashing", past: "Bashed", noun: "command" }
+					: { present: "Exploring", past: "Explored", noun: "file" };
+	if (!allDone) return labels.present;
+	const count =
+		group.type === "bashing"
+			? group.records.length
+			: new Set(group.records.map(targetPathForRecord)).size;
+	return `${labels.past} ${count} ${count === 1 ? labels.noun : `${labels.noun}s`}`;
+}
+
+function formatGroupCallBody(record: CompactCall, theme: any): string {
+	const body = formatCallBody(record.name, record.args, theme, true);
+	if (record.name !== "edit" || !record._completed) return body;
+	return body + theme.fg("dim", "  ") + formatEditStats(record.result, theme);
 }
 
 function formatGroup(group: DiscoveryGroup, theme: any): string {
-	const allCompleted = group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
+	const allCompleted =
+		group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
 	const headerLabel = groupHeaderLabel(group);
 	const headerText = allCompleted
 		? theme.fg("text", theme.bold(headerLabel))
-		: renderLiveThinkingGradient(headerLabel);
-	const lines = [
-		groupBulletColor(group, theme) + headerText,
-	];
+		: renderLiveGradient(headerLabel, MUTED_GROUP_GRADIENT_PRESET);
+	const lines = [groupBulletColor(group, theme) + headerText];
 	for (const [index, record] of group.records.entries()) {
-		const prefix = index === 0 ? "  └ " : "    ";
-		const suffix = record._completed && (record.name === "grep" || record.name === "find")
-			? matchLabel(record.result, theme)
-			: "";
-		lines.push(
-			theme.fg("dim", prefix) +
-			formatCallBody(record.name, record.args, theme, true) +
-			suffix,
-		);
+		const prefix =
+			index === group.records.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE;
+		const suffix =
+			record._completed && (record.name === "grep" || record.name === "find")
+				? matchLabel(record.result, theme)
+				: "";
+		lines.push(theme.fg("dim", prefix) + formatGroupCallBody(record, theme) + suffix);
 	}
 	return lines.join("\n");
 }
 
 export class CompactRenderer {
 	private readonly calls = new Map<string, CompactCall>();
-	private lastCall: CompactCall | undefined;
-	private lastGroupKey: string | undefined;
+	/** The single live group. Settled groups are dropped so a later
+	 *  same-type call starts a fresh group at its own transcript position
+	 *  instead of reopening the old one. */
 	private currentGroup: DiscoveryGroup | undefined;
-	/** The single discovery group persists until session replacement. */
-	private discoveryGroup: DiscoveryGroup | undefined;
-	/** The single working group (edit/write/non-grep bash) persists until session replacement. */
-	private workingGroup: DiscoveryGroup | undefined;
 	private readonly pendingGroupInvalidations = new Set<DiscoveryGroup>();
 
 	/** Tick callback that re-renders the active group owner so the group
-	 *  header gradient sweeps in lockstep with the Thinking/Working
+	 *  header gradient sweeps in lockstep with the Thinking
 	 *  widget. Subscribed while any group is unsettled (active); removed
-	 *  on settle or session reset. */
+	 *  on settle or session reset. The callback identity is stable for
+	 *  the subscription lifecycle; the invalidate target is rebound on
+	 *  each renderCall so Pi rebuilds (which provide a fresh invalidate
+	 *  closure) rebind without churning the subscriber Set. */
 	private groupTickCb: (() => void) | undefined;
+	private groupTickTarget: (() => void) | undefined;
 
 	/** Whether the current turn has produced visible text output. */
 	private turnHasText = false;
 	private turnHasUserMessage = false;
 	private canCarryPreviousGroup = false;
+	private priorGroupKey: string | undefined;
 
 	beginTurn(): void {
-		if (!this.canCarryPreviousGroup) this.resetGroupingState();
+		if (!this.canCarryPreviousGroup) {
+			this.resetGroupingState();
+		} else if (this.currentGroup) {
+			this.currentGroup.settled = false;
+		}
 		this.canCarryPreviousGroup = false;
 		this.turnHasText = false;
 		this.turnHasUserMessage = false;
 	}
 
 	endTurn(thinkingHidden: boolean, message?: any): void {
-		this.settleGroups();
-		const messageHasText = Array.isArray(message?.content) && message.content.some(
-			(part: any) => part?.type === "text" && typeof part.text === "string" && part.text.trim(),
-		);
-		this.canCarryPreviousGroup = thinkingHidden && !this.turnHasText && !messageHasText && !this.turnHasUserMessage;
+		const messageHasText =
+			Array.isArray(message?.content) &&
+			message.content.some(
+				(part: any) => part?.type === "text" && typeof part.text === "string" && part.text.trim(),
+			);
+		this.canCarryPreviousGroup =
+			thinkingHidden && !this.turnHasText && !messageHasText && !this.turnHasUserMessage;
+		if (!this.canCarryPreviousGroup) {
+			this.settleGroups();
+			this.resetGroupingState();
+		}
 	}
 
 	/** Called by the plugin when the current turn produces visible text
 	 *  output (text_start/text_delta). Break the old group immediately so
-	 *  an intervening non-discovery tool cannot update it. */
+	 *  an intervening non-group tool cannot update it. */
 	noteVisibleText(): void {
-		if (!this.turnHasText) this.settleGroups();
-		if (!this.turnHasText) this.resetGroupingState();
+		this.settleGroups();
+		this.resetGroupingState();
 		this.turnHasText = true;
 	}
 
 	noteUserMessage(): void {
-		if (!this.turnHasUserMessage) this.resetGroupingState();
+		if (!this.turnHasUserMessage) {
+			this.settleGroups();
+			this.resetGroupingState();
+		}
 		this.turnHasUserMessage = true;
 	}
 
@@ -388,31 +509,40 @@ export class CompactRenderer {
 	resetForSession(): void {
 		this.unsubscribeGroupTick();
 		this.calls.clear();
-		this.lastCall = undefined;
-		this.lastGroupKey = undefined;
 		this.currentGroup = undefined;
-		this.discoveryGroup = undefined;
-		this.workingGroup = undefined;
 		this.pendingGroupInvalidations.clear();
 		this.turnHasText = false;
 		this.turnHasUserMessage = false;
 		this.canCarryPreviousGroup = false;
+		this.priorGroupKey = undefined;
 	}
 
-	/** Whether any tool group (discovery or working) currently has at
+	/** Re-paint compact rows after a live accent/theme rebuild. */
+	refreshThemeColors(theme: any): void {
+		const groups_refreshed = new Set<DiscoveryGroup>();
+		for (const record of this.calls.values()) {
+			const group = record.group;
+			if (group?.callText && group.records.length > 1 && !groups_refreshed.has(group)) {
+				groups_refreshed.add(group);
+				group.callText.setText(formatGroup(group, theme));
+				continue;
+			}
+			if (record.callText) {
+				record.callText.setText(formatStandaloneCallRow(record, theme));
+			}
+		}
+	}
+
+	/** Whether any compact tool group currently has at
 	 *  least one running member. Read by pi-compact-tools lifecycle handlers
 	 *  to drive the shared `isToolGroupActive` flag in
-	 *  pi-ember-ui/mode-colors.ts, which suppresses the Thinking/Working
+	 *  pi-ember-ui/mode-colors.ts, which suppresses the Thinking
 	 *  widget while a group header carries the live gradient. */
 	hasActiveGroups(): boolean {
-		const groups = [this.discoveryGroup, this.workingGroup, this.currentGroup];
-		for (const group of groups) {
-			if (!group || group.records.length === 0) continue;
-			const allComplete = group.records.every((r) => r._completed);
-			if (group.records.some((r) => !r._completed)) return true;
-			if (allComplete && !group.settled) return true;
-		}
-		return false;
+		const group = this.currentGroup;
+		if (!group || group.records.length === 0) return false;
+		if (group.records.some((r) => !r._completed)) return true;
+		return group.records.every((r) => r._completed) && !group.settled;
 	}
 
 	/** Settle a single group so its label flips to past tense. No-op if
@@ -423,42 +553,42 @@ export class CompactRenderer {
 		this.scheduleGroupInvalidation(group);
 	}
 
-	/** Settle all live groups so their labels flip to past tense
-	 *  (Explored/Worked). Called when the agent demonstrably moves on:
-	 *  visible text, a non-group tool, or turn end. Idempotent per group
-	 *  via scheduleGroupInvalidation. */
+	/** Settle the live group so its label flips to past tense. Called when the
+	 *  agent demonstrably moves on:
+	 *  visible text, emitted thinking text, a non-group tool, or a different
+	 *  groupable tool. Idempotent per group via scheduleGroupInvalidation. */
 	private settleGroups(): void {
-		this.settleGroup(this.discoveryGroup);
-		this.settleGroup(this.workingGroup);
+		this.settleGroup(this.currentGroup);
 		this.unsubscribeGroupTick();
 	}
 
 	/** Subscribe the group owner to the thinking tick so the group header
-	 *  gradient animates at the same cadence as the Thinking/Working
-	 *  widget. Idempotent — only subscribes once. */
+	 *  gradient animates at the same cadence as the Thinking
+	 *  widget. The callback identity is stable for the subscription
+	 *  lifecycle; only the invalidate target is rebound. This prevents
+	 *  Set live-iteration hazards when renderCall provides a fresh
+	 *  invalidate closure on Pi rebuilds. */
 	private subscribeGroupTick(ownerInvalidate: (() => void) | undefined): void {
 		if (!ownerInvalidate) return;
+		this.groupTickTarget = ownerInvalidate;
 		if (this.groupTickCb) return;
-		const cb = (): void => {
-			ownerInvalidate();
+		this.groupTickCb = (): void => {
+			this.groupTickTarget?.();
 		};
-		this.groupTickCb = cb;
-		subscribeGroupTick(cb);
+		subscribeGradientTick(this.groupTickCb);
 	}
 
 	/** Unsubscribe the group tick callback if one is active. */
 	private unsubscribeGroupTick(): void {
 		if (!this.groupTickCb) return;
-		unsubscribeGroupTick(this.groupTickCb);
+		unsubscribeGradientTick(this.groupTickCb);
 		this.groupTickCb = undefined;
+		this.groupTickTarget = undefined;
 	}
 
 	private resetGroupingState(): void {
-		this.lastCall = undefined;
-		this.lastGroupKey = undefined;
 		this.currentGroup = undefined;
-		this.discoveryGroup = undefined;
-		this.workingGroup = undefined;
+		this.priorGroupKey = undefined;
 	}
 
 	private scheduleGroupInvalidation(group: DiscoveryGroup): void {
@@ -470,34 +600,38 @@ export class CompactRenderer {
 		});
 	}
 
-	private markNonDiscoveryGroups(): void {
-		// A non-group tool means the agent moved on from both discovery and
-		// working — settle both so their labels flip to past tense.
-		this.settleGroups();
-	}
-
 	private appendToGroup(group: DiscoveryGroup, record: CompactCall): void {
-		// Attach every member only once the group has a second member. This
-		// keeps a lone discovery call rendered as a normal standalone row.
 		for (const member of group.records) member.group = group;
+		group.settled = false;
 		group.records.push(record);
 		record.group = group;
 		this.currentGroup = group;
 		this.scheduleGroupInvalidation(group);
 	}
 
-	registerCall(
-		name: string,
-		id: string,
-		args: any,
-		invalidate?: () => void,
-	): CompactCall {
+	private startGroup(key: string, record: CompactCall): DiscoveryGroup {
+		const type =
+			key === "__editing__"
+				? "editing"
+				: key === "__writing__"
+					? "writing"
+					: key === "__bashing__"
+						? "bashing"
+						: "discovery";
+		const group: DiscoveryGroup = {
+			records: [record],
+			renderOwner: record,
+			type,
+			key,
+		};
+		this.currentGroup = group;
+		return group;
+	}
+
+	registerCall(name: string, id: string, args: any, invalidate?: () => void): CompactCall {
 		const existing = this.calls.get(id);
 		if (existing) {
 			existing.args = args;
-			// Keep the live callback for one-shot group-owner updates. The
-			// tool_call lifecycle hook re-registers existing calls without a
-			// component invalidator, so do not erase it there.
 			if (invalidate) {
 				existing.invalidate = invalidate;
 			}
@@ -508,8 +642,6 @@ export class CompactRenderer {
 		this.calls.set(id, record);
 		const key = groupKey(name, args);
 
-		// A visible assistant message or user message separates this turn from
-		// the old group. Reset lazily so a turn can still group its own calls.
 		if ((this.turnHasText || this.turnHasUserMessage) && key !== undefined) {
 			this.resetGroupingState();
 			this.turnHasText = false;
@@ -517,49 +649,13 @@ export class CompactRenderer {
 		}
 
 		if (key === undefined) {
-			this.markNonDiscoveryGroups();
+			this.settleGroups();
+		} else if (this.currentGroup && !this.currentGroup.settled && this.currentGroup.key === key) {
+			this.appendToGroup(this.currentGroup, record);
+		} else {
+			this.settleGroups();
+			this.startGroup(key, record);
 		}
-
-		if (key === "__discovery__") {
-			// Discovery is one persistent group. It intentionally survives
-			// turn boundaries and intervening non-discovery calls; the latter
-			// only makes the group label monotonic via hasNonDiscovery.
-			// Starting/continuing discovery settles the working group — the
-			// agent has moved on from working.
-			this.settleGroup(this.workingGroup);
-			if (!this.discoveryGroup) {
-				this.discoveryGroup = {
-					records: [record],
-					renderOwner: record,
-					type: "discovery",
-				};
-				this.currentGroup = this.discoveryGroup;
-			} else {
-				this.appendToGroup(this.discoveryGroup, record);
-			}
-		} else if (key === "__working__") {
-			// Working group (edit/write/non-grep bash) — same persistent-group
-			// semantics as discovery. Starting/continuing working settles the
-			// discovery group — the agent has moved on from exploring.
-			this.settleGroup(this.discoveryGroup);
-			if (!this.workingGroup) {
-				this.workingGroup = {
-					records: [record],
-					renderOwner: record,
-					type: "working",
-				};
-				this.currentGroup = this.workingGroup;
-			} else {
-				this.appendToGroup(this.workingGroup, record);
-			}
-		} else if (key && this.lastCall && key === this.lastGroupKey) {
-			const group = this.lastCall.group ?? { records: [this.lastCall] };
-			this.lastCall.group = group;
-			if (!group.renderOwner) group.renderOwner = this.lastCall;
-			this.appendToGroup(group, record);
-		}
-		this.lastCall = record;
-		this.lastGroupKey = key;
 		record.invalidate = invalidate;
 		return record;
 	}
@@ -577,21 +673,13 @@ export class CompactRenderer {
 		// the owner component has been destroyed and recreated.
 	}
 
-	renderCall(
-		name: string,
-		args: any,
-		theme: any,
-		context: ToolRenderContext,
-	): Component {
+	renderCall(name: string, args: any, theme: any, context: ToolRenderContext): Component {
 		try {
 			return this.renderCallInner(name, args, theme, context);
 		} catch {
 			// Never throw: Pi's fallback would dump raw content. Return a
 			// compact call row instead.
-			return new Text(
-				theme.fg("muted", BULLET) + formatCallBody(name, args, theme),
-				0, 0,
-			);
+			return new Text(theme.fg("muted", BULLET) + formatCallBody(name, args, theme), 0, 0);
 		}
 	}
 
@@ -604,19 +692,20 @@ export class CompactRenderer {
 		const record = this.registerCall(name, context.toolCallId, args, context.invalidate);
 		if (record.group && record.group.records.length > 1) {
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
-			const callText = context.state.callText instanceof Text
-				? context.state.callText
-				: new Text("", 0, 0);
+			const callText =
+				context.state.callText instanceof CompactGroupText
+					? context.state.callText
+					: new CompactGroupText();
 			context.state.callText = callText;
 			// Re-bind the group's shared visual handle to the owner's live
-			// Text on every render. On Pi rebuilds (thinking-toggle,
-			// compaction, settings) context.state is fresh, so a new Text is
+			// component on every render. On Pi rebuilds (thinking-toggle,
+			// compaction, settings) context.state is fresh, so a new component is
 			// created and the group handle is repointed to the live owner.
 			record.group.callText = callText;
 			callText.setText(formatGroup(record.group, theme));
 			// While the group is not settled (agent hasn't moved on), subscribe
 			// the owner's invalidate to the thinking tick so the gradient
-			// header sweeps in lockstep with the Thinking/Working widget.
+			// header sweeps in lockstep with the Thinking widget.
 			if (!record.group.settled) {
 				this.subscribeGroupTick(record.invalidate);
 			} else {
@@ -624,13 +713,11 @@ export class CompactRenderer {
 			}
 			return callText;
 		}
-		const callText = context.state.callText instanceof Text
-			? context.state.callText
-			: new Text("", 0, 0);
+		const callText =
+			context.state.callText instanceof Text ? context.state.callText : new Text("", 0, 0);
 		context.state.callText = callText;
-		callText.setText(
-			bulletColor(record, theme) + formatCallBody(name, args, theme),
-		);
+		record.callText = callText;
+		callText.setText(formatStandaloneCallRow(record, theme));
 		return callText;
 	}
 
@@ -667,9 +754,8 @@ export class CompactRenderer {
 		if (record.group && record.group.records.length > 1) {
 			// Update the shared group visual directly so the owner's row
 			// reflects this member's completion (bullet color, match count,
-			// Explored label) without invalidating the owner. setText clears
-			// the Text cache; Pi's next requestRender re-renders the owner's
-			// selfRenderContainer with the updated Text.
+			// final label) without invalidating the owner. Pi's next requestRender
+			// renders the owner's selfRenderContainer with the updated component.
 			record.group.callText?.setText(formatGroup(record.group, theme));
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
 			if (expanded && !options.isPartial) {
@@ -684,30 +770,8 @@ export class CompactRenderer {
 		const error = errorText(result, context.isError);
 		const callText = context.state.callText;
 		if (callText instanceof Text) {
-			if (name === "edit") {
-				callText.setText(
-					bulletColor(record, theme) +
-						formatCallBody(name, args, theme) +
-						theme.fg("dim", "  ") +
-						formatEditStats(result, theme),
-				);
-			} else if (name === "grep" || name === "find") {
-				callText.setText(
-					bulletColor(record, theme) +
-						formatCallBody(name, args, theme) +
-						matchLabel(result, theme),
-				);
-			} else if (name === "bash") {
-				callText.setText(
-					bulletColor(record, theme) +
-						formatCallBody(name, args, theme) +
-						formatBashResultLine(result, theme),
-				);
-			} else {
-				callText.setText(
-					bulletColor(record, theme) + formatCallBody(name, args, theme),
-				);
-			}
+			record.callText = callText;
+			callText.setText(formatStandaloneCallRow(record, theme));
 		}
 		if (error) return new Text(theme.fg("error", error), 0, 0);
 		if (expanded) {

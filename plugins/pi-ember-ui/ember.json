@@ -28,7 +28,8 @@
 		"toolPendingBg": "#282832",
 		"toolSuccessBg": "#283228",
 		"toolErrorBg": "#3c2828",
-		"customMsgBg": "#2d2838"
+		"customMsgBg": "#343541",
+		"toolMatchCountFg": "#82430f"
 	},
 	"colors": {
 		"accent": "emberAccent",
@@ -49,7 +50,7 @@
 		"userMessageText": "text",
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "text",
-		"customMessageLabel": "#9575cd",
+		"customMessageLabel": "emberAccent90",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
@@ -89,11 +90,12 @@
 		"thinkingXhigh": "emberAccent75",
 		"thinkingMax": "emberAccent90",
 
-		"bashMode": "green"
+		"bashMode": "green",
+		"toolMatchCount": "toolMatchCountFg"
 	},
 	"export": {
 		"pageBg": "#18181e",
-		"cardBg": "#1e1e24",
-		"infoBg": "#3c3728"
+		"cardBg": "#201b1d",
+		"infoBg": "#31221a"
 	}
 }

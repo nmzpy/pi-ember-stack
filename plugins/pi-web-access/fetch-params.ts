@@ -19,7 +19,9 @@ export interface NormalizedFetchContentParams {
 	};
 }
 
-export function normalizeFetchContentParams(params: FetchContentParams): NormalizedFetchContentParams {
+export function normalizeFetchContentParams(
+	params: FetchContentParams,
+): NormalizedFetchContentParams {
 	const normalizedUrls = uniqueUrls(normalizeUrlArray(params.urls));
 	const urlList = normalizedUrls.length > 0 ? normalizedUrls : normalizeSingleUrl(params.url);
 	const prompt = normalizeOptionalString(params.prompt);

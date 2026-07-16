@@ -54,25 +54,28 @@ export interface SearchErrorPlan {
 }
 
 function truncate(text: string, max: number): string {
-	return text.length > max ? text.slice(0, max - 1) + "\u2026" : text;
+	return text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
 }
 
 /**
  * Build the error/cancel render plan. Returns null when `details` carries no
  * error/cancel signal (so the caller falls through to the normal success renderer).
  */
-export function buildSearchErrorPlan(details: SearchErrorDetails | undefined | null): SearchErrorPlan | null {
+export function buildSearchErrorPlan(
+	details: SearchErrorDetails | undefined | null,
+): SearchErrorPlan | null {
 	if (!details || (!details.error && !details.cancelled)) {
 		return null;
 	}
 
 	const headline = details.error ?? "Search cancelled.";
 	const queries = details.cancelledQueries ?? [];
-	const queryCount = typeof details.queryCount === "number" && details.queryCount > 0
-		? details.queryCount
-		: queries.length;
+	const queryCount =
+		typeof details.queryCount === "number" && details.queryCount > 0
+			? details.queryCount
+			: queries.length;
 	const done = queries.length;
-	const errored = queries.filter(q => q.error).length;
+	const errored = queries.filter((q) => q.error).length;
 
 	// Rich diagnostics only make sense when there is something to diagnose: a
 	// cancelled/curator result with partial data, OR a non-cancel error that carries
@@ -96,13 +99,17 @@ export function buildSearchErrorPlan(details: SearchErrorDetails | undefined | n
 			diag.push(`cancel reason   : ${details.cancelReason ?? "unknown"}`);
 		}
 		// Browser connection state — the most common stale cause (page never opened).
-		const browserLabel = details.browserConnected === undefined
-			? "unknown"
-			: details.browserConnected
-				? "connected"
-				: "never connected";
+		const browserLabel =
+			details.browserConnected === undefined
+				? "unknown"
+				: details.browserConnected
+					? "connected"
+					: "never connected";
 		diag.push(`browser         : ${browserLabel}`);
-		if (typeof details.lastHeartbeatAgeMs === "number" && Number.isFinite(details.lastHeartbeatAgeMs)) {
+		if (
+			typeof details.lastHeartbeatAgeMs === "number" &&
+			Number.isFinite(details.lastHeartbeatAgeMs)
+		) {
 			diag.push(`last heartbeat  : ${Math.round(details.lastHeartbeatAgeMs / 1000)}s ago`);
 		}
 		if (queryCount > 0) {
@@ -151,7 +158,7 @@ export function buildSearchErrorPlan(details: SearchErrorDetails | undefined | n
 		parts.push(`reason: ${details.cancelReason}`);
 	}
 	if (parts.length > 0) {
-		collapsed.push(parts.join("; ") + ".");
+		collapsed.push(`${parts.join("; ")}.`);
 	}
 	// For non-cancel errors with extra detail, preview the first detail line.
 	if (collapsed.length === 0 && extras.length > 0) {
@@ -162,9 +169,10 @@ export function buildSearchErrorPlan(details: SearchErrorDetails | undefined | n
 
 	// --- expand hint ---
 	const hiddenLines = Math.max(0, expanded.length - (1 + collapsed.length)); // headline + preview shown when collapsed
-	const expandHint = hiddenLines > 0
-		? `... (${hiddenLines} more lines, ${expanded.length} total, ctrl+o to expand)`
-		: null;
+	const expandHint =
+		hiddenLines > 0
+			? `... (${hiddenLines} more lines, ${expanded.length} total, ctrl+o to expand)`
+			: null;
 
 	return { expanded, collapsed, expandHint };
 }

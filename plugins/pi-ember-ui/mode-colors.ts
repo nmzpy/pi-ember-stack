@@ -7,6 +7,7 @@ export const MODE_COLORS: Record<string, string> = {
 
 export const MUTED_BULLET_COLOR = "#666666";
 export const MUTED_COLOR = "#808080";
+export const TEXT_COLOR = "#d4d4d4";
 
 export const PAGE_BG = "#18181e";
 
@@ -57,7 +58,7 @@ export function setLatestSubagentRunning(active: boolean): void {
 let toolGroupActive = false;
 
 /**
- * Whether any compact tool group (Exploring or Working) currently has at
+ * Whether any compact tool group (Exploring, Editing, Writing, or Bashing) currently has at
  * least one running member. Set by pi-compact-tools lifecycle handlers and
  * read by the pi-ember-ui thinking widget render closure so the
  * Thinking/Working row can be hidden while a group header carries the
@@ -103,6 +104,18 @@ export function colorize(hex: string, text: string): string {
 	return `\x1b[38;2;${hexToRgb(hex)}m${text}\x1b[39m`;
 }
 
+/**
+ * Render `text` in the live accent color, bypassing `theme.fg("accent")`
+ * which reads from the global theme proxy that can briefly hold the
+ * disk-seed Coder accent after Pi's theme watcher reloads `ember.json`.
+ * Uses the same accent derivation as `buildThemeFgColors` (`accentDesat`
+ * = accent blended 80% toward TEXT_COLOR) so the footer matches the
+ * theme's own accent token exactly.
+ */
+export function liveAccentFg(text: string): string {
+	return colorize(blendToHex(getActiveModeColor(), TEXT_COLOR, 0.8), text);
+}
+
 export function mutedBullet(): string {
 	return colorize(MUTED_BULLET_COLOR, "\u2022");
 }
@@ -118,16 +131,10 @@ export function hexToRgbTriplet(hex: string): [number, number, number] {
 }
 
 export function rgbTripletToHex(rgb: [number, number, number]): string {
-	return `#${rgb
-		.map((v) => v.toString(16).padStart(2, "0"))
-		.join("")}`;
+	return `#${rgb.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export function blendToHex(
-	fgHex: string,
-	bgHex: string,
-	opacity: number,
-): string {
+export function blendToHex(fgHex: string, bgHex: string, opacity: number): string {
 	const [fr, fg, fb] = hexToRgbTriplet(fgHex);
 	const [br, bg, bb] = hexToRgbTriplet(bgHex);
 	return rgbTripletToHex([
@@ -151,7 +158,23 @@ export function buildCodeBgHex(accentHex: string): string {
 	return blendToHex(accentHex, PAGE_BG, 0.05);
 }
 
+/** User-message pill background — accent at 10% over PAGE_BG. */
+export function buildUserMessageBgHex(accentHex: string): string {
+	return blendToHex(accentHex, PAGE_BG, 0.1);
+}
+
+/** Grep/find inline match-count label — accent at 50% over PAGE_BG (fg only). */
+export const TOOL_MATCH_COUNT_BLEND = 0.5;
+
+export function buildToolMatchCountFgHex(accentHex: string): string {
+	return blendToHex(accentHex, PAGE_BG, TOOL_MATCH_COUNT_BLEND);
+}
+
+/** Theme fg token for compact-tool match counts — use via theme.fg(), never theme.bg(). */
+export const TOOL_MATCH_COUNT_FG = "toolMatchCount" as const;
+
 export function buildThemeFgColors(accentHex: string): Record<string, string> {
+	const userMsgBg = buildUserMessageBgHex(accentHex);
 	const accent90 = blendToHex(accentHex, PAGE_BG, 0.9);
 	const accent60 = blendToHex(accentHex, PAGE_BG, 0.6);
 	const accent30 = blendToHex(accentHex, PAGE_BG, 0.3);
@@ -161,7 +184,6 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 	const accent35 = blendToHex(accentHex, PAGE_BG, 0.35);
 	const accent45 = blendToHex(accentHex, PAGE_BG, 0.45);
 	const accent75 = blendToHex(accentHex, PAGE_BG, 0.75);
-	const TEXT_COLOR = "#d4d4d4";
 	const accentDesat = blendToHex(accentHex, TEXT_COLOR, 0.8);
 
 	return {
@@ -177,7 +199,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 
 		// Inline code foreground uses normal text color; only the
 		// background rectangle (buildCodeBgHex) carries the accent tint.
-		mdCode: "#d4d4d4",
+		mdCode: TEXT_COLOR,
 
 		// Border muted (30% opacity)
 		borderMuted: accent30,
@@ -197,10 +219,11 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		warning: "#ffff00",
 		muted: MUTED_COLOR,
 		dim: "#666666",
-		text: "#d4d4d4",
+		text: TEXT_COLOR,
 		thinkingText: MUTED_COLOR,
-		userMessageText: "#d4d4d4",
-		customMessageText: "#d4d4d4",
+		userMessageText: TEXT_COLOR,
+		[TOOL_MATCH_COUNT_FG]: buildToolMatchCountFgHex(accentHex),
+		customMessageText: TEXT_COLOR,
 		toolOutput: MUTED_COLOR,
 		mdLinkUrl: "#666666",
 		mdCodeBlock: "#b5bd68",
@@ -218,21 +241,37 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		syntaxString: "#CE9178",
 		syntaxNumber: "#B5CEA8",
 		syntaxType: "#4EC9B0",
-		syntaxOperator: "#D4D4D4",
-		syntaxPunctuation: "#D4D4D4",
+		syntaxOperator: TEXT_COLOR,
+		syntaxPunctuation: TEXT_COLOR,
 		bashMode: "#b5bd68",
 	};
 }
 
 export function buildThemeBgColors(accentHex: string): Record<string, string> {
-	const userMsgBg = blendToHex(accentHex, PAGE_BG, 0.1);
+	const userMsgBg = buildUserMessageBgHex(accentHex);
 	return {
 		selectedBg: "#3a3a4a",
 		userMessageBg: userMsgBg,
 		subagentBg: blendToHex(accentHex, PAGE_BG, 0.09),
-		customMessageBg: "#2d2838",
+		customMessageBg: userMsgBg,
 		toolPendingBg: "#282832",
 		toolSuccessBg: "#283228",
 		toolErrorBg: "#3c2828",
+	};
+}
+
+/** Build the `export` section colors (pageBg, cardBg, infoBg) from the
+ *  active accent and PAGE_BG. These are used by Pi's HTML export feature
+ *  and by the curator page. Derived from the SSOT accent — never hardcode
+ *  hex values for export backgrounds. */
+export function buildThemeExportColors(accentHex: string): {
+	pageBg: string;
+	cardBg: string;
+	infoBg: string;
+} {
+	return {
+		pageBg: PAGE_BG,
+		cardBg: blendToHex(accentHex, PAGE_BG, 0.04),
+		infoBg: blendToHex(accentHex, PAGE_BG, 0.12),
 	};
 }

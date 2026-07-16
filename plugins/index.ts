@@ -4,29 +4,38 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import devinAuthPlugin from "./devin-auth/extensions/index.ts";
 import piCompactToolsPlugin, { getSharedRenderer } from "./pi-compact-tools/index.ts";
+import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 import piWebAccessPlugin from "./pi-web-access/extensions/index.ts";
+import xaiAuthPlugin from "./xai-auth/extensions/index.ts";
 
 export { getSharedRenderer };
 
-type PluginId = "pi-compact-tools" | "pi-custom-agents" | "devin-auth" | "pi-ember-fff" | "pi-ember-ui" | "pi-ember-tps" | "pi-web-access";
+type PluginId =
+	| "pi-compact-tools"
+	| "pi-custom-agents"
+	| "devin-auth"
+	| "pi-cursor-auth"
+	| "xai-auth"
+	| "pi-ember-fff"
+	| "pi-ember-ui"
+	| "pi-ember-tps"
+	| "pi-web-access";
 type StackPlugin = {
 	id: PluginId;
 	description: string;
 	extension: (pi: ExtensionAPI) => void | Promise<void>;
 };
 
-type StackPluginConfig = {
-	plugins?: unknown;
-};
-
-const CONFIG_RELATIVE_PATH = path.join(".pi", "ember-stack.json");
+const CONFIG_FILENAME = "pi-ember-stack.json";
 const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-compact-tools",
 	"devin-auth",
+	"pi-cursor-auth",
+	"xai-auth",
 	"pi-custom-agents",
 	"pi-ember-fff",
 	"pi-ember-ui",
@@ -44,6 +53,16 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "devin-auth",
 		description: "Devin OAuth provider, model catalog, and streaming transport",
 		extension: devinAuthPlugin,
+	},
+	{
+		id: "pi-cursor-auth",
+		description: "Cursor subscription auth, model catalog, and native Pi streaming",
+		extension: piCursorAuthPlugin,
+	},
+	{
+		id: "xai-auth",
+		description: "xAI (Grok) OAuth provider, model catalog, streaming, and custom tools",
+		extension: xaiAuthPlugin,
 	},
 	{
 		id: "pi-custom-agents",
@@ -76,58 +95,61 @@ function isPluginId(value: unknown): value is PluginId {
 	return typeof value === "string" && PLUGINS.some((plugin) => plugin.id === value);
 }
 
-function getConfigPath(cwd: string): string {
-	return path.join(cwd, CONFIG_RELATIVE_PATH);
+function getConfigPath(): string {
+	const home =
+		process.env.PI_HOME ||
+		path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent");
+	return path.join(home, CONFIG_FILENAME);
 }
 
-function readEnabledPlugins(cwd: string): Set<PluginId> {
-	const configPath = getConfigPath(cwd);
-	if (!fs.existsSync(configPath)) return new Set(DEFAULT_PLUGIN_IDS);
-
-	let config: StackPluginConfig;
+function readConfigFile(): Record<string, unknown> {
+	const configPath = getConfigPath();
+	if (!fs.existsSync(configPath)) return {};
 	try {
-		config = JSON.parse(fs.readFileSync(configPath, "utf-8")) as StackPluginConfig;
+		return JSON.parse(fs.readFileSync(configPath, "utf-8")) as Record<string, unknown>;
 	} catch (error) {
 		throw new Error(
-			`Invalid ${CONFIG_RELATIVE_PATH}: ${error instanceof Error ? error.message : String(error)}`,
+			`Invalid ${CONFIG_FILENAME}: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
+}
+
+function writeConfigFile(config: Record<string, unknown>): void {
+	const configPath = getConfigPath();
+	fs.mkdirSync(path.dirname(configPath), { recursive: true });
+	fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+}
+
+function readEnabledPlugins(): Set<PluginId> {
+	const config = readConfigFile();
 
 	if (!Array.isArray(config.plugins)) {
-		throw new Error(
-			`${CONFIG_RELATIVE_PATH} must contain a plugins array with known plugin IDs.`,
-		);
+		return new Set(DEFAULT_PLUGIN_IDS);
 	}
 
-	const unknownPlugin = config.plugins.find((pluginId) => !isPluginId(pluginId));
+	const unknownPlugin = (config.plugins as unknown[]).find((pluginId) => !isPluginId(pluginId));
 	if (unknownPlugin !== undefined) {
 		throw new Error(
-			`Unknown pi-ember-stack plugin ${String(unknownPlugin)} in ${CONFIG_RELATIVE_PATH}.`,
+			`Unknown pi-ember-stack plugin ${String(unknownPlugin)} in ${CONFIG_FILENAME}.`,
 		);
 	}
 
 	return new Set(config.plugins as PluginId[]);
 }
 
-function writeEnabledPlugins(cwd: string, enabledPlugins: Set<PluginId>): void {
-	const configPath = getConfigPath(cwd);
-	fs.mkdirSync(path.dirname(configPath), { recursive: true });
-	fs.writeFileSync(
-		configPath,
-		`${JSON.stringify({ plugins: PLUGINS.filter((plugin) => enabledPlugins.has(plugin.id)).map((plugin) => plugin.id) }, null, 2)}\n`,
-		"utf-8",
+function writeEnabledPlugins(enabledPlugins: Set<PluginId>): void {
+	const config = readConfigFile();
+	config.plugins = PLUGINS.filter((plugin) => enabledPlugins.has(plugin.id)).map(
+		(plugin) => plugin.id,
 	);
+	writeConfigFile(config);
 }
 
 function formatPluginChoice(plugin: StackPlugin, enabledPlugins: Set<PluginId>): string {
 	return `${enabledPlugins.has(plugin.id) ? "[on]" : "[off]"} ${plugin.id} — ${plugin.description}`;
 }
 
-function registerPluginCommand(
-	pi: ExtensionAPI,
-	cwd: string,
-	enabledPlugins: Set<PluginId>,
-): void {
+function registerPluginCommand(pi: ExtensionAPI, enabledPlugins: Set<PluginId>): void {
 	pi.registerCommand("stack-plugins", {
 		description: "Show or toggle pi-ember-stack plugins",
 		handler: async (_args, ctx) => {
@@ -149,7 +171,7 @@ function registerPluginCommand(
 			} else {
 				enabledPlugins.add(plugin.id);
 			}
-			writeEnabledPlugins(cwd, enabledPlugins);
+			writeEnabledPlugins(enabledPlugins);
 			ctx.ui.notify(
 				`${plugin.id} ${enabledPlugins.has(plugin.id) ? "enabled" : "disabled"}. Restart pi to apply the change.`,
 			);
@@ -158,11 +180,10 @@ function registerPluginCommand(
 }
 
 export default async function piEmberStackPlugin(pi: ExtensionAPI): Promise<void> {
-	const cwd = process.cwd();
-	const enabledPlugins = readEnabledPlugins(cwd);
+	const enabledPlugins = readEnabledPlugins();
 	for (const plugin of PLUGINS) {
 		if (!enabledPlugins.has(plugin.id)) continue;
 		await plugin.extension(pi);
 	}
-	registerPluginCommand(pi, cwd, enabledPlugins);
+	registerPluginCommand(pi, enabledPlugins);
 }

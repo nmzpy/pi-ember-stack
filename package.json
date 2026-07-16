@@ -1,7 +1,7 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.2.3",
-  "description": "Ember's configurable pi plugin stack with modes, questionnaire, compact edits, subagents, and Devin auth",
+  "version": "0.2.4",
+  "description": "Ember's configurable Pi stack with modes, compact tools, subagents, and Devin, Cursor, and xAI providers",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -41,6 +41,7 @@
     "@ff-labs/fff-node": "0.9.6",
     "@mozilla/readability": "^0.6.0",
     "@sinclair/typebox": "^0.34.0",
+    "chalk": "^5.6.2",
     "linkedom": "^0.16.0",
     "p-limit": "^6.1.0",
     "turndown": "^7.2.0",

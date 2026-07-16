@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	AssistantMessageComponent,
+	BashExecutionComponent,
 	Theme,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
@@ -19,12 +20,14 @@ import {
 import {
 	buildCodeBgHex,
 	buildThemeBgColors,
+	buildThemeExportColors,
 	buildThemeFgColors,
 	getActiveModeColor,
 	getActiveModeId,
 	isPlanAutoContinuing,
 	isShellMode,
 	isToolGroupActive,
+	isLatestSubagentRunning,
 	MUTED_COLOR,
 	PAGE_BG,
 	setLatestSubagentRunning,
@@ -32,17 +35,53 @@ import {
 	setShellMode,
 	setThinkingBlocksHidden,
 	setToolGroupActive,
+	TEXT_COLOR,
 } from "./mode-colors.ts";
+import {
+	activate_gradient,
+	clamp_lerp,
+	deactivate_gradient,
+	EDGE_PADDING,
+	gaussian_intensity,
+	get_gradient_phase,
+	get_gradient_phase_with_offset,
+	get_logo_phase,
+	GRADIENT_SIGMA,
+	type GradientPreset,
+	MUTED_GROUP_GRADIENT_PRESET,
+	invalidate_gradient_cache,
+	render_gradient,
+	set_gradient_render_request,
+	shutdown_gradient_clock,
+} from "./gradient.ts";
+import {
+	bind_slash_command_exit_render,
+	enable_tui_clear_on_shrink,
+	ensure_chatbox_leading_spacer,
+	reset_slash_command_tracking,
+} from "./layout.ts";
+import {
+	bind_model_picker_session,
+	install_model_picker_patches,
+	reset_model_picker_session,
+} from "./model-picker.ts";
+
+export { pick_model_in_editor as pickModelInEditor } from "./model-picker.ts";
+export { cancel_pending_model_pick as cancelPendingModelPick } from "./model-picker.ts";
+export { wrap_model_picker_editor as wrapModelPickerEditor } from "./model-picker.ts";
+export {
+	finalize_editor_input_after as finalizeEditorInputAfter,
+	reset_slash_command_tracking as resetSlashCommandTracking,
+	sync_slash_command_active as syncSlashCommandActive,
+} from "./layout.ts";
+export { intercept_shell_input as interceptShellInput } from "./shell-mode.ts";
+import { notify_theme_refresh } from "./theme-refresh.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const THEME_JSON = path.join(SOURCE_ROOT, "ember.json");
 const THEME_NAME = "ember";
 
-const LOGO_FRAME_INTERVAL_MS = 100;
-const LOGO_ANIMATION_FRAMES = 20;
-const MIN_RENDER_INTERVAL_MS = 100;
-const THINKING_TICK_MS = 72;
-const THINKING_FRAME_STEP = 0.048;
+const MIN_RENDER_INTERVAL_MS = 50;
 const LOGO = [
 	"  ██████   ██",
 	"  ██   ██  ██",
@@ -53,25 +92,122 @@ const LOGO = [
 ];
 
 const SHADOW_OFFSET_X = 1;
-const SHADOW_OFFSET_Y = 0;
-const SHADOW_GLYPH = "\u2591";
-const SHADOW_OPACITY = 0.4;
+const SHADOW_OFFSET_Y = 1;
+const SHADOW_OPACITY = 0.25;
+
+type GridCell = { ch: string; rgb?: [number, number, number] };
+type Grid = GridCell[][];
+
+const BOX_SHADOW_GLYPHS: readonly string[] = [
+	" ",
+	"\u2500",
+	"\u2500",
+	"\u2500",
+	"\u2502",
+	"\u2510",
+	"\u250c",
+	"\u252c",
+	"\u2502",
+	"\u2518",
+	"\u2514",
+	"\u2534",
+	"\u2502",
+	"\u2524",
+	"\u251c",
+	"\u253c",
+];
+
+function gridToLines(grid: Grid): string[] {
+	return grid.map((rowCells) =>
+		rowCells
+			.map((cell) => {
+				if (cell.rgb) {
+					const [r, g, b] = cell.rgb;
+					return `\x1b[38;2;${r};${g};${b}m${cell.ch}\x1b[39m`;
+				}
+				return cell.ch;
+			})
+			.join(""),
+	);
+}
+
+function placeBoxShadow(
+	grid: Grid,
+	gridRows: number,
+	gridCols: number,
+	colorForRow: (row: number) => [number, number, number],
+): void {
+	const connections = Array.from({ length: gridRows }, () => new Array<number>(gridCols).fill(0));
+	const isLogoCell = (row: number, col: number): boolean => LOGO[row]?.[col] === "\u2588";
+	const addConnections = (row: number, col: number, bits: number): void => {
+		if (row < 0 || row >= gridRows || col < 0 || col >= gridCols) return;
+		connections[row][col] |= bits;
+	};
+
+	// Store edge endpoints, not whole line cells, so concave logo corners join
+	// cleanly rather than rendering as crossed vertical and horizontal strokes.
+	for (let row = 0; row < LOGO.length; row++) {
+		for (let col = 0; col < LOGO[row].length; col++) {
+			if (!isLogoCell(row, col)) continue;
+			const rightExposed = !isLogoCell(row, col + 1);
+			const bottomExposed = !isLogoCell(row + 1, col);
+			if (rightExposed) {
+				addConnections(row, col + SHADOW_OFFSET_X, 4);
+				addConnections(row + SHADOW_OFFSET_Y, col + SHADOW_OFFSET_X, 8);
+			}
+			if (bottomExposed) {
+				const bottomRow = row + SHADOW_OFFSET_Y;
+				addConnections(bottomRow, col, isLogoCell(row, col - 1) ? 2 : 10);
+				addConnections(row + SHADOW_OFFSET_Y, col + 1, 1);
+			}
+		}
+	}
+
+	const [bgR, bgG, bgB] = hexToRgbTriplet(PAGE_BG);
+	for (let row = 0; row < gridRows; row++) {
+		for (let col = 0; col < gridCols; col++) {
+			if (connections[row][col] === 0 || grid[row][col].ch !== " ") continue;
+			const [cr, cg, cb] = colorForRow(row);
+			const sr = Math.round(bgR + (cr - bgR) * SHADOW_OPACITY);
+			const sg = Math.round(bgG + (cg - bgG) * SHADOW_OPACITY);
+			const sb = Math.round(bgB + (cb - bgB) * SHADOW_OPACITY);
+			grid[row][col] = { ch: BOX_SHADOW_GLYPHS[connections[row][col]], rgb: [sr, sg, sb] };
+		}
+	}
+}
 
 let thinkingActive = false;
 let workingActive = false;
-let thinkingFrame = 0;
 let logoAnimating = false;
 let logoStatic = false;
-let logoFrame = 0;
-let logoAnimationFrameCount = 0;
-let logoTimer: ReturnType<typeof setInterval> | undefined;
-let editorRenderPatched = false;
-let assistantMessagePatched = false;
-let requestRender: (() => void) | undefined;
-let renderCallback: (() => void) | undefined;
+const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
+
+const CURSOR_BLINK_INTERVAL_MS = 500;
+let cursorVisible = true;
+let cursorBlinkTimer: ReturnType<typeof setInterval> | undefined;
+
+function startCursorBlink(): void {
+	if (cursorBlinkTimer !== undefined) return;
+	cursorVisible = true;
+	cursorBlinkTimer = setInterval(() => {
+		cursorVisible = !cursorVisible;
+		requestRender?.();
+	}, CURSOR_BLINK_INTERVAL_MS);
+}
+
+function stopCursorBlink(): void {
+	if (cursorBlinkTimer !== undefined) {
+		clearInterval(cursorBlinkTimer);
+		cursorBlinkTimer = undefined;
+	}
+	cursorVisible = true;
+}
+let requestRender: ((force?: boolean) => void) | undefined;
+let renderCallback: ((force?: boolean) => void) | undefined;
 let renderTimer: ReturnType<typeof setTimeout> | undefined;
 let renderGeneration = 0;
 let lastRenderAt = 0;
+let forceRenderPending = false;
 let sessionCtx: any;
 
 type EditorWithBorder = Editor & {
@@ -80,21 +216,11 @@ type EditorWithBorder = Editor & {
 };
 
 /**
- * Cached result of the subagent-running scan. The scan itself is O(n)
- * over the session branch (getBranch + two passes), so it MUST NOT run
- * inside the per-frame Editor.prototype.render path. It is recomputed
- * only on subagent tool_execution_start / tool_execution_end events and reset
- * on session replacement. The render path reads this cached flag via
- * subagentRunningCached.
- */
-let subagentRunningCached = false;
-
-/**
  * Recompute whether the latest tool call in the session is a `subagent`
  * that has not yet produced a toolResult. Scans session entries
- * (available via module-level sessionCtx) and writes the result to both
- * the shared mode-colors flag and the local cache. Called only from
- * tool-execution event handlers — never from the render path.
+ * (available via module-level sessionCtx) and writes the result to the
+ * shared mode-colors flag. Called only from tool-execution event
+ * handlers — never from the render path.
  */
 function recompute_latest_subagent_running(): boolean {
 	const entries = sessionCtx?.sessionManager?.getBranch?.() ?? [];
@@ -125,7 +251,6 @@ function recompute_latest_subagent_running(): boolean {
 			}
 		}
 	}
-	subagentRunningCached = running;
 	setLatestSubagentRunning(running);
 	return running;
 }
@@ -136,9 +261,28 @@ function resetRenderScheduler(): void {
 	renderTimer = undefined;
 	renderCallback = undefined;
 	lastRenderAt = 0;
+	forceRenderPending = false;
 }
 
-function scheduleRender(): void {
+function scheduleRender(force = false): void {
+	if (force) {
+		forceRenderPending = true;
+		if (renderCallback === undefined) return;
+		// Match Pi's requestRender(true): run immediately so a normal
+		// post-handleInput differential render cannot win with stale rows.
+		if (renderTimer !== undefined) {
+			clearTimeout(renderTimer);
+			renderTimer = undefined;
+		}
+		const generation = renderGeneration;
+		const shouldForce = forceRenderPending;
+		forceRenderPending = false;
+		if (generation !== renderGeneration || renderCallback === undefined) return;
+		renderCallback(shouldForce);
+		lastRenderAt = Date.now();
+		return;
+	}
+
 	if (renderCallback === undefined || renderTimer !== undefined) return;
 
 	const generation = renderGeneration;
@@ -147,78 +291,52 @@ function scheduleRender(): void {
 	renderTimer = setTimeout(() => {
 		renderTimer = undefined;
 		if (generation !== renderGeneration || renderCallback === undefined) return;
-		renderCallback();
+		const shouldForce = forceRenderPending;
+		forceRenderPending = false;
+		renderCallback(shouldForce);
 		lastRenderAt = Date.now();
 	}, delay);
 }
 
-let thinkingTimer: ReturnType<typeof setInterval> | undefined;
+/** Live-gradient tick subscribers are managed by gradient.ts.
+ *  Re-export subscribe/unsubscribe so existing consumers
+ *  (pi-compact-tools, subagent renderer) keep working without import changes. */
+export { subscribe_gradient_tick as subscribeGradientTick } from "./gradient.ts";
+export { unsubscribe_gradient_tick as unsubscribeGradientTick } from "./gradient.ts";
+export { MUTED_GROUP_GRADIENT_PRESET } from "./gradient.ts";
 
-/** Group-header tick subscribers. The compact renderer registers the
- *  active group owner's invalidate here so the group header gradient
- *  sweeps at the same THINKING_TICK_MS cadence as the Thinking/Working
- *  widget. The tick timer stays alive while any subscriber is active,
- *  even if thinking/working are inactive. */
-const groupTickCallbacks = new Set<() => void>();
-
-export function subscribeGroupTick(cb: () => void): void {
-	groupTickCallbacks.add(cb);
-	startThinkingTick();
-}
-
-export function unsubscribeGroupTick(cb: () => void): void {
-	groupTickCallbacks.delete(cb);
-	maybeStopThinkingTick();
-}
-
-function startThinkingTick(): void {
-	if (thinkingTimer) return;
-	thinkingTimer = setInterval(() => {
-		thinkingFrame += THINKING_FRAME_STEP;
-		if (thinkingFrame > 1) thinkingFrame -= 1;
-		requestRender?.();
-		for (const cb of groupTickCallbacks) {
-			try { cb(); } catch { /* best effort */ }
-		}
-	}, THINKING_TICK_MS);
-}
-
-function stopThinkingTick(): void {
-	if (thinkingTimer) {
-		clearInterval(thinkingTimer);
-		thinkingTimer = undefined;
-	}
-}
-
-/** Stop the tick timer only when no animation and no group subscribers
- *  are active. */
-function maybeStopThinkingTick(): void {
-	if (!thinkingActive && !workingActive && groupTickCallbacks.size === 0) {
-		stopThinkingTick();
-	}
+/**
+ * Request a TUI re-render from outside this plugin. Normal requests are
+ * throttled (MIN_RENDER_INTERVAL_MS); forced requests run immediately and
+ * clear Pi's differential-render buffer. Safe to call from editor handleInput —
+ * it never
+ * iterates session entries or does synchronous fs.
+ */
+export function requestTuiRender(force = false): void {
+	requestRender?.(force);
 }
 
 function stopThinkingAnimation(): void {
 	thinkingActive = false;
-	maybeStopThinkingTick();
+	deactivate_gradient("thinking");
 	requestRender?.();
 }
 
 function startThinkingAnimation(): void {
-	if (!thinkingActive && !workingActive) thinkingFrame = 0;
 	thinkingActive = true;
-	startThinkingTick();
+	activate_gradient("thinking");
+	if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
 }
 
 function startWorkingAnimation(): void {
-	if (!thinkingActive && !workingActive) thinkingFrame = 0;
 	workingActive = true;
-	startThinkingTick();
+	activate_gradient("working");
+	if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
 }
 
 function stopWorkingAnimation(): void {
 	workingActive = false;
-	maybeStopThinkingTick();
+	deactivate_gradient("working");
 	requestRender?.();
 }
 
@@ -231,7 +349,9 @@ function wrapThemeWithCodeBg(base: Theme): Theme {
 						return (
 							liveCodeBgAnsi +
 							target.getFgAnsi("mdCode" as any) +
-							" " + text + " " +
+							" " +
+							text +
+							" " +
 							"\x1b[39m\x1b[49m"
 						);
 					}
@@ -391,40 +511,76 @@ class CachedMarkdown {
 	}
 }
 
-function installProxiedTheme(fgColors: Record<string, string>, bgColors: Record<string, string>, codeBg: string): void {
-	const base = new Theme(
-		fgColors as any,
-		bgColors as any,
-		"truecolor",
-		{ name: "ember" },
-	);
-	liveTheme = base;
-	liveCodeBgAnsi = bgAnsi(codeBg);
-	const wrapped = wrapThemeWithCodeBg(base);
+/** Pi's theme file watcher reloads ember.json 100ms after any disk write
+ *  (ensureThemeInstalled / updateInstalledThemeExport). That reload goes
+ *  through createTheme(), which only knows the built-in ThemeBg keys and
+ *  drops our custom subagentBg — then theme.bg("subagentBg") crashes.
+ *  Re-assert our live Theme (which carries subagentBg in bgColors) onto
+ *  the global slots after every apply, and again after the watcher debounce. */
+let themeReassertTimer: ReturnType<typeof setTimeout> | undefined;
+const THEME_REASSERT_MS = 150;
+
+function reassertLiveTheme(): void {
+	if (!liveTheme) return;
+	const wrapped = wrapThemeWithCodeBg(liveTheme);
 	(globalThis as any)[THEME_KEY] = wrapped;
 	(globalThis as any)[THEME_KEY_OLD] = wrapped;
+}
+
+function scheduleThemeReassert(): void {
+	if (themeReassertTimer !== undefined) clearTimeout(themeReassertTimer);
+	themeReassertTimer = setTimeout(() => {
+		themeReassertTimer = undefined;
+		reassertLiveTheme();
+	}, THEME_REASSERT_MS);
+}
+
+function installProxiedTheme(
+	fgColors: Record<string, string>,
+	bgColors: Record<string, string>,
+	codeBg: string,
+): void {
+	const base = new Theme(fgColors as any, bgColors as any, "truecolor", { name: "ember" });
+	liveTheme = base;
+	liveCodeBgAnsi = bgAnsi(codeBg);
+	reassertLiveTheme();
 }
 
 function applyDynamicTheme(options: { invalidate?: boolean; render?: boolean } = {}): void {
 	markdownThemeGeneration += 1;
 	clearMarkdownRenderCache();
+	invalidate_gradient_cache();
 	const accent = getActiveModeColor();
 	const fgColors = buildThemeFgColors(accent);
 	const bgColors = buildThemeBgColors(accent);
 	const codeBg = buildCodeBgHex(accent);
+	// Export colors for HTML export are written once at install
+	// (ensureThemeInstalled + updateInstalledThemeExport) — never mid-session.
+	// Writing ember.json while Pi's theme watcher is active reloads a Theme
+	// via createTheme() that drops custom bg keys (subagentBg) and crashes.
 
 	if (liveTheme) {
 		liveCodeBgAnsi = bgAnsi(codeBg);
 		updateLiveThemeColors(fgColors, bgColors);
+		notify_theme_refresh(liveTheme);
+		// ensureThemeInstalled may have just written the file; re-assert
+		// our live Theme (with subagentBg) now and after the watcher debounce.
+		reassertLiveTheme();
+		scheduleThemeReassert();
 		if (options.invalidate !== false) (tuiRef as any)?.invalidate();
 		if (options.render !== false) requestRender?.();
 		return;
 	}
 	installProxiedTheme(fgColors, bgColors, codeBg);
+	if (liveTheme) notify_theme_refresh(liveTheme);
+	scheduleThemeReassert();
 	if (options.render !== false) requestRender?.();
 }
 
-function updateLiveThemeColors(fgColors: Record<string, string>, bgColors: Record<string, string>): void {
+function updateLiveThemeColors(
+	fgColors: Record<string, string>,
+	bgColors: Record<string, string>,
+): void {
 	if (!liveTheme) return;
 	const fgMap = (liveTheme as any).fgColors as Map<string, string>;
 	const bgMap = (liveTheme as any).bgColors as Map<string, string>;
@@ -436,125 +592,107 @@ function updateLiveThemeColors(fgColors: Record<string, string>, bgColors: Recor
 	}
 }
 
-/** Linear interpolation between two RGB triplets. */
-function lerpRgb(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
-	return [
-		Math.round(a[0] + (b[0] - a[0]) * t),
-		Math.round(a[1] + (b[1] - a[1]) * t),
-		Math.round(a[2] + (b[2] - a[2]) * t),
-	];
+/**
+ * Render a live animated gradient using the shared clock phase and the
+ * canonical gradient engine. Thinking/Working use the accent palette;
+ * MUTED_GROUP_GRADIENT_PRESET (compact group headers, running subagents)
+ * uses the muted→text palette.
+ */
+export function renderLiveGradient(
+	text: string,
+	preset: GradientPreset,
+	phaseOffsetMs: number = 0,
+): string {
+	return render_gradient(text, preset, get_gradient_phase_with_offset(phaseOffsetMs));
 }
 
-/** Gradient RGB cache. Invalidated when the theme generation changes so
- *  cached ANSI output can never outlive its theme. O(1) per render call. */
-let gradientCacheGeneration = -1;
-let gradientAccentCache = new Map<string, [number, number, number]>();
-let gradientBgRgb: [number, number, number] | undefined;
-
-function cachedAccentRgb(accentHex: string): [number, number, number] {
-	if (gradientCacheGeneration !== markdownThemeGeneration) {
-		gradientAccentCache = new Map();
-		gradientBgRgb = undefined;
-		gradientCacheGeneration = markdownThemeGeneration;
-	}
-	let rgb = gradientAccentCache.get(accentHex);
-	if (!rgb) {
-		rgb = hexToRgbTriplet(accentHex);
-		gradientAccentCache.set(accentHex, rgb);
-	}
-	return rgb;
-}
-
-function cachedBgRgb(): [number, number, number] {
-	if (!gradientBgRgb) {
-		gradientBgRgb = hexToRgbTriplet(PAGE_BG);
-	}
-	return gradientBgRgb;
-}
-
-function renderGradientLabel(text: string, accent: string, phaseOffset = 0): string {
-	const chars = [...text];
-	const len = chars.length;
-	if (len === 0) return "";
-	const accentRgb = cachedAccentRgb(accent);
-	const bgRgb = cachedBgRgb();
-	// 3 stops: muted 10% tail, dim 40%, accent peak — all in RGB space.
-	const mutedTail = lerpRgb(bgRgb, accentRgb, 0.1);
-	const dim = lerpRgb(bgRgb, accentRgb, 0.4);
-	const peak = accentRgb;
-	const result: string[] = [];
-	const phase = (thinkingFrame + phaseOffset) % 1;
-	for (let i = 0; i < len; i++) {
-		const charPos = i / Math.max(1, len - 1);
-		const dist = charPos - phase;
-		const wrapped = dist < -0.5 ? dist + 1 : dist > 0.5 ? dist - 1 : dist;
-		const intensity = Math.exp(-(wrapped * wrapped) * 8);
-		// Piecewise 3-stop blend: muted tail -> dim mid -> accent peak.
-		const lower = lerpRgb(mutedTail, dim, Math.min(1, intensity * 2));
-		const rgb = lerpRgb(lower, peak, Math.max(0, Math.min(1, (intensity - 0.5) * 2)));
-		result.push(`\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${chars[i]}\x1b[39m`);
-	}
-	return result.join("");
-}
-
-/** Render the same animated gradient used by the live Thinking label. */
+/** Compatibility wrapper: render the Thinking-style accent gradient.
+ *  Subagent renderer calls this for running agent labels. */
 export function renderLiveThinkingGradient(text: string): string {
-	return renderGradientLabel(text, getActiveModeColor());
+	return render_gradient(text, MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase());
 }
 
-/** Render an animated gradient with a stable per-row phase offset. */
-export { renderGradientLabel };
+/** Compatibility wrapper: render the muted→text gradient for compact
+ *  tool group headers. */
+export function renderMutedGradientLabel(text: string): string {
+	return render_gradient(text, MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase());
+}
+
+/** Compatibility wrapper: render an accent gradient with an optional
+ *  phase offset. Used by callers that pass an explicit accent color. */
+export function renderGradientLabel(text: string, _accent?: string, _phaseOffset?: number): string {
+	return render_gradient(text, "thinking", get_gradient_phase());
+}
 
 function installThinkingBorderOverride(): void {
-	if (editorRenderPatched) return;
-	editorRenderPatched = true;
-	const originalRender = Editor.prototype.render;
-	Editor.prototype.render = function renderThinkingBorder(this: EditorWithBorder, width: number): string[] {
-	const accent = getActiveModeColor();
-	const accentLight = lightenHex(accent, 0.5);
-	const borderColor = isShellMode() ? MUTED_COLOR : accentLight;
-	const accentBorder = (text: string): string => colorize(text, borderColor);
-	const dimInsetBorder = (): string =>
-		` ${colorWithOpacity("\u2500".repeat(Math.max(0, width - 2)), borderColor, 0.1875)} `;
-	const originalBorderColor = this.borderColor;
-	this.borderColor = accentBorder;
-	const innerWidth = Math.max(1, width - 2);
-	const lines = originalRender.call(this, innerWidth);
-	this.borderColor = originalBorderColor;
+	const proto = Editor.prototype as any;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+	const originalRender = proto.render;
+	proto.render = function renderThinkingBorder(this: EditorWithBorder, width: number): string[] {
+		const borderColor = isShellMode() || workingActive ? MUTED_COLOR : TEXT_COLOR;
+		const border = (text: string): string => colorize(text, borderColor);
+		const dimBorder = (text: string): string => colorWithOpacity(text, MUTED_COLOR, 0.1875);
+		const INSET = 1;
+		const INNER_PAD = 1;
+		const innerWidth = Math.max(1, width - INSET * 2 - 2 - INNER_PAD * 2);
+		const originalBorderColor = this.borderColor;
+		this.borderColor = border;
+		const lines = originalRender.call(this, innerWidth);
+		this.borderColor = originalBorderColor;
 
-	const stripped = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
-	const isBorderLine = (s: string): boolean => {
-		const raw = stripped(s);
-		return raw.length > 0 && [...raw].every((ch) => ch === "\u2500" || ch === " ");
-	};
-	const borderIndices: number[] = [];
-	for (let i = 0; i < lines.length; i++) {
-		if (isBorderLine(lines[i])) borderIndices.push(i);
-	}
-	const topIdx = borderIndices[0] ?? 0;
-	const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
-
-	for (let i = 1; i < lines.length; i++) {
-		if (i === bottomBorderIdx) continue;
-		lines[i] = ` ${lines[i]} `;
-	}
-	const subagentActive = subagentRunningCached;
-	if (subagentActive) {
-		lines[topIdx] = dimInsetBorder();
-	} else {
-		lines[topIdx] = accentBorder("\u2500".repeat(width));
-	}
-	if (bottomBorderIdx >= 0) {
-		const inputText = this.getText?.() ?? "";
-		if (inputText.trimStart().startsWith("/")) {
-			lines[bottomBorderIdx] = dimInsetBorder();
-		} else {
-			lines[bottomBorderIdx] = accentBorder("\u2500".repeat(width));
+		if (!cursorVisible) {
+			for (let i = 0; i < lines.length; i++) {
+				lines[i] = lines[i].replace(/\x1b\[7m([^\x1b]*)\x1b\[0m/g, (_m: string, p1: string) => p1);
+			}
 		}
-	}
+
+		const stripped = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+		const isBorderLine = (s: string): boolean => {
+			const raw = stripped(s);
+			return (
+				raw.length > 0 &&
+				[...raw].some((ch) => ch === "\u2500") &&
+				[...raw].every((ch) => ch === "\u2500" || ch === " ")
+			);
+		};
+		const borderIndices: number[] = [];
+		for (let i = 0; i < lines.length; i++) {
+			if (isBorderLine(lines[i])) borderIndices.push(i);
+		}
+		const topIdx = borderIndices[0] ?? 0;
+		const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
+		const isSlashMode = this.getText?.().trimStart().startsWith("/") === true;
+		const hasAutocompleteRows = bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
+		const middleBorderIdx = isSlashMode && hasAutocompleteRows ? bottomBorderIdx : -1;
+
+		const pad = " ".repeat(INSET);
+		const innerPad = " ".repeat(INNER_PAD);
+		const borderWidth = innerWidth + INNER_PAD * 2;
+		const topCorners = `${pad}${border("\u256d")}${border("\u2500".repeat(borderWidth))}${border("\u256e")}${pad}`;
+		const bottomCorners = `${pad}${border("\u2570")}${border("\u2500".repeat(borderWidth))}${border("\u256f")}${pad}`;
+		const middleSep = `${pad}${border("\u2502")}${innerPad}${dimBorder("\u2500".repeat(innerWidth))}${innerPad}${border("\u2502")}${pad}`;
+
+		for (let i = 1; i < lines.length; i++) {
+			const borderIdxPos = borderIndices.indexOf(i);
+			const isMiddleBorder =
+				i === middleBorderIdx ||
+				(middleBorderIdx < 0 && borderIdxPos > 0 && borderIdxPos < borderIndices.length - 1);
+			if (i === bottomBorderIdx && !isMiddleBorder) continue;
+			if (isMiddleBorder) {
+				lines[i] = middleSep;
+			} else {
+				lines[i] =
+					`${pad}${border("\u2502")}${innerPad}${lines[i]}${innerPad}${border("\u2502")}${pad}`;
+			}
+		}
+		lines[topIdx] = topCorners;
+		if (bottomBorderIdx >= 0) {
+			lines[bottomBorderIdx] = middleBorderIdx >= 0 ? middleSep : bottomCorners;
+		}
 		const lastLineIdx = lines.length - 1;
 		if (lastLineIdx > bottomBorderIdx && lastLineIdx > 0) {
-			lines[lastLineIdx] = accentBorder("\u2500".repeat(width));
+			lines.push(bottomCorners);
 		}
 		if (lines.length === 0) return lines;
 		return lines;
@@ -562,8 +700,9 @@ function installThinkingBorderOverride(): void {
 }
 
 function installAssistantMessagePatch(): void {
-	if (assistantMessagePatched) return;
-	assistantMessagePatched = true;
+	const proto = (AssistantMessageComponent as any).prototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
 
 	const assistantPrototype = (AssistantMessageComponent as any).prototype;
 	const originalSetHideThinkingBlock = assistantPrototype.setHideThinkingBlock;
@@ -578,17 +717,26 @@ function installAssistantMessagePatch(): void {
 		const hide = this.hideThinkingBlock;
 		setThinkingBlocksHidden(hide === true);
 		const outputPad = this.outputPad;
-		// Skip the full rebuild when nothing that affects the rendered output
-		// has changed. invalidate() (from theme change, thinking toggle,
-		// output-pad change) calls updateContent with the SAME message —
-		// recreating every Markdown child and clearing contentContainer is
-		// O(blocks) per assistant message per rebuild, which freezes long
-		// transcripts on thinking-toggle. The child Markdown caches were
-		// already cleared by the invalidate() propagation, so the next
-		// render() will re-parse regardless — but we avoid the object
-		// churn and container rebuild.
+		// Skip the full rebuild only when nothing that affects output changed.
+		// Must include:
+		// - markdownThemeGeneration: live accent mode switches bump this so
+		//   MD headers/links/bullets rebuild with the new accent (CachedMarkdown
+		//   re-parse alone is not enough if the heading closure or baked ANSI
+		//   outlives the theme).
+		// - content length signature: streaming mutates the same message ref;
+		//   without a content sig the 3rd+ delta would freeze the transcript.
+		// Thinking-toggle changes `hide` so it still rebuilds. Spurious
+		// invalidate() with identical inputs still skips (no freezes).
 		const sameMessage = this._emberContentMessage === message;
-		const cacheKey = `${sameMessage ? "same" : "diff"}|${hide}|${outputPad}`;
+		let contentSig = "";
+		if (Array.isArray(message?.content)) {
+			for (const c of message.content) {
+				if (c?.type === "text") contentSig += `t${c.text?.length ?? 0}`;
+				else if (c?.type === "thinking") contentSig += `h${c.thinking?.length ?? 0}`;
+				else if (c?.type === "toolCall") contentSig += `c${c.id ?? ""}`;
+			}
+		}
+		const cacheKey = `${sameMessage ? "same" : "diff"}|${hide}|${outputPad}|${markdownThemeGeneration}|${contentSig}`;
 		if (sameMessage && this._emberContentKey === cacheKey) {
 			this.lastMessage = message;
 			return;
@@ -612,33 +760,24 @@ function installAssistantMessagePatch(): void {
 
 		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
 
-		// Override the heading function so that when a heading contains a
-		// colon, only the portion before (and including) the colon is
-		// accent-colored — the remainder reverts to plain text. This makes
-		// headings like "### Module 3: Implementation" render with
-		// "Module 3:" in accent and " Implementation" in plain text.
-		if (!this._emberMarkdownTheme || this._emberMarkdownThemeBase !== this.markdownTheme) {
-			const base = this.markdownTheme;
-			this._emberMarkdownThemeBase = base;
-			this._emberMarkdownTheme = {
-				...base,
-				heading: (text: string) => emberHeadingStyle(text, theme),
-			};
-		}
+		// Always rebuild the markdown theme so heading (and any other
+		// overrides) resolve against the current live Theme. Never close
+		// over a Theme reference from a previous mode — mdHeading must
+		// track the live accent on every rebuild.
+		// Heading style: colon-split accent ("Module 3:" accent, rest text).
+		// emberHeadingStyle resolves liveTheme at call time (not closed over).
+		this._emberMarkdownThemeBase = this.markdownTheme;
+		this._emberMarkdownTheme = {
+			...this.markdownTheme,
+			heading: (text: string) => emberHeadingStyle(text),
+		};
 		const mdTheme = this._emberMarkdownTheme;
 
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text?.trim()) {
 				this.contentContainer.addChild(
-					new CachedMarkdown(
-						content.text.trim(),
-						this.outputPad,
-						0,
-						mdTheme,
-						undefined,
-						"text",
-					),
+					new CachedMarkdown(content.text.trim(), this.outputPad, 0, mdTheme, undefined, "text"),
 				);
 			} else if (content.type === "thinking" && content.thinking?.trim()) {
 				if (hide) continue;
@@ -650,7 +789,7 @@ function installAssistantMessagePatch(): void {
 						0,
 						mdTheme,
 						{
-							color: (text: string) => theme.fg("thinkingText", text),
+							color: (text: string) => resolve_live_theme().fg("thinkingText", text),
 							italic: true,
 						},
 						"thinking",
@@ -668,9 +807,7 @@ function installAssistantMessagePatch(): void {
 		// active — the extension silently sends "continue" so the user never
 		// sees this error or the recovery message.
 		const suppressLengthError =
-			message.stopReason === "length" &&
-			getActiveModeId() === "plan" &&
-			isPlanAutoContinuing();
+			message.stopReason === "length" && getActiveModeId() === "plan" && isPlanAutoContinuing();
 		if (message.stopReason === "length" && !suppressLengthError) {
 			this.contentContainer.addChild(new Spacer(1));
 			this.contentContainer.addChild(
@@ -690,19 +827,112 @@ function installAssistantMessagePatch(): void {
 						? message.errorMessage
 						: "Operation aborted";
 				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), this.outputPad, 0));
+				this.contentContainer.addChild(
+					new Text(theme.fg("error", abortMessage), this.outputPad, 0),
+				);
 			} else if (message.stopReason === "error") {
 				const errorMsg = message.errorMessage || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
+				this.contentContainer.addChild(
+					new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0),
+				);
 			}
 		}
+
+		// Mirror user-message Box paddingY: keep a blank row below visible
+		// assistant text when tool rows are not about to follow in the transcript.
+		if (hasVisibleContent && !hasToolCalls) {
+			this.contentContainer.addChild(new Spacer(1));
+		}
+	};
+}
+
+/** Patch Text.prototype.invalidate so that ExpandableText instances (used
+ *  by the [Context]/[Skills]/[Extensions]/[Themes] loaded-resources
+ *  sections and the built-in header) re-evaluate their collapsed/expanded
+ *  text from the getter callbacks. The base Text class stores ANSI-baked
+ *  text once at construction; invalidate() only clears the wrap/pad cache,
+ *  so the old accent color persists across mode switches. Re-calling the
+ *  getters on invalidate refreshes the ANSI codes with the live theme.
+ *
+ *  ExpandableText extends Text but does not store an `expanded` property
+ *  — `setExpanded(expanded)` calls `setText()` without persisting the
+ *  boolean. We determine the current expansion state by comparing the
+ *  ANSI-stripped visible text against the stripped collapsed/expanded
+ *  getter outputs. */
+function installExpandableTextPatch(): void {
+	const proto = (Text as any).prototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+	const originalInvalidate = proto.invalidate;
+	proto.invalidate = function (this: any): void {
+		originalInvalidate?.call(this);
+		if (typeof this.getCollapsedText !== "function" || typeof this.getExpandedText !== "function") {
+			return;
+		}
+		const collapsedText = this.getCollapsedText();
+		const expandedText = this.getExpandedText();
+		const currentStripped = this.text?.replace(ANSI_STRIP, "") ?? "";
+		this.text =
+			currentStripped === expandedText.replace(ANSI_STRIP, "") ? expandedText : collapsedText;
+	};
+}
+
+function installBashExecutionPatch(): void {
+	const proto = (BashExecutionComponent as any).prototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+
+	const originalRender = proto.render;
+	const originalUpdateDisplay = proto.updateDisplay;
+
+	proto.updateDisplay = function emberBashUpdateDisplay(this: any): void {
+		originalUpdateDisplay.call(this);
+		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		if (!theme) return;
+		const status = this.status;
+		const dollarColor =
+			status === "error"
+				? "error"
+				: status === "complete" || status === "cancelled"
+					? "success"
+					: "text";
+		const header = this.contentContainer?.children?.[0];
+		if (header instanceof Text) {
+			header.setText(`${theme.fg(dollarColor, theme.bold("$"))} ${theme.fg("text", this.command)}`);
+		}
+	};
+
+	proto.render = function renderEmberBash(this: any, width: number): string[] {
+		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		if (!theme) return originalRender.call(this, width);
+
+		const innerWidth = Math.max(1, width - 2);
+		const rawLines = originalRender.call(this, innerWidth) as string[];
+
+		const filtered: string[] = [];
+		for (const line of rawLines) {
+			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+			if (/^[\s\u2500]*$/.test(stripped)) continue;
+			filtered.push(line);
+		}
+
+		const result: string[] = [];
+		const pad = " ";
+		for (const line of filtered) {
+			const padded = pad + line;
+			const visLen = visibleWidth(padded);
+			const padNeeded = Math.max(0, width - visLen);
+			const fullLine = padded + " ".repeat(padNeeded);
+			result.push(theme.bg("userMessageBg", fullLine));
+		}
+		return result;
 	};
 }
 
 function colorWithOpacity(text: string, hex: string, opacity: number): string {
 	const source = hex.slice(1);
-	const base = [24, 24, 30];
+	const base = hexToRgbTriplet(PAGE_BG);
 	const rgb = [
 		parseInt(source.slice(0, 2), 16),
 		parseInt(source.slice(2, 4), 16),
@@ -726,14 +956,6 @@ function blendToHex(fgHex: string, bgHex: string, opacity: number): string {
 	const g = Math.round(bg + (fg - bg) * opacity);
 	const b = Math.round(bb + (fb - bb) * opacity);
 	return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
-}
-
-function lightenHex(hex: string, amount: number): string {
-	const [r, g, b] = hexToRgbTriplet(hex);
-	const lr = Math.round(r + (255 - r) * amount);
-	const lg = Math.round(g + (255 - g) * amount);
-	const lb = Math.round(b + (255 - b) * amount);
-	return `#${lr.toString(16).padStart(2, "0")}${lg.toString(16).padStart(2, "0")}${lb.toString(16).padStart(2, "0")}`;
 }
 
 function colorize(text: string, hex: string): string {
@@ -773,16 +995,26 @@ function splitAtVisibleChar(text: string, sep: string): [string, string] {
 }
 
 /**
+ * Resolve the live Theme at call time so MD headers always track the
+ * active mode accent. Never close over a Theme from construction time —
+ * mode switches mutate (or replace) the live Theme after messages exist.
+ */
+function resolve_live_theme(): any {
+	return liveTheme ?? (globalThis as any)[THEME_KEY];
+}
+
+/**
  * Custom markdown heading style: when the heading text contains a colon,
  * only the portion up to and including the first colon is accent-colored;
  * the remainder reverts to plain text color. When there is no colon the
  * entire heading is accent-colored (the default behavior).
  *
- * The input `text` may already carry ANSI codes (bold, underline) applied
- * by the markdown renderer before calling `heading()`. We strip ANSI to
- * detect the colon, split at that visible position, then re-apply colors.
+ * Always reads `mdHeading` from the live Theme so mode switches recolor
+ * existing transcript headers. The input `text` may already carry ANSI
+ * codes (bold, underline) from the markdown renderer before `heading()`.
  */
-function emberHeadingStyle(text: string, theme: any): string {
+function emberHeadingStyle(text: string): string {
+	const theme = resolve_live_theme();
 	const visible = text.replace(ANSI_STRIP, "");
 	// Hide the leading hash prefix ("### ", "## ", etc.) that pi-tui's
 	// markdown renderer prepends for h3+ headings. The heading text
@@ -804,13 +1036,17 @@ function emberHeadingStyle(text: string, theme: any): string {
 	// Preserve bold/underline from the original by re-applying via theme.
 	// The markdown renderer wraps h1 as bold+underline, h2+ as bold.
 	// We re-apply bold to both parts; underline only if it was in the original.
-	const hasUnderline = text.includes("\x1b[4m") || text.includes("\x1b[1;4m") || text.includes("\x1b[4;1m");
+	const hasUnderline =
+		text.includes("\x1b[4m") || text.includes("\x1b[1;4m") || text.includes("\x1b[4;1m");
 	const stylePrefix = (s: string): string => {
 		let styled = theme.bold(s);
 		if (hasUnderline) styled = theme.underline(styled);
 		return styled;
 	};
-	return theme.fg("mdHeading", stylePrefix(prefixStripped)) + theme.fg("text", stylePrefix(suffixStripped));
+	return (
+		theme.fg("mdHeading", stylePrefix(prefixStripped)) +
+		theme.fg("text", stylePrefix(suffixStripped))
+	);
 }
 
 function folderNameFromCwd(cwd: string): string {
@@ -819,7 +1055,8 @@ function folderNameFromCwd(cwd: string): string {
 
 function welcomeConfigPath(): string {
 	return path.join(
-		process.env.PI_HOME || path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent"),
+		process.env.PI_HOME ||
+			path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent"),
 		"welcome.json",
 	);
 }
@@ -829,7 +1066,9 @@ function setWelcomeUpdates(enabled: boolean): void {
 	let config: Record<string, unknown> = {};
 	try {
 		config = JSON.parse(fs.readFileSync(file, "utf8"));
-	} catch { /* first-run, no file yet */ }
+	} catch {
+		/* first-run, no file yet */
+	}
 	config.updates = enabled;
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, `${JSON.stringify(config, null, "\t")}\n`);
@@ -837,13 +1076,11 @@ function setWelcomeUpdates(enabled: boolean): void {
 
 type RadialPoint = { x: number; y: number; r: number; g: number; b: number; falloff: number };
 
-function lerp(a: number, b: number, t: number): number {
-	return a + (b - a) * t;
-}
-
 function radialColorForCell(x: number, y: number, points: RadialPoint[]): [number, number, number] {
 	let totalWeight = 0;
-	let r = 0, g = 0, b = 0;
+	let r = 0,
+		g = 0,
+		b = 0;
 	for (const p of points) {
 		const dx = x - p.x;
 		const dy = y - p.y;
@@ -854,78 +1091,58 @@ function radialColorForCell(x: number, y: number, points: RadialPoint[]): [numbe
 		b += p.b * weight;
 		totalWeight += weight;
 	}
-	return [
-		Math.round(r / totalWeight),
-		Math.round(g / totalWeight),
-		Math.round(b / totalWeight),
-	];
+	return [Math.round(r / totalWeight), Math.round(g / totalWeight), Math.round(b / totalWeight)];
 }
 
 function startLogoAnimation(): void {
-	if (logoTimer) return;
+	if (logoAnimating) return;
 	logoAnimating = true;
 	logoStatic = false;
-	logoFrame = 0;
-	logoAnimationFrameCount = 0;
-	logoTimer = setInterval(() => {
-		logoFrame += 0.04;
-		if (logoFrame > 1) logoFrame -= 1;
-		logoAnimationFrameCount += 1;
-		requestRender?.();
-		if (logoAnimationFrameCount >= LOGO_ANIMATION_FRAMES) stopLogoAnimation();
-	}, LOGO_FRAME_INTERVAL_MS);
+	activate_gradient("logo");
 }
 
 function stopLogoAnimation(): void {
 	logoAnimating = false;
 	logoStatic = true;
-	logoAnimationFrameCount = 0;
-	if (logoTimer) {
-		clearInterval(logoTimer);
-		logoTimer = undefined;
-	}
+	deactivate_gradient("logo");
 	requestRender?.();
 }
 
 function renderLogoWithGradient(accent: string): string[] {
 	const logoRows = LOGO.length;
 	const logoCols = LOGO[0].length;
-	const gridCols = logoCols + SHADOW_OFFSET_X;
-	const gridRows = logoRows + Math.ceil(SHADOW_OFFSET_Y);
+	const gridCols = logoCols + SHADOW_OFFSET_X + 1;
+	const gridRows = logoRows + SHADOW_OFFSET_Y;
 
-	// Static state: 2-stop vertical gradient (top = muted #808080, bottom =
-	// text #d4d4d4). No radial points, no per-frame sweep.
+	// Static state: 2-stop vertical gradient (top = muted, bottom = text).
+	// No radial points, no per-frame sweep.
 	if (!logoAnimating && logoStatic) {
 		const mutedRgb = hexToRgbTriplet(MUTED_COLOR);
-		const textRgb = hexToRgbTriplet("#d4d4d4");
-		const grid: Array<Array<{ ch: string; rgb?: [number, number, number] }>> = [];
+		const textRgb = hexToRgbTriplet(TEXT_COLOR);
+		const grid: Grid = [];
 		for (let row = 0; row < gridRows; row++) {
 			grid.push(new Array(gridCols).fill(null).map(() => ({ ch: " " })));
 		}
-		for (let row = 0; row < logoRows; row++) {
+		const colorForRow = (row: number): [number, number, number] => {
 			const t = logoRows > 1 ? row / (logoRows - 1) : 0;
-			const rgb = lerpRgb(mutedRgb, textRgb, t);
+			return clamp_lerp(mutedRgb, textRgb, t);
+		};
+		for (let row = 0; row < logoRows; row++) {
+			const rgb = colorForRow(row);
 			for (let col = 0; col < LOGO[row].length; col++) {
 				if (LOGO[row][col] === "\u2588") {
 					grid[row][col] = { ch: "\u2588", rgb };
 				}
 			}
 		}
-		return grid.map((rowCells) =>
-			rowCells.map((cell) => {
-				if (cell.rgb) {
-					const [r, g, b] = cell.rgb;
-					return `\x1b[38;2;${r};${g};${b}m${cell.ch}\x1b[39m`;
-				}
-				return cell.ch;
-			}).join("")
-		);
+		placeBoxShadow(grid, gridRows, gridCols, colorForRow);
+		return gridToLines(grid);
 	}
 
 	const [ar, ag, ab] = hexToRgbTriplet(accent);
-	const accent70 = blendToHex(accent, "#18181e", 0.7);
+	const accent70 = blendToHex(accent, PAGE_BG, 0.7);
 	const [s7r, s7g, s7b] = hexToRgbTriplet(accent70);
-	const accent40 = blendToHex(accent, "#18181e", 0.4);
+	const accent40 = blendToHex(accent, PAGE_BG, 0.4);
 	const [s4r, s4g, s4b] = hexToRgbTriplet(accent40);
 	const points: RadialPoint[] = [
 		{ x: 2, y: 0, r: 255, g: 255, b: 255, falloff: 3 },
@@ -935,10 +1152,15 @@ function renderLogoWithGradient(accent: string): string[] {
 		{ x: 0, y: 4, r: 200, g: 180, b: 140, falloff: 2 },
 	];
 
-	const grid: Array<Array<{ ch: string; rgb?: [number, number, number] }>> = [];
+	const grid: Grid = [];
 	for (let row = 0; row < gridRows; row++) {
 		grid.push(new Array(gridCols).fill(null).map(() => ({ ch: " " })));
 	}
+
+	// Logo-specific ping-pong phase so the sweep travels right then left
+	// smoothly instead of snapping back to the start.
+	const phase = get_logo_phase();
+	const sweep_center = -EDGE_PADDING + phase * (Math.max(0, logoCols - 1) + 2 * EDGE_PADDING);
 
 	for (let row = 0; row < logoRows; row++) {
 		for (let col = 0; col < LOGO[row].length; col++) {
@@ -946,10 +1168,8 @@ function renderLogoWithGradient(accent: string): string[] {
 			if (ch === "\u2588") {
 				let [r, g, b] = radialColorForCell(col, row, points);
 				if (logoAnimating) {
-					const charPos = col / Math.max(1, logoCols - 1);
-					const dist = charPos - logoFrame;
-					const wrapped = dist < -0.5 ? dist + 1 : dist > 0.5 ? dist - 1 : dist;
-					const intensity = Math.exp(-(wrapped * wrapped) * 6);
+					const dist = col - sweep_center;
+					const intensity = gaussian_intensity(dist, GRADIENT_SIGMA);
 					r = Math.round(r + (255 - r) * intensity);
 					g = Math.round(g + (255 - g) * intensity);
 					b = Math.round(b + (255 - b) * intensity);
@@ -959,75 +1179,66 @@ function renderLogoWithGradient(accent: string): string[] {
 		}
 	}
 
-	const halfOpacity = SHADOW_OPACITY / 2;
-	const placeShadow = (sRow: number, sCol: number, opacity: number): void => {
-		if (sRow < 0 || sRow >= gridRows || sCol < 0 || sCol >= gridCols) return;
-		const existing = grid[sRow][sCol];
-		if (existing.ch !== " ") return;
-		const [gr, gg, gb] = radialColorForCell(sCol, sRow, points);
-		const bgR = 24, bgG = 24, bgB = 30;
-		const sr = Math.round(bgR + (gr - bgR) * opacity);
-		const sg = Math.round(bgG + (gg - bgG) * opacity);
-		const sb = Math.round(bgB + (gb - bgB) * opacity);
-		grid[sRow][sCol] = { ch: SHADOW_GLYPH, rgb: [sr, sg, sb] };
+	const centerCol = logoCols / 2;
+	const animatingColorForRow = (row: number): [number, number, number] => {
+		const [r, g, b] = radialColorForCell(centerCol, row, points);
+		return [r, g, b];
 	};
-
-	for (let row = 0; row < logoRows; row++) {
-		for (let col = 0; col < LOGO[row].length; col++) {
-			const ch = LOGO[row][col];
-			if (ch === "\u2588") {
-				const sCol = col + SHADOW_OFFSET_X;
-				const sRowBase = row + Math.floor(SHADOW_OFFSET_Y);
-				placeShadow(sRowBase, sCol, halfOpacity);
-				placeShadow(sRowBase + 1, sCol, halfOpacity);
-			}
-		}
-	}
-
-	return grid.map((rowCells) =>
-		rowCells.map((cell) => {
-			if (cell.rgb) {
-				const [r, g, b] = cell.rgb;
-				return `\x1b[38;2;${r};${g};${b}m${cell.ch}\x1b[39m`;
-			}
-			return cell.ch;
-		}).join("")
-	);
+	placeBoxShadow(grid, gridRows, gridCols, animatingColorForRow);
+	return gridToLines(grid);
 }
 
 let tuiRef: any;
+
+/** Invalidate only the loaded-resources container ([Context]/[Skills]/
+ *  [Extensions]/[Themes]) so its ExpandableText children re-evaluate
+ *  their getter callbacks with the new accent. The chat container and
+ *  its cached transcript output are untouched. O(children) — typically
+ *  4-8 ExpandableText + Spacer nodes. */
+function invalidateLoadedResources(): void {
+	if (!tuiRef?.children) return;
+	for (const child of tuiRef.children) {
+		if (child?.constructor?.name === "Container" && child !== tuiRef) {
+			for (const grandchild of child.children) {
+				if (typeof grandchild?.getCollapsedText === "function") {
+					grandchild.invalidate?.();
+				}
+			}
+		}
+	}
+}
 
 function installStartupHeader(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 
 	ctx.ui.setHeader((tui: any, theme: any) => {
 		tuiRef = tui;
+		enable_tui_clear_on_shrink(tui);
+		ensure_chatbox_leading_spacer(tui);
 		return {
-		render(width: number): string[] {
-			// Re-read every render so model/dir/mode changes are reflected.
-			const dir = folderNameFromCwd(ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd());
-			const model = ctx.model;
-			const modelName = model?.name ?? model?.id ?? "no model";
+			render(width: number): string[] {
+				// Re-read every render so model/dir/mode changes are reflected.
+				const dir = folderNameFromCwd(ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd());
+				const model = ctx.model;
+				const modelName = model?.name ?? model?.id ?? "no model";
 
-			const accent = getActiveModeColor();
-			const logoLines = renderLogoWithGradient(accent);
-			const logoWidth = visibleWidth(logoLines[0] ?? "");
-			const leftPad = Math.max(0, Math.floor((width - logoWidth) / 2));
-			const padStr = " ".repeat(leftPad);
+				const accent = getActiveModeColor();
+				const logoLines = renderLogoWithGradient(accent);
+				const logoWidth = visibleWidth(logoLines[0] ?? "");
+				const leftPad = Math.max(0, Math.floor((width - logoWidth) / 2));
+				const padStr = " ".repeat(leftPad);
 
-			const infoLine = `${theme.fg("text", modelName)} ${theme.fg("accent", "\u2022")} ${theme.fg("dim", dir)}`;
-			const infoPad = Math.max(0, Math.floor((width - visibleWidth(infoLine)) / 2));
-			const infoPadStr = " ".repeat(infoPad);
+				const infoLine = `${theme.fg("text", modelName)} ${theme.fg("accent", "\u2022")} ${theme.fg("dim", dir)}`;
+				const infoPad = Math.max(0, Math.floor((width - visibleWidth(infoLine)) / 2));
+				const infoPadStr = " ".repeat(infoPad);
 
-			const lines = [
-				...logoLines.map((line) => padStr + line),
-				"",
-				infoPadStr + infoLine,
-			];
-			return lines.map((line) => visibleWidth(line) > width ? truncateToWidth(line, width) : line);
-		},
-		invalidate() {},
-	};
+				const lines = [...logoLines.map((line) => padStr + line), infoPadStr + infoLine];
+				return lines.map((line) =>
+					visibleWidth(line) > width ? truncateToWidth(line, width) : line,
+				);
+			},
+			invalidate() {},
+		};
 	});
 }
 
@@ -1046,39 +1257,88 @@ function ensureThemeInstalled(): void {
 	const dest = path.join(themesDir, `${THEME_NAME}.json`);
 	if (!fs.existsSync(dest)) {
 		fs.copyFileSync(THEME_JSON, dest);
+	} else {
+		const srcContent = fs.readFileSync(THEME_JSON, "utf-8");
+		const destContent = fs.readFileSync(dest, "utf-8");
+		if (srcContent !== destContent) {
+			fs.copyFileSync(THEME_JSON, dest);
+		}
+	}
+	// Seed export colors from the SSOT builder (default accent). Do this
+	// only at install — mid-session writes trigger Pi's theme watcher,
+	// which reloads a Theme without custom bg keys (subagentBg) and crashes.
+	updateInstalledThemeExport(buildThemeExportColors(getActiveModeColor()));
+}
+
+/** Update the `export` section of the installed ember.json on disk so
+ *  Pi's HTML export feature has accent-derived pageBg/cardBg/infoBg.
+ *  Call only from ensureThemeInstalled (before the live Theme is installed
+ *  or with scheduleThemeReassert pending). Never call mid-session without
+ *  re-asserting the live Theme — the file watcher will clobber it. */
+function updateInstalledThemeExport(exportColors: {
+	pageBg: string;
+	cardBg: string;
+	infoBg: string;
+}): void {
+	const dest = path.join(getThemesDir(), `${THEME_NAME}.json`);
+	let json: Record<string, unknown>;
+	try {
+		json = JSON.parse(fs.readFileSync(dest, "utf-8"));
+	} catch {
 		return;
 	}
-	const srcContent = fs.readFileSync(THEME_JSON, "utf-8");
-	const destContent = fs.readFileSync(dest, "utf-8");
-	if (srcContent !== destContent) {
-		fs.copyFileSync(THEME_JSON, dest);
+	const current = json.export as Record<string, string> | undefined;
+	if (
+		current?.pageBg === exportColors.pageBg &&
+		current?.cardBg === exportColors.cardBg &&
+		current?.infoBg === exportColors.infoBg
+	) {
+		return;
+	}
+	json.export = exportColors;
+	try {
+		fs.writeFileSync(dest, `${JSON.stringify(json, null, "\t")}\n`);
+	} catch {
+		/* best-effort — export colors are non-critical */
 	}
 }
 
 /**
- * Install the Thinking/Working widget one row above the editor. The widget
+ * Install the Thinking/Working widget flush above the editor. Leading padding
+ * above the chatbox (or above this label when visible) comes from
+ * ensure_chatbox_leading_spacer() in layout.ts (CHATBOX_LEADING_ROWS).
  * renders the live animated gradient label while the agent is reasoning or
  * executing tools, and hides itself (returns []) when a compact tool group
- * (Exploring or Working) is active — the group header carries the gradient
+ * (Exploring, Editing, Writing, or Bashing) is active — the group header carries the gradient
  * in that case, so the two never compete for the same visual slot.
  */
 function installThinkingWidget(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
 		render(_width: number): string[] {
+			if (isLatestSubagentRunning()) return [];
 			if (isToolGroupActive()) return [];
 			if (!thinkingActive && !workingActive) return [];
+			const preset: GradientPreset = thinkingActive ? "thinking" : "working";
 			const labelText = thinkingActive ? "Thinking" : "Working";
-			return [renderGradientLabel(labelText, getActiveModeColor())];
+			const WIDGET_INSET = 3;
+			const widgetPad = " ".repeat(WIDGET_INSET);
+			return [`${widgetPad}${renderLiveGradient(labelText, preset)}${widgetPad}`];
 		},
 		invalidate() {},
 	}));
 }
 
 export default function piEmberUiPlugin(pi: ExtensionAPI): void {
+	bind_slash_command_exit_render((force) => requestTuiRender(force));
+	// /model + /resume: prototype intercepts only (no registerCommand — that
+	// conflicts with built-ins and shows in Extension issues).
+	install_model_picker_patches();
 	ensureThemeInstalled();
 	installThinkingBorderOverride();
 	installAssistantMessagePatch();
+	installExpandableTextPatch();
+	installBashExecutionPatch();
 	applyDynamicTheme();
 
 	pi.on("session_start", (event, ctx) => {
@@ -1087,33 +1347,26 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		tuiRef = undefined;
 		requestRender = undefined;
 		liveTheme = undefined;
-		subagentRunningCached = false;
 		if (ctx.mode === "tui") {
-			renderCallback = () => {
+			bind_model_picker_session(ctx, pi);
+			renderCallback = (force = false) => {
 				if (tuiRef?.requestRender) {
-					tuiRef.requestRender();
+					tuiRef.requestRender(force);
 					return;
 				}
 				ctx.ui.setStatus("pi-ember-ui-thinking-tick", undefined);
 			};
 			requestRender = scheduleRender;
+			set_gradient_render_request(scheduleRender);
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHiddenThinkingLabel("");
 			installThinkingWidget(ctx);
+			startCursorBlink();
 		}
 		applyDynamicTheme();
 		if (ctx.mode === "tui") {
 			installStartupHeader(ctx);
-			if (tuiRef?.children) {
-				for (const child of tuiRef.children) {
-					if (child?.children?.length > 1 && typeof child.addChild === "function" && child !== tuiRef) {
-						const nonSpacers = child.children.filter((c: any) => c?.constructor?.name !== "Spacer");
-						child.children.length = 0;
-						child.children.push(...nonSpacers);
-						break;
-					}
-				}
-			}
+			if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
 			// Only animate the logo on genuinely fresh sessions where the
 			// header is visible. On /resume, /fork, and /reload the header
 			// is scrolled off-screen (or it is a hot reload); even the
@@ -1133,10 +1386,15 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// pi-custom-agents (and any other extension) via the shared event bus.
 	pi.events.on("pi-ember-ui:mode-change", (event: any) => {
 		if (event?.liveOnly === true) {
-			// Mode switches update the live editor/footer only. Invalidating the
-			// whole TUI makes a large resumed transcript re-render synchronously.
-			// The custom-agents extension supplies the single live render tick.
-			applyDynamicTheme({ invalidate: false, render: false });
+			// Mode switches rebuild live theme colors (mdHeading, accent, …)
+			// and invalidate the TUI. applyDynamicTheme bumps
+			// markdownThemeGeneration; the updateContent skip-guard includes
+			// that generation so assistant messages fully rebuild their
+			// CachedMarkdown children with the new accent — MD headers,
+			// links, and list bullets all track the live mode color.
+			applyDynamicTheme({ invalidate: true, render: false });
+			invalidateLoadedResources();
+			requestRender?.();
 			return;
 		}
 		applyDynamicTheme();
@@ -1145,6 +1403,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("message_update", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		const ev = event.assistantMessageEvent;
+		if (ev?.type === "thinking_delta" || ev?.type === "text_delta") {
+			stopLogoAnimation();
+		}
 		if (ev && (ev.type === "thinking_start" || ev.type === "thinking_delta")) {
 			if (!thinkingActive) startThinkingAnimation();
 		}
@@ -1156,7 +1417,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		stopLogoAnimation();
 		startWorkingAnimation();
 	});
 
@@ -1166,7 +1426,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		// When the agent loop ends (including after abort/cancel/error), no
 		// subagent can still be running. Reset the flag so the editor border
 		// reverts from the dim inset to the full-opacity accent line.
-		subagentRunningCached = false;
 		setLatestSubagentRunning(false);
 		requestRender?.();
 	});
@@ -1180,7 +1439,12 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("tool_execution_end", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		if (event.toolName === "subagent") {
-			recompute_latest_subagent_running();
+			// The subagent tool has finished executing. Recompute would race the
+			// toolResult being appended to the session branch and could keep the
+			// flag true until agent_end, leaving the cap line visible for the
+			// rest of the task. Set it false directly; a subsequent
+			// tool_execution_start for a new subagent will recompute as needed.
+			setLatestSubagentRunning(false);
 			// Always request a render after a subagent finishes so the editor
 			// border updates from dim-inset back to the accent line.
 			requestRender?.();
@@ -1213,20 +1477,25 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// stale closures. The factory body calls applyDynamicTheme() on load,
 	// which would otherwise invoke the old requestRender/tuiRef.
 	pi.on("session_shutdown", (_event, ctx) => {
+		reset_model_picker_session();
+		reset_slash_command_tracking();
 		resetRenderScheduler();
 		sessionCtx = undefined;
 		requestRender = undefined;
 		tuiRef = undefined;
 		liveTheme = undefined;
 		liveCodeBgAnsi = "";
+		if (themeReassertTimer !== undefined) {
+			clearTimeout(themeReassertTimer);
+			themeReassertTimer = undefined;
+		}
 		markdownThemeGeneration = 0;
 		clearMarkdownRenderCache();
-		subagentRunningCached = false;
-		groupTickCallbacks.clear();
 		stopLogoAnimation();
-		stopThinkingTick();
-		stopThinkingAnimation();
-		stopWorkingAnimation();
+		shutdown_gradient_clock();
+		stopCursorBlink();
+		thinkingActive = false;
+		workingActive = false;
 		setShellMode(false);
 		setLatestSubagentRunning(false);
 		setThinkingBlocksHidden(false);

@@ -56,6 +56,19 @@ export function invalidateAgentCache(): void {
 	_cache = null;
 }
 
+/** Resolve an agent name without making callers depend on frontmatter casing. */
+export function resolveAgent(
+	agents: AgentConfig[],
+	requestedName: string,
+): AgentConfig | undefined {
+	const normalizedName = requestedName.trim();
+	if (!normalizedName) return undefined;
+	return (
+		agents.find((agent) => agent.name === normalizedName) ??
+		agents.find((agent) => agent.name.toLowerCase() === normalizedName.toLowerCase())
+	);
+}
+
 function loadAgentsFromDir(dir: string, source: "user" | "project" | "bundled"): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 
@@ -82,11 +95,15 @@ function loadAgentsFromDir(dir: string, source: "user" | "project" | "bundled"):
 
 		const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content);
 
-		if (typeof frontmatter.name !== "string" || typeof frontmatter.description !== "string") continue;
+		if (typeof frontmatter.name !== "string" || typeof frontmatter.description !== "string")
+			continue;
 
 		const tools =
 			typeof frontmatter.tools === "string"
-				? frontmatter.tools.split(",").map((t) => t.trim()).filter(Boolean)
+				? frontmatter.tools
+						.split(",")
+						.map((t) => t.trim())
+						.filter(Boolean)
 				: Array.isArray(frontmatter.tools)
 					? (frontmatter.tools as unknown[]).filter((t): t is string => typeof t === "string")
 					: undefined;
@@ -96,9 +113,11 @@ function loadAgentsFromDir(dir: string, source: "user" | "project" | "bundled"):
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-			thinking: typeof frontmatter.thinking === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(frontmatter.thinking)
-				? frontmatter.thinking as AgentConfig["thinking"]
-				: undefined,
+			thinking:
+				typeof frontmatter.thinking === "string" &&
+				["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(frontmatter.thinking)
+					? (frontmatter.thinking as AgentConfig["thinking"])
+					: undefined,
 			systemPrompt: body,
 			source,
 			filePath,
@@ -122,7 +141,8 @@ function isDirectory(p: string): boolean {
  *  edits and add/remove/rename operations. */
 function dirSignature(dir: string): string {
 	try {
-		const entries = fs.readdirSync(dir, { withFileTypes: true })
+		const entries = fs
+			.readdirSync(dir, { withFileTypes: true })
 			.filter((e) => e.name.endsWith(".md") && (e.isFile() || e.isSymbolicLink()))
 			.map((e) => {
 				const file = path.join(dir, e.name);
@@ -229,7 +249,10 @@ export function discoverAgents(
 	return { agents, projectAgentsDir };
 }
 
-export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
+export function formatAgentList(
+	agents: AgentConfig[],
+	maxItems: number,
+): { text: string; remaining: number } {
 	if (agents.length === 0) return { text: "none", remaining: 0 };
 	const listed = agents.slice(0, maxItems);
 	const remaining = agents.length - listed.length;

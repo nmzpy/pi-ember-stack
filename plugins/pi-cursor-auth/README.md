@@ -1,0 +1,62 @@
+# pi-cursor-auth
+
+Cursor subscription provider for [Pi](https://pi.dev), bundled as part of
+`@nmzpy/pi-ember-stack`.
+
+The provider uses the official Cursor Agent CLI's browser-authenticated session.
+It does not require or accept a Cursor SDK API key. Pi continues to own the
+conversation, tool loop, tool permissions, rendering, and session persistence.
+
+## Requirements
+
+- Install the official Cursor Agent CLI.
+- Ensure `cursor-agent` is available, or set `CURSOR_AGENT_EXECUTABLE` to its
+  executable path.
+- Authenticate with `/login cursor` or `cursor-agent login`.
+
+The provider deliberately does not fall back to an executable named `agent`,
+because other products use that ambiguous command name. It also does not provide
+an API-key or `cursor/auto` fallback: the CLI must be installed, authenticated,
+and able to list models before the provider registers.
+
+## Usage
+
+```text
+/login cursor
+/cursor-refresh-models
+/model cursor/<model-id>
+```
+
+Run `/cursor-refresh-models` to see the available model ids from your subscription. There is no `cursor/auto` fallback; the plugin fails loudly if the CLI is missing, unauthenticated, or returns no models.
+
+Diagnostics and logout:
+
+```text
+/cursor-status
+/cursor-logout
+```
+
+`/login cursor` delegates browser authentication to Cursor Agent. Cursor owns
+and stores the subscription credential; Pi stores only a non-secret marker so
+its normal provider login UI recognizes the completed login.
+
+## Transport
+
+Each Pi provider turn starts Cursor Agent in `stream-json` print mode and sends
+a neutral serialization of Pi's existing system prompt, ordered messages, and
+active function schemas. The serialization does not add a Cursor/Composer
+persona or replace Pi's system prompt.
+
+Cursor text and thinking events become native Pi stream events. A Cursor tool
+event is accepted only when it resolves to a tool in Pi's active tool list; Pi
+then executes the tool through its normal lifecycle. Unknown tool events stop
+the request and surface an error.
+
+Image input is not advertised and fails explicitly rather than being dropped.
+
+## Provenance
+
+The Cursor CLI executable resolution, model-output parsing, stream event shapes,
+and tool-event compatibility behavior were informed by
+[Nomadcxx/opencode-cursor](https://github.com/Nomadcxx/opencode-cursor), licensed
+under BSD-3-Clause. See `LICENSE`.

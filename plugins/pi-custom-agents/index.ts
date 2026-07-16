@@ -14,144 +14,68 @@
  *   /debug        — read-only health-check auditor + UI/Qt diagnostics
  *   /orchestrate  — read-only task decomposition + delegation planner
  */
- 
+
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Model } from "@earendil-works/pi-ai";
+import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import {
-	CustomEditor,
-	type ExtensionUIContext,
-	type KeybindingsManager,
-} from "@earendil-works/pi-coding-agent";
-import {
+	getKeybindings,
 	truncateToWidth,
 	visibleWidth,
-	Container,
-	Text,
-	Spacer,
-	Input,
-	fuzzyFilter,
-	getKeybindings,
 	matchesKey,
 	type EditorTheme,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import { isShellMode, mutedBullet, setActiveMode, setPlanAutoContinuing, setShellMode } from "../pi-ember-ui/mode-colors.ts";
+import {
+	isShellMode,
+	liveAccentFg,
+	mutedBullet,
+	setActiveMode,
+	setPlanAutoContinuing,
+	setShellMode,
+} from "../pi-ember-ui/mode-colors.ts";
+import {
+	cancelPendingModelPick,
+	finalizeEditorInputAfter,
+	interceptShellInput,
+	pickModelInEditor,
+	resetSlashCommandTracking,
+	wrapModelPickerEditor,
+} from "../pi-ember-ui/index.ts";
 import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	askQuestionnaire,
+	type QuestionnaireAnsweredCallback,
 	type QuestionnaireQuestion,
 	registerQuestionnaireTool,
 } from "./questionnaire-tool.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 
-const THINKING_LEVEL_SHORTCUT = "shift+t";
-
 function modelIdentityString(model: Model<any> | undefined): string {
 	return model ? `${model.provider}/${model.id}` : "";
 }
 
-function intercept_thinking_level(data: string, cycle_thinking_level: () => void): boolean {
-	if (!matchesKey(data, THINKING_LEVEL_SHORTCUT)) return false;
-	cycle_thinking_level();
-	return true;
+/**
+ * CustomEditor handles app.clear (Ctrl+C) before Editor.handleInput, so Pi never
+ * runs the autocomplete cancel path (tui.select.cancel is also Ctrl+C). Cancel
+ * autocomplete first so clear/quit does not leave a stale overlay or stall exit.
+ */
+function prepare_app_clear_input(data: string, editor: any): void {
+	if (!getKeybindings().matches(data, "app.clear")) return;
+	editor.cancelAutocomplete?.();
 }
 
-/**
- * Intercept '!' on empty input to enter shell mode, and escape or
- * backspace (on empty input) to exit. The '!' is eaten so it never
- * appears in the editor.
- */
-function intercept_shell_mode(data: string, editor: any, ctx: any): boolean {
-	if (matchesKey(data, "!")) {
-		const text = editor.getText?.() ?? "";
-		if (text.length === 0) {
-			setShellMode(true);
-			ctx.ui.setStatus("pi-ember-ui-shell-mode", undefined);
-			return true;
-		}
-	}
-	if (isShellMode()) {
-		if (matchesKey(data, "escape")) {
-			setShellMode(false);
-			ctx.ui.setStatus("pi-ember-ui-shell-mode", undefined);
-			return true;
-		}
-		if (matchesKey(data, "backspace")) {
-			const text = editor.getText?.() ?? "";
-			if (text.length === 0) {
-				setShellMode(false);
-				ctx.ui.setStatus("pi-ember-ui-shell-mode", undefined);
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-/**
- * Intercept /model and /model <search> on Enter, redirecting to our
- * fuzzy-search model picker instead of Pi's built-in unbounded selector.
- */
-function intercept_model_command(data: string, editor: any, pi: any, ctx: any): boolean {
-	const kb = getKeybindings();
-	if (!kb.matches(data, "tui.select.confirm")) return false;
-	const getText = editor.getText?.bind(editor) ?? editor.getExpandedText?.bind(editor);
-	if (!getText) return false;
-	const text = getText().trim();
-	if (text !== "/model" && !text.startsWith("/model ")) return false;
+function intercept_slash_escape(data: string, editor: any): boolean {
+	if (!matchesKey(data, "escape")) return false;
+	const text = editor.getText?.() ?? "";
+	if (!text.trimStart().startsWith("/")) return false;
+	cancelPendingModelPick();
+	editor.cancelAutocomplete?.();
 	editor.setText?.("");
-	void show_model_picker(pi, ctx);
+	finalizeEditorInputAfter(editor);
 	return true;
-}
-
-/**
- * Shared fuzzy-search model picker used by /model and shift+m.
- * Uses boundedSelect so large model catalogs don't require scrolling.
- */
-async function show_model_picker(pi: any, ctx: any): Promise<void> {
-	if (!ctx.hasUI) return;
-	const models = ctx.modelRegistry.getAvailable() as any[];
-	if (models.length === 0) {
-		ctx.ui.notify("No models available.", "warning");
-		return;
-	}
-	const current = ctx.model as any;
-	const labels = models.map((m) => {
-		const prefix = current && m.provider === current.provider && m.id === current.id ? "→ " : "  ";
-		return `${prefix}${m.name ?? m.id} • ${m.provider}`;
-	});
-	const choice = await boundedSelect(ctx, "Select model", labels);
-	if (!choice) return;
-	const idx = labels.indexOf(choice);
-	if (idx < 0) return;
-	const model = models[idx];
-	try {
-		await pi.setModel(model);
-		ctx.ui.notify(`Model: ${model.id} • ${model.provider}`, "info");
-	} catch (err) {
-		ctx.ui.notify(
-			`Failed to set model: ${err instanceof Error ? err.message : String(err)}`,
-			"error",
-		);
-	}
-}
-
-class ThinkingLevelEditor extends CustomEditor {
-	constructor(
-		tui: TUI,
-		theme: EditorTheme,
-		keybindings: KeybindingsManager,
-		private readonly cycle_thinking_level: () => void,
-	) {
-		super(tui, theme, keybindings);
-	}
-
-	override handleInput(data: string): void {
-		if (intercept_thinking_level(data, this.cycle_thinking_level)) return;
-		super.handleInput(data);
-	}
 }
 
 type PersistedState = {
@@ -160,7 +84,9 @@ type PersistedState = {
 };
 
 function getPersistedStatePath(): string {
-	const home = process.env.PI_HOME || path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent");
+	const home =
+		process.env.PI_HOME ||
+		path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent");
 	return path.join(home, "pi-ember-stack.json");
 }
 
@@ -177,7 +103,14 @@ function writePersistedState(state: PersistedState): void {
 	const file = getPersistedStatePath();
 	try {
 		fs.mkdirSync(path.dirname(file), { recursive: true });
-		fs.writeFileSync(file, `${JSON.stringify(state, null, "\t")}\n`);
+		let existing: Record<string, unknown> = {};
+		try {
+			existing = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+		} catch {
+			// file doesn't exist or is invalid — start fresh
+		}
+		const merged = { ...existing, ...state } as Record<string, unknown>;
+		fs.writeFileSync(file, `${JSON.stringify(merged, null, "\t")}\n`);
 	} catch {
 		// best-effort persistence
 	}
@@ -191,120 +124,31 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
-const BOUNDED_SELECT_MAX_VISIBLE = 10;
-
-async function boundedSelect(
-	ctx: any,
-	title: string,
-	options: string[],
-): Promise<string | undefined> {
-	return ctx.ui.custom((tui: any, theme: any, _kb: any, done: (result: string) => void) => {
-		const root = new Container();
-		root.addChild(new Text(theme.fg("border", "\u2500".repeat(60)), 0, 0));
-		root.addChild(new Spacer(1));
-		root.addChild(new Text(theme.fg("accent", theme.bold(title)), 0, 0));
-		root.addChild(new Spacer(1));
-
-		const searchInput = new Input();
-		searchInput.onSubmit = () => {
-			if (filtered[selectedIndex] !== undefined) {
-				done(filtered[selectedIndex]);
-			}
-		};
-		root.addChild(searchInput);
-		root.addChild(new Spacer(1));
-
-		const listContainer = new Container();
-		root.addChild(listContainer);
-		root.addChild(new Spacer(1));
-		root.addChild(new Text(
-			theme.fg("muted", "  type to search  \u2191\u2193 navigate  enter select  esc cancel"),
-			0, 0,
-		));
-		root.addChild(new Spacer(1));
-		root.addChild(new Text(theme.fg("border", "\u2500".repeat(60)), 0, 0));
-
-		let selectedIndex = 0;
-		let filtered = options;
-
-		function updateList(): void {
-			listContainer.clear();
-			const max = BOUNDED_SELECT_MAX_VISIBLE;
-			const start = Math.max(0, Math.min(
-				selectedIndex - Math.floor(max / 2),
-				filtered.length - max,
-			));
-			const end = Math.min(start + max, filtered.length);
-			for (let i = start; i < end; i++) {
-				const isSelected = i === selectedIndex;
-				const prefix = isSelected ? theme.fg("accent", "\u2192 ") : "  ";
-				const text = isSelected
-					? prefix + theme.fg("accent", filtered[i])
-					: prefix + theme.fg("text", filtered[i]);
-				listContainer.addChild(new Text(text, 0, 0));
-			}
-			if (start > 0 || end < filtered.length) {
-				listContainer.addChild(new Text(
-					theme.fg("muted", `  (${selectedIndex + 1}/${filtered.length})`),
-					0, 0,
-				));
-			}
-			if (filtered.length === 0) {
-				listContainer.addChild(new Text(
-					theme.fg("muted", "  No matching models"),
-					0, 0,
-				));
-			}
-		}
-
-		function filterModels(): void {
-			const query = searchInput.getValue();
-			filtered = query
-				? fuzzyFilter(options, query, (s) => s)
-				: options;
-			selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1));
-			updateList();
-		}
-
-		filterModels();
-
-		(root as any).handleInput = (keyData: string): void => {
-			const kb = getKeybindings();
-			if (kb.matches(keyData, "tui.select.up")) {
-				if (filtered.length === 0) return;
-				selectedIndex = selectedIndex === 0
-					? filtered.length - 1
-					: selectedIndex - 1;
-				updateList();
-			} else if (kb.matches(keyData, "tui.select.down")) {
-				if (filtered.length === 0) return;
-				selectedIndex = selectedIndex === filtered.length - 1
-					? 0
-					: selectedIndex + 1;
-				updateList();
-			} else if (kb.matches(keyData, "tui.select.confirm")) {
-				if (filtered[selectedIndex] !== undefined) {
-					done(filtered[selectedIndex]);
-				}
-			} else if (kb.matches(keyData, "tui.select.cancel")) {
-				done(undefined as unknown as string);
-			} else {
-				searchInput.handleInput(keyData);
-				filterModels();
-			}
-		};
-		(root as any).getSearchInput = () => searchInput;
-		return root;
-	});
-}
-
 // Web-access tools are read-only research tools (web_search, fetch_content,
 // get_search_content) registered by the pi-web-access plugin. They belong in
 // every mode so the agent can do web research regardless of mode.
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
 const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire", ...WEB_ACCESS_TOOLS];
-const READONLY_DELEGATING_TOOLS = ["read", "grep", "find", "ls", "questionnaire", "subagent", ...WEB_ACCESS_TOOLS];
-const FULL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "questionnaire", ...WEB_ACCESS_TOOLS];
+const READONLY_DELEGATING_TOOLS = [
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"questionnaire",
+	"subagent",
+	...WEB_ACCESS_TOOLS,
+];
+const FULL_TOOLS = [
+	"read",
+	"bash",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ls",
+	"questionnaire",
+	...WEB_ACCESS_TOOLS,
+];
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SUBAGENT_FILES: Record<string, string> = {
@@ -339,6 +183,9 @@ with isolated context. Use it to keep your own context lean.
 
 Modes: single (agent + task), parallel (tasks array, max 8), chain (sequential
 with {previous}).
+
+Agent names are case-insensitive and surrounding whitespace is ignored; the
+runtime resolves requests to the canonical frontmatter name.
 `;
 
 interface ModeConfig {
@@ -737,12 +584,14 @@ const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
  * and through one zero-delay dirty timer shared by message_end and
  * tool_execution_end events, never from the footer render path.
  */
-let footerStatsCache: {
-	totalCost: number;
-	latestCacheHitRate: number | undefined;
-	contextTokens: number | null;
-	contextWindow: number;
-} | undefined;
+let footerStatsCache:
+	| {
+			totalCost: number;
+			latestCacheHitRate: number | undefined;
+			contextTokens: number | null;
+			contextWindow: number;
+	  }
+	| undefined;
 let footerThinkingLevel = "off";
 
 function recompute_footer_stats(ctx: any): void {
@@ -753,9 +602,7 @@ function recompute_footer_stats(ctx: any): void {
 		const usage = entry.message.usage;
 		totalCost += usage.cost.total;
 		const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-		latestCacheHitRate = promptTokens > 0
-			? (usage.cacheRead / promptTokens) * 100
-			: undefined;
+		latestCacheHitRate = promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
 	}
 	const model = ctx.model;
 	const contextUsage = ctx.getContextUsage();
@@ -771,6 +618,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
+	let questionnaireAnsweredThisPlan = false;
 	let active_session_manager: any;
 	let session_ready = false;
 	let pending_mode_id: string | undefined;
@@ -813,7 +661,12 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		currentMode = persistedAtLoad.mode;
 	}
 
-	registerQuestionnaireTool(pi);
+	const onQuestionnaireAnswered: QuestionnaireAnsweredCallback = () => {
+		if (currentMode === "plan" && waitingForPlan) {
+			questionnaireAnsweredThisPlan = true;
+		}
+	};
+	registerQuestionnaireTool(pi, onQuestionnaireAnswered);
 
 	for (const modeId of MODE_IDS) {
 		const mode = MODES[modeId];
@@ -894,46 +747,29 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	});
 
 	const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-	let active_ui: ExtensionUIContext | undefined;
 	let thinking_editor_installed = false;
-
-	const cycle_thinking_level = (): void => {
-		const current = pi.getThinkingLevel() as string;
-		const idx = THINKING_LEVELS.indexOf(current);
-		const next = THINKING_LEVELS[(idx + 1) % THINKING_LEVELS.length];
-		pi.setThinkingLevel(next);
-		active_ui?.notify(`Thinking: ${next}`, "info");
-	};
 
 	const install_thinking_editor = (ctx: any): void => {
 		if (!ctx.hasUI) return;
-		active_ui = ctx.ui;
 		if (thinking_editor_installed) return;
 
 		const previous_editor = ctx.ui.getEditorComponent();
 		ctx.ui.setEditorComponent((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => {
-			const editor = previous_editor?.(tui, theme, keybindings);
-			if (editor) {
-				const original_handle_input = editor.handleInput.bind(editor);
+			const editor =
+				previous_editor?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+			const original_handle_input = editor.handleInput.bind(editor);
 			editor.handleInput = (data: string): void => {
-				if (intercept_shell_mode(data, editor, ctx)) return;
-				if (intercept_thinking_level(data, cycle_thinking_level)) return;
-				if (intercept_model_command(data, editor, pi, ctx)) return;
+				prepare_app_clear_input(data, editor);
+				if (interceptShellInput(data, editor)) return;
+				if (intercept_slash_escape(data, editor)) return;
 				original_handle_input(data);
+				finalizeEditorInputAfter(editor);
 			};
-				return editor;
-			}
-			return new ThinkingLevelEditor(tui, theme, keybindings, cycle_thinking_level);
+			wrapModelPickerEditor(editor, pi, ctx);
+			return editor;
 		});
 		thinking_editor_installed = true;
 	};
-
-	pi.registerShortcut("shift+m", {
-		description: "Show model picker",
-		handler: async (ctx: any) => {
-			await show_model_picker(pi, ctx);
-		},
-	});
 
 	pi.registerCommand("subagent-model", {
 		description: "Set the model and thinking level for subagents on next spawn",
@@ -942,10 +778,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				ctx.ui.notify("subagent-model requires interactive UI.", "error");
 				return;
 			}
-			const agentChoice = await ctx.ui.select(
-				"Subagent to configure",
-				["Coder", "Scout"],
-			);
+			const agentChoice = await ctx.ui.select("Subagent to configure", ["Coder", "Scout"]);
 			if (!agentChoice) return;
 			const agentKey = agentChoice.toLowerCase();
 			const filePath = SUBAGENT_FILES[agentKey];
@@ -953,37 +786,17 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				ctx.ui.notify(`Agent file not found: ${filePath ?? agentKey}`, "error");
 				return;
 			}
-			const availableModels = ctx.modelRegistry.getAvailable();
-			if (availableModels.length === 0) {
-				ctx.ui.notify("No models available in registry.", "error");
-				return;
-			}
 			let currentContent = fs.readFileSync(filePath, "utf-8");
 			const currentModelMatch = currentContent.match(/^model:\s*(.+)$/m);
 			const currentModel = currentModelMatch ? currentModelMatch[1].trim() : "inherits parent";
-			const modelLabels = availableModels.map(
-				(m: any) => `${m.provider}/${m.id} — ${m.name}`,
-			);
-			const modelChoice = await boundedSelect(
-				ctx,
-				`Model for ${agentChoice} subagent (current: ${currentModel})`,
-				modelLabels,
-			);
-			if (!modelChoice) return;
-			const selectedIdx = modelLabels.indexOf(modelChoice);
-			if (selectedIdx < 0) return;
-			const selectedModel = availableModels[selectedIdx];
-			const modelValue = `${selectedModel.provider}/${selectedModel.id}`;
+			ctx.ui.notify(`Pick a model for ${agentChoice} subagent (current: ${currentModel})`, "info");
+			const picked = await pickModelInEditor(ctx, pi);
+			if (!picked) return;
+			const modelValue = `${picked.provider}/${picked.id}`;
 			if (currentModelMatch) {
-				currentContent = currentContent.replace(
-					/^model:\s*.+$/m,
-					`model: ${modelValue}`,
-				);
+				currentContent = currentContent.replace(/^model:\s*.+$/m, `model: ${modelValue}`);
 			} else {
-				currentContent = currentContent.replace(
-					/^(---\n)/,
-					`$1model: ${modelValue}\n`,
-				);
+				currentContent = currentContent.replace(/^(---\n)/, `$1model: ${modelValue}\n`);
 			}
 			const currentThinkingMatch = currentContent.match(/^thinking:\s*(.+)$/m);
 			const currentThinking = currentThinkingMatch ? currentThinkingMatch[1].trim() : "off";
@@ -999,15 +812,9 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				return;
 			}
 			if (currentThinkingMatch) {
-				currentContent = currentContent.replace(
-					/^thinking:\s*.+$/m,
-					`thinking: ${thinkingChoice}`,
-				);
+				currentContent = currentContent.replace(/^thinking:\s*.+$/m, `thinking: ${thinkingChoice}`);
 			} else {
-				currentContent = currentContent.replace(
-					/^(---\n)/,
-					`$1thinking: ${thinkingChoice}\n`,
-				);
+				currentContent = currentContent.replace(/^(---\n)/, `$1thinking: ${thinkingChoice}\n`);
 			}
 			fs.writeFileSync(filePath, currentContent, "utf-8");
 			ctx.ui.notify(
@@ -1017,21 +824,19 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	});
 
 	async function showPlanReview(ctx: any): Promise<"implement" | "edit" | "reject" | undefined> {
-		const questions: QuestionnaireQuestion[] = [{
-			id: "plan-review",
-			label: "Plan Review",
-			prompt: "Choose what to do with the plan.",
-			options: [
-				{ value: "implement", label: "Implement Plan" },
-				{ value: "edit", label: "Edit Plan" },
-				{ value: "reject", label: "Reject Plan" },
-			],
-		}];
-		const answers = await askQuestionnaire(
-			ctx,
-			"Plan Review",
-			questions,
-		);
+		const questions: QuestionnaireQuestion[] = [
+			{
+				id: "plan-review",
+				label: "Plan Review",
+				prompt: "Choose what to do with the plan.",
+				options: [
+					{ value: "implement", label: "Implement Plan" },
+					{ value: "edit", label: "Edit Plan" },
+					{ value: "reject", label: "Reject Plan" },
+				],
+			},
+		];
+		const answers = await askQuestionnaire(ctx, "Plan Review", questions);
 		const choice = answers?.[0]?.value;
 		if (choice === "implement") return "implement";
 		if (choice === "edit") return "edit";
@@ -1042,25 +847,25 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	async function handlePlanImplement(ctx: any) {
 		if (!ctx.hasUI) {
 			switchMode(DEFAULT_MODE, ctx);
-			pi.sendUserMessage("Execute the plan. Follow the steps and test.");
+			pi.sendUserMessage("Execute the plan following the modules.");
 			return;
 		}
-		const target = await ctx.ui.select(
-			"Implement via",
-			["Code", "Orchestrate"],
-		);
+		const target = await ctx.ui.select("Implement via", ["Code", "Orchestrate"]);
 		if (!target) {
 			ctx.ui.notify("Plan implementation cancelled.");
 			return;
 		}
 		const targetMode = target === "Orchestrate" ? "orchestrate" : DEFAULT_MODE;
 		switchMode(targetMode, ctx);
-		const msg = target === "Orchestrate"
-			? "Orchestrate focused modules for subagents."
-			: "Execute the plan. Follow the steps and test.";
-		pi.sendMessage(
-			{ customType: "pi-agents-plan-implement", content: PLAN_IMPLEMENT_PROMPT, display: false },
-		);
+		const msg =
+			target === "Orchestrate"
+				? "Orchestrate focused modules for subagents."
+				: "Execute the plan following the modules.";
+		pi.sendMessage({
+			customType: "pi-agents-plan-implement",
+			content: PLAN_IMPLEMENT_PROMPT,
+			display: false,
+		});
 		pi.sendUserMessage(msg, { deliverAs: "followUp" });
 	}
 
@@ -1070,6 +875,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			const mode = MODES[currentMode];
 			lastMessagedMode = currentMode;
 			waitingForPlan = currentMode === "plan";
+			if (waitingForPlan) questionnaireAnsweredThisPlan = false;
 			return {
 				systemPrompt: augmentedSystemPrompt,
 				message: {
@@ -1102,7 +908,9 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	pi.on("turn_end", (event: any) => {
 		const msg = event?.message;
-		lastTurnAborted = msg?.stopReason === "aborted" || msg?.role === "assistant" && msg?.content?.stopReason === "aborted";
+		lastTurnAborted =
+			msg?.stopReason === "aborted" ||
+			(msg?.role === "assistant" && msg?.content?.stopReason === "aborted");
 		lastTurnLengthStopped = msg?.stopReason === "length";
 	});
 
@@ -1141,11 +949,17 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				lastTurnAborted = false;
 				return;
 			}
+			if (questionnaireAnsweredThisPlan) {
+				questionnaireAnsweredThisPlan = false;
+				ctx.ui.notify("Plan complete. Staying in plan mode — type to refine or switch modes.");
+				return;
+			}
 			const action = await showPlanReview(ctx);
 			if (action === "implement") {
 				await handlePlanImplement(ctx);
 			} else if (action === "edit") {
 				waitingForPlan = true;
+				questionnaireAnsweredThisPlan = false;
 				ctx.ui.notify("Edit your plan — type your changes and send.");
 			} else if (action === "reject") {
 				ctx.ui.notify("Plan rejected. Staying in plan mode.");
@@ -1156,76 +970,77 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	function installCustomFooter(ctx: any) {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setFooter((_tui: any, theme: any, footerData: any) => {
-		return {
-			render(width: number): string[] {
-				const PAD = " ";
-				const innerWidth = Math.max(0, width - 2);
-				// Read cached stats instead of iterating all session entries +
-				// calling getContextUsage() every frame. The cache is
-				// recomputed by the coalesced lifecycle-event timer.
-				const stats = footerStatsCache;
-				const totalCost = stats?.totalCost ?? 0;
-				const latestCacheHitRate = stats?.latestCacheHitRate;
-				const contextWindow = stats?.contextWindow ?? 0;
-				const usedTokens = stats?.contextTokens;
+			return {
+				render(width: number): string[] {
+					const PAD = "  ";
+					const innerWidth = Math.max(0, width - 4);
+					const stats = footerStatsCache;
+					const totalCost = stats?.totalCost ?? 0;
+					const latestCacheHitRate = stats?.latestCacheHitRate;
+					const contextWindow = stats?.contextWindow ?? 0;
+					const usedTokens = stats?.contextTokens;
 
-				const model = ctx.model;
-				const usedLabel = usedTokens === null || usedTokens === undefined
-					? "?"
-					: formatTokens(usedTokens);
-				const statsParts: string[] = [];
-				statsParts.push(`${usedLabel}/${formatTokens(contextWindow)}`);
-				if (latestCacheHitRate !== undefined) {
-					statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-				}
-				if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
-					statsParts.push(`$${totalCost.toFixed(3)}`);
-				}
-				let statsLeft = isShellMode() ? "shell" : statsParts.join(" ");
-				if (visibleWidth(statsLeft) > innerWidth) {
-					statsLeft = truncateToWidth(statsLeft, innerWidth, "...");
-				}
+					const model = ctx.model;
+					const usedLabel =
+						usedTokens === null || usedTokens === undefined ? "?" : formatTokens(usedTokens);
+					const cwd = ctx.sessionManager.getCwd();
+					const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
 
-				const mode = MODES[currentMode];
-				const modeLabel = mode.label.charAt(0).toUpperCase() + mode.label.slice(1);
-				const modelName = model?.name ?? model?.id ?? "no model";
-				const provider = model?.provider ?? "unknown";
-				const variant = footerThinkingLevel !== "off" ? ` ${footerThinkingLevel}` : "";
-			const rightSide =
-				theme.fg("accent", modeLabel) +
-				` ${theme.fg("dim", "\u2022")} ` +
-				theme.fg("text", `${modelName}${variant}`) +
-				theme.fg("dim", ` ${provider}`);
-				const availableForRight = innerWidth - visibleWidth(statsLeft) - 2;
-				const displayedRight = availableForRight > 0
-					? truncateToWidth(rightSide, availableForRight, "")
-					: "";
-				const padding = " ".repeat(Math.max(
-					0,
-					innerWidth - visibleWidth(statsLeft) - visibleWidth(displayedRight),
-				));
-				const statsLine = PAD + theme.fg("dim", statsLeft) + padding + displayedRight + PAD;
+					// --- Left side: folderdir • context/cache/cost ---
+					const statsParts: string[] = [];
+					statsParts.push(`${usedLabel}/${formatTokens(contextWindow)}`);
+					if (latestCacheHitRate !== undefined) {
+						statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+					}
+					if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
+						statsParts.push(`$${totalCost.toFixed(3)}`);
+					}
+					const statsStr = isShellMode() ? "shell" : statsParts.join(" ");
+					const leftSide =
+						theme.fg("dim", folderName) +
+						` ${theme.fg("dim", "\u2022")} ` +
+						theme.fg("dim", statsStr);
+					let statsLeft = leftSide;
+					if (visibleWidth(statsLeft) > innerWidth) {
+						statsLeft = truncateToWidth(statsLeft, innerWidth, "...");
+					}
 
-				const cwd = ctx.sessionManager.getCwd();
-				const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
-				const sessionName = ctx.sessionManager.getSessionName();
-			const lines = [statsLine];
-			const tps = getLiveTps();
-			const folderLabel = theme.fg("dim", folderName);
-			let folderLine = PAD + folderLabel + PAD;
-			if (tps > 0) {
-				const tpsStr = tps < 10 ? tps.toFixed(1) : tps < 100 ? tps.toFixed(0) : `${Math.round(tps)}`;
-				const tpsText = theme.fg("accent", `${tpsStr} tps`);
-				const tpsPadding = " ".repeat(Math.max(0, innerWidth - visibleWidth(folderLabel) - visibleWidth(tpsText)));
-				folderLine = PAD + folderLabel + tpsPadding + tpsText + PAD;
-			}
-			lines.push(folderLine);
-			if (sessionName) {
-				lines.push(PAD + truncateToWidth(theme.fg("dim", sessionName), innerWidth, theme.fg("dim", "...")) + PAD);
-			}
-			return lines;
-			},
-		};
+					// --- Right side: Mode • model thinking-level provider tps ---
+					const mode = MODES[currentMode];
+					const modeLabel = mode.label.charAt(0).toUpperCase() + mode.label.slice(1);
+					const modelName = model?.name ?? model?.id ?? "no model";
+					const provider = model?.provider ?? "unknown";
+					const variant = footerThinkingLevel !== "off" ? ` ${footerThinkingLevel}` : "";
+					const tps = getLiveTps();
+					let tpsSegment = "";
+					if (tps > 0) {
+						const tpsStr =
+							tps < 10 ? tps.toFixed(1) : tps < 100 ? tps.toFixed(0) : `${Math.round(tps)}`;
+						const tpsColored =
+							tps < 50
+								? theme.fg("muted", `${tpsStr} tps`)
+								: tps < 100
+									? theme.fg("text", `${tpsStr} tps`)
+									: liveAccentFg(`${tpsStr} tps`);
+						tpsSegment = ` ${tpsColored}`;
+					}
+					const rightSide =
+						liveAccentFg(modeLabel) +
+						` ${theme.fg("dim", "\u2022")} ` +
+						theme.fg("text", `${modelName}${variant}`) +
+						theme.fg("dim", ` ${provider}`) +
+						tpsSegment;
+					const availableForRight = innerWidth - visibleWidth(statsLeft) - 2;
+					const displayedRight =
+						availableForRight > 0 ? truncateToWidth(rightSide, availableForRight, "") : "";
+					const padding = " ".repeat(
+						Math.max(0, innerWidth - visibleWidth(statsLeft) - visibleWidth(displayedRight)),
+					);
+					const statsLine = PAD + statsLeft + padding + displayedRight + PAD;
+
+					return [statsLine];
+				},
+			};
 		});
 	}
 
@@ -1246,9 +1061,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	async function restoreMode(ctx: any): Promise<void> {
 		const persisted = readPersistedState();
-		const savedMode = persisted.mode && persisted.mode in MODES
-			? persisted.mode
-			: getLastModeFromSession(ctx);
+		const savedMode =
+			persisted.mode && persisted.mode in MODES ? persisted.mode : getLastModeFromSession(ctx);
 		if (savedMode && savedMode !== DEFAULT_MODE) {
 			currentMode = savedMode;
 			lastMessagedMode = savedMode;
@@ -1267,6 +1081,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		// Keep mode switching lazy until all session-bound setup has finished.
 		active_session_manager = ctx.sessionManager;
 		session_ready = false;
+		resetSlashCommandTracking();
 		cancel_footer_stats_schedule();
 		footerStatsCache = undefined;
 		footerThinkingLevel = "off";
@@ -1288,7 +1103,10 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		if (!model) return;
 		const persisted = readPersistedState();
 		const identity = { provider: model.provider, modelId: model.id };
-		if (persisted.model?.provider === identity.provider && persisted.model?.modelId === identity.modelId) {
+		if (
+			persisted.model?.provider === identity.provider &&
+			persisted.model?.modelId === identity.modelId
+		) {
 			return;
 		}
 		writePersistedState({ ...persisted, model: identity });
@@ -1340,11 +1158,12 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		setPlanAutoContinuing(false);
 		planAutoContinueCount = 0;
 		lastTurnLengthStopped = false;
+		questionnaireAnsweredThisPlan = false;
+		resetSlashCommandTracking();
+		thinking_editor_installed = false;
 		const persisted = readPersistedState();
 		const model = ctx.model as Model<any> | undefined;
-		const modelIdentity = model
-			? { provider: model.provider, modelId: model.id }
-			: persisted.model;
+		const modelIdentity = model ? { provider: model.provider, modelId: model.id } : persisted.model;
 		writePersistedState({ ...persisted, mode: currentMode, model: modelIdentity });
 	});
 

@@ -12,7 +12,6 @@
   },
   "include": ["plugins/**/*.ts"],
   "exclude": [
-    "plugins/**/test/**",
-    "plugins/pi-web-access/*.ts"
+    "plugins/**/test/**"
   ]
 }

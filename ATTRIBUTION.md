@@ -13,3 +13,10 @@ Upstream project: <https://github.com/bacnh85/pi-extensions>.
 maintained by `nmzpy`. Its original MIT license and documentation are retained
 in that plugin directory. Upstream project:
 <https://github.com/nmzpy/pi-devin-auth>.
+
+`plugins/pi-cursor-auth/` uses Cursor CLI integration patterns informed by
+`Nomadcxx/opencode-cursor`, including executable discovery, model-list parsing,
+stream event shapes, and tool-call compatibility. The upstream project is
+BSD-3-Clause licensed; its license is retained in
+`plugins/pi-cursor-auth/LICENSE`. Upstream project:
+<https://github.com/Nomadcxx/opencode-cursor>.
