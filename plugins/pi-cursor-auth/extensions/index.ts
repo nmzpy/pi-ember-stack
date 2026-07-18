@@ -1,6 +1,6 @@
 import {
-	AuthStorage,
 	type ExtensionAPI,
+	ModelRuntime,
 	type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
@@ -102,7 +102,8 @@ export default async function pi_cursor_auth(pi: ExtensionAPI): Promise<void> {
 		handler: async (_args, ctx) => {
 			try {
 				await logout_cursor();
-				AuthStorage.create().remove(CURSOR_PROVIDER_ID);
+				const model_runtime = await ModelRuntime.create();
+				await model_runtime.logout(CURSOR_PROVIDER_ID);
 				ctx.ui.notify("Cursor: logged out.", "info");
 			} catch (error) {
 				ctx.ui.notify(

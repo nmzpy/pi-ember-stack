@@ -38,9 +38,19 @@ export function sync_slash_command_active(editor: { getText?: () => string }): v
 	was_slash_command = editor_text_starts_with_slash(editor);
 }
 
-type TuiSnapInternals = {
-	terminal: { rows: number; columns: number };
+type TuiRenderInternals = {
+	terminal: {
+		rows: number;
+		columns: number;
+		clearScreen?: () => void;
+	};
 	render: (width: number) => string[];
+	previousLines?: string[];
+	previousKittyImageIds?: Set<number>;
+	previousWidth?: number;
+	previousHeight?: number;
+	cursorRow?: number;
+	hardwareCursorRow?: number;
 	maxLinesRendered?: number;
 	previousViewportTop?: number;
 	setClearOnShrink?: (enabled: boolean) => void;
@@ -51,45 +61,50 @@ type TuiSnapInternals = {
 type EditorWithTui = {
 	getText?: () => string;
 	isShowingAutocomplete?: () => boolean;
-	tui?: TuiSnapInternals;
+	tui?: TuiRenderInternals;
 };
 
 function editor_is_showing_autocomplete(editor: EditorWithTui): boolean {
 	return editor.isShowingAutocomplete?.() === true;
 }
 
-/** Pi defaults clearOnShrink off; enable once so shrink redraws can clear stale rows. */
-export function enable_tui_clear_on_shrink(tui: TUI): void {
-	(tui as unknown as TuiSnapInternals).setClearOnShrink?.(true);
+/** Keep Pi's shrink path from issuing full redraws that clear terminal scrollback. */
+export function disable_tui_clear_on_shrink(tui: TUI): void {
+	(tui as unknown as TuiRenderInternals).setClearOnShrink?.(false);
 }
 
 /**
- * Prime Pi's clearOnShrink full redraw on the next doRender(). Never use
- * requestRender(true) here — its width/height reset homes the buffer and breaks
- * bottom anchoring after overflow.
+ * Reset only the visible terminal screen before the collapse render. Pi's
+ * normal full reset also emits `3J`, which destroys scrollback. Clearing the
+ * screen through the terminal abstraction preserves scrollback, while making
+ * the next ordinary render rebuild from the current top-down layout instead
+ * of leaving stale autocomplete rows behind.
  */
-function prime_overlay_collapse_shrink_redraw(tui: TuiSnapInternals, line_count: number): void {
-	const height = tui.terminal.rows;
-	tui.maxLinesRendered = Math.max(tui.maxLinesRendered ?? 0, line_count + 1);
-	if (line_count > height) {
-		tui.previousViewportTop = Math.max(0, line_count - height);
-	}
-	tui.setClearOnShrink?.(true);
+function reset_collapse_screen_without_scrollback(tui: TuiRenderInternals): void {
+	tui.terminal.clearScreen?.();
+	tui.previousLines = [];
+	tui.previousKittyImageIds = new Set();
+	tui.previousWidth = 0;
+	tui.previousHeight = 0;
+	tui.cursorRow = 0;
+	tui.hardwareCursorRow = 0;
+	tui.maxLinesRendered = 0;
+	tui.previousViewportTop = 0;
 }
 
 /**
- * After slash/autocomplete overlay collapse: clear stale autocomplete rows and
- * re-anchor the bottom viewport. Uses Pi's clearOnShrink path, not requestRender(true).
+ * After slash/autocomplete overlay collapse, preserve the chatbox viewport and
+ * request only Pi's normal differential render. This lets the terminal remain
+ * the owner of scrollback instead of priming Pi's full clear/redraw path.
  */
-export function request_overlay_collapse_viewport_snap(editor?: EditorWithTui): void {
+export function request_overlay_collapse_render(editor?: EditorWithTui): void {
 	const generation = slash_exit_redraw_generation;
 	const run = (): void => {
 		if (generation !== slash_exit_redraw_generation) return;
 		const tui = editor?.tui;
 		if (tui?.stopped) return;
-		if (tui?.requestRender && tui.terminal && tui.render) {
-			const line_count = tui.render(tui.terminal.columns).length;
-			prime_overlay_collapse_shrink_redraw(tui, line_count);
+		if (tui?.requestRender) {
+			reset_collapse_screen_without_scrollback(tui);
 			tui.requestRender(false);
 			return;
 		}
@@ -105,7 +120,7 @@ export function request_overlay_collapse_viewport_snap(editor?: EditorWithTui): 
 /**
  * Call after every editor handleInput (including early-return escape clears).
  * When slash mode ends or the slash autocomplete overlay collapses, schedule a
- * viewport snap via Pi's clearOnShrink redraw.
+ * normal differential render after the upward-growing menu disappears.
  */
 export function finalize_editor_input_after(editor: EditorWithTui): void {
 	const is_slash = editor_text_starts_with_slash(editor);
@@ -113,7 +128,7 @@ export function finalize_editor_input_after(editor: EditorWithTui): void {
 	const should_snap_viewport =
 		(was_slash_command && !is_slash) || (was_editor_autocomplete_visible && !autocomplete_visible);
 	if (should_snap_viewport) {
-		request_overlay_collapse_viewport_snap(editor);
+		request_overlay_collapse_render(editor);
 	}
 	was_slash_command = is_slash;
 	was_editor_autocomplete_visible = autocomplete_visible;

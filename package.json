@@ -1,9 +1,9 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Ember's configurable Pi stack with modes, compact tools, subagents, and Devin, Cursor, and xAI providers",
   "type": "module",
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -25,6 +25,7 @@
   "files": [
     "README.md",
     "ATTRIBUTION.md",
+    "LICENSE",
     "tsconfig.json",
     "plugins"
   ],
@@ -56,10 +57,10 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.3",
-    "@earendil-works/pi-agent-core": "^0.80.6",
-    "@earendil-works/pi-ai": "^0.80.6",
-    "@earendil-works/pi-coding-agent": "^0.80.6",
-    "@earendil-works/pi-tui": "^0.80.6",
+    "@earendil-works/pi-agent-core": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-tui": "^0.80.10",
     "@ff-labs/fff-node": "0.9.6",
     "@sinclair/typebox": "^0.34.0",
     "@types/node": "^20.19.43",

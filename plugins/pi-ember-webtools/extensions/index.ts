@@ -1,5 +1,5 @@
 /**
- * pi-web-access — Ember-owned extension wrapper.
+ * pi-ember-webtools — Ember-owned extension wrapper.
  *
  * The vendored source lives in the plugin root (`../index.ts` and sibling
  * modules) and is compiled directly by tsc. This thin wrapper imports the
@@ -13,16 +13,16 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import piWebAccessFactory from "../index.ts";
+import piEmberWebtoolsFactory from "../index.ts";
 
 const PLUGIN_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SKILLS_DIR = path.join(PLUGIN_ROOT, "skills");
 
-export default async function piWebAccessPlugin(pi: ExtensionAPI): Promise<void> {
+export default async function piEmberWebtoolsPlugin(pi: ExtensionAPI): Promise<void> {
 	// Register the bundled librarian skill directory.
 	pi.on("resources_discover", async () => ({
 		skillPaths: [SKILLS_DIR],
 	}));
 
-	piWebAccessFactory(pi);
+	piEmberWebtoolsFactory(pi);
 }

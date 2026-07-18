@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["plugins/pi-ember-webtools/**/*.ts"],
+  "exclude": ["plugins/pi-ember-webtools/test/**"]
+}

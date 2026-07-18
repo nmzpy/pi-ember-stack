@@ -19,7 +19,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Model } from "@earendil-works/pi-ai";
-import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import {
+	copyToClipboard,
+	CustomEditor,
+	type KeybindingsManager,
+} from "@earendil-works/pi-coding-agent";
 import {
 	getKeybindings,
 	truncateToWidth,
@@ -47,7 +51,6 @@ import {
 import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	askQuestionnaire,
-	type QuestionnaireAnsweredCallback,
 	type QuestionnaireQuestion,
 	registerQuestionnaireTool,
 } from "./questionnaire-tool.ts";
@@ -55,6 +58,47 @@ import subagentPlugin from "./subagent/extensions/index.ts";
 
 function modelIdentityString(model: Model<any> | undefined): string {
 	return model ? `${model.provider}/${model.id}` : "";
+}
+
+function unbind_thinking_toggle(): void {
+	const keybindings = getKeybindings();
+	keybindings.setUserBindings({
+		...keybindings.getUserBindings(),
+		"app.thinking.toggle": [],
+		"app.tree.toggleLabelTimestamp": [],
+	});
+}
+
+function stable_serialize(value: unknown): string {
+	if (value === null || typeof value !== "object") {
+		const serialized = JSON.stringify(value);
+		return serialized === undefined ? String(value) : serialized;
+	}
+	if (Array.isArray(value)) return `[${value.map(stable_serialize).join(",")}]`;
+	const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+		a.localeCompare(b),
+	);
+	return `{${entries
+		.map(([key, entry]) => `${JSON.stringify(key)}:${stable_serialize(entry)}`)
+		.join(",")}}`;
+}
+
+function tool_call_signature(tool_name: string, input: unknown): string {
+	return `${tool_name}:${stable_serialize(input)}`;
+}
+
+function assistant_text(message: unknown): string {
+	if (!message || typeof message !== "object") return "";
+	const record = message as { role?: unknown; content?: unknown };
+	if (record.role !== "assistant" || !Array.isArray(record.content)) return "";
+	return record.content
+		.filter(
+			(item): item is { type?: unknown; text?: unknown } =>
+				item !== null && typeof item === "object",
+		)
+		.filter((item) => item.type === "text" && typeof item.text === "string")
+		.map((item) => item.text as string)
+		.join("");
 }
 
 /**
@@ -125,10 +169,18 @@ function formatTokens(count: number): string {
 }
 
 // Web-access tools are read-only research tools (web_search, fetch_content,
-// get_search_content) registered by the pi-web-access plugin. They belong in
+// get_search_content) registered by the pi-ember-webtools plugin. They belong in
 // every mode so the agent can do web research regardless of mode.
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
-const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire", ...WEB_ACCESS_TOOLS];
+const READONLY_TOOLS = [
+	"read",
+	"bash",
+	"grep",
+	"find",
+	"ls",
+	"questionnaire",
+	...WEB_ACCESS_TOOLS,
+];
 const READONLY_DELEGATING_TOOLS = [
 	"read",
 	"grep",
@@ -615,10 +667,11 @@ function recompute_footer_stats(ctx: any): void {
 }
 
 export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
+	unbind_thinking_toggle();
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
-	let questionnaireAnsweredThisPlan = false;
+	let latest_plan_text = "";
 	let active_session_manager: any;
 	let session_ready = false;
 	let pending_mode_id: string | undefined;
@@ -661,12 +714,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		currentMode = persistedAtLoad.mode;
 	}
 
-	const onQuestionnaireAnswered: QuestionnaireAnsweredCallback = () => {
-		if (currentMode === "plan" && waitingForPlan) {
-			questionnaireAnsweredThisPlan = true;
-		}
-	};
-	registerQuestionnaireTool(pi, onQuestionnaireAnswered);
+	registerQuestionnaireTool(pi);
 
 	for (const modeId of MODE_IDS) {
 		const mode = MODES[modeId];
@@ -823,7 +871,24 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		},
 	});
 
-	async function showPlanReview(ctx: any): Promise<"implement" | "edit" | "reject" | undefined> {
+	async function copy_plan_to_clipboard(ctx: any): Promise<void> {
+		const plan = latest_plan_text.trim();
+		if (!plan) {
+			ctx.ui.notify("No plan text is available to copy.", "error");
+			return;
+		}
+		try {
+			await copyToClipboard(plan);
+			ctx.ui.notify("Plan copied to clipboard.", "info");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Failed to copy plan: ${message}`, "error");
+		}
+	}
+
+	async function showPlanReview(
+		ctx: any,
+	): Promise<"implement" | "copy" | { action: "refine"; instruction: string } | undefined> {
 		const questions: QuestionnaireQuestion[] = [
 			{
 				id: "plan-review",
@@ -831,16 +896,39 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				prompt: "Choose what to do with the plan.",
 				options: [
 					{ value: "implement", label: "Implement Plan" },
-					{ value: "edit", label: "Edit Plan" },
-					{ value: "reject", label: "Reject Plan" },
+					{ value: "copy", label: "Copy Plan" },
 				],
 			},
 		];
 		const answers = await askQuestionnaire(ctx, "Plan Review", questions);
+		const answer = answers?.[0];
+		if (answer?.value === "implement") return "implement";
+		if (answer?.value === "copy") return "copy";
+		if (answer?.wasCustom && answer.value) {
+			return { action: "refine", instruction: answer.value };
+		}
+		return undefined;
+	}
+
+	async function showLoopRecovery(
+		ctx: any,
+	): Promise<{ action: "end" | "retry" | "custom"; instruction?: string } | undefined> {
+		const questions: QuestionnaireQuestion[] = [
+			{
+				id: "loop-recovery",
+				label: "Tool Loop Detected",
+				prompt: "Choose how to handle the repeated tool call.",
+				options: [
+					{ value: "end", label: "End stream" },
+					{ value: "retry", label: "Retry" },
+				],
+			},
+		];
+		const answers = await askQuestionnaire(ctx, "Tool Loop Detected", questions);
 		const choice = answers?.[0]?.value;
-		if (choice === "implement") return "implement";
-		if (choice === "edit") return "edit";
-		if (choice === "reject") return "reject";
+		if (choice === "end") return { action: "end" };
+		if (choice === "retry") return { action: "retry" };
+		if (choice) return { action: "custom", instruction: choice };
 		return undefined;
 	}
 
@@ -871,11 +959,14 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	pi.on("before_agent_start", async (event: any) => {
 		const augmentedSystemPrompt = event.systemPrompt + PARALLEL_TOOL_CALL_GUIDANCE;
+		if (currentMode === "plan" && waitingForPlan && event.prompt !== "continue") {
+			latest_plan_text = "";
+		}
 		if (currentMode !== DEFAULT_MODE && lastMessagedMode !== currentMode) {
 			const mode = MODES[currentMode];
 			lastMessagedMode = currentMode;
 			waitingForPlan = currentMode === "plan";
-			if (waitingForPlan) questionnaireAnsweredThisPlan = false;
+			if (waitingForPlan) latest_plan_text = "";
 			return {
 				systemPrompt: augmentedSystemPrompt,
 				message: {
@@ -905,9 +996,45 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	/** Max consecutive auto-continues before giving up and surfacing the error. */
 	const PLAN_AUTO_CONTINUE_MAX = 5;
 	let planAutoContinueCount = 0;
+	const LOOP_TOOL_CALL_LIMIT = 3;
+	let loop_tool_call_signature: string | undefined;
+	let loop_tool_call_count = 0;
+	let loop_detected = false;
+	let loop_prompt_active = false;
+
+	function reset_tool_loop_tracking(): void {
+		loop_tool_call_signature = undefined;
+		loop_tool_call_count = 0;
+		loop_detected = false;
+	}
+
+	pi.on("agent_start", () => {
+		reset_tool_loop_tracking();
+		loop_prompt_active = false;
+	});
+
+	pi.on("tool_call", (event: any, ctx: any) => {
+		if (loop_detected || loop_prompt_active) return;
+		const signature = tool_call_signature(event.toolName, event.input);
+		if (signature === loop_tool_call_signature) {
+			loop_tool_call_count++;
+		} else {
+			loop_tool_call_signature = signature;
+			loop_tool_call_count = 1;
+		}
+		if (loop_tool_call_count >= LOOP_TOOL_CALL_LIMIT) {
+			loop_detected = true;
+			ctx.abort();
+		}
+	});
 
 	pi.on("turn_end", (event: any) => {
 		const msg = event?.message;
+		const plan_text =
+			waitingForPlan && currentMode === "plan" ? assistant_text(msg) : "";
+		if (plan_text) {
+			latest_plan_text = latest_plan_text ? `${latest_plan_text}\n\n${plan_text}` : plan_text;
+		}
 		lastTurnAborted =
 			msg?.stopReason === "aborted" ||
 			(msg?.role === "assistant" && msg?.content?.stopReason === "aborted");
@@ -915,6 +1042,44 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	});
 
 	pi.on("agent_settled", async (_event: any, ctx: any) => {
+		if (loop_detected && !loop_prompt_active) {
+			loop_prompt_active = true;
+			const model = ctx.model as Model<any> | undefined;
+			const model_name = model?.name ?? model?.id ?? "The model";
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					`${model_name} has been looping for ${LOOP_TOOL_CALL_LIMIT} toolcalls`,
+					"warning",
+				);
+			}
+			const choice = ctx.hasUI ? await showLoopRecovery(ctx) : undefined;
+			loop_prompt_active = false;
+			reset_tool_loop_tracking();
+			lastTurnAborted = false;
+			lastTurnLengthStopped = false;
+			setPlanAutoContinuing(false);
+			if (choice?.action === "retry") {
+				pi.sendMessage(
+					{
+						customType: "pi-agents-loop-retry",
+						content: "You have been looping, back off and continue with a different tool.",
+						display: false,
+					},
+					{ triggerTurn: true },
+				);
+			} else if (choice?.action === "custom" && choice.instruction) {
+				pi.sendMessage(
+					{
+						customType: "pi-agents-loop-guidance",
+						content: choice.instruction,
+						display: false,
+					},
+					{ triggerTurn: true },
+				);
+			}
+			return;
+		}
+
 		// Plan-mode output-limit recovery: when the model hits the max output
 		// token limit while generating a plan, silently send "continue" as a
 		// hidden custom message so the user never sees the error message or
@@ -949,20 +1114,16 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				lastTurnAborted = false;
 				return;
 			}
-			if (questionnaireAnsweredThisPlan) {
-				questionnaireAnsweredThisPlan = false;
-				ctx.ui.notify("Plan complete. Staying in plan mode — type to refine or switch modes.");
-				return;
-			}
 			const action = await showPlanReview(ctx);
 			if (action === "implement") {
 				await handlePlanImplement(ctx);
-			} else if (action === "edit") {
+			} else if (action === "copy") {
+				await copy_plan_to_clipboard(ctx);
 				waitingForPlan = true;
-				questionnaireAnsweredThisPlan = false;
-				ctx.ui.notify("Edit your plan — type your changes and send.");
-			} else if (action === "reject") {
-				ctx.ui.notify("Plan rejected. Staying in plan mode.");
+			} else if (action?.action === "refine") {
+				waitingForPlan = true;
+				latest_plan_text = "";
+				pi.sendUserMessage(action.instruction);
 			}
 		}
 	});
@@ -1158,7 +1319,9 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		setPlanAutoContinuing(false);
 		planAutoContinueCount = 0;
 		lastTurnLengthStopped = false;
-		questionnaireAnsweredThisPlan = false;
+		reset_tool_loop_tracking();
+		loop_prompt_active = false;
+		latest_plan_text = "";
 		resetSlashCommandTracking();
 		thinking_editor_installed = false;
 		const persisted = readPersistedState();

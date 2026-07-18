@@ -1,5 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "include": ["plugins/pi-web-access/**/*.ts"],
-  "exclude": ["plugins/pi-web-access/test/**"]
-}

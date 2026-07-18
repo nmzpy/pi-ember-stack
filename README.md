@@ -15,6 +15,9 @@ one package:
   and streaming transport.
 - Cursor subscription support through the official Cursor Agent CLI, with Pi
   retaining its native session and tool loop.
+- Dynamic context pruning (`pi-ember-dcp`): outbound-only dedup/error purge,
+  optional LLM `compress` tool, and `/dcp` controls. Session history on disk is
+  not rewritten; only the messages sent to the model are pruned.
 - A self-contained `Ctrl+Space` mode-cycle shortcut and a footer showing the
   active mode, model, and thinking variant.
 
@@ -25,7 +28,18 @@ plugins under `plugins/`. Enable them globally in `PI_HOME/pi-ember-stack.json`:
 
 ```json
 {
-  "plugins": ["pi-compact-tools", "pi-custom-agents", "devin-auth", "pi-cursor-auth"]
+  "plugins": [
+    "pi-compact-tools",
+    "devin-auth",
+    "pi-cursor-auth",
+    "xai-auth",
+    "pi-custom-agents",
+    "pi-ember-dcp",
+    "pi-ember-fff",
+    "pi-ember-ui",
+    "pi-ember-tps",
+    "pi-ember-webtools"
+  ]
 }
 ```
 
@@ -36,6 +50,17 @@ the TUI. Restart pi after changing the list. The available plugins are:
 - `pi-custom-agents`: questionnaire UI, primary modes, plans, subagent tool, and bundled agent definitions.
 - `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
 - `pi-cursor-auth`: Cursor subscription auth, model refresh, and native Pi streaming.
+- `xai-auth`: xAI (Grok) OAuth provider, catalog, streaming, and custom tools.
+- `pi-ember-dcp`: dynamic context pruning, `compress` tool, `/dcp` commands, and bundled `pi-dcp` skill.
+- `pi-ember-fff`: FFF-powered grep/find with compact rendering.
+- `pi-ember-ui`: Ember accent theme and TUI chrome.
+- `pi-ember-tps`: tokens-per-second meter.
+- `pi-ember-webtools`: web search, URL fetching, and related extraction tools.
+
+`pi-ember-dcp` is on by default with the other stack plugins. Toggle it via
+`/stack-plugins` or by editing the global `plugins` list. DCP user config and
+session state live under `~/.pi-dcp/` (optional project override:
+`<cwd>/.pi/dcp.json`).
 
 ## Project setup
 
@@ -67,7 +92,7 @@ pi update --extensions
 Third-party utilities such as pi-fff and image paste remain separate package
 entries. Devin auth is now bundled as a stack plugin, but credentials and
 provider secrets stay in the machine-local pi configuration and are not part
-of this repository.
+of this repository. DCP state under `~/.pi-dcp/` is also machine-local.
 
 ## Development
 
@@ -75,7 +100,7 @@ The package entrypoint is `plugins/index.ts`. Compact tools are under
 `plugins/pi-compact-tools/`, while questionnaire, primary modes, plans,
 subagents, and bundled agents are under `plugins/pi-custom-agents/`. Provider
 plugins are under `plugins/devin-auth/`, `plugins/pi-cursor-auth/`, and
-`plugins/xai-auth/`.
+`plugins/xai-auth/`. Dynamic context pruning is under `plugins/pi-ember-dcp/`.
 
 Run the package typecheck with:
 

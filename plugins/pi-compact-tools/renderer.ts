@@ -67,8 +67,7 @@ export type DiscoveryGroup = {
 	 * started a tool in a different group). The label only flips to past
 	 * tense when both all members are complete AND the group is settled.
 	 * While complete-but-unsettled, the group stays active (gradient + present
-	 * tense) so the Thinking widget stays hidden and there is no premature
-	 * past-tense label.
+	 * tense) so there is no premature past-tense label.
 	 */
 	settled?: boolean;
 	/**
@@ -176,7 +175,14 @@ function groupKey(name: string, args: any): string | undefined {
 function errorText(result: any, isError: boolean): string | undefined {
 	const content = result?.content?.find((item: any) => item.type === "text");
 	if (!isError && !content?.text?.startsWith("Error")) return undefined;
-	return textValue(content?.text, "Tool failed").split("\n")[0];
+	const text = typeof content?.text === "string" ? content.text : "Tool failed";
+	return text.replace(/\r\n?/g, "\n").split("\n")[0] || "Tool failed";
+}
+
+function compactErrorComponent(error: string, theme: any): Component {
+	const component = new CompactGroupText();
+	component.setText(theme.fg("error", error));
+	return component;
 }
 
 function fullOutputText(result: any): string {
@@ -210,7 +216,8 @@ function bashLastLine(result: any): string | undefined {
 	return undefined;
 }
 
-function formatBashResultLine(result: any, theme: any): string {
+function formatBashResultLine(result: any, theme: any, isError = false): string {
+	if (isError) return "";
 	const lastLine = bashLastLine(result);
 	if (lastLine === undefined) return "";
 	return "\n" + theme.fg("dim", "  ") + theme.fg("text", lastLine);
@@ -324,7 +331,7 @@ function formatStandaloneCallRow(record: CompactCall, theme: any): string {
 		return prefix + matchLabel(result, theme);
 	}
 	if (name === "bash") {
-		return prefix + formatBashResultLine(result, theme);
+		return prefix + formatBashResultLine(result, theme, record.isError);
 	}
 	return prefix;
 }
@@ -401,7 +408,7 @@ function groupHeaderLabel(group: DiscoveryGroup): string {
 			: group.type === "writing"
 				? { present: "Writing", past: "Written", noun: "file" }
 				: group.type === "bashing"
-					? { present: "Bashing", past: "Bashed", noun: "command" }
+					? { present: "Bashing", past: "Ran", noun: "command" }
 					: { present: "Exploring", past: "Explored", noun: "file" };
 	if (!allDone) return labels.present;
 	const count =
@@ -455,35 +462,13 @@ export class CompactRenderer {
 	private groupTickCb: (() => void) | undefined;
 	private groupTickTarget: (() => void) | undefined;
 
-	/** Whether the current turn has produced visible text output. */
-	private turnHasText = false;
-	private turnHasUserMessage = false;
-	private canCarryPreviousGroup = false;
-	private priorGroupKey: string | undefined;
-
 	beginTurn(): void {
-		if (!this.canCarryPreviousGroup) {
-			this.resetGroupingState();
-		} else if (this.currentGroup) {
-			this.currentGroup.settled = false;
-		}
-		this.canCarryPreviousGroup = false;
-		this.turnHasText = false;
-		this.turnHasUserMessage = false;
+		this.resetGroupingState();
 	}
 
-	endTurn(thinkingHidden: boolean, message?: any): void {
-		const messageHasText =
-			Array.isArray(message?.content) &&
-			message.content.some(
-				(part: any) => part?.type === "text" && typeof part.text === "string" && part.text.trim(),
-			);
-		this.canCarryPreviousGroup =
-			thinkingHidden && !this.turnHasText && !messageHasText && !this.turnHasUserMessage;
-		if (!this.canCarryPreviousGroup) {
-			this.settleGroups();
-			this.resetGroupingState();
-		}
+	endTurn(_thinkingHidden?: boolean, _message?: unknown): void {
+		this.settleGroups();
+		this.resetGroupingState();
 	}
 
 	/** Called by the plugin when the current turn produces visible text
@@ -492,15 +477,11 @@ export class CompactRenderer {
 	noteVisibleText(): void {
 		this.settleGroups();
 		this.resetGroupingState();
-		this.turnHasText = true;
 	}
 
 	noteUserMessage(): void {
-		if (!this.turnHasUserMessage) {
-			this.settleGroups();
-			this.resetGroupingState();
-		}
-		this.turnHasUserMessage = true;
+		this.settleGroups();
+		this.resetGroupingState();
 	}
 
 	/** Clear all accumulated call state. Called on session replacement
@@ -511,10 +492,6 @@ export class CompactRenderer {
 		this.calls.clear();
 		this.currentGroup = undefined;
 		this.pendingGroupInvalidations.clear();
-		this.turnHasText = false;
-		this.turnHasUserMessage = false;
-		this.canCarryPreviousGroup = false;
-		this.priorGroupKey = undefined;
 	}
 
 	/** Re-paint compact rows after a live accent/theme rebuild. */
@@ -536,8 +513,7 @@ export class CompactRenderer {
 	/** Whether any compact tool group currently has at
 	 *  least one running member. Read by pi-compact-tools lifecycle handlers
 	 *  to drive the shared `isToolGroupActive` flag in
-	 *  pi-ember-ui/mode-colors.ts, which suppresses the Thinking
-	 *  widget while a group header carries the live gradient. */
+	 *  pi-ember-ui/mode-colors.ts for group state and live gradient rendering. */
 	hasActiveGroups(): boolean {
 		const group = this.currentGroup;
 		if (!group || group.records.length === 0) return false;
@@ -588,7 +564,6 @@ export class CompactRenderer {
 
 	private resetGroupingState(): void {
 		this.currentGroup = undefined;
-		this.priorGroupKey = undefined;
 	}
 
 	private scheduleGroupInvalidation(group: DiscoveryGroup): void {
@@ -641,12 +616,6 @@ export class CompactRenderer {
 		const record: CompactCall = { id, name, args, isError: false };
 		this.calls.set(id, record);
 		const key = groupKey(name, args);
-
-		if ((this.turnHasText || this.turnHasUserMessage) && key !== undefined) {
-			this.resetGroupingState();
-			this.turnHasText = false;
-			this.turnHasUserMessage = false;
-		}
 
 		if (key === undefined) {
 			this.settleGroups();
@@ -758,12 +727,13 @@ export class CompactRenderer {
 			// renders the owner's selfRenderContainer with the updated component.
 			record.group.callText?.setText(formatGroup(record.group, theme));
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
+			const error = errorText(result, context.isError);
+			if (error) return compactErrorComponent(error, theme);
 			if (expanded && !options.isPartial) {
 				const output = formatExpandedOutput(result, theme);
 				if (output) return new Text(output, 0, 0);
 			}
-			const error = errorText(result, context.isError);
-			return error ? new Text(theme.fg("error", error), 0, 0) : new Text("", 0, 0);
+			return new Text("", 0, 0);
 		}
 		if (options.isPartial) return new Text("", 0, 0);
 
@@ -773,7 +743,7 @@ export class CompactRenderer {
 			record.callText = callText;
 			callText.setText(formatStandaloneCallRow(record, theme));
 		}
-		if (error) return new Text(theme.fg("error", error), 0, 0);
+		if (error) return compactErrorComponent(error, theme);
 		if (expanded) {
 			const output = formatExpandedOutput(result, theme);
 			if (output) return new Text(output, 0, 0);

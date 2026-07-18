@@ -6,10 +6,11 @@ import devinAuthPlugin from "./devin-auth/extensions/index.ts";
 import piCompactToolsPlugin, { getSharedRenderer } from "./pi-compact-tools/index.ts";
 import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
+import piEmberDcpPlugin from "./pi-ember-dcp/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
-import piWebAccessPlugin from "./pi-web-access/extensions/index.ts";
+import piEmberWebtoolsPlugin from "./pi-ember-webtools/extensions/index.ts";
 import xaiAuthPlugin from "./xai-auth/extensions/index.ts";
 
 export { getSharedRenderer };
@@ -17,13 +18,14 @@ export { getSharedRenderer };
 type PluginId =
 	| "pi-compact-tools"
 	| "pi-custom-agents"
+	| "pi-ember-dcp"
 	| "devin-auth"
 	| "pi-cursor-auth"
 	| "xai-auth"
 	| "pi-ember-fff"
 	| "pi-ember-ui"
 	| "pi-ember-tps"
-	| "pi-web-access";
+	| "pi-ember-webtools";
 type StackPlugin = {
 	id: PluginId;
 	description: string;
@@ -37,10 +39,11 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-cursor-auth",
 	"xai-auth",
 	"pi-custom-agents",
+	"pi-ember-dcp",
 	"pi-ember-fff",
 	"pi-ember-ui",
 	"pi-ember-tps",
-	"pi-web-access",
+	"pi-ember-webtools",
 ];
 
 const PLUGINS: readonly StackPlugin[] = [
@@ -70,6 +73,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		extension: piCustomAgentsPlugin,
 	},
 	{
+		id: "pi-ember-dcp",
+		description: "Dynamic context pruning and compress tool for outbound LLM context",
+		extension: piEmberDcpPlugin,
+	},
+	{
 		id: "pi-ember-fff",
 		description: "FFF-powered grep and find with compact rendering",
 		extension: piEmberFffPlugin,
@@ -85,9 +93,9 @@ const PLUGINS: readonly StackPlugin[] = [
 		extension: piEmberTpsPlugin,
 	},
 	{
-		id: "pi-web-access",
+		id: "pi-ember-webtools",
 		description: "Web search, URL fetching, GitHub cloning, PDF/YouTube/video extraction",
-		extension: piWebAccessPlugin,
+		extension: piEmberWebtoolsPlugin,
 	},
 ];
 
@@ -127,7 +135,16 @@ function readEnabledPlugins(): Set<PluginId> {
 		return new Set(DEFAULT_PLUGIN_IDS);
 	}
 
-	const unknownPlugin = (config.plugins as unknown[]).find((pluginId) => !isPluginId(pluginId));
+	const rawPlugins = config.plugins as unknown[];
+	const configuredPlugins = rawPlugins.map((pluginId) =>
+		pluginId === "pi-web-access" ? "pi-ember-webtools" : pluginId,
+	);
+	if (configuredPlugins.some((pluginId, index) => pluginId !== rawPlugins[index])) {
+		config.plugins = configuredPlugins;
+		writeConfigFile(config);
+	}
+
+	const unknownPlugin = configuredPlugins.find((pluginId) => !isPluginId(pluginId));
 	if (unknownPlugin !== undefined) {
 		throw new Error(
 			`Unknown pi-ember-stack plugin ${String(unknownPlugin)} in ${CONFIG_FILENAME}.`,

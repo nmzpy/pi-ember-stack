@@ -30,8 +30,6 @@ interface QuestionnaireAnswer {
 	wasCustom: boolean;
 }
 
-export type QuestionnaireAnsweredCallback = () => void;
-
 interface QuestionnaireResult {
 	answers: QuestionnaireAnswer[];
 	cancelled: boolean;
@@ -58,7 +56,6 @@ export async function askQuestionnaire(
 	ctx: any,
 	title: string,
 	questions: QuestionnaireQuestion[],
-	onAnswered?: QuestionnaireAnsweredCallback,
 ): Promise<QuestionnaireAnswer[] | undefined> {
 	if (!ctx.hasUI || questions.length === 0) return undefined;
 
@@ -151,7 +148,6 @@ export async function askQuestionnaire(
 
 			function advance(): void {
 				if (questionIndex === questions.length - 1) {
-					onAnswered?.();
 					done({ answers: Array.from(answers.values()), cancelled: false });
 					return;
 				}
@@ -316,10 +312,7 @@ export async function askQuestionnaire(
 	return result.cancelled ? undefined : result.answers;
 }
 
-export function registerQuestionnaireTool(
-	pi: any,
-	onAnswered?: QuestionnaireAnsweredCallback,
-): void {
+export function registerQuestionnaireTool(pi: any): void {
 	pi.registerTool({
 		name: "questionnaire",
 		label: "Questionnaire",
@@ -360,7 +353,7 @@ export function registerQuestionnaireTool(
 				};
 			}
 
-			const answers = await askQuestionnaire(ctx, "Questionnaire", params.questions, onAnswered);
+			const answers = await askQuestionnaire(ctx, "Questionnaire", params.questions);
 			return {
 				content: [
 					{

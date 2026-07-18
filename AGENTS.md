@@ -79,7 +79,12 @@
   `AssistantMessageComponent.updateContent` rebuilds its `CachedMarkdown`
   children (the skip-guard keys on the theme generation — mode switches
   recolor MD headers/links/bullets; identical invalidate inputs still
-  skip), invalidate the loaded-resources container
+  skip). `install_markdown_theme_patch` is the one global Markdown boundary:
+  before every `Markdown.render`, it binds the component's `heading` callback
+  to `emberHeadingStyle`, so assistant/custom/compaction/branch/skill/changelog
+  Markdown all resolve `mdHeading` through the live Theme rather than Pi's
+  watcher-replaced static seed. Never add per-component heading patches.
+  Invalidate the loaded-resources container
   (`invalidateLoadedResources`), and request a render. Heading color
   always resolves via the live Theme at call time (`emberHeadingStyle` →
   `mdHeading`), never a closed-over Theme from construction. The
@@ -89,6 +94,17 @@
   `[Extensions]`/`[Themes]` section headers and bodies refresh their ANSI
   codes with the live accent. Never bypass this patch by baking
   `theme.fg(...)` output into a `Text` without a re-evaluation path.
+  `invalidateLoadedResources()` is a recursive walk over the live `tuiRef`
+  tree (not the old fragile grandchild-only scan): it invalidates every
+  `ExpandableText` and also recolors plain accent `Text` rows that Pi
+  bakes once at construction and never refreshes (`✓ New session started`,
+  `What's New`, `Keyboard Shortcuts`). The baked-accent recolor table
+  (`ACCENT_TEXT_RECOLORERS`) maps the ANSI-stripped visible string to a
+  recolor function that re-renders via `resolve_live_theme().fg("accent",
+  …)` — SSOT, no hardcoded hex. If Pi adds new accent `Text` rows in the
+  future, add them to `ACCENT_TEXT_RECOLORERS`; do not add a second
+  recolor path. A `WeakSet` guards against cycles; O(nodes) per mode
+  switch.
 - **Editor Patch Discipline:** The `Editor.prototype.render` monkey-patch is the
   single place where border and content inset logic lives. Detect border lines
   structurally (by character content), not by fragile index arithmetic.
@@ -200,20 +216,15 @@
   is 1 blank row above the label when visible, or above the chatbox when hidden;
   the label is flush to the editor), NOT
   inside the editor top border. The widget row has a 3-column inset on left and
-  right. The
-  widget render closure is O(1): it reads `thinkingActive`, `workingActive`,
-  and `isToolGroupActive()` from `pi-ember-ui/mode-colors.ts`. When any compact
-  tool group (Exploring, Editing, Writing, or Bashing) is active — i.e. has a running member OR
-  all members complete but the group is not yet settled (agent hasn't moved
-  on) — `isToolGroupActive()` is true and the widget returns `[]` (hidden) —
-  the group header in the transcript carries a muted/text gradient sweep via
-  `renderLiveGradient(label, "exploringGroup")` or `"workingGroup"` (no accent
-  color — just muted→text) instead. When the group settles (visible text,
-  thinking text, a non-group or different-group tool, or a user message),
-  the header reverts to plain bold final summary and the Thinking/Working
-  widget returns. `turn_end` itself does not settle a group; settlement only
-  happens when the assistant also produced no visible text/thinking in the
-  current turn and the next turn would otherwise continue the same group. The
+  right. The widget render closure is O(1): it reads `thinkingActive` and
+  `workingActive` and remains visible while compact groups are active, so the
+  chatbox state is never hidden by an `Exploring`/`Editing`/`Writing`/`Bashing`
+  transcript group. Group headers still carry their own muted/text gradient
+  sweep via `renderLiveGradient(label, "exploringGroup")` or
+  `"workingGroup"` (no accent color — just muted→text). When the group settles
+  (visible text, thinking text, a non-group or different-group tool, a user
+  message, or `turn_end`), the header reverts to plain bold final summary.
+  The
   `isToolGroupActive`/`setToolGroupActive` flag lives in
   `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools` lifecycle
   handlers (`tool_call`, `tool_execution_end`, `turn_end`, `session_start`) via
@@ -265,9 +276,11 @@ Pi
     │   └── Cursor subscription auth, model discovery, and Pi-native streaming
     ├── plugins/xai-auth/
     │   └── xAI (Grok) OAuth provider, catalog, streaming, custom tools, CLI shims
+    ├── plugins/pi-ember-dcp/
+    │   └── Dynamic context pruning, compress tool, /dcp controls
     ├── plugins/pi-ember-fff/
     │   └── FFF-powered grep/find with external allowlist
-    └── plugins/pi-web-access/
+    └── plugins/pi-ember-webtools/
         └── Web search, URL fetching, GitHub cloning, PDF/YouTube/video extraction
 ```
 
@@ -314,34 +327,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `discoveryGroup`/`workingGroup` dual-slot model was removed; there is
     no cross-group settling because settling + starting fresh is
     equivalent and simpler.
-  - **Per-turn grouping with hidden-thinking continuity:** Calls
-    group within a single turn. At `turn_end`, the renderer permits the
-    next turn to continue the previous group only when thinking blocks are
-    hidden, the assistant emitted no visible text and no thinking text, and
-    no user message was injected. Otherwise `beginTurn()` (fired on
-    `turn_start`) clears the grouping state before the next call. This prevents
-    agent replies and user messages from causing a later tool call to rewrite
-    an old compact group block. The hidden-thinking state is shared by
-    `pi-ember-ui` and `pi-compact-tools`; assistant text and user-message
-    boundaries come from lifecycle events.
-  - **Monotonic group-scoped label (settled-gated):** Group labels flip to their
-    past tense summary only when **all members
-    have completed AND the group is settled** — i.e. the agent has
-    demonstrably moved on. A group settles when the agent emits visible
-    text or thinking text (`noteVisibleText`), starts a non-group or
-    different-type groupable tool, or a user message arrives. `turn_end`
-    does **not** settle a group on its own; settlement only happens when the
-    assistant also produced no visible text/thinking in the current turn and
-    the next turn would otherwise continue the same group. While all members
-    are complete but the group is not yet settled, the label stays present
-    tense with the live gradient and `hasActiveGroups()` remains true so the
-    Thinking/Working widget stays hidden (no duplication). The `settled` flag
-    lives on `DiscoveryGroup`; `settleGroup`/`settleGroups` are the single
-    setters. A new member joining an already-settled group un-settles it
-    (`appendToGroup` sets `group.settled = false`) so the label stays
-    present tense until the agent truly moves on from the expanded group.
-    Settled groups are never reopened — a later same-type call starts a
-    new group at its own position.
+  - **Per-turn grouping:** Calls group within a single turn. `beginTurn()`
+    clears the previous grouping state, and `endTurn()` settles the group so
+    its header immediately becomes a past-tense summary. A later same-type
+    call starts a fresh group at its own transcript position rather than
+    reopening the old block. The `settled` flag lives on `DiscoveryGroup`;
+    `settleGroup`/`settleGroups` are the single setters. Settled groups are
+    never reopened.
   - **Group-header gradient tick:** While a group is not settled, the
     owner's `invalidate` is subscribed to the shared gradient tick via
     `subscribeGradientTick`/`unsubscribeGradientTick` (exported from
@@ -385,6 +377,9 @@ field. Keep that mechanism aligned with the actual plugin folders.
   - **Non-owner rendering:** Non-owner group members render an empty
     `Text` (zero vertical space) so only the owner hosts the visible
     group block.
+- Bash failures render only the first error line as one ANSI-aware, width-truncated
+  row; expanded output must not bypass this compact error boundary. Successful Bash
+  output remains subject to the existing collapsed/expanded rendering rules.
 - Use Pi's self-rendering `Component` contract carefully. Avoid spacer-heavy shells,
   duplicate result rows, and full preview diffs.
 - Respect third-party ownership. `pi-fff` may own `grep` and `find` when
@@ -419,18 +414,11 @@ field. Keep that mechanism aligned with the actual plugin folders.
   the description with an inline multiline `Editor` (from `@earendil-works/pi-tui`)
   so the user can type a custom answer. Enter commits the typed text as the
   answer (`wasCustom: true`); Escape returns to the option list. The typed
-  text flows to the model as the answer value/label. The
-  `QuestionnaireAnsweredCallback` (fired only on successful completion, not
-  cancellation) is wired from `registerQuestionnaireTool` in
-  `pi-custom-agents/index.ts` to set `questionnaireAnsweredThisPlan` when
-  the active mode is `plan` and `waitingForPlan` is true.
-- **Plan-review suppression after questionnaire:** When the agent settles
-  after a plan turn in which a model-invoked questionnaire was successfully
-  answered, the `agent_settled` handler skips the `showPlanReview()` prompt
-  (Implement/Edit/Reject) and instead notifies the user that the plan is
-  complete. The plan-review prompt still appears when no questionnaire was
-  answered. The `questionnaireAnsweredThisPlan` flag is reset on plan
-  entry, "edit" re-entry, and `session_shutdown`.
+  text flows to the model as the answer value/label.
+- **Plan review:** Every completed plan turn, including turns where the model
+  invoked and received a questionnaire answer, opens the canonical
+  `showPlanReview()` questionnaire. The user can implement, copy, or use the
+  automatic custom `None` option; typed None guidance refines the plan directly.
 - **Plan-mode output-limit auto-continue:** When the model hits the maximum
   output token limit (`stopReason === "length"`) while generating a plan in
   plan mode, the extension silently sends a hidden `"continue"` custom
@@ -445,7 +433,16 @@ field. Keep that mechanism aligned with the actual plugin folders.
   infinite loops; after the budget is exhausted the error surfaces normally.
   Never duplicate the suppression flag or the auto-continue logic in other
   plugins.
-- `ctrl+t` remains Pi's built-in thinking visibility toggle.
+- **Repeated tool-call guard:** `pi-custom-agents` tracks consecutive identical
+  tool name/argument signatures across turns. After three repetitions it aborts
+  the stream, notifies the user with the active model name, and uses the shared
+  questionnaire UI with `End stream`, `Retry`, and the automatic custom `None`
+  option. Retry injects the hidden `pi-agents-loop-retry` message instructing the
+  model to back off and use a different tool; a custom None answer is injected
+  as hidden guidance. Tracking resets at each agent run and session shutdown.
+- The built-in thinking-toggle and tree `Shift+T` keybindings are intentionally
+  overridden to empty bindings, so thinking blocks cannot be hidden or shown and
+  `Shift+T` is unbound.
 - `/model` and `/resume` picking is owned by `pi-ember-ui/model-picker.ts`: it
   intercepts the editor `handleInput` / `submitValue` / keybindings, opens
   Pi's in-editor slash-argument autocomplete (chat-pill popup via
@@ -458,17 +455,16 @@ field. Keep that mechanism aligned with the actual plugin folders.
   completions via `ctx.ui.addAutocompleteProvider`. Without `pi-ember-ui`,
   Pi's built-in overlay selectors still work. `/subagent-model` reuses
   `pickModelInEditor()` from the same module.
-- **Slash-command exit render snap:** When the editor transitions out of a
+- **Slash-command exit render:** When the editor transitions out of a
   slash-command state (input no longer starts with `/` via Escape or
-  backspace), `intercept_slash_command_exit` calls `requestTuiRender(true)` — the
-  shared throttled render scheduler from `pi-ember-ui/index.ts`
-  (`MIN_RENDER_INTERVAL_MS`). The exit path uses a forced render so Pi clears
-  differential-render rows left below the collapsed chatbox. This snaps the
-  TUI layout back to its allocated space instead of leaving the expanded
-  slash-command overlay hole below the chatbox. The `was_slash_command` flag
-  is reset on `session_start` and `session_shutdown`. The check is O(1) (one
-  `getText()` + string prefix test) and the render is throttled, so it never
-  exceeds the per-frame budget.
+  backspace), `finalizeEditorInputAfter` primes Pi's viewport/high-water
+  bookkeeping so the chatbox stays in place, then requests a normal
+  differential render through the shared `pi-ember-ui` scheduler. It does not
+  force Pi's full clear/redraw path or clear terminal scrollback. Pi's normal
+  differential cleanup removes rows left below the collapsed chatbox. The
+  `was_slash_command` flag is reset on `session_start` and `session_shutdown`.
+  The check is O(1) (one `getText()` + string prefix test) and the render is
+  throttled, so it never exceeds the per-frame budget.
 - **Shell mode:** Pressing `!` on empty input enters shell mode (the `!` is
   eaten so it never appears in the editor). The `interceptShellInput` function
   lives in `pi-ember-ui/shell-mode.ts` (SSOT) and is called from the
@@ -504,10 +500,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `session.prompt()` and disposes
   only after that promise settles; never race `agent_end` against disposal.
   The subagent runs **in-process** on the main thread — not in a
-  `worker_thread`. The runner reuses the parent's `ModelRegistry` and
-  `AuthStorage` directly so every registered provider (Devin, xAI,
-  built-ins, custom `models.json` entries) is available without
-  re-registration. `session.prompt()` is async and does not block the TUI
+  `worker_thread`. The runner accepts the parent's extension-facing
+  `ModelRegistry` and crosses to its canonical `ModelRuntime` exactly once in
+  `runner.ts`; child sessions receive that same runtime so every registered
+  provider, credential source, header, runtime override, and custom
+  `models.json` entry is available without copying auth or re-registering
+  providers. Never recreate child auth storage in `index.ts` or `service.ts`.
+  `session.prompt()` is async and does not block the TUI
   render loop. The empty resource loader uses `createExtensionRuntime()`
   (from `@earendil-works/pi-coding-agent`) so the `ExtensionRuntime` shape
   (`pendingProviderRegistrations`, `flagValues`, `assertActive`, ...) is
@@ -541,8 +540,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
 ### `devin-auth`
 
 - Owns the Devin provider, OAuth flow, model catalog, and streaming transport.
-- Primes the live model catalog during the awaited factory load (reading
-  credentials from `auth.json` via `AuthStorage`) so devin models exist before
+- Primes the live model catalog during the awaited factory load (reading the
+  credential via Pi's one-off `readStoredCredential`) so devin models exist before
   pi flushes pending provider registrations and restores the session model.
   `session_start` re-primes to cover `/login` and catalog-TTL expiry.
 - Credentials, tokens, and provider secrets remain machine-local.
@@ -645,6 +644,47 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Credentials, tokens, and provider secrets remain machine-local.
 - Never commit `auth.json`, OAuth tokens, or generated credential files.
 
+### `pi-ember-dcp`
+
+- Owns dynamic context pruning for outbound LLM context and the `/dcp` command
+  surface (`context`, `stats`, `sweep`, `manual`, `decompress`, `recompress`,
+  `help`).
+- Adapted from `@davecodes/pi-dcp` 0.2.0 by Davidcreador
+  (AGPL-3.0-or-later; license retained in `plugins/pi-ember-dcp/LICENSE`).
+  Upstream: https://github.com/Davidcreador/pi-dcp.
+- **Outbound-only pruning:** A `context` handler runs the prune pipeline
+  (deduplication, errored-input purge, stored compressions) immediately before
+  each LLM call and returns a freshly built message array. Message objects share
+  identity with persisted session entries and must not be mutated in place;
+  session history on disk is never rewritten. Pipeline exceptions pass the
+  original messages through unchanged.
+- **Protected tools:** Always-protected tool names live once in
+  `ALWAYS_PROTECTED_TOOLS` (`compress`, `write`, `edit`, `todo`, `task`,
+  `skill`) — never hardcode a second membership set. User config may extend
+  protection lists; it cannot remove the always-protected set.
+- **`compress` tool:** Registers message-mode (`toolCallIds[]`) or range-mode
+  (`start`/`end`) based on config. Permission `deny` skips registration.
+  Compressions are stored in session state and reapplied on later context
+  builds; they do not rewrite the transcript.
+- **Config/state SSOT:** User config and runtime state live under `~/.pi-dcp/`
+  (global `config.json`, prompts, session files) with optional project override
+  at `<cwd>/.pi/dcp.json`. Defaults and load/merge live in `lib/config.ts` —
+  never duplicate thresholds or paths elsewhere. Config `enabled: false` skips
+  all wiring at factory time.
+- **Lifecycle:** Session-bound state is restored on `session_start`, saved on
+  `agent_end`/`session_shutdown`, and cleared on shutdown so jiti-cached
+  modules cannot leak session IDs. Runtime `/dcp manual` is not persisted;
+  `session_start` reseeds `manualMode` from live config so toggles cannot
+  leak across `/new`/`/resume`/`/fork`. `session_compact` resets ID-based
+  tracking while preserving user-requested compressions. Turn index and
+  errored tool observations update from `turn_start`/`tool_result` only —
+  never from a render path.
+- **Bundled skill:** `plugins/pi-ember-dcp/skills/pi-dcp/` is registered via
+  `resources_discover` (`skillPaths`) from the plugin entry — same pattern as
+  `pi-ember-webtools` librarian. Skill text must match current commands/schema
+  and retain upstream AGPL attribution.
+- Does not own compact tool rendering, modes, providers, or web tools.
+
 ### `pi-ember-fff`
 
 - Owns the Ember-owned `grep` and `find` tool registrations (override mode),
@@ -671,16 +711,16 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `normalizeExcludes`, `buildQuery`) lives in `query.ts` — never duplicate
   path-mapping logic in the tool execute functions.
 
-### `pi-web-access`
+### `pi-ember-webtools`
 
-- Vendored from `pi-web-access` by Nico Bailon (MIT License, see
-  `plugins/pi-web-access/LICENSE`). Original source:
+- Ember-owned web tools, vendored from `pi-web-access` by Nico Bailon (MIT
+  License, see `plugins/pi-ember-webtools/LICENSE`). Original source:
   https://github.com/nicobailon/pi-web-access
 - Provides `web_search`, `fetch_content`, and `get_search_content` tools,
   plus `/websearch`, `/curator`, `/google-account`, and `/search` commands.
 - Supports multiple search providers: OpenAI, Brave, Parallel, Tavily, Exa,
   Perplexity, and Gemini.
-- The bundled `librarian` skill lives in `plugins/pi-web-access/skills/` and
+- The bundled `librarian` skill lives in `plugins/pi-ember-webtools/skills/` and
   is registered via `resources_discover` from the extension wrapper.
 - The extension wrapper (`extensions/index.ts`) dynamically imports the
   vendored `index.ts` so the vendored source — which has type drift against

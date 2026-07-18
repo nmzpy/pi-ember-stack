@@ -20,3 +20,8 @@ stream event shapes, and tool-call compatibility. The upstream project is
 BSD-3-Clause licensed; its license is retained in
 `plugins/pi-cursor-auth/LICENSE`. Upstream project:
 <https://github.com/Nomadcxx/opencode-cursor>.
+
+`plugins/pi-ember-dcp/` was adapted from `@davecodes/pi-dcp` version `0.2.0`
+by Davidcreador into the Ember plugin registry. The upstream package declares
+AGPL-3.0-or-later; that license is retained in `plugins/pi-ember-dcp/LICENSE`.
+Upstream project: <https://github.com/Davidcreador/pi-dcp>.

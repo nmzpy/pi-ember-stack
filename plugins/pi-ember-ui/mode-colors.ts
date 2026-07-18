@@ -59,10 +59,8 @@ let toolGroupActive = false;
 
 /**
  * Whether any compact tool group (Exploring, Editing, Writing, or Bashing) currently has at
- * least one running member. Set by pi-compact-tools lifecycle handlers and
- * read by the pi-ember-ui thinking widget render closure so the
- * Thinking/Working row can be hidden while a group header carries the
- * gradient.
+ * least one running member. Set by pi-compact-tools lifecycle handlers for
+ * shared group state and gradient rendering.
  */
 export function isToolGroupActive(): boolean {
 	return toolGroupActive;

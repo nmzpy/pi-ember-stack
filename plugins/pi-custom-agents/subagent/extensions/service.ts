@@ -1,4 +1,4 @@
-import { AuthStorage, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
 import { runSubAgent, type SubAgentResult } from "./runner.ts";
 import { resolveModel } from "./model.ts";
@@ -35,13 +35,7 @@ export async function runNamedAgent(options: {
 	const { model, attempted } = resolveModel(options.agent.model, options.ctx.model, options.ctx.modelRegistry);
 	if (!model) throw new Error(`No model resolved for agent "${options.agent.name}" (tried: ${attempted.join(", ") || "none"})`);
 
-	const authStorage = AuthStorage.inMemory();
 	const modelRegistry = options.ctx.modelRegistry;
-	const auth = await options.ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (auth.ok) {
-		if (auth.apiKey) authStorage.setRuntimeApiKey(model.provider, auth.apiKey);
-		// ponytail: env and headers stay on the parent modelRegistry — reuse it directly.
-	}
 
 	const timeoutController = options.timeout && options.timeout > 0 ? new AbortController() : undefined;
 	const timeoutId = timeoutController ? setTimeout(() => timeoutController.abort(), options.timeout) : undefined;
@@ -60,7 +54,6 @@ export async function runNamedAgent(options: {
 			task: options.task,
 			tools: (options.agent.tools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]).filter((tool) => tool !== "subagent"),
 			model,
-			authStorage,
 			modelRegistry,
 			signal,
 			agentName: options.agent.name,

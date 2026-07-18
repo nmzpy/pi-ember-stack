@@ -18,7 +18,7 @@ import {
 	type ToolRenderContext,
 	type ToolRenderResultOptions,
 } from "./renderer.ts";
-import { isThinkingBlocksHidden, setToolGroupActive } from "../pi-ember-ui/mode-colors.ts";
+import { setToolGroupActive } from "../pi-ember-ui/mode-colors.ts";
 import { subscribe_theme_refresh } from "../pi-ember-ui/theme-refresh.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -93,8 +93,8 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		unsubscribe_theme_refresh = undefined;
 	});
 	pi.on("turn_start", () => renderer.beginTurn());
-	pi.on("turn_end", (event: any) => {
-		renderer.endTurn(isThinkingBlocksHidden(), event?.message);
+	pi.on("turn_end", () => {
+		renderer.endTurn();
 		setToolGroupActive(renderer.hasActiveGroups());
 	});
 	pi.on("message_start", (event: any) => {
@@ -123,8 +123,8 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		}
 	});
 	// A completed group member may flip the group-active flag to false
-	// (all members done) — update the shared flag so the Thinking/Working
-	// widget can return and the group header reverts to plain bold.
+	// (all members done) — update the shared flag so group state and the
+	// group header gradient stay synchronized.
 	pi.on("tool_execution_end", () => {
 		setToolGroupActive(renderer.hasActiveGroups());
 	});

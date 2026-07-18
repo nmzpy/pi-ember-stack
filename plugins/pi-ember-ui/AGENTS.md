@@ -44,23 +44,24 @@ retain assumptions about one editor instance.
 - `TUI.requestRender()` schedules a normal render through Pi's 16 ms scheduler.
 - `TUI.requestRender(true)` clears Pi's differential state
   (`previousLines`, dimensions, cursor rows, high-water rows, and viewport)
-  and runs a full clear/redraw on the next tick. Never use this on slash/autocomplete
-  collapse when rendered content overflows the terminal — it homes the buffer and
-  breaks bottom anchoring. `request_overlay_collapse_viewport_snap()` is the SSOT:
-  bump `maxLinesRendered`, set `previousViewportTop` when overflowed, enable
-  `clearOnShrink`, then `requestRender(false)` so Pi's shrink redraw clears stale
-  autocomplete rows and re-anchors the bottom viewport.
+  and runs a full clear/redraw on the next tick. Never use this on normal
+  slash/autocomplete collapse — it homes the buffer and can clear terminal
+  scrollback. `disable_tui_clear_on_shrink()` explicitly keeps Pi's
+  `clearOnShrink` path off for the live TUI.
 - `clearOnShrink` controls whether Pi performs a full redraw when the rendered
   content becomes shorter than the previous high-water mark. Pi defaults it **off**
-  (`PI_CLEAR_ON_SHRINK=1` to enable globally). `enable_tui_clear_on_shrink()` turns
-  it on per session so slash-autocomplete collapse can clear stale blank rows.
+  (`PI_CLEAR_ON_SHRINK=1` to enable globally); Ember explicitly disables it per
+  session so terminal scrollback remains terminal-owned. Collapse uses the
+  non-destructive screen reset described below instead of Pi's shrink path.
 - When rendered content is taller than the terminal, Pi displays the bottom
-  viewport and appends new lines with terminal scroll. When it is shorter, rows
-  begin at terminal row 0. Do not insert layout padding rows to fake
-  bottom-anchoring — let content grow and scroll naturally.
-- `layout.ts` owns slash/autocomplete-collapse viewport snaps
-  (`request_overlay_collapse_viewport_snap()`, `finalizeEditorInputAfter()`),
-  and `ensure_chatbox_leading_spacer()` only.
+  viewport and appends new lines with terminal scroll. On slash/autocomplete
+  collapse, `layout.ts` clears only the visible screen through the terminal
+  abstraction, resets Pi's differential state, and requests a normal render.
+  It deliberately does not emit Pi's `3J` scrollback clear sequence, re-enable
+  `clearOnShrink`, or use `requestRender(true)`.
+- `layout.ts` owns slash/autocomplete-collapse normal render requests
+  (`request_overlay_collapse_render()`, `finalizeEditorInputAfter()`), the
+  non-destructive visible-screen reset, and `ensure_chatbox_leading_spacer()`.
   `CHATBOX_LEADING_ROWS` (1) is the SSOT for padding above the chatbox or above
   Thinking/Working when that widget is visible — the widget label itself is flush
   to the editor.
@@ -75,6 +76,11 @@ retain assumptions about one editor instance.
 3. Bottom horizontal border
 4. Autocomplete rows, when active
 
+The Ember render override reorders active autocomplete rows above the editor
+body, so the chat-pill grows upward and the editor remains terminal-bottom
+anchored. Its outer shell uses a rounded top border for the menu, a shared
+separator, the editor body, and rounded bottom corners.
+
 The base editor has no side borders. The Ember `Editor.prototype.render`
 override owns the chat-pill border, content insets, slash separator, and
 autocomplete boundary. Keep all of that logic in `plugins/pi-ember-ui/index.ts`.
@@ -83,8 +89,10 @@ The editor's `handleInput()` mutates editor state and may update autocomplete;
 after the focused component handles input, `TUI.handleInput()` requests a normal
 render. Slash-exit and autocomplete-collapse detection run after Pi's original editor
 handler via `finalizeEditorInputAfter(editor)` in `layout.ts` (including Escape
-early returns and model-picker intercepts). Overlay collapse calls `request_overlay_collapse_viewport_snap()`, which primes
-Pi's `clearOnShrink` shrink redraw (never `requestRender(true)`).
+early returns and model-picker intercepts). Overlay collapse calls
+`request_overlay_collapse_render()`, which resets only the visible screen and
+Pi's differential bookkeeping, then requests a normal render without Pi's
+scrollback-clearing path.
 
 ## Extension UI Contracts
 
@@ -95,8 +103,9 @@ Pi's `clearOnShrink` shrink redraw (never `requestRender(true)`).
   below-editor widget container. Widget render closures must remain O(1).
 - `setFooter(factory)` removes the current footer and adds the custom footer as
   a direct TUI child.
-- Pi's autocomplete list is rendered by the editor after its base bottom border;
-  the Ember patch must detect borders from their characters, not fixed row
+- Pi's base autocomplete list is rendered after its bottom border, but the
+  Ember patch moves active autocomplete rows above the editor body so the
+  chat-pill grows upward. Detect borders from their characters, not fixed row
   indexes.
 
 ## Model / Resume Picker (`model-picker.ts`)

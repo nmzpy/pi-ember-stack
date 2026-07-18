@@ -29,18 +29,14 @@ function makeContext(id: string, state: Record<string, any> = {}) {
 }
 
 describe("CompactRenderer", () => {
-	test("hidden thinking with no text carries grouping across turns", () => {
+	test("hidden thinking does not carry grouping across turns", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
-		const ctx1 = makeContext("a");
-		r.renderCall("read", { file_path: "foo.ts" }, theme, ctx1 as any);
+		r.renderCall("read", { file_path: "foo.ts" }, theme, makeContext("a") as any);
 		r.endTurn(true);
 		r.beginTurn();
-		const ctx2 = makeContext("b");
-		r.renderCall("read", { file_path: "bar.ts" }, theme, ctx2 as any);
-		const record = (r as any).calls.get("b");
-		expect(record.group).toBeDefined();
-		expect(record.group).toBe((r as any).calls.get("a").group);
+		r.renderCall("read", { file_path: "bar.ts" }, theme, makeContext("b") as any);
+		expect((r as any).calls.get("b").group).toBeUndefined();
 	});
 
 	test("visible text before discovery calls resets grouping across turns", () => {
@@ -119,7 +115,7 @@ describe("CompactRenderer", () => {
 		const unsettledOwner = r.renderCall("read", { file_path: "a.ts" }, theme, { ...ownerContext, state: stateA } as any) as any;
 		expect(stripAnsi(unsettledOwner.text)).toContain("Read");
 		// The discovery group is already settled and should not be reopened by a
-		// later discovery call in a new turn unless hidden thinking carries it.
+		// later discovery call in a new turn.
 		r.endTurn(true);
 		r.beginTurn();
 		r.renderCall("read", { file_path: "z.ts" }, theme, makeContext("z") as any);
@@ -329,6 +325,27 @@ describe("CompactRenderer", () => {
 		expect((comp as any).text).toContain("Error: not found");
 	});
 
+	test("bash errors stay on one compact truncated row even when expanded", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const args = { command: "./t.gate.sh" };
+		const call = r.renderCall("bash", args, theme, makeContext("a") as any) as any;
+		const comp = r.renderResult(
+			"bash",
+			args,
+			{
+				content: [{ type: "text", text: `Error: ${"x".repeat(200)}\nline two\nline three` }],
+			},
+			{ isPartial: false, expanded: true },
+			theme,
+			{ ...makeContext("a"), isError: true } as any,
+		) as any;
+		expect(call.text).not.toContain("\n");
+		const lines = comp.render(40);
+		expect(lines).toHaveLength(1);
+		expect(stripAnsi(lines[0])).not.toContain("line two");
+	});
+
 	test("read never dumps file content on success", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -448,7 +465,7 @@ describe("CompactRenderer", () => {
 		}
 		// Settle by emitting visible text; the bashing group is now complete and past-tense.
 		bashing.noteVisibleText();
-		expect(stripAnsi((bashing.renderCall("bash", { command: "echo first" }, theme, bashA as any) as any).text)).toContain("Bashed 2 commands");
+		expect(stripAnsi((bashing.renderCall("bash", { command: "echo first" }, theme, bashA as any) as any).text)).toContain("Ran 2 commands");
 	});
 
 	test("grouped rows include read ranges and truncate to the TUI width", () => {
@@ -672,7 +689,7 @@ describe("CompactRenderer", () => {
 		expect((comp as any).text).toContain("Error: not found");
 	});
 
-	test("group stays 'Exploring' at turn end and only flips after visible text", () => {
+	test("group flips to 'Explored' at turn end", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const stateA: Record<string, any> = {};
@@ -695,17 +712,9 @@ describe("CompactRenderer", () => {
 			theme,
 			{ ...makeContext("b", stateB), isError: false } as any,
 		);
-		// At turn end with hidden thinking and no text, the group stays
-		// present-tense and continues into the next turn.
 		r.endTurn(true);
-		const stillExploring = r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any) as any;
-		expect(stripAnsi(stillExploring.text)).toContain("Exploring");
-		// Visible text in the next turn settles the group and breaks grouping.
-		r.beginTurn();
-		r.noteVisibleText();
-		r.renderCall("read", { file_path: "b.ts" }, theme, makeContext("c") as any);
 		const settledCall = r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any) as any;
-		expect(stripAnsi(settledCall.text)).toContain("Explored");
+		expect(stripAnsi(settledCall.text)).toContain("Explored 2 files");
 		expect(stripAnsi(settledCall.text)).not.toContain("Exploring");
 	});
 
@@ -770,7 +779,7 @@ describe("CompactRenderer", () => {
 		expect(recB.group).toBeUndefined();
 	});
 
-	test("thinking-only turn keeps discovery calls grouped with previous turn", () => {
+	test("thinking-only turn starts a fresh discovery group", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const stateA: Record<string, any> = {};
@@ -780,13 +789,8 @@ describe("CompactRenderer", () => {
 		r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
 		const recA = (r as any).calls.get("a");
 		const recB = (r as any).calls.get("b");
-		expect(recB.group).toBeDefined();
-		expect(recB.group).toBe(recA.group);
-		// Owner is still the first member from the previous turn
-		expect(recA.group.renderOwner).toBe(recA);
-		// The group remains unsettled until visible text or a different tool appears.
-		const ownerComp = r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any) as any;
-		expect(stripAnsi(ownerComp.text)).toContain("Exploring");
+		expect(recB.group).toBeUndefined();
+		expect(recA.group).toBeUndefined();
 	});
 
 	test("group hasNonDiscovery flag is sticky within a turn", () => {

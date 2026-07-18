@@ -23,7 +23,7 @@ export function showGhHint(): void {
 	if (!ghHintShown) {
 		ghHintShown = true;
 		console.error(
-			"[pi-web-access] Install `gh` CLI for better GitHub repo access including private repos.",
+			"[pi-ember-webtools] Install `gh` CLI for better GitHub repo access including private repos.",
 		);
 	}
 }

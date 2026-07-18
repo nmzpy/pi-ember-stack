@@ -15,8 +15,11 @@
  * and auth are handled internally via the OAuth-issued api_key.
  */
 
-import type { ExtensionAPI, ProviderModelConfig } from '@earendil-works/pi-coding-agent';
-import { AuthStorage } from '@earendil-works/pi-coding-agent';
+import {
+    type ExtensionAPI,
+    type ProviderModelConfig,
+    readStoredCredential,
+} from '@earendil-works/pi-coding-agent';
 import type {
     Api,
     Model,
@@ -45,15 +48,20 @@ let _pi: ExtensionAPI | null = null;
  * models exist before pi flushes pending provider registrations and restores
  * the session model.
  *
- * Reads auth.json directly via AuthStorage (the model registry is not bound
- * yet during factory load). Silently no-ops when not signed in or the fetch
- * fails — the session_start handler re-attempts once the registry is live.
+ * Reads the stored credential through Pi's one-off credential API (the model
+ * registry is not bound yet during factory load). Silently no-ops when not
+ * signed in or the fetch fails — session_start retries once the registry is live.
  */
 async function primeCatalogFromStoredAuth(): Promise<void> {
     if (!_pi) return;
     try {
-        const authStorage = AuthStorage.create();
-        const apiKey = await authStorage.getApiKey(PROVIDER_ID, { includeFallback: false });
+        const credential = readStoredCredential(PROVIDER_ID);
+        const apiKey =
+            credential?.type === 'oauth'
+                ? credential.access
+                : credential?.type === 'api_key'
+                  ? credential.key
+                  : undefined;
         if (!apiKey) return;
         const catalog = await getCachedCatalog(apiKey, DEFAULT_HOST);
         const liveModels = buildLiveModels(catalog);

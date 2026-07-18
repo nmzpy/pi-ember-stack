@@ -1,4 +1,4 @@
-# Pi Web Access - Changelog
+# Pi Ember Webtools (vendored Pi Web Access) - Changelog
 
 All notable changes to this project will be documented in this file.
 

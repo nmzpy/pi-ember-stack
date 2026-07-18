@@ -1,18 +1,18 @@
 <p>
-  <img src="banner.png" alt="pi-web-access" width="1100">
+  <img src="banner.png" alt="pi-ember-webtools" width="1100">
 </p>
 
-# Pi Web Access
+# Pi Ember Webtools
 
 **Web search, content extraction, and video understanding for Pi agent. OpenAI/Codex search, zero-config Exa search, Brave, Parallel, Tavily, optional browser-cookie Gemini Web, or bring your own API keys.**
 
-[![npm version](https://img.shields.io/npm/v/pi-web-access?style=for-the-badge)](https://www.npmjs.com/package/pi-web-access)
+Bundled with `@nmzpy/pi-ember-stack` as the `pi-ember-webtools` plugin.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows*-blue?style=for-the-badge)]()
 
 https://github.com/user-attachments/assets/cac6a17a-1eeb-4dde-9818-cdf85d8ea98f
 
-## Why Pi Web Access
+## Why Pi Ember Webtools
 
 **Zero Config** — Works out of the box with Exa MCP (no API key needed). If you're signed into Pi with a Codex subscription, OpenAI web search can reuse that auth. Add API keys for OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, or Gemini API for more control, or opt into browser-cookie access for Gemini Web.
 
@@ -24,9 +24,8 @@ https://github.com/user-attachments/assets/cac6a17a-1eeb-4dde-9818-cdf85d8ea98f
 
 ## Install
 
-```bash
-pi install npm:pi-web-access
-```
+This plugin is bundled with `@nmzpy/pi-ember-stack`; enable it through the
+`pi-ember-stack.json` plugin registry.
 
 Works immediately with no API keys — Exa MCP provides zero-config search. If Pi has Codex auth from `/login`, OpenAI search can also work without a separate key. For more providers or direct API access, add keys to `~/.pi/web-search.json`:
 

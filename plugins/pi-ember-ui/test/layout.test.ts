@@ -4,7 +4,7 @@ import {
 	bind_slash_command_exit_render,
 	cancel_slash_exit_redraw,
 	CHATBOX_LEADING_ROWS,
-	enable_tui_clear_on_shrink,
+	disable_tui_clear_on_shrink,
 	ensure_chatbox_leading_spacer,
 	finalize_editor_input_after,
 	reset_slash_command_tracking,
@@ -30,7 +30,13 @@ function mock_editor_with_tui(options: {
 }) {
 	const lines = Array.from({ length: options.line_count }, () => "line");
 	const tui: Record<string, unknown> = {
-		terminal: { rows: options.rows, columns: 80 },
+		terminal: {
+			rows: options.rows,
+			columns: 80,
+			clearScreen: () => {
+				tui.screenCleared = true;
+			},
+		},
 		render: () => lines,
 		maxLinesRendered: options.max_lines_rendered ?? options.line_count,
 		previousViewportTop: 0,
@@ -74,18 +80,18 @@ describe("chatbox leading spacer", () => {
 });
 
 describe("TUI shrink redraw", () => {
-	test("enables clearOnShrink on the live TUI instance", () => {
+	test("disables clearOnShrink on the live TUI instance", () => {
 		let enabled: boolean | undefined;
 		const tui = { setClearOnShrink: (value: boolean) => {
 			enabled = value;
 		} };
-		enable_tui_clear_on_shrink(tui as never);
-		expect(enabled).toBe(true);
+		disable_tui_clear_on_shrink(tui as never);
+		expect(enabled).toBe(false);
 	});
 });
 
-describe("slash command exit snap", () => {
-	test("primes clearOnShrink and bottom viewport when overflow content exits slash mode", () => {
+describe("slash command exit render", () => {
+	test("requests a normal render when overflow content exits slash mode", () => {
 		reset_slash_command_tracking();
 		let force: boolean | undefined;
 		const editor = mock_editor_with_tui({
@@ -100,12 +106,13 @@ describe("slash command exit snap", () => {
 		editor.getText = () => "";
 		finalize_editor_input_after(editor);
 		expect(force).toBe(false);
-		expect(editor.tui.maxLinesRendered).toBe(56);
-		expect(editor.tui.previousViewportTop).toBe(26);
-		expect(editor.tui.clearOnShrink).toBe(true);
+		expect(editor.tui.maxLinesRendered).toBe(0);
+		expect(editor.tui.previousViewportTop).toBe(0);
+		expect(editor.tui.screenCleared).toBe(true);
+		expect(editor.tui.clearOnShrink).toBe(false);
 	});
 
-	test("primes clearOnShrink when short content exits slash mode", () => {
+	test("does not enable clearOnShrink for short content", () => {
 		reset_slash_command_tracking();
 		let force: boolean | undefined;
 		const editor = mock_editor_with_tui({
@@ -120,18 +127,27 @@ describe("slash command exit snap", () => {
 		editor.getText = () => "";
 		finalize_editor_input_after(editor);
 		expect(force).toBe(false);
-		expect(editor.tui.maxLinesRendered).toBe(16);
-		expect(editor.tui.clearOnShrink).toBe(true);
+		expect(editor.tui.maxLinesRendered).toBe(0);
+		expect(editor.tui.previousViewportTop).toBe(0);
+		expect(editor.tui.screenCleared).toBe(true);
+		expect(editor.tui.clearOnShrink).toBe(false);
 	});
 
-	test("primes clearOnShrink when overflow autocomplete collapses", () => {
+	test("requests a normal render when overflow autocomplete collapses", () => {
 		reset_slash_command_tracking();
 		let force: boolean | undefined;
+		let screen_cleared = false;
 		const editor = {
 			getText: () => "/model ",
 			isShowingAutocomplete: () => true,
 			tui: {
-				terminal: { rows: 24, columns: 80 },
+				terminal: {
+					rows: 24,
+					columns: 80,
+					clearScreen: () => {
+						screen_cleared = true;
+					},
+				},
 				render: () => Array.from({ length: 50 }, () => "line"),
 				maxLinesRendered: 58,
 				previousViewportTop: 0,
@@ -148,9 +164,10 @@ describe("slash command exit snap", () => {
 		editor.isShowingAutocomplete = () => false;
 		finalize_editor_input_after(editor);
 		expect(force).toBe(false);
-		expect(editor.tui.maxLinesRendered).toBe(58);
-		expect(editor.tui.previousViewportTop).toBe(26);
-		expect(editor.tui.clearOnShrink).toBe(true);
+		expect(editor.tui.maxLinesRendered).toBe(0);
+		expect(editor.tui.previousViewportTop).toBe(0);
+		expect(screen_cleared).toBe(true);
+		expect(editor.tui.clearOnShrink).toBe(false);
 	});
 
 	test("cancels deferred slash-exit redraw during shutdown", async () => {
@@ -159,17 +176,15 @@ describe("slash command exit snap", () => {
 		bind_slash_command_exit_render(() => {
 			called = true;
 		});
-		const editor = mock_editor_with_tui({
-			rows: 40,
-			line_count: 10,
-			requestRender: () => {
-				called = true;
-			},
-		});
+		const editor = {
+			getText: () => "/model ",
+			isShowingAutocomplete: () => false,
+		};
 		finalize_editor_input_after(editor);
 		editor.getText = () => "";
-		cancel_slash_exit_redraw();
 		finalize_editor_input_after(editor);
+		cancel_slash_exit_redraw();
+		await new Promise<void>((resolve) => process.nextTick(resolve));
 		expect(called).toBe(false);
 	});
 
@@ -186,7 +201,7 @@ describe("slash command exit snap", () => {
 		finalize_editor_input_after(editor);
 		editor.getText = () => "";
 		finalize_editor_input_after(editor);
-		expect(force).toBe(false);
+		expect(force).toBeUndefined();
 		await new Promise<void>((resolve) => process.nextTick(resolve));
 		expect(force).toBe(false);
 	});

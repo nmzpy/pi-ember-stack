@@ -2,9 +2,10 @@
  * SDK-based sub-agent runner for pi-subagent.
  *
  * Runs an isolated AgentSession in-process on the main thread, reusing the
- * parent's ModelRegistry and AuthStorage so every registered provider (Devin,
- * xAI, built-ins, custom models.json entries) is available without
- * re-registration. The session uses a minimal system prompt, no extensions,
+ * parent's canonical ModelRuntime through its extension-facing ModelRegistry
+ * facade. This keeps every registered provider (Devin, xAI, built-ins, custom
+ * models.json entries) and credential source available without re-registration.
+ * The session uses a minimal system prompt, no extensions,
  * no skills, no prompt templates, no thinking, and no compaction.
  *
  * session.prompt() is async and does not block the TUI render loop — pi's
@@ -14,14 +15,14 @@
 
 import type { Message, Model } from "@earendil-works/pi-ai";
 import {
-	type AuthStorage,
+	createAgentSession,
 	createExtensionRuntime,
 	getAgentDir,
 	loadProjectContextFiles,
 	type ModelRegistry,
+	type ModelRuntime,
 	SessionManager,
 	SettingsManager,
-	createAgentSession,
 } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
@@ -69,13 +70,33 @@ export interface SubAgentResult {
 // Public API
 // ---------------------------------------------------------------------------
 
+interface ModelRegistryRuntimeBridge {
+	readonly runtime?: ModelRuntime;
+}
+
+/**
+ * Pi exposes ModelRegistry to extensions as a synchronous compatibility facade,
+ * while createAgentSession consumes the canonical ModelRuntime. Keep the one
+ * unavoidable bridge at this SDK boundary so every subagent path reuses the
+ * parent's exact provider/auth runtime instead of copying credentials or
+ * rebuilding provider catalogs.
+ */
+function resolve_parent_model_runtime(model_registry: ModelRegistry): ModelRuntime {
+	const model_runtime = (model_registry as unknown as ModelRegistryRuntimeBridge).runtime;
+	if (!model_runtime) {
+		throw new Error(
+			"Subagent requires a Pi ModelRegistry backed by ModelRuntime (Pi 0.80.10 or newer).",
+		);
+	}
+	return model_runtime;
+}
+
 export async function runSubAgent(options: {
 	cwd: string;
 	systemPrompt: string;
 	task: string;
 	tools: string[];
 	model: Model<any>;
-	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
 	signal?: AbortSignal;
 	agentName?: string;
@@ -90,7 +111,6 @@ export async function runSubAgent(options: {
 		task,
 		tools,
 		model,
-		authStorage,
 		modelRegistry,
 		signal,
 		agentName = "subagent",
@@ -150,6 +170,7 @@ export async function runSubAgent(options: {
 		compaction: { enabled: false },
 		retry: { enabled: false },
 	});
+	const model_runtime = resolve_parent_model_runtime(modelRegistry);
 
 	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 	let unsubscribe: (() => void) | undefined;
@@ -176,8 +197,7 @@ export async function runSubAgent(options: {
 			cwd,
 			model,
 			thinkingLevel,
-			authStorage,
-			modelRegistry,
+			modelRuntime: model_runtime,
 			resourceLoader,
 			tools,
 			sessionManager: SessionManager.inMemory(cwd),

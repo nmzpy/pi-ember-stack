@@ -26,7 +26,6 @@ import {
 	getActiveModeId,
 	isPlanAutoContinuing,
 	isShellMode,
-	isToolGroupActive,
 	isLatestSubagentRunning,
 	MUTED_COLOR,
 	PAGE_BG,
@@ -56,7 +55,7 @@ import {
 } from "./gradient.ts";
 import {
 	bind_slash_command_exit_render,
-	enable_tui_clear_on_shrink,
+	disable_tui_clear_on_shrink,
 	ensure_chatbox_leading_spacer,
 	reset_slash_command_tracking,
 } from "./layout.ts";
@@ -664,14 +663,19 @@ function installThinkingBorderOverride(): void {
 		const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
 		const isSlashMode = this.getText?.().trimStart().startsWith("/") === true;
 		const hasAutocompleteRows = bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
-		const middleBorderIdx = isSlashMode && hasAutocompleteRows ? bottomBorderIdx : -1;
+		// Autocomplete belongs above the chat pill so it grows upward while the
+		// editor stays anchored at the bottom of the TUI. This avoids needing
+		// viewport/high-water-mark manipulation when the popup collapses.
+		const middleBorderIdx = hasAutocompleteRows ? bottomBorderIdx : -1;
 
 		const pad = " ".repeat(INSET);
 		const innerPad = " ".repeat(INNER_PAD);
 		const borderWidth = innerWidth + INNER_PAD * 2;
 		const topCorners = `${pad}${border("\u256d")}${border("\u2500".repeat(borderWidth))}${border("\u256e")}${pad}`;
 		const bottomCorners = `${pad}${border("\u2570")}${border("\u2500".repeat(borderWidth))}${border("\u256f")}${pad}`;
-		const middleSep = `${pad}${border("\u2502")}${innerPad}${dimBorder("\u2500".repeat(innerWidth))}${innerPad}${border("\u2502")}${pad}`;
+		const middleSep = isSlashMode
+			? `${pad}${border("\u2502")}${innerPad}${dimBorder("\u2500".repeat(innerWidth))}${innerPad}${border("\u2502")}${pad}`
+			: `${pad}${border("\u2502")}${innerPad}${border("\u2500".repeat(innerWidth))}${innerPad}${border("\u2502")}${pad}`;
 
 		for (let i = 1; i < lines.length; i++) {
 			const borderIdxPos = borderIndices.indexOf(i);
@@ -693,6 +697,15 @@ function installThinkingBorderOverride(): void {
 		const lastLineIdx = lines.length - 1;
 		if (lastLineIdx > bottomBorderIdx && lastLineIdx > 0) {
 			lines.push(bottomCorners);
+		}
+		if (hasAutocompleteRows && bottomBorderIdx >= 0) {
+			// The loop above has already applied the chat-pill side borders to
+			// autocomplete rows and appended the shell's bottom corners. Move
+			// those rows before the editor body, keeping one shared outer shell.
+			const bottomCornersIdx = lines.length - 1;
+			const autocompleteLines = lines.slice(bottomBorderIdx + 1, bottomCornersIdx);
+			const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
+			return [topCorners, ...autocompleteLines, middleSep, ...editorLines, bottomCorners];
 		}
 		if (lines.length === 0) return lines;
 		return lines;
@@ -767,10 +780,9 @@ function installAssistantMessagePatch(): void {
 		// Heading style: colon-split accent ("Module 3:" accent, rest text).
 		// emberHeadingStyle resolves liveTheme at call time (not closed over).
 		this._emberMarkdownThemeBase = this.markdownTheme;
-		this._emberMarkdownTheme = {
+		this._emberMarkdownTheme = bind_live_markdown_theme({
 			...this.markdownTheme,
-			heading: (text: string) => emberHeadingStyle(text),
-		};
+		});
 		const mdTheme = this._emberMarkdownTheme;
 
 		for (let i = 0; i < message.content.length; i++) {
@@ -971,7 +983,6 @@ const ANSI_STRIP = /\x1b\[[0-9;]*m/g;
  * Returns `[full, ""]` when the separator is not found.
  */
 function splitAtVisibleChar(text: string, sep: string): [string, string] {
-	let visiblePos = 0;
 	let i = 0;
 	while (i < text.length) {
 		if (text[i] === "\x1b") {
@@ -988,7 +999,6 @@ function splitAtVisibleChar(text: string, sep: string): [string, string] {
 			const suffix = text.slice(i + 1);
 			return [prefix, suffix];
 		}
-		visiblePos++;
 		i++;
 	}
 	return [text, ""];
@@ -1047,6 +1057,39 @@ function emberHeadingStyle(text: string): string {
 		theme.fg("mdHeading", stylePrefix(prefixStripped)) +
 		theme.fg("text", stylePrefix(suffixStripped))
 	);
+}
+
+/**
+ * Canonical Markdown-theme binding for Ember. Pi creates Markdown instances
+ * through several component types (assistant, custom, compaction, branch,
+ * skills, changelog). Every one must share this live heading callback rather
+ * than retaining getMarkdownTheme()'s global-theme closure.
+ */
+function bind_live_markdown_theme(markdown_theme: MarkdownTheme): MarkdownTheme {
+	markdown_theme.heading = emberHeadingStyle;
+	return markdown_theme;
+}
+
+/**
+ * Enforce the canonical live heading callback at the Markdown boundary. This
+ * covers every Pi Markdown-bearing component without duplicating patches per
+ * component. TUI invalidation clears each Markdown render cache on mode changes;
+ * CachedMarkdown additionally keys its bounded cache by theme generation.
+ */
+function install_markdown_theme_patch(): void {
+	type MarkdownPrototype = {
+		[EMBER_PATCH_MARKER]?: boolean;
+		render(this: Markdown, width: number): string[];
+	};
+	const proto = Markdown.prototype as unknown as MarkdownPrototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+	const originalRender = proto.render;
+	proto.render = function renderWithLiveHeading(this: Markdown, width: number): string[] {
+		const markdown_theme = (this as unknown as { theme?: MarkdownTheme }).theme;
+		if (markdown_theme) bind_live_markdown_theme(markdown_theme);
+		return originalRender.call(this, width);
+	};
 }
 
 function folderNameFromCwd(cwd: string): string {
@@ -1190,20 +1233,77 @@ function renderLogoWithGradient(accent: string): string[] {
 
 let tuiRef: any;
 
-/** Invalidate only the loaded-resources container ([Context]/[Skills]/
- *  [Extensions]/[Themes]) so its ExpandableText children re-evaluate
- *  their getter callbacks with the new accent. The chat container and
- *  its cached transcript output are untouched. O(children) — typically
- *  4-8 ExpandableText + Spacer nodes. */
+/** Known plain-accent Text rows that Pi builds once with baked ANSI and
+ *  never re-evaluates. On a mode switch we re-color them through the live
+ *  Theme so they track the new accent. The visible string is the key; the
+ *  value is a function that re-renders the full ANSI for that row using the
+ *  live Theme. SSOT: no hardcoded hex — all color flows through
+ *  resolve_live_theme(). */
+const ACCENT_TEXT_RECOLORERS: Array<{
+	match: (stripped: string) => boolean;
+	recolor: (theme: any) => string;
+}> = [
+	{
+		match: (s) => s === "\u2713 New session started",
+		recolor: (theme) => `${theme.fg("accent", "\u2713 New session started")}`,
+	},
+	{
+		match: (s) => s === "What's New",
+		recolor: (theme) => theme.bold(theme.fg("accent", "What's New")),
+	},
+	{
+		match: (s) => s === "Keyboard Shortcuts",
+		recolor: (theme) => theme.bold(theme.fg("accent", "Keyboard Shortcuts")),
+	},
+];
+
+/** Recursively walk a TUI component tree and recolor every node that
+ *  depends on the live accent. Two cases:
+ *
+ *  1. ExpandableText ([Context]/[Skills]/[Extensions]/[Themes] and the
+ *     built-in header): call invalidate() so the
+ *     installExpandableTextPatch re-runs getCollapsedText/getExpandedText
+ *     with the live mdHeading/accent.
+ *  2. Plain accent Text rows (e.g. "✓ New session started", "What's New",
+ *     "Keyboard Shortcuts"): Pi bakes their ANSI once at construction and
+ *     never refreshes them. We match the ANSI-stripped visible text against
+ *     ACCENT_TEXT_RECOLORERS and rewrite via setText() with the live Theme.
+ *
+ *  Bounded by the live TUI tree (header + chat container + loaded-resources
+ *  container). Visited set guards against cycles. O(nodes) — typically a
+ *  few dozen — well within the per-frame budget. */
 function invalidateLoadedResources(): void {
-	if (!tuiRef?.children) return;
-	for (const child of tuiRef.children) {
-		if (child?.constructor?.name === "Container" && child !== tuiRef) {
-			for (const grandchild of child.children) {
-				if (typeof grandchild?.getCollapsedText === "function") {
-					grandchild.invalidate?.();
+	const root = tuiRef;
+	if (!root) return;
+	const theme = resolve_live_theme();
+	if (!theme) return;
+	const visited = new WeakSet();
+	const stack: any[] = [root];
+	while (stack.length > 0) {
+		const node = stack.pop();
+		if (!node || typeof node !== "object" || visited.has(node)) continue;
+		visited.add(node);
+
+		// ExpandableText: re-run getters via the patched invalidate.
+		if (typeof node.getCollapsedText === "function") {
+			node.invalidate?.();
+		}
+
+		// Plain accent Text: match visible text and rewrite ANSI.
+		if (typeof node.setText === "function" && typeof node.text === "string") {
+			const stripped = node.text.replace(ANSI_STRIP, "");
+			for (const entry of ACCENT_TEXT_RECOLORERS) {
+				if (entry.match(stripped)) {
+					node.setText(entry.recolor(theme));
+					break;
 				}
-			}
+		}
+		}
+
+		// Recurse into children.
+		const children = node.children;
+		if (Array.isArray(children)) {
+			for (const child of children) stack.push(child);
 		}
 	}
 }
@@ -1213,7 +1313,7 @@ function installStartupHeader(ctx: any): void {
 
 	ctx.ui.setHeader((tui: any, theme: any) => {
 		tuiRef = tui;
-		enable_tui_clear_on_shrink(tui);
+		disable_tui_clear_on_shrink(tui);
 		ensure_chatbox_leading_spacer(tui);
 		return {
 			render(width: number): string[] {
@@ -1307,17 +1407,14 @@ function updateInstalledThemeExport(exportColors: {
  * Install the Thinking/Working widget flush above the editor. Leading padding
  * above the chatbox (or above this label when visible) comes from
  * ensure_chatbox_leading_spacer() in layout.ts (CHATBOX_LEADING_ROWS).
- * renders the live animated gradient label while the agent is reasoning or
- * executing tools, and hides itself (returns []) when a compact tool group
- * (Exploring, Editing, Writing, or Bashing) is active — the group header carries the gradient
- * in that case, so the two never compete for the same visual slot.
+ * The live animated gradient label remains visible while compact tool groups
+ * render their own transcript headers, so the chatbox state is never hidden.
  */
 function installThinkingWidget(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
 		render(_width: number): string[] {
 			if (isLatestSubagentRunning()) return [];
-			if (isToolGroupActive()) return [];
 			if (!thinkingActive && !workingActive) return [];
 			const preset: GradientPreset = thinkingActive ? "thinking" : "working";
 			const labelText = thinkingActive ? "Thinking" : "Working";
@@ -1336,6 +1433,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	install_model_picker_patches();
 	ensureThemeInstalled();
 	installThinkingBorderOverride();
+	install_markdown_theme_patch();
 	installAssistantMessagePatch();
 	installExpandableTextPatch();
 	installBashExecutionPatch();

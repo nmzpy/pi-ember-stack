@@ -53,7 +53,7 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
 	step "tests (bun)"
-	if bun test plugins/pi-compact-tools plugins/pi-cursor-auth plugins/pi-ember-fff plugins/pi-custom-agents plugins/pi-ember-tps 2>&1; then
+	if bun test plugins/pi-compact-tools plugins/pi-cursor-auth plugins/pi-ember-fff plugins/pi-ember-ui plugins/pi-custom-agents plugins/pi-ember-tps plugins/pi-ember-dcp 2>&1; then
 		ok "bun tests"
 	else
 		fail "bun tests"
