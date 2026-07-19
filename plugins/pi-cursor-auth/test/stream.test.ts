@@ -90,6 +90,42 @@ describe("Cursor event conversion", () => {
 		expect(output.content.at(-1)).toEqual(result.toolCall);
 	});
 
+	test("unwraps mcpToolCall envelopes and resolves the inner tool", () => {
+		const tools: Tool[] = [
+			{
+				name: "read",
+				description: "Read file",
+				parameters: Type.Object({ path: Type.String() }),
+			},
+		];
+		const { consumer, output } = make_consumer(tools);
+		const action = consumer.consume({
+			type: "tool_call",
+			subtype: "started",
+			call_id: "call-mcp",
+			tool_call: {
+				mcpToolCall: {
+					args: {
+						name: "read_file",
+						args: { file_path: "README.md" },
+						provider_identifier: "filesystem",
+						tool_name: "read_file",
+					},
+				},
+			},
+		});
+		const result = consumer.finish();
+
+		expect(action).toBe("terminate");
+		expect(result.toolCall).toEqual({
+			type: "toolCall",
+			id: "call-mcp",
+			name: "read",
+			arguments: { path: "README.md" },
+		});
+		expect(output.content.at(-1)).toEqual(result.toolCall);
+	});
+
 	test("fails closed for a tool absent from Pi's active list", () => {
 		const { consumer } = make_consumer();
 		const action = consumer.consume({
@@ -102,6 +138,22 @@ describe("Cursor event conversion", () => {
 		expect(action).toBe("terminate");
 		expect(result.toolCall).toBeUndefined();
 		expect(result.error).toContain("unavailable tool deleteToolCall");
+	});
+
+	test("skips Cursor-native MCP introspection tool calls and continues the stream", () => {
+		const { consumer, output } = make_consumer();
+		const action = consumer.consume({
+			type: "tool_call",
+			subtype: "started",
+			call_id: "call-mcp",
+			tool_call: { getMcpToolsToolCall: { args: { toolCallId: "call-mcp" } } },
+		});
+		const result = consumer.finish();
+
+		expect(action).toBe("continue");
+		expect(result.toolCall).toBeUndefined();
+		expect(result.error).toBeUndefined();
+		expect(output.content).toEqual([]);
 	});
 
 	test("maps reported usage into Pi's accounting contract", () => {

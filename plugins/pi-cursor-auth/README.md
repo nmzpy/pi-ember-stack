@@ -49,10 +49,13 @@ persona or replace Pi's system prompt.
 
 Cursor text and thinking events become native Pi stream events. A Cursor tool
 event is accepted only when it resolves to a tool in Pi's active tool list; Pi
-then executes the tool through its normal lifecycle. Unknown tool events stop
-the request and surface an error.
+then executes the tool through its normal lifecycle. Cursor wraps Model Context
+Protocol server tool calls in an `mcpToolCall` envelope; the provider unwraps
+the envelope and resolves the inner tool name (`args.name`/`args.tool_name`)
+through Pi's registry before execution. Unknown tool events stop the request
+and surface an error.
 
-Image input is not advertised and fails explicitly rather than being dropped.
+Image input is advertised and passed through as base64 data URLs in the serialized request.
 
 ## Provenance
 

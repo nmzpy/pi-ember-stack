@@ -41,6 +41,15 @@ import { type SubAgentResult, isFailedResult, getResultOutput } from "./runner.t
  */
 const TOOL_ROW_WIDTH_FRACTION = 0.5;
 
+/**
+ * Per-subagent gradient phase offset in ms, multiplied by the agent's
+ * index. Staggers the gradient sweep of parallel/chain subagents so
+ * their running labels don't animate in perfect sync. 64 ms per index
+ * gives 2x the divergence of the previous 32 ms step, making the
+ * stagger clearly visible across simultaneous agents.
+ */
+const SUBAGENT_PHASE_OFFSET_MS = 64;
+
 export class SubagentToolText implements Component {
 	text = "";
 
@@ -586,7 +595,7 @@ export function renderSubagentLayout(args: any, results: SubAgentResult[], theme
 					theme,
 					row.result,
 					hasHeader ? fg("dim", treePrefix) : "",
-					entry.agentIndex * 32,
+					entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 					row.isSingle,
 				),
 			);
@@ -644,12 +653,16 @@ export function buildSubagentLayoutComponent(
 				theme,
 				row.result,
 				hasHeader ? fg("dim", treePrefix) : "",
-				agentIndex * 32,
+				agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 				row.isSingle,
 			);
 			if (row.status === "completed") {
 				// Completed rows get the user-message-style subagentBg background.
-				const rowBox = new Box(1, 0, (s: string) => theme.bg("subagentBg", s));
+				// paddingX=0 keeps the tree prefix (├/└) aligned with running rows
+				// (plain Text, no Box) so a mid-pipeline completion doesn't shift
+				// left and break the vertical tree. applyBg still fills the full
+				// terminal width with the tint regardless of paddingX.
+				const rowBox = new Box(0, 0, (s: string) => theme.bg("subagentBg", s));
 				rowBox.addChild(new Text(rowText, 0, 0));
 				container.addChild(rowBox);
 			} else {

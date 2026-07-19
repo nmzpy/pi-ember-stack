@@ -1,9 +1,10 @@
 import type { Context, Message, Tool } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-interface SerializedContent {
-	type: "text" | "thinking" | "toolCall";
+export interface SerializedContent {
+	type: "text" | "image" | "thinking" | "toolCall";
 	text?: string;
+	image_url?: string;
 	thinking?: string;
 	id?: string;
 	name?: string;
@@ -29,9 +30,7 @@ function text_from_user_content(message: Extract<Message, { role: "user" }>): Se
 	if (typeof message.content === "string") return [{ type: "text", text: message.content }];
 	return message.content.map((content) => {
 		if (content.type === "image") {
-			throw new Error(
-				"Cursor subscription models do not support image input through this provider.",
-			);
+			return { type: "image", image_url: `data:${content.mimeType};base64,${content.data}` };
 		}
 		return { type: "text", text: content.text };
 	});
@@ -45,7 +44,7 @@ function serialize_message(message: Message): SerializedMessage {
 	if (message.role === "toolResult") {
 		const content = message.content.map((part): SerializedContent => {
 			if (part.type === "image") {
-				throw new Error("Cursor subscription models do not support image tool results.");
+				return { type: "image", image_url: `data:${part.mimeType};base64,${part.data}` };
 			}
 			return { type: "text", text: part.text };
 		});

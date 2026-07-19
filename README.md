@@ -32,7 +32,6 @@ plugins under `plugins/`. Enable them globally in `PI_HOME/pi-ember-stack.json`:
     "pi-compact-tools",
     "devin-auth",
     "pi-cursor-auth",
-    "xai-auth",
     "pi-custom-agents",
     "pi-ember-dcp",
     "pi-ember-fff",
@@ -50,7 +49,6 @@ the TUI. Restart pi after changing the list. The available plugins are:
 - `pi-custom-agents`: questionnaire UI, primary modes, plans, subagent tool, and bundled agent definitions.
 - `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
 - `pi-cursor-auth`: Cursor subscription auth, model refresh, and native Pi streaming.
-- `xai-auth`: xAI (Grok) OAuth provider, catalog, streaming, and custom tools.
 - `pi-ember-dcp`: dynamic context pruning, `compress` tool, `/dcp` commands, and bundled `pi-dcp` skill.
 - `pi-ember-fff`: FFF-powered grep/find with compact rendering.
 - `pi-ember-ui`: Ember accent theme and TUI chrome.
@@ -99,8 +97,7 @@ of this repository. DCP state under `~/.pi-dcp/` is also machine-local.
 The package entrypoint is `plugins/index.ts`. Compact tools are under
 `plugins/pi-compact-tools/`, while questionnaire, primary modes, plans,
 subagents, and bundled agents are under `plugins/pi-custom-agents/`. Provider
-plugins are under `plugins/devin-auth/`, `plugins/pi-cursor-auth/`, and
-`plugins/xai-auth/`. Dynamic context pruning is under `plugins/pi-ember-dcp/`.
+plugins are under `plugins/devin-auth/` and `plugins/pi-cursor-auth/`. Dynamic context pruning is under `plugins/pi-ember-dcp/`.
 
 Run the package typecheck with:
 

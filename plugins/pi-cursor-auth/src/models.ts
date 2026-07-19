@@ -21,7 +21,7 @@ export function build_cursor_models(
 		name: model.name,
 		api: CURSOR_API_IDENTIFIER,
 		reasoning: false,
-		input: ["text"],
+		input: ["text", "image"],
 		cost: ZERO_COST,
 		contextWindow: CURSOR_DEFAULT_CONTEXT_WINDOW,
 		maxTokens: CURSOR_DEFAULT_MAX_TOKENS,

@@ -21,6 +21,14 @@ const active_processes = new Set<ChildProcessWithoutNullStreams>();
 const MAX_STDERR_CHARS = 64 * 1024;
 let active_cwd: string | undefined;
 
+// Tool calls that cursor-agent executes internally and that have no Pi equivalent.
+// We skip them and let the stream continue rather than failing closed.
+const CURSOR_NATIVE_TOOL_CALLS = new Set([
+	"getMcpToolsToolCall",
+	"listMcpResourcesToolCall",
+	"readMcpResourceToolCall",
+]);
+
 function make_initial_message(model: Model<Api>): AssistantMessage {
 	return {
 		role: "assistant",
@@ -128,6 +136,7 @@ class CursorEventConsumer {
 		) {
 			this.close_active_block();
 			const parsed = this.parse_tool_call(event);
+			if (parsed === null) return "continue";
 			if (typeof parsed === "string") {
 				this.terminal_error = parsed;
 				return "terminate";
@@ -220,19 +229,41 @@ class CursorEventConsumer {
 		this.active_block = null;
 	}
 
-	private parse_tool_call(event: CursorEvent): ToolCall | string {
+	private parse_tool_call(event: CursorEvent): ToolCall | string | null {
 		if (!is_record(event.tool_call)) return "Cursor emitted a malformed tool call.";
 		const [raw_name, payload] = Object.entries(event.tool_call)[0] || [];
 		if (!raw_name || !is_record(payload)) return "Cursor emitted a malformed tool call.";
-		const tool_name = resolve_pi_tool_name(raw_name, this.tools);
-		if (!tool_name) {
-			return `Cursor attempted unavailable tool ${raw_name}; the request was stopped before host execution.`;
+
+		// Several tool calls are Cursor-native MCP introspection calls (e.g.
+		// getMcpToolsToolCall, listMcpResourcesToolCall, readMcpResourceToolCall).
+		// They are handled entirely by cursor-agent; Pi has no equivalent tool, so
+		// skip them and let the stream continue.
+		if (CURSOR_NATIVE_TOOL_CALLS.has(raw_name)) return null;
+
+		// Cursor wraps Model Context Protocol server tool calls in an `mcpToolCall`
+		// envelope. The real tool name lives at `args.name` (or `args.tool_name`)
+		// and the real arguments live at `args.args`. Unwrap it so Pi resolves the
+		// underlying tool through its normal registry instead of failing on the
+		// `mcpToolCall` wrapper name.
+		let resolved_raw_name = raw_name;
+		let raw_input: unknown;
+		if (raw_name === "mcpToolCall") {
+			const mcp_args = is_record(payload.args) ? payload.args : {};
+			const inner_name =
+				(typeof mcp_args.name === "string" && mcp_args.name) ||
+				(typeof mcp_args.tool_name === "string" && mcp_args.tool_name);
+			if (!inner_name) return "Cursor emitted an mcpToolCall without a tool name.";
+			resolved_raw_name = inner_name;
+			raw_input = mcp_args.args;
+		} else {
+			raw_input = payload.args ?? payload.input;
 		}
-		const input = is_record(payload.args)
-			? payload.args
-			: is_record(payload.input)
-				? payload.input
-				: {};
+
+		const tool_name = resolve_pi_tool_name(resolved_raw_name, this.tools);
+		if (!tool_name) {
+			return `Cursor attempted unavailable tool ${resolved_raw_name}; the request was stopped before host execution.`;
+		}
+		const input = is_record(raw_input) ? raw_input : {};
 		return {
 			type: "toolCall",
 			id: safe_tool_call_id(event.call_id),

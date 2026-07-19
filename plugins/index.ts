@@ -11,7 +11,6 @@ import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 import piEmberWebtoolsPlugin from "./pi-ember-webtools/extensions/index.ts";
-import xaiAuthPlugin from "./xai-auth/extensions/index.ts";
 
 export { getSharedRenderer };
 
@@ -21,7 +20,6 @@ type PluginId =
 	| "pi-ember-dcp"
 	| "devin-auth"
 	| "pi-cursor-auth"
-	| "xai-auth"
 	| "pi-ember-fff"
 	| "pi-ember-ui"
 	| "pi-ember-tps"
@@ -37,7 +35,6 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-compact-tools",
 	"devin-auth",
 	"pi-cursor-auth",
-	"xai-auth",
 	"pi-custom-agents",
 	"pi-ember-dcp",
 	"pi-ember-fff",
@@ -61,11 +58,6 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-cursor-auth",
 		description: "Cursor subscription auth, model catalog, and native Pi streaming",
 		extension: piCursorAuthPlugin,
-	},
-	{
-		id: "xai-auth",
-		description: "xAI (Grok) OAuth provider, model catalog, streaming, and custom tools",
-		extension: xaiAuthPlugin,
 	},
 	{
 		id: "pi-custom-agents",

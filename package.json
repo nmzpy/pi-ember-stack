@@ -1,7 +1,7 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.2.5",
-  "description": "Ember's configurable Pi stack with modes, compact tools, subagents, and Devin, Cursor, and xAI providers",
+  "version": "0.2.6",
+  "description": "Ember's configurable Pi stack with modes, compact tools, subagents, and Devin and Cursor providers",
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "keywords": [

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Context, Tool } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import type { SerializedContent } from "../src/context.ts";
 import {
 	__test_only,
 	build_cursor_prompt,
@@ -88,7 +89,29 @@ describe("Cursor request mapping", () => {
 		]);
 	});
 
-	test("rejects images rather than silently dropping them", () => {
+	test("serializes image content as a data URL in tool results", () => {
+		const context: Context = {
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "image", data: "xyz", mimeType: "image/jpeg" }],
+					isError: false,
+					timestamp: 1,
+				},
+			],
+		};
+		const prompt = build_cursor_prompt(context);
+		const json = prompt.match(/<pi_model_request>\n([\s\S]+)\n<\/pi_model_request>/)?.[1];
+		const request = JSON.parse(json || "{}") as { messages: Array<{ content: SerializedContent[] }> };
+		expect(request.messages[0].content[0]).toEqual({
+			type: "image",
+			image_url: "data:image/jpeg;base64,xyz",
+		});
+	});
+
+	test("serializes image content as a data URL in user messages", () => {
 		const context: Context = {
 			messages: [
 				{
@@ -98,7 +121,13 @@ describe("Cursor request mapping", () => {
 				},
 			],
 		};
-		expect(() => build_cursor_prompt(context)).toThrow("do not support image input");
+		const prompt = build_cursor_prompt(context);
+		const json = prompt.match(/<pi_model_request>\n([\s\S]+)\n<\/pi_model_request>/)?.[1];
+		const request = JSON.parse(json || "{}") as { messages: Array<{ content: SerializedContent[] }> };
+		expect(request.messages[0].content[0]).toEqual({
+			type: "image",
+			image_url: "data:image/png;base64,abc",
+		});
 	});
 
 	test("maps native CLI aliases only onto Pi's active tool list", () => {

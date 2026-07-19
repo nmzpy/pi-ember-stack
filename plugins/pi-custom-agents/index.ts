@@ -60,15 +60,6 @@ function modelIdentityString(model: Model<any> | undefined): string {
 	return model ? `${model.provider}/${model.id}` : "";
 }
 
-function unbind_thinking_toggle(): void {
-	const keybindings = getKeybindings();
-	keybindings.setUserBindings({
-		...keybindings.getUserBindings(),
-		"app.thinking.toggle": [],
-		"app.tree.toggleLabelTimestamp": [],
-	});
-}
-
 function stable_serialize(value: unknown): string {
 	if (value === null || typeof value !== "object") {
 		const serialized = JSON.stringify(value);
@@ -667,7 +658,6 @@ function recompute_footer_stats(ctx: any): void {
 }
 
 export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
-	unbind_thinking_toggle();
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
@@ -1080,27 +1070,35 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			return;
 		}
 
-		// Plan-mode output-limit recovery: when the model hits the max output
-		// token limit while generating a plan, silently send "continue" as a
-		// hidden custom message so the user never sees the error message or
-		// the recovery prompt. The suppression flag in mode-colors.ts is set
-		// in the message_end handler (before the TUI renders the error row).
+		// Output-limit recovery: when the model hits the max output token limit,
+		// compact the context and silently send "continue" as a hidden custom
+		// message so the user never sees the error message or the recovery
+		// prompt. The suppression flag in mode-colors.ts is set in the
+		// message_end handler (before the TUI renders the error row).
 		if (
-			waitingForPlan &&
-			currentMode === "plan" &&
 			lastTurnLengthStopped &&
 			!lastTurnAborted &&
 			planAutoContinueCount < PLAN_AUTO_CONTINUE_MAX
 		) {
 			planAutoContinueCount++;
 			lastTurnLengthStopped = false;
-			// Hidden custom message: participates in LLM context as a user
-			// turn (convertToLlm maps role "custom" → "user") but is not
-			// rendered in the TUI, so the user never sees "continue".
-			pi.sendMessage(
-				{ customType: "pi-agents-plan-continue", content: "continue", display: false },
-				{ triggerTurn: true },
-			);
+			setPlanAutoContinuing(true);
+			ctx.compact({
+				customInstructions:
+					"The assistant response was cut off by the output token limit. " +
+					"Summarize the incomplete turn and continue from where it left off, " +
+					"picking up the same thought or tool call without repeating work.",
+				onComplete: () => {
+					setPlanAutoContinuing(false);
+					pi.sendMessage(
+						{ customType: "pi-agents-auto-continue", content: "continue", display: false },
+						{ triggerTurn: true },
+					);
+				},
+				onError: () => {
+					setPlanAutoContinuing(false);
+				},
+			});
 			return;
 		}
 		// Reset auto-continue state once the turn completes normally.
@@ -1284,18 +1282,16 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	// event-loop burst, away from the footer render closure.
 	pi.on("message_end", (event: any, ctx: any) => {
 		schedule_footer_stats(ctx);
-		// Set the plan-auto-continue suppression flag BEFORE the TUI renders
-		// the assistant message (extension message_end fires before the
-		// interactive-mode handler that calls updateContent). When the model
-		// hits the output token limit in plan mode and we haven't exhausted
-		// the retry budget, suppress the error row — agent_settled will send
-		// the hidden "continue" message to resume generation.
+		// Set the auto-continue suppression flag BEFORE the TUI renders the
+		// assistant message (extension message_end fires before the interactive-mode
+		// handler that calls updateContent). When the model hits the output token
+		// limit and we haven't exhausted the retry budget, suppress the error row —
+		// agent_settled will compact and send a hidden "continue" message to resume.
 		const msg = event?.message;
 		if (
 			msg?.role === "assistant" &&
 			msg?.stopReason === "length" &&
-			currentMode === "plan" &&
-			waitingForPlan &&
+			!lastTurnAborted &&
 			planAutoContinueCount < PLAN_AUTO_CONTINUE_MAX
 		) {
 			setPlanAutoContinuing(true);

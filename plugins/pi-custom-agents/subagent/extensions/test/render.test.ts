@@ -355,6 +355,12 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 		const scoutLine = lines.find((l) => stripAnsi(l).includes("Scout A"));
 		expect(scoutLine).toBeDefined();
 		expect(scoutLine).toContain("[bg:subagentBg:");
+		// Tree-prefix column alignment: the completed row's prefix must start at
+		// the same column as the running row's prefix (no extra left padding
+		// from the subagentBg Box). Both rows should start with the same tree
+		// glyph (`├ ` / `└ `) at column 0.
+		expect(stripAnsi(lines[1]).startsWith("[dim:  ├ ")).toBe(true);
+		expect(stripAnsi(scoutLine!).startsWith("[bg:subagentBg:[dim:  └ ")).toBe(true);
 	});
 
 	test("all completed parallel: each row gets its own subagentBg", () => {

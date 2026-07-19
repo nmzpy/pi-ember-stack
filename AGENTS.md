@@ -67,9 +67,13 @@
   escape sequences directly in renderer or component code. The live accent color is
   the single authority for mode-derived visuals.
 - **Compact Rendering Is Authoritative:** Tool call rows are single-line, bullet-led,
-  and never dump raw content. Match counts, diff stats, and status labels append
-  inline to the existing call row — never on a separate line below. Group headers
-  (`Exploring`/`Explored`) summarize; child rows stay compact.
+  and never dump raw content. Both standalone and grouped call rows use the
+  `CompactGroupText` component (ANSI-aware `truncateToWidth` at the TUI's
+  supplied available width) so a long bash command, file path, or result line
+  never wraps to multiple rows — it ellipsizes to one row. Match counts, diff
+  stats, and status labels append inline to the existing call row — never on a
+  separate line below. Group headers (`Exploring`/`Explored`) summarize;
+  child rows stay compact.
 - **Dynamic Theme Is the Live Source:** `applyDynamicTheme()` rebuilds the full
   `Theme` instance from `mode-colors.ts` on every mode change. The static
   `ember.json` is the install-time seed only. Never patch individual theme fields
@@ -222,9 +226,13 @@
   transcript group. Group headers still carry their own muted/text gradient
   sweep via `renderLiveGradient(label, "exploringGroup")` or
   `"workingGroup"` (no accent color — just muted→text). When the group settles
-  (visible text, thinking text, a non-group or different-group tool, a user
+  (visible user-facing text, a non-group or different-group tool, a user
   message, or `turn_end`), the header reverts to plain bold final summary.
-  The
+  Thinking deltas do NOT settle the group — the model routinely thinks
+  between consecutive discovery calls, and settling on every thinking
+  delta would prevent read/grep/find/ls calls from ever folding into a
+  single `Exploring` group. Only visible text (the agent writing its
+  response) marks the boundary between exploration batches. The
   `isToolGroupActive`/`setToolGroupActive` flag lives in
   `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools` lifecycle
   handlers (`tool_call`, `tool_execution_end`, `turn_end`, `session_start`) via
@@ -274,8 +282,6 @@ Pi
     │   └── Devin provider, OAuth, catalog, and streaming
     ├── plugins/pi-cursor-auth/
     │   └── Cursor subscription auth, model discovery, and Pi-native streaming
-    ├── plugins/xai-auth/
-    │   └── xAI (Grok) OAuth provider, catalog, streaming, custom tools, CLI shims
     ├── plugins/pi-ember-dcp/
     │   └── Dynamic context pruning, compress tool, /dcp controls
     ├── plugins/pi-ember-fff/
@@ -327,13 +333,17 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `discoveryGroup`/`workingGroup` dual-slot model was removed; there is
     no cross-group settling because settling + starting fresh is
     equivalent and simpler.
-  - **Per-turn grouping:** Calls group within a single turn. `beginTurn()`
-    clears the previous grouping state, and `endTurn()` settles the group so
-    its header immediately becomes a past-tense summary. A later same-type
-    call starts a fresh group at its own transcript position rather than
-    reopening the old block. The `settled` flag lives on `DiscoveryGroup`;
-    `settleGroup`/`settleGroups` are the single setters. Settled groups are
-    never reopened.
+  - **Cross-turn grouping:** Discovery and action groups persist across
+    consecutive turns. `beginTurn()`/`endTurn()` do not reset the active
+    group, so sequential read/grep/find/ls, edit, write, or bash calls
+    fold into a single `Exploring`/`Editing`/`Writing`/`Bashing` header
+    until the agent writes visible user-facing text, the user sends a
+    message, a non-groupable tool runs, or the group key changes.
+    `agent_end` settles all groups so completed runs flip to
+    `Explored`/`Edited`/`Written`/`Bashed`. The `settled` flag lives on
+    `DiscoveryGroup`; `settleGroup`/`settleGroups`/`settleAllGroups` are
+    the single setters. Settled groups can be reopened when a new same-key
+    call arrives; the label flips back to present tense.
   - **Group-header gradient tick:** While a group is not settled, the
     owner's `invalidate` is subscribed to the shared gradient tick via
     `subscribeGradientTick`/`unsubscribeGradientTick` (exported from
@@ -440,9 +450,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
   option. Retry injects the hidden `pi-agents-loop-retry` message instructing the
   model to back off and use a different tool; a custom None answer is injected
   as hidden guidance. Tracking resets at each agent run and session shutdown.
-- The built-in thinking-toggle and tree `Shift+T` keybindings are intentionally
-  overridden to empty bindings, so thinking blocks cannot be hidden or shown and
-  `Shift+T` is unbound.
+- Thinking blocks are shown/hidden through the built-in thinking-toggle
+  keybinding, preserving Pi's native behavior.
 - `/model` and `/resume` picking is owned by `pi-ember-ui/model-picker.ts`: it
   intercepts the editor `handleInput` / `submitValue` / keybindings, opens
   Pi's in-editor slash-argument autocomplete (chat-pill popup via
@@ -516,9 +525,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
   the API provider.
   Running rows and the `Subagents` header remain transparent; only
   completed/failed rows receive a full-width `subagentBg` `Box`
-  background. The expanded view (Ctrl+O) wraps each terminal agent's
-  detailed output in its own independent `subagentBg` Box — no aggregate
-  outer box.
+  background. The collapsed-view completed-row Box uses `paddingX=0` so
+  the tree prefix (`├`/`└`) stays column-aligned with running rows
+  (plain `Text`, no Box) — a mid-pipeline completion must not shift left
+  and break the vertical tree. `applyBg` still fills the full terminal
+  width with the tint regardless of `paddingX`. The expanded view
+  (Ctrl+O) wraps each terminal agent's detailed output in its own
+  independent `subagentBg` Box (with a 1-col inset, since expanded
+  sections are not tree-aligned) — no aggregate outer box.
   The nested latest-tool-call preview row under a running subagent uses
   `SubagentToolText` (a `Component` defined in `render.ts`) — not pi-tui's
   wrapping `Text`. `SubagentToolText` truncates to half the viewport width
@@ -589,60 +603,22 @@ field. Keep that mechanism aligned with the actual plugin folders.
   sources for the forward (Pi→Cursor) schema translation. The existing
   `TOOL_ALIASES` + `normalize_tool_arguments` handle the reverse
   (Cursor→Pi) mapping when the model responds. Never duplicate these
-  maps in other files.
+  maps in other files. Cursor wraps Model Context Protocol server tool
+  calls in an `mcpToolCall` envelope whose real tool name lives at
+  `args.name`/`args.tool_name` and whose real arguments live at
+  `args.args`; `CursorEventConsumer.parse_tool_call` in `src/stream.ts`
+  is the single place that unwraps this envelope before
+  `resolve_pi_tool_name` runs, so MCP-routed tool calls resolve through
+  Pi's normal registry instead of failing on the `mcpToolCall` wrapper
+  name.
 - Each provider turn uses a fresh CLI process so Cursor-side conversation state
   cannot diverge from Pi sessions, compaction, forks, or tool results. Abort and
   `session_shutdown` terminate all owned child processes.
-- The provider advertises text input only. Images and image-bearing tool results
-  fail explicitly rather than being silently omitted.
+- The provider advertises text and image input. Image content is passed through
+  as base64 data URLs in the serialized request.
 - Integration patterns are informed by `Nomadcxx/opencode-cursor`
   (BSD-3-Clause, see `plugins/pi-cursor-auth/LICENSE`), with attribution and
   provenance retained.
-
-### `xai-auth`
-
-- Owns the xAI (Grok) OAuth provider, model catalog, streaming transport,
-  custom xAI tools, and Cursor/Grok CLI tool shims.
-- Forked from [pi-xai-oauth](https://github.com/BlockedPath/pi-xai-oauth)
-  (MIT License, see `plugins/xai-auth/LICENSE`). Original source attribution
-  retained; adapted for the `pi-ember-stack` plugin architecture.
-- Registers the `xai-auth` provider with a static model catalog (Grok 4.5,
-  4.3, Build, Composer 2.5 Fast, 4.20 variants). Models are defined once in
-  `src/models.ts` (SSOT) — never duplicate model definitions elsewhere.
-- All OAuth constants (issuer URL, client ID, scopes, redirect port, refresh
-  skew, API base URLs, CLI proxy URL, Grok client version) live in
-  `src/constants.ts` — never hardcode these values in other files.
-- OAuth login uses PKCE with a local callback server (`127.0.0.1:56121`) and
-  manual-paste fallback for WSL/remote environments. Token refresh rotates
-  automatically before expiry. Reuses `~/.grok/auth.json` from the official
-  Grok CLI when present.
-- Streaming delegates to pi's built-in OpenAI Responses transport
-  (`openAIResponsesApi().streamSimple`) with xAI-specific payload rewriting
-  (`rewriteXaiResponsesPayload`): system/developer text → top-level
-  `instructions`, image-bearing `function_call_output` → text + replay,
-  reasoning effort normalization, and `prompt_cache_key` routing. Grok Build
-  and Composer route through `cli-chat-proxy.grok.com` with Grok CLI proxy
-  headers; all other models hit `api.x.ai` directly.
-- Custom xAI tools (`xai_generate_text`, `xai_web_search`, `xai_x_search`,
-  `xai_multi_agent`, `xai_code_execution`, `xai_generate_image`,
-  `xai_analyze_image`, `xai_critique`, `xai_deep_research`) use the xAI
-  Responses API directly with OAuth credentials. Tool names are fixed —
-  installing duplicate copies of this plugin causes registration conflicts.
-- Cursor/Grok CLI tool shims (`Read`, `Write`, `StrReplace`, `Edit`, `Delete`,
-  `LS`, `Grep`, `Glob`, `Shell`, `WebSearch`) are automatically enabled when
-  a Grok CLI proxy model (`grok-build` or `grok-composer-2.5-fast`) is
-  selected and disabled when switching back. The shims map Cursor-style
-  argument names onto pi's built-in tools.
-- Improvements adopted from `devin-auth`:
-  - **AbortError guard**: `unhandledRejection` handler swallows
-    `DOMException [AbortError]` rejections from cancelled agent runs.
-    Non-abort rejections are re-emitted. Removed on `session_shutdown`.
-  - **Session-replacement discipline**: `session_shutdown` clears
-    module-level `_pi` and removes the rejection handler so jiti-cached
-    modules don't survive across sessions with stale references.
-  - **`/xai-status` command**: Quick auth diagnostics.
-- Credentials, tokens, and provider secrets remain machine-local.
-- Never commit `auth.json`, OAuth tokens, or generated credential files.
 
 ### `pi-ember-dcp`
 

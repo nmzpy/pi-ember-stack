@@ -23,7 +23,6 @@ import {
 	buildThemeExportColors,
 	buildThemeFgColors,
 	getActiveModeColor,
-	getActiveModeId,
 	isPlanAutoContinuing,
 	isShellMode,
 	isLatestSubagentRunning,
@@ -180,6 +179,18 @@ let workingActive = false;
 let logoAnimating = false;
 let logoStatic = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
+
+let userPromptAt = 0;
+
+function formatElapsed(ms: number): string {
+	const totalSeconds = Math.floor(ms / 1000);
+	if (totalSeconds < 60) {
+		return `${totalSeconds}s`;
+	}
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return `${minutes}m ${seconds}s`;
+}
 
 const CURSOR_BLINK_INTERVAL_MS = 500;
 let cursorVisible = true;
@@ -815,11 +826,11 @@ function installAssistantMessagePatch(): void {
 
 		const hasToolCalls = message.content.some((c: any) => c.type === "toolCall");
 		this.hasToolCalls = hasToolCalls;
-		// Suppress the output-limit error when plan-mode auto-continue is
-		// active — the extension silently sends "continue" so the user never
-		// sees this error or the recovery message.
+		// Suppress the output-limit error when auto-continue is active —
+		// the extension compacts and silently sends "continue" so the user
+		// never sees this error or the recovery message.
 		const suppressLengthError =
-			message.stopReason === "length" && getActiveModeId() === "plan" && isPlanAutoContinuing();
+			message.stopReason === "length" && isPlanAutoContinuing();
 		if (message.stopReason === "length" && !suppressLengthError) {
 			this.contentContainer.addChild(new Spacer(1));
 			this.contentContainer.addChild(
@@ -1418,9 +1429,14 @@ function installThinkingWidget(ctx: any): void {
 			if (!thinkingActive && !workingActive) return [];
 			const preset: GradientPreset = thinkingActive ? "thinking" : "working";
 			const labelText = thinkingActive ? "Thinking" : "Working";
+			const elapsedMs = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
+			const elapsedText = elapsedMs >= 1000 ? ` ${formatElapsed(elapsedMs)}` : "";
 			const WIDGET_INSET = 3;
 			const widgetPad = " ".repeat(WIDGET_INSET);
-			return [`${widgetPad}${renderLiveGradient(labelText, preset)}${widgetPad}`];
+			const theme = resolve_live_theme();
+			const elapsedColored = elapsedText ? theme.fg("muted", elapsedText) : "";
+			const labelGradient = renderLiveGradient(labelText, preset);
+			return [`${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`];
 		},
 		invalidate() {},
 	}));
@@ -1509,6 +1525,13 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 	});
 
+	pi.on("message_start", (event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		if (event.message?.role === "user") {
+			userPromptAt = performance.now();
+		}
+	});
+
 	pi.on("message_end", () => {
 		stopThinkingAnimation();
 	});
@@ -1518,13 +1541,20 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		startWorkingAnimation();
 	});
 
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (_event, ctx) => {
 		stopThinkingAnimation();
 		stopWorkingAnimation();
 		// When the agent loop ends (including after abort/cancel/error), no
 		// subagent can still be running. Reset the flag so the editor border
 		// reverts from the dim inset to the full-opacity accent line.
 		setLatestSubagentRunning(false);
+		const duration = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
+		userPromptAt = 0;
+		if (ctx.mode === "tui" && duration >= 1000) {
+			const model = ctx.model;
+			const modelName = model?.name ?? model?.id ?? "model";
+			ctx.ui.notify(`${modelName} · ${formatElapsed(duration)}`, "info");
+		}
 		requestRender?.();
 	});
 
@@ -1594,6 +1624,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		stopCursorBlink();
 		thinkingActive = false;
 		workingActive = false;
+		userPromptAt = 0;
 		setShellMode(false);
 		setLatestSubagentRunning(false);
 		setThinkingBlocksHidden(false);

@@ -91,6 +91,30 @@ function resolve_parent_model_runtime(model_registry: ModelRegistry): ModelRunti
 	return model_runtime;
 }
 
+const GENERIC_ABORT_PHRASES = [
+	"this operation was aborted",
+	"the operation was aborted",
+	"request was aborted",
+	"the signal was aborted",
+	"operation was aborted",
+];
+
+function isGenericAbortMessage(message: string | undefined): boolean {
+	if (!message) return true;
+	const lower = message.toLowerCase();
+	return GENERIC_ABORT_PHRASES.some((phrase) => lower.includes(phrase)) || lower === "aborted" || lower === "abort";
+}
+
+function extractFailureMessage(error: unknown): string {
+	if (error === null || error === undefined) return "Unknown error";
+	const cause = (error as { cause?: unknown }).cause;
+	if (cause instanceof Error && cause.message && !isGenericAbortMessage(cause.message)) {
+		return cause.message;
+	}
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+
 export async function runSubAgent(options: {
 	cwd: string;
 	systemPrompt: string;
@@ -98,7 +122,8 @@ export async function runSubAgent(options: {
 	tools: string[];
 	model: Model<any>;
 	modelRegistry: ModelRegistry;
-	signal?: AbortSignal;
+	parentSignal?: AbortSignal;
+	timeoutMs?: number;
 	agentName?: string;
 	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	onUpdate?: (text: string) => void;
@@ -112,16 +137,28 @@ export async function runSubAgent(options: {
 		tools,
 		model,
 		modelRegistry,
-		signal,
+		parentSignal,
+		timeoutMs,
 		agentName = "subagent",
 		thinkingLevel = "off",
 		onMessage,
 		onToolCall,
 	} = options;
 
-	if (signal?.aborted) {
-		return failedResult(agentName, task, "aborted", "Sub-agent aborted before start");
-	}
+	const timeoutController =
+		timeoutMs && timeoutMs > 0 ? new AbortController() : undefined;
+	const timeoutId = timeoutController
+		? setTimeout(() => timeoutController.abort(), timeoutMs)
+		: undefined;
+	const signals = [parentSignal, timeoutController?.signal].filter(
+		(value): value is AbortSignal => Boolean(value),
+	);
+	const combinedSignal =
+		signals.length > 1
+			? typeof (AbortSignal as any).any === "function"
+				? (AbortSignal as any).any(signals)
+				: signals[0]
+			: signals[0];
 
 	const agentDir = getAgentDir();
 
@@ -185,11 +222,18 @@ export async function runSubAgent(options: {
 			session.abort().catch(() => {});
 		}
 	};
-	if (signal) {
-		if (signal.aborted) {
-			return failedResult(agentName, task, "aborted", "Sub-agent aborted before start");
+	if (combinedSignal) {
+		if (combinedSignal.aborted) {
+			if (timeoutId) clearTimeout(timeoutId);
+			const isTimeout = timeoutController?.signal.aborted && !parentSignal?.aborted;
+			return failedResult(
+				agentName,
+				task,
+				isTimeout ? "timeout" : "aborted",
+				isTimeout ? `Timeout after ${timeoutMs}ms` : "Sub-agent aborted before start",
+			);
 		}
-		signal.addEventListener("abort", onAbort, { once: true });
+		combinedSignal.addEventListener("abort", onAbort, { once: true });
 	}
 
 	try {
@@ -275,14 +319,35 @@ export async function runSubAgent(options: {
 		} else {
 			result.stopReason = result.stopReason || "error";
 		}
-		result.errorMessage =
-			result.errorMessage || (error instanceof Error ? error.message : String(error));
+		if (!result.errorMessage) {
+			result.errorMessage = extractFailureMessage(error);
+		}
 	} finally {
-		if (signal) signal.removeEventListener("abort", onAbort);
+		if (timeoutId) clearTimeout(timeoutId);
+		if (combinedSignal) combinedSignal.removeEventListener("abort", onAbort);
 		unsubscribe?.();
 		try {
 			session?.dispose();
 		} catch {}
+	}
+
+	// Surface the actual failure reason instead of the provider's generic
+	// "This operation was aborted" / "Request was aborted" string.
+	if (timeoutController?.signal.aborted && !parentSignal?.aborted) {
+		result.exitCode = 1;
+		result.stopReason = "timeout";
+		result.errorMessage = `Timeout after ${timeoutMs}ms`;
+	} else if (parentSignal?.aborted) {
+		result.exitCode = 1;
+		result.stopReason = result.stopReason === "timeout" ? "timeout" : "aborted";
+		if (isGenericAbortMessage(result.errorMessage)) {
+			result.errorMessage = "Cancelled: parent operation aborted";
+		}
+	} else if (isGenericAbortMessage(result.errorMessage)) {
+		result.exitCode = 1;
+		result.stopReason = result.stopReason || "error";
+		result.errorMessage =
+			result.stopReason === "aborted" ? "Subagent aborted" : "Subagent failed";
 	}
 
 	return result;

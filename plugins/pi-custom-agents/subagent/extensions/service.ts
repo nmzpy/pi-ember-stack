@@ -36,37 +36,19 @@ export async function runNamedAgent(options: {
 	if (!model) throw new Error(`No model resolved for agent "${options.agent.name}" (tried: ${attempted.join(", ") || "none"})`);
 
 	const modelRegistry = options.ctx.modelRegistry;
-
-	const timeoutController = options.timeout && options.timeout > 0 ? new AbortController() : undefined;
-	const timeoutId = timeoutController ? setTimeout(() => timeoutController.abort(), options.timeout) : undefined;
-	const signals = [options.signal, timeoutController?.signal].filter((value): value is AbortSignal => Boolean(value));
-	const signal = signals.length > 1
-		? typeof (AbortSignal as any).any === "function"
-			? (AbortSignal as any).any(signals)
-			: signals[0]
-		: signals[0];
 	const contract = options.instructions?.slice(0, 16 * 1024);
 
-	try {
-		const result = await runSubAgent({
-			cwd: options.cwd,
-			systemPrompt: contract ? `${options.agent.systemPrompt}\n\n## Task Contract\n${contract}` : options.agent.systemPrompt,
-			task: options.task,
-			tools: (options.agent.tools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]).filter((tool) => tool !== "subagent"),
-			model,
-			modelRegistry,
-			signal,
-			agentName: options.agent.name,
-			thinkingLevel: options.agent.thinking,
-			onMessage: options.onMessage,
-		});
-		if (timeoutController?.signal.aborted && !options.signal?.aborted) {
-			result.exitCode = 1;
-			result.stopReason = "timeout";
-			result.errorMessage ||= `Timeout after ${options.timeout}ms`;
-		}
-		return result;
-	} finally {
-		if (timeoutId) clearTimeout(timeoutId);
-	}
+	return runSubAgent({
+		cwd: options.cwd,
+		systemPrompt: contract ? `${options.agent.systemPrompt}\n\n## Task Contract\n${contract}` : options.agent.systemPrompt,
+		task: options.task,
+		tools: (options.agent.tools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]).filter((tool) => tool !== "subagent"),
+		model,
+		modelRegistry,
+		parentSignal: options.signal,
+		timeoutMs: options.timeout,
+		agentName: options.agent.name,
+		thinkingLevel: options.agent.thinking,
+		onMessage: options.onMessage,
+	});
 }

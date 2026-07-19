@@ -29,14 +29,17 @@ function makeContext(id: string, state: Record<string, any> = {}) {
 }
 
 describe("CompactRenderer", () => {
-	test("hidden thinking does not carry grouping across turns", () => {
+	test("hidden thinking carries grouping across turns", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		r.renderCall("read", { file_path: "foo.ts" }, theme, makeContext("a") as any);
 		r.endTurn(true);
 		r.beginTurn();
 		r.renderCall("read", { file_path: "bar.ts" }, theme, makeContext("b") as any);
-		expect((r as any).calls.get("b").group).toBeUndefined();
+		const recA = (r as any).calls.get("a");
+		const recB = (r as any).calls.get("b");
+		expect(recB.group).toBe(recA.group);
+		expect(recB.group).toBeDefined();
 	});
 
 	test("visible text before discovery calls resets grouping across turns", () => {
@@ -57,14 +60,17 @@ describe("CompactRenderer", () => {
 		expect(stripAnsi(ownerComp.text)).toContain("Read");
 	});
 
-	test("visible thinking blocks do not carry grouping across turns", () => {
+	test("visible thinking blocks do not settle the group", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		r.renderCall("read", { file_path: "foo.ts" }, theme, makeContext("a") as any);
 		r.endTurn(false);
 		r.beginTurn();
 		r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
-		expect((r as any).calls.get("b").group).toBeUndefined();
+		const recA = (r as any).calls.get("a");
+		const recB = (r as any).calls.get("b");
+		expect(recB.group).toBe(recA.group);
+		expect(recB.group).toBeDefined();
 	});
 
 	test("a user message prevents hidden-thinking carry-over", () => {
@@ -689,7 +695,7 @@ describe("CompactRenderer", () => {
 		expect((comp as any).text).toContain("Error: not found");
 	});
 
-	test("group flips to 'Explored' at turn end", () => {
+	test("group flips to 'Explored' when settled", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const stateA: Record<string, any> = {};
@@ -712,7 +718,7 @@ describe("CompactRenderer", () => {
 			theme,
 			{ ...makeContext("b", stateB), isError: false } as any,
 		);
-		r.endTurn(true);
+		r.settleAllGroups();
 		const settledCall = r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any) as any;
 		expect(stripAnsi(settledCall.text)).toContain("Explored 2 files");
 		expect(stripAnsi(settledCall.text)).not.toContain("Exploring");
@@ -779,7 +785,7 @@ describe("CompactRenderer", () => {
 		expect(recB.group).toBeUndefined();
 	});
 
-	test("thinking-only turn starts a fresh discovery group", () => {
+	test("thinking-only turn carries the discovery group across turns", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const stateA: Record<string, any> = {};
@@ -789,8 +795,8 @@ describe("CompactRenderer", () => {
 		r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
 		const recA = (r as any).calls.get("a");
 		const recB = (r as any).calls.get("b");
-		expect(recB.group).toBeUndefined();
-		expect(recA.group).toBeUndefined();
+		expect(recB.group).toBe(recA.group);
+		expect(recB.group).toBeDefined();
 	});
 
 	test("group hasNonDiscovery flag is sticky within a turn", () => {

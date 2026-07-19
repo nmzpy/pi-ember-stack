@@ -587,45 +587,22 @@ export default function (pi: ExtensionAPI) {
 				let tools = agent.tools ?? defaultTools;
 				tools = tools.filter((t) => t !== "subagent");
 
-				const timeoutController = timeoutMs && timeoutMs > 0 ? new AbortController() : undefined;
-				const timeoutId = timeoutController
-					? setTimeout(() => timeoutController.abort(), timeoutMs)
-					: undefined;
-				const signals = [parentSignal, timeoutController?.signal].filter(
-					(value): value is AbortSignal => Boolean(value),
-				);
-				const combinedSignal =
-					signals.length > 1
-						? typeof (AbortSignal as any).any === "function"
-							? (AbortSignal as any).any(signals)
-							: signals[0]
-						: signals[0];
-
-				try {
-					const result = await runSubAgent({
-						cwd: cwd ?? ctx.cwd,
-						systemPrompt: params.instructions
-							? `${agent.systemPrompt}\n\n## Task Contract\n${params.instructions.slice(0, 16 * 1024)}`
-							: agent.systemPrompt,
-						task,
-						tools,
-						model: resolved.model,
-						modelRegistry,
-						signal: combinedSignal,
-						agentName: label,
-						thinkingLevel: agent.thinking,
-						onMessage: onProgress,
-						onToolCall,
-					});
-					if (timeoutController?.signal.aborted && !parentSignal?.aborted) {
-						result.exitCode = 1;
-						result.stopReason = "timeout";
-						result.errorMessage ||= `Timeout after ${timeoutMs}ms`;
-					}
-					return result;
-				} finally {
-					if (timeoutId) clearTimeout(timeoutId);
-				}
+				return runSubAgent({
+					cwd: cwd ?? ctx.cwd,
+					systemPrompt: params.instructions
+						? `${agent.systemPrompt}\n\n## Task Contract\n${params.instructions.slice(0, 16 * 1024)}`
+						: agent.systemPrompt,
+					task,
+					tools,
+					model: resolved.model,
+					modelRegistry,
+					parentSignal,
+					timeoutMs,
+					agentName: label,
+					thinkingLevel: agent.thinking,
+					onMessage: onProgress,
+					onToolCall,
+				});
 			}
 
 			// --- Chain mode ---

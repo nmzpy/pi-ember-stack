@@ -97,22 +97,25 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		renderer.endTurn();
 		setToolGroupActive(renderer.hasActiveGroups());
 	});
+	pi.on("agent_end", () => {
+		renderer.settleAllGroups();
+		setToolGroupActive(false);
+	});
 	pi.on("message_start", (event: any) => {
 		if (event?.message?.role === "user") renderer.noteUserMessage();
 	});
 	pi.on("message_update", (event: any) => {
-		// When the model streams visible text OR thinking text, mark the
-		// turn as having assistant output so the next groupable tool call
-		// starts a fresh group instead of appending to the previous one.
-		// Thinking-only turns keep grouping coherent.
+		// When the model streams visible user-facing text, settle the
+		// current group so the next groupable tool call starts a fresh
+		// group instead of appending to the previous one. Thinking deltas
+		// do NOT settle the group — the model routinely thinks between
+		// consecutive discovery calls (read/grep/find/ls), and settling on
+		// every thinking delta would prevent those calls from ever folding
+		// into a single Exploring group. Only visible text (the agent
+		// writing its response to the user) marks the boundary between one
+		// exploration batch and the next.
 		const ev = event?.assistantMessageEvent;
-		if (
-			ev &&
-			(ev.type === "text_start" ||
-				ev.type === "text_delta" ||
-				ev.type === "thinking_start" ||
-				ev.type === "thinking_delta")
-		) {
+		if (ev && (ev.type === "text_start" || ev.type === "text_delta")) {
 			renderer.noteVisibleText();
 		}
 	});

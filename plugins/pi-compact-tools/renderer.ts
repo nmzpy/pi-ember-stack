@@ -46,7 +46,7 @@ export type CompactCall = {
 	_completed?: boolean;
 	result?: any;
 	/** Standalone (non-group-owner) call row visual — repainted on theme change. */
-	callText?: Text;
+	callText?: CompactGroupText;
 };
 
 export type DiscoveryGroup = {
@@ -63,9 +63,9 @@ export type DiscoveryGroup = {
 	hasNonDiscovery?: boolean;
 	/**
 	 * Whether the agent has demonstrably moved on from this group (emitted
-	 * visible text, emitted thinking text, started a non-group tool, or
-	 * started a tool in a different group). The label only flips to past
-	 * tense when both all members are complete AND the group is settled.
+	 * visible user-facing text, started a non-group tool, or started a tool
+	 * in a different group). The label only flips to past tense when both
+	 * all members are complete AND the group is settled.
 	 * While complete-but-unsettled, the group stays active (gradient + present
 	 * tense) so there is no premature past-tense label.
 	 */
@@ -81,11 +81,13 @@ export type DiscoveryGroup = {
 };
 
 /**
- * Group rows must never wrap: wrapping child previews produces visually noisy
- * blocks. The TUI supplies the authoritative available width on every render,
- * so truncate each independently styled line at that boundary.
+ * Compact call rows must never wrap: wrapping long bash commands or file
+ * paths produces visually noisy multi-row blocks. The TUI supplies the
+ * authoritative available width on every render, so truncate each
+ * independently styled line at that boundary. Used for both group rows
+ * and standalone (non-group) call rows.
  */
-class CompactGroupText implements Component {
+export class CompactGroupText implements Component {
 	text = "";
 
 	setText(text: string): void {
@@ -463,12 +465,15 @@ export class CompactRenderer {
 	private groupTickTarget: (() => void) | undefined;
 
 	beginTurn(): void {
-		this.resetGroupingState();
+		// Intentionally no-op: discovery/action groups persist across turns so
+		// consecutive read/grep/find/ls/edit/write/bash calls fold into one
+		// block until the agent writes visible text or the user speaks.
 	}
 
 	endTurn(_thinkingHidden?: boolean, _message?: unknown): void {
-		this.settleGroups();
-		this.resetGroupingState();
+		// Intentionally no-op: settling on turn_end would break cross-turn
+		// grouping. Groups settle on visible text, user messages, non-groupable
+		// tools, different group keys, or agent end.
 	}
 
 	/** Called by the plugin when the current turn produces visible text
@@ -480,6 +485,13 @@ export class CompactRenderer {
 	}
 
 	noteUserMessage(): void {
+		this.settleGroups();
+		this.resetGroupingState();
+	}
+
+	/** Settle the active group and clear it. Called at agent end so completed
+	 *  groups flip to past tense once the run finishes. */
+	settleAllGroups(): void {
 		this.settleGroups();
 		this.resetGroupingState();
 	}
@@ -531,7 +543,7 @@ export class CompactRenderer {
 
 	/** Settle the live group so its label flips to past tense. Called when the
 	 *  agent demonstrably moves on:
-	 *  visible text, emitted thinking text, a non-group tool, or a different
+	 *  visible user-facing text, a non-group tool, or a different
 	 *  groupable tool. Idempotent per group via scheduleGroupInvalidation. */
 	private settleGroups(): void {
 		this.settleGroup(this.currentGroup);
@@ -647,8 +659,11 @@ export class CompactRenderer {
 			return this.renderCallInner(name, args, theme, context);
 		} catch {
 			// Never throw: Pi's fallback would dump raw content. Return a
-			// compact call row instead.
-			return new Text(theme.fg("muted", BULLET) + formatCallBody(name, args, theme), 0, 0);
+			// compact call row instead. Use CompactGroupText (truncating) so
+			// even the fallback never wraps to multiple rows.
+			const fallback = new CompactGroupText();
+			fallback.setText(theme.fg("muted", BULLET) + formatCallBody(name, args, theme));
+			return fallback;
 		}
 	}
 
@@ -683,7 +698,9 @@ export class CompactRenderer {
 			return callText;
 		}
 		const callText =
-			context.state.callText instanceof Text ? context.state.callText : new Text("", 0, 0);
+			context.state.callText instanceof CompactGroupText
+				? context.state.callText
+				: new CompactGroupText();
 		context.state.callText = callText;
 		record.callText = callText;
 		callText.setText(formatStandaloneCallRow(record, theme));
@@ -739,7 +756,7 @@ export class CompactRenderer {
 
 		const error = errorText(result, context.isError);
 		const callText = context.state.callText;
-		if (callText instanceof Text) {
+		if (callText instanceof CompactGroupText) {
 			record.callText = callText;
 			callText.setText(formatStandaloneCallRow(record, theme));
 		}
