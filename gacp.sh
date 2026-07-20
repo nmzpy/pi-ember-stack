@@ -60,14 +60,9 @@ VERSION="$(npm version patch --no-git-tag-version)"
 VERSION="${VERSION#v}"
 
 if [[ "$RELEASE_MODE" == "1" ]]; then
-	if [[ -n "${NPM_TOKEN:-}" ]]; then
-		echo "Using NPM_TOKEN from environment for publish."
-	else
-		npm whoami >/dev/null || {
-			echo "ERROR: Log in to npm with 'npm login' before creating a release, or set NPM_TOKEN." >&2
-			exit 1
-		}
-	fi
+	npm whoami >/dev/null || {
+		echo "WARNING: Not logged in to npm; git push/tag will still run but publish is disabled." >&2
+	}
 	COMMIT_MSG="${COMMIT_MSG:-release: v$VERSION}"
 else
 	COMMIT_MSG="${COMMIT_MSG:-chore: v$VERSION}"
@@ -92,13 +87,7 @@ echo "=== Pushing ==="
 git push
 if [[ "$RELEASE_MODE" == "1" ]]; then
 	git push origin "v$VERSION"
-	echo "=== Publishing @nmzpy/pi-ember-stack@$VERSION ==="
-	if [[ -n "${NPM_TOKEN:-}" ]]; then
-		npm publish --access public --//registry.npmjs.org/:_authToken="$NPM_TOKEN"
-	else
-		npm publish --access public
-	fi
-	echo "=== Release v$VERSION complete ==="
+	echo "=== Tag v$VERSION pushed (npm publish disabled; run manually when ready) ==="
 else
 	echo "=== Pushed v$VERSION ==="
 fi
