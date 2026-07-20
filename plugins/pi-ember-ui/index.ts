@@ -2109,10 +2109,14 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setLatestSubagentRunning(false);
 		const duration = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
 		userPromptAt = 0;
-		if (ctx.mode === "tui" && duration >= 1000) {
-			const model = ctx.model;
-			const modelName = model?.name ?? model?.id ?? "model";
-			ctx.ui.notify(`${modelName} · ${formatElapsed(duration)}`, "info");
+		try {
+			if (ctx.mode === "tui" && duration >= 1000) {
+				const model = ctx.model;
+				const modelName = model?.name ?? model?.id ?? "model";
+				ctx.ui.notify(`${modelName} · ${formatElapsed(duration)}`, "info");
+			}
+		} catch {
+			/* stale ctx after replacement/dispose; skip notify */
 		}
 		requestRender?.();
 	});
@@ -2126,7 +2130,11 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		agentRunPending = false;
 		stopThinkingAnimation();
 		stopWorkingAnimation();
-		if (ctx.mode === "tui") requestRender?.();
+		try {
+			if (ctx.mode === "tui") requestRender?.();
+		} catch {
+			/* stale ctx after replacement/dispose; no render */
+		}
 	});
 
 	pi.on("tool_execution_start", (event, ctx) => {
@@ -2136,7 +2144,11 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
-		if (ctx.mode !== "tui") return;
+		try {
+			if (ctx.mode !== "tui") return;
+		} catch {
+			return;
+		}
 		schedule_footer_stats(ctx);
 		if (event.toolName === "subagent") {
 			// The subagent tool has finished executing. Recompute would race the
