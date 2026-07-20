@@ -50,9 +50,16 @@ retain assumptions about one editor instance.
   `disable_tui_clear_on_shrink()` explicitly keeps Pi's `clearOnShrink` path
   off for the live TUI. Use `snap_tui_to_bottom()` / `requestTuiRenderSnapToBottom()`
   (exported from `layout.ts` / `index.ts`) for any snap that must re-pin the
-  chatbox to the bottom: it clears only the visible screen (`\x1b[2J\x1b[H`,
-  never `3J`), resets the same bookkeeping, and requests a normal render
-  whose first-render path re-anchors `previousViewportTop` to the bottom.
+  chatbox to the bottom: it renders the full content via `tui.render(width)`,
+  runs the same pipeline as `doRender` (composite overlays, extract cursor,
+  apply line resets), then writes ONLY the bottom `height` lines (the
+  visible viewport) to the terminal with `\x1b[2J\x1b[H` (never `3J`).
+  The full `newLines` array is stored in `previousLines` so the next render
+  is a correct differential against the full transcript. Printing only
+  `height` lines means nothing spills into scrollback — holding the
+  thinking-blocks toggle no longer pushes duplicate transcript snapshots
+  into the terminal buffer. The snap completes the render synchronously
+  and does NOT call `requestRender`.
   The slash-command exit snap, the thinking-toggle snap, and the
   compact-group auto-settle snap all use this helper.
 - `clearOnShrink` controls whether Pi performs a full redraw when the rendered

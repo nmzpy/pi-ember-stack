@@ -5,7 +5,7 @@ one package:
 
 - Primary modes: `/coder`, `/architect`, `/doctor`, `/orchestrator`, and
   `/ui-doctor`.
-- Inline `questionnaire` UI for decision-oriented questions. Agents are told to
+- Inline `quiz` UI for decision-oriented questions. Agents are told to
   prefer it when they need a user choice.
 - A compact native `edit` renderer that shows the filename and a single
   `+N / -N` result row.
@@ -46,7 +46,7 @@ Remove a plugin ID to disable it, or use `/stack-plugins` to toggle one from
 the TUI. Restart pi after changing the list. The available plugins are:
 
 - `pi-compact-tools`: collapsed native edit rendering.
-- `pi-custom-agents`: questionnaire UI, primary modes, plans, subagent tool, and bundled agent definitions.
+- `pi-custom-agents`: quiz UI, primary modes, plans, subagent tool, and bundled agent definitions.
 - `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
 - `pi-cursor-auth`: Cursor subscription auth, model refresh, and native Pi streaming.
 - `pi-ember-dcp`: dynamic context pruning, `compress` tool, `/dcp` commands, and bundled `pi-dcp` skill.
@@ -95,7 +95,7 @@ of this repository. DCP state under `~/.pi-dcp/` is also machine-local.
 ## Development
 
 The package entrypoint is `plugins/index.ts`. Compact tools are under
-`plugins/pi-compact-tools/`, while questionnaire, primary modes, plans,
+`plugins/pi-compact-tools/`, while quiz, primary modes, plans,
 subagents, and bundled agents are under `plugins/pi-custom-agents/`. Provider
 plugins are under `plugins/devin-auth/` and `plugins/pi-cursor-auth/`. Dynamic context pruning is under `plugins/pi-ember-dcp/`.
 

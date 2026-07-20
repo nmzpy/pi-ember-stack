@@ -1,5 +1,5 @@
 import { Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
-import { parseJsonWithRepair } from "@earendil-works/pi-ai/compat";
+import { parseStreamingJson } from "@earendil-works/pi-ai/compat";
 import * as Diff from "diff";
 import {
 	MUTED_GROUP_GRADIENT_PRESET,
@@ -252,12 +252,14 @@ function extractStreamingEdits(args: any): Array<{ oldText: string; newText: str
 	if (typeof args.edits === "string") {
 		const trimmed = args.edits.trim();
 		if (!trimmed) return undefined;
-		try {
-			const parsed = parseJsonWithRepair<any>(trimmed);
-			if (Array.isArray(parsed)) return parsed;
-		} catch {
-			// Partial / unparseable string: fall through.
-		}
+		// Use the partial-JSON parser so a truncated streaming `edits` string
+		// (e.g. GLM / Opus 4.6 streaming edits as JSON) yields a usable array
+		// instead of throwing. parseJsonWithRepair throws on unterminated
+		// strings, which silently killed the live +N -N path for these
+		// providers until the tool completed. parseStreamingJson returns a
+		// best-effort partial array (or {}) and never throws.
+		const parsed = parseStreamingJson(trimmed);
+		if (Array.isArray(parsed)) return parsed;
 	}
 	if (typeof args.oldText === "string" || typeof args.newText === "string") {
 		return [{ oldText: args.oldText ?? "", newText: args.newText ?? "" }];

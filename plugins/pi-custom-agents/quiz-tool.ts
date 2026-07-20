@@ -9,46 +9,48 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { requestTuiRender } from "../pi-ember-ui/index.ts";
-import { setQuestionnaireActive } from "../pi-ember-ui/mode-colors.ts";
+import { chatboxBorderColor, requestTuiRender } from "../pi-ember-ui/index.ts";
+import { colorize, setQuizActive } from "../pi-ember-ui/mode-colors.ts";
 
-export interface QuestionnaireOption {
+export interface QuizOption {
 	value: string;
 	label: string;
 	description?: string;
+	/** Optional hex color applied to the option when selected. */
+	selectedColor?: string;
 }
 
-export interface QuestionnaireQuestion {
+export interface QuizQuestion {
 	id: string;
 	label?: string;
 	prompt: string;
-	options: QuestionnaireOption[];
+	options: QuizOption[];
 }
 
-interface QuestionnaireAnswer {
+interface QuizAnswer {
 	id: string;
 	value: string;
 	label: string;
 	wasCustom: boolean;
 }
 
-interface QuestionnaireResult {
-	answers: QuestionnaireAnswer[];
+interface QuizResult {
+	answers: QuizAnswer[];
 	cancelled: boolean;
 }
 
 /**
- * Single canonical serializer for the model-facing questionnaire result.
+ * Single canonical serializer for the model-facing quiz result.
  * Emits one inline line per answer, pairing the answer with its question's
  * label (or id fallback) and full prompt so the model has the same context
  * the user saw. Question metadata is sourced only from `params.questions`
- * (SSOT) — never mirrored onto `QuestionnaireAnswer`.
+ * (SSOT) — never mirrored onto `QuizAnswer`.
  */
 export function format_answers_for_model(
-	questions: QuestionnaireQuestion[],
-	answers: QuestionnaireAnswer[],
+	questions: QuizQuestion[],
+	answers: QuizAnswer[],
 ): string {
-	const by_id = new Map<string, QuestionnaireQuestion>();
+	const by_id = new Map<string, QuizQuestion>();
 	for (const q of questions) by_id.set(q.id, q);
 	return answers
 		.map((answer) => {
@@ -61,7 +63,7 @@ export function format_answers_for_model(
 		.join("\n");
 }
 
-const QuestionnaireParams = Type.Object({
+const QuizParams = Type.Object({
 	questions: Type.Array(
 		Type.Object({
 			id: Type.String({ description: "Unique question identifier" }),
@@ -78,27 +80,35 @@ const QuestionnaireParams = Type.Object({
 	),
 });
 
-export async function askQuestionnaire(
+export interface AskQuizOptions {
+	/** Whether to append the automatic "None" option to each question. Default true. */
+	includeNone?: boolean;
+}
+
+export async function askQuiz(
 	ctx: any,
 	title: string,
-	questions: QuestionnaireQuestion[],
-): Promise<QuestionnaireAnswer[] | undefined> {
+	questions: QuizQuestion[],
+	options?: AskQuizOptions,
+): Promise<QuizAnswer[] | undefined> {
 	if (!ctx.hasUI || questions.length === 0) return undefined;
+	const includeNone = options?.includeNone !== false;
 
 	const result = await ctx.ui.custom(
-		(_tui: any, theme: any, _keybindings: any, done: (result: QuestionnaireResult) => void) => {
-			setQuestionnaireActive(true);
+		(_tui: any, theme: any, _keybindings: any, done: (result: QuizResult) => void) => {
+			setQuizActive(true);
 			requestTuiRender();
-			const finish = (r: QuestionnaireResult): void => {
-				setQuestionnaireActive(false);
+			const finish = (r: QuizResult): void => {
+				setQuizActive(false);
 				requestTuiRender();
 				done(r);
 			};
 			let questionIndex = 0;
 			let optionIndex = 0;
 			let cachedLines: string[] | undefined;
+			let cachedWidth: number | undefined;
 			let inputMode = false;
-			const answers = new Map<string, QuestionnaireAnswer>();
+			const answers = new Map<string, QuizAnswer>();
 
 			const NONE_VALUE = "__none__";
 			const NONE_DESC = "Specify the proper answer";
@@ -138,6 +148,7 @@ export async function askQuestionnaire(
 
 			function refresh(): void {
 				cachedLines = undefined;
+				cachedWidth = undefined;
 				_tui.requestRender();
 			}
 
@@ -163,25 +174,25 @@ export async function askQuestionnaire(
 					// Ensure the assembled line never exceeds the terminal width;
 					// wrapTextWithAnsi can produce a line whose visible width equals
 					// the budget, but when joined with the prefix it can still overrun.
-					lines.push(
-						visibleWidth(line) > width ? truncateToWidth(line, width) : line,
-					);
+					lines.push(visibleWidth(line) > width ? truncateToWidth(line, width) : line);
 				}
 			}
 
-			function currentQuestion(): QuestionnaireQuestion {
+			function currentQuestion(): QuizQuestion {
 				return questions[questionIndex];
 			}
 
-			function displayOptions(): { option: QuestionnaireOption; isNone: boolean }[] {
+			function displayOptions(): { option: QuizOption; isNone: boolean }[] {
 				const q = currentQuestion();
-				const result: { option: QuestionnaireOption; isNone: boolean }[] = q.options.map(
+				const result: { option: QuizOption; isNone: boolean }[] = q.options.map(
 					(option) => ({ option, isNone: false }),
 				);
-				result.push({
-					option: { value: NONE_VALUE, label: "None", description: NONE_DESC },
-					isNone: true,
-				});
+				if (includeNone) {
+					result.push({
+						option: { value: NONE_VALUE, label: "None", description: NONE_DESC },
+						isNone: true,
+					});
+				}
 				return result;
 			}
 
@@ -196,10 +207,10 @@ export async function askQuestionnaire(
 			}
 
 			function render(width: number): string[] {
-				if (cachedLines) return cachedLines;
 				const renderWidth = Math.max(1, width);
+				if (cachedLines && cachedWidth === renderWidth) return cachedLines.slice();
 				const question = currentQuestion();
-				const lines: string[] = [theme.fg("text", "─".repeat(renderWidth))];
+				const lines: string[] = [chatboxBorderColor("─".repeat(renderWidth))];
 				addWrappedWithPrefix(lines, " ", theme.fg("text", theme.bold(title)), renderWidth);
 				addWrappedWithPrefix(
 					lines,
@@ -218,7 +229,7 @@ export async function askQuestionnaire(
 						addWrappedWithPrefix(
 							lines,
 							prefix,
-							theme.fg("dim", `${i + 1}. ${option.label}`),
+							theme.fg("muted", `${i + 1}. ${option.label}`),
 							renderWidth,
 						);
 					}
@@ -234,29 +245,34 @@ export async function askQuestionnaire(
 					for (const line of editor.render(Math.max(1, renderWidth - 2))) {
 						lines.push(` ${line}`);
 					}
-					lines.push("");
-					addWrappedWithPrefix(
-						lines,
-						" ",
-						theme.fg("dim", "Enter to submit • Esc back to options"),
-						renderWidth,
-					);
-					lines.push(theme.fg("text", "─".repeat(renderWidth)));
+					lines.push(chatboxBorderColor("─".repeat(renderWidth)));
 					cachedLines = lines;
-					return lines;
+					cachedWidth = renderWidth;
+					return lines.slice();
 				}
 
 				const opts = displayOptions();
 				for (let i = 0; i < opts.length; i++) {
 					const { option, isNone } = opts[i];
 					const selected = i === optionIndex;
-					const prefix = selected ? theme.fg("text", "> ") : "  ";
-					const color = selected ? "text" : "muted";
 					const labelSuffix = isNone && inputMode ? " ✎" : "";
+					const label = `${i + 1}. ${option.label}${labelSuffix}`;
+					let prefix: string;
+					let painted: string;
+					if (selected && option.selectedColor) {
+						prefix = colorize(option.selectedColor, "> ");
+						painted = colorize(option.selectedColor, label);
+					} else if (selected) {
+						prefix = theme.fg("text", "> ");
+						painted = theme.fg("text", label);
+					} else {
+						prefix = "  ";
+						painted = theme.fg("dim", label);
+					}
 					addWrappedWithPrefix(
 						lines,
 						prefix,
-						theme.fg(color, `${i + 1}. ${option.label}${labelSuffix}`),
+						painted,
 						renderWidth,
 					);
 					if (option.description) {
@@ -269,16 +285,10 @@ export async function askQuestionnaire(
 					}
 				}
 
-				lines.push("");
-				addWrappedWithPrefix(
-					lines,
-					" ",
-					theme.fg("dim", "Up/Down navigate | Enter select | Left/Right revisit | Esc cancel"),
-					renderWidth,
-				);
-				lines.push(theme.fg("text", "─".repeat(renderWidth)));
+				lines.push(chatboxBorderColor("─".repeat(renderWidth)));
 				cachedLines = lines;
-				return lines;
+				cachedWidth = renderWidth;
+				return lines.slice();
 			}
 
 			function handleInput(data: string): void {
@@ -351,17 +361,17 @@ export async function askQuestionnaire(
 	return result.cancelled ? undefined : result.answers;
 }
 
-export function registerQuestionnaireTool(pi: any): void {
+export function registerQuizTool(pi: any): void {
 	pi.registerTool({
-		name: "questionnaire",
-		label: "Questionnaire",
+		name: "quiz",
+		label: "Quiz",
 		description: "Ask the user one or more decision questions inline before continuing.",
-		parameters: QuestionnaireParams,
+		parameters: QuizParams,
 		executionMode: "sequential",
 		renderShell: "self",
 		async execute(
 			_toolCallId: string,
-			params: { questions: QuestionnaireQuestion[] },
+			params: { questions: QuizQuestion[] },
 			_signal: AbortSignal,
 			_onUpdate: unknown,
 			ctx: any,
@@ -371,7 +381,7 @@ export function registerQuestionnaireTool(pi: any): void {
 					content: [
 						{
 							type: "text",
-							text: "Error: Questionnaire UI is only available in interactive mode.",
+							text: "Error: Quiz UI is only available in interactive mode.",
 						},
 					],
 					details: { answers: [], cancelled: true },
@@ -385,35 +395,35 @@ export function registerQuestionnaireTool(pi: any): void {
 					content: [
 						{
 							type: "text",
-							text: "Error: Questionnaire questions require at least one option.",
+							text: "Error: Quiz questions require at least one option.",
 						},
 					],
 					details: { answers: [], cancelled: true },
 				};
 			}
 
-			const answers = await askQuestionnaire(ctx, "Questionnaire", params.questions);
+			const answers = await askQuiz(ctx, "Quiz", params.questions);
 			return {
 				content: [
 					{
 						type: "text",
 						text:
 							answers === undefined
-								? "User cancelled the questionnaire."
+								? "User cancelled the quiz."
 								: format_answers_for_model(params.questions, answers),
 					},
 				],
 				details: { answers: answers ?? [], cancelled: answers === undefined },
 			};
 		},
-		renderCall(args: { questions?: QuestionnaireQuestion[] }, _theme: any): any {
+		renderCall(args: { questions?: QuizQuestion[] }, _theme: any): any {
 			// Compact bullet row, consistent with every other tool. The
-			// interactive overlay (askQuestionnaire) owns the two chatbox
+			// interactive overlay (askQuiz) owns the two chatbox
 			// horizontal rules the user sees; wrapping the transcript tag in
 			// chatboxBorderContainer here added a third/fourth `─` line.
 			const count = args.questions?.length ?? 0;
 			return new Text(
-				`${_theme.fg("muted", "• ")}${_theme.fg("toolTitle", _theme.bold("questionnaire "))}${_theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`)}`,
+				`${_theme.fg("muted", "• ")}${_theme.fg("dim", _theme.bold("quiz "))}${_theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`)}`,
 				0,
 				0,
 			);
@@ -422,11 +432,11 @@ export function registerQuestionnaireTool(pi: any): void {
 			result: any,
 			_options: unknown,
 			theme: any,
-			context: { args?: { questions?: QuestionnaireQuestion[] } },
+			context: { args?: { questions?: QuizQuestion[] } },
 		): any {
 			const details = result.details as
 				| {
-						answers?: QuestionnaireAnswer[];
+						answers?: QuizAnswer[];
 						cancelled?: boolean;
 				  }
 				| undefined;
@@ -438,12 +448,13 @@ export function registerQuestionnaireTool(pi: any): void {
 			return new Text(
 				answers
 					.map((answer) => {
-						const q = questions.find((q: QuestionnaireQuestion) => q.id === answer.id);
+						const q = questions.find((q: QuizQuestion) => q.id === answer.id);
 						const q_title = q?.label ?? q?.id ?? answer.id;
 						const q_prompt = q?.prompt ?? "";
 						const prefix = answer.wasCustom ? "(custom) " : "";
-						const label = `${q_title}: ${q_prompt} → ${prefix}${answer.label}`;
-						return `${theme.fg("success", "Selected: ")}${theme.fg("text", label)}`;
+						const questionText = `${q_title}: ${q_prompt}`;
+						const answerText = `${prefix}${answer.label}`;
+						return `${theme.fg("dim", `${questionText} → `)}${theme.fg("text", answerText)}`;
 					})
 					.join("\n"),
 				0,

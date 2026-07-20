@@ -8,6 +8,7 @@ import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 import piEmberDcpPlugin from "./pi-ember-dcp/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
+import piEmberTodoPlugin from "./pi-ember-todo/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 import piEmberWebtoolsPlugin from "./pi-ember-webtools/extensions/index.ts";
@@ -21,6 +22,7 @@ type PluginId =
 	| "devin-auth"
 	| "pi-cursor-auth"
 	| "pi-ember-fff"
+	| "pi-ember-todo"
 	| "pi-ember-ui"
 	| "pi-ember-tps"
 	| "pi-ember-webtools";
@@ -38,6 +40,7 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-custom-agents",
 	"pi-ember-dcp",
 	"pi-ember-fff",
+	"pi-ember-todo",
 	"pi-ember-ui",
 	"pi-ember-tps",
 	"pi-ember-webtools",
@@ -61,7 +64,7 @@ const PLUGINS: readonly StackPlugin[] = [
 	},
 	{
 		id: "pi-custom-agents",
-		description: "Questionnaire, primary modes, plans, subagents, and bundled agent definitions",
+		description: "Quiz, primary modes, plans, subagents, and bundled agent definitions",
 		extension: piCustomAgentsPlugin,
 	},
 	{
@@ -73,6 +76,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-ember-fff",
 		description: "FFF-powered grep and find with compact rendering",
 		extension: piEmberFffPlugin,
+	},
+	{
+		id: "pi-ember-todo",
+		description: "Task list with blockedBy DAG, /todos command, and above-editor overlay",
+		extension: piEmberTodoPlugin,
 	},
 	{
 		id: "pi-ember-ui",

@@ -207,8 +207,12 @@ function handle_model_command_text(editor: any, text: string): boolean {
 		}
 	}
 
-	open_model_autocomplete(editor, searchTerm);
-	return true;
+	// Fall through to Pi's original submitValue → onSubmit → handleModelCommand.
+	// Pi's handler awaits modelRuntime.refresh() before searching, so it resolves
+	// models that aren't in the synchronous getAvailable() snapshot (newly
+	// refreshed catalogs, scoped models, OAuth providers). Reopening the
+	// autocomplete here would loop forever when the sync snapshot is stale.
+	return false;
 }
 
 /**
@@ -324,7 +328,11 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 				finalize_editor_input_after(editor);
 				return;
 			}
-			if ((is_confirm || is_submit || is_tab) && should_auto_submit_slash_text(text) && typeof editor.submitValue === "function") {
+			if (
+				(is_confirm || is_submit || is_tab) &&
+				should_auto_submit_slash_text(text) &&
+				typeof editor.submitValue === "function"
+			) {
 				editor.submitValue();
 				finalize_editor_input_after(editor);
 				return;

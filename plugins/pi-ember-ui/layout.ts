@@ -38,11 +38,14 @@ export function sync_slash_command_active(editor: { getText?: () => string }): v
 	was_slash_command = editor_text_starts_with_slash(editor);
 }
 
+type CursorPos = { row: number; col: number } | null;
+
 type TuiRenderInternals = {
 	terminal: {
 		rows: number;
 		columns: number;
 		clearScreen?: () => void;
+		write?: (data: string) => void;
 	};
 	render: (width: number) => string[];
 	previousLines?: string[];
@@ -56,6 +59,17 @@ type TuiRenderInternals = {
 	setClearOnShrink?: (enabled: boolean) => void;
 	requestRender?: (force?: boolean) => void;
 	stopped?: boolean;
+	// Optional render-pipeline methods (same ones doRender calls). All guarded
+	// with typeof checks so a missing method degrades gracefully rather than
+	// crashing. Used by snap_tui_to_bottom to render the visible viewport
+	// in-place without reprinting the entire transcript into scrollback.
+	overlayStack?: unknown[];
+	compositeOverlays?: (lines: string[], termWidth: number, termHeight: number) => string[];
+	extractCursorPosition?: (lines: string[], height: number) => CursorPos;
+	applyLineResets?: (lines: string[]) => string[];
+	deleteKittyImages?: (ids: Set<number>) => string;
+	collectKittyImageIds?: (lines: string[]) => Set<number>;
+	positionHardwareCursor?: (cursorPos: CursorPos, totalLines: number) => void;
 };
 
 type EditorWithTui = {
@@ -74,51 +88,107 @@ export function disable_tui_clear_on_shrink(tui: TUI): void {
 }
 
 /**
- * Reset only the visible terminal screen before a snap render. Pi's
- * normal full reset also emits `3J`, which destroys scrollback. Clearing the
- * screen through the terminal abstraction preserves scrollback, while making
- * the next ordinary render rebuild from the current top-down layout instead
- * of leaving stale rows behind. After this reset, `doRender()` sees
- * `previousLines.length === 0` and takes the first-render branch
- * (`fullRender(false)` — no `3J`), which re-renders every line and sets
- * `previousViewportTop = bufferLength - height`, pinning the chatbox to the
- * bottom without touching scrollback.
- */
-function reset_screen_without_scrollback(tui: TuiRenderInternals): void {
-	tui.terminal.clearScreen?.();
-	tui.previousLines = [];
-	tui.previousKittyImageIds = new Set();
-	tui.previousWidth = 0;
-	tui.previousHeight = 0;
-	tui.cursorRow = 0;
-	tui.hardwareCursorRow = 0;
-	tui.maxLinesRendered = 0;
-	tui.previousViewportTop = 0;
-}
-
-/**
  * Pin the chatbox to the bottom of the viewport while preserving terminal
- * scrollback. This is the scrollback-safe equivalent of Pi's
- * `requestRender(true)`: it clears only the visible screen (`2J`, never `3J`),
- * resets Pi's differential bookkeeping, and requests a normal render whose
- * first-render path re-anchors `previousViewportTop` to the bottom. Use this
- * for any snap that must re-pin the viewport after a line-count shrink
- * (compact-group collapse, thinking-toggle rebuild). Never call
- * `tui.requestRender(true)` from render/lifecycle paths — it emits `3J` and
- * destroys scrollback.
+ * scrollback AND without reprinting the entire transcript. This is the
+ * scrollback-safe, bloat-free equivalent of Pi's `requestRender(true)`.
+ *
+ * It renders the full content via `tui.render(width)`, runs the same pipeline
+ * as `doRender` (composite overlays, extract cursor, apply line resets), then
+ * writes ONLY the bottom `height` lines (the visible viewport) to the terminal
+ * with `\x1b[2J\x1b[H` (clears the visible screen, never `3J` which would
+ * destroy scrollback). The full `newLines` array is stored in `previousLines`
+ * so the next render is a correct differential against the full transcript —
+ * nothing is lost, only the visible rows are painted.
+ *
+ * This eliminates the duplicate-snapshot bloat that happened when the old
+ * snap reset `previousLines = []` and let `doRender`'s first-render branch
+ * reprint every line of the transcript into the terminal buffer on each
+ * toggle (holding the thinking-blocks toggle pushed N copies of the whole
+ * transcript into scrollback). Printing only `height` lines means nothing
+ * spills into scrollback: `2J\x1b[H` clears exactly `height` rows and the
+ * `height` written lines fill exactly the visible screen.
+ *
+ * The snap completes the render synchronously and does NOT call
+ * `requestRender` — any pending `requestRender` from Pi (e.g. `showStatus`)
+ * fires next tick as a harmless no-op diff against the now-correct
+ * `previousLines`.
+ *
+ * Use this for any snap that must re-pin the viewport after a line-count
+ * shrink (compact-group collapse, thinking-toggle rebuild, slash-command
+ * exit). Never call `tui.requestRender(true)` from render/lifecycle paths —
+ * it emits `3J` and destroys scrollback.
  *
  * Returns true when the snap was applied, false when it could not run safely
- * (no TUI bound, or the TUI is stopped). Callers MUST NOT fall back to
- * `requestRender(true)` on a false return — a missing TUI means we are outside
- * a live TUI session where a snap is meaningless.
+ * (no TUI bound, TUI stopped, or the TUI lacks the render/write/clearScreen
+ * methods the in-place render needs). Callers MUST NOT fall back to
+ * `requestRender(true)` on a false return — a missing TUI means we are
+ * outside a live TUI session where a snap is meaningless.
  */
 export function snap_tui_to_bottom(tui: TuiRenderInternals | undefined | null): boolean {
 	if (!tui) return false;
 	if (tui.stopped) return false;
 	if (typeof tui.terminal?.clearScreen !== "function") return false;
-	if (typeof tui.requestRender !== "function") return false;
-	reset_screen_without_scrollback(tui);
-	tui.requestRender(false);
+	if (typeof tui.terminal?.write !== "function") return false;
+	if (typeof tui.render !== "function") return false;
+
+	const width = tui.terminal.columns;
+	const height = tui.terminal.rows;
+	if (!width || !height) return false;
+
+	// Render the full content (same call doRender makes).
+	let new_lines = tui.render(width);
+	// Composite overlays into the rendered lines, matching doRender.
+	if (tui.overlayStack && tui.overlayStack.length > 0 && typeof tui.compositeOverlays === "function") {
+		new_lines = tui.compositeOverlays(new_lines, width, height);
+	}
+	// Extract cursor marker before applying line resets (same order as doRender).
+	const cursor_pos =
+		typeof tui.extractCursorPosition === "function" ? tui.extractCursorPosition(new_lines, height) : null;
+	if (typeof tui.applyLineResets === "function") {
+		new_lines = tui.applyLineResets(new_lines);
+	} else {
+		// Minimal fallback: ensure each line is a string.
+		for (let i = 0; i < new_lines.length; i++) {
+			if (typeof new_lines[i] !== "string") new_lines[i] = String(new_lines[i] ?? "");
+		}
+	}
+
+	// Only the visible viewport (bottom `height` lines) is written to the
+	// terminal. This is the key difference from the old snap: printing `height`
+	// lines after `2J\x1b[H` fills exactly the visible screen, so nothing spills
+	// into scrollback no matter how tall the transcript is.
+	const viewport_top = Math.max(0, new_lines.length - height);
+	const visible_lines = new_lines.slice(viewport_top);
+
+	// Build a synchronized-output buffer: delete previous kitty images, clear
+	// the visible screen (2J, never 3J), then write the viewport lines.
+	let buffer = "\x1b[?2026h";
+	if (typeof tui.deleteKittyImages === "function" && tui.previousKittyImageIds) {
+		buffer += tui.deleteKittyImages(tui.previousKittyImageIds);
+	}
+	buffer += "\x1b[2J\x1b[H";
+	for (let i = 0; i < visible_lines.length; i++) {
+		if (i > 0) buffer += "\r\n";
+		buffer += visible_lines[i];
+	}
+	buffer += "\x1b[?2026l";
+	tui.terminal.write(buffer);
+
+	// Update all bookkeeping so the next render is a correct differential
+	// against the FULL transcript (not just the visible slice).
+	tui.previousLines = new_lines;
+	tui.previousKittyImageIds =
+		typeof tui.collectKittyImageIds === "function" ? tui.collectKittyImageIds(new_lines) : new Set();
+	tui.cursorRow = Math.max(0, new_lines.length - 1);
+	tui.hardwareCursorRow = Math.max(0, new_lines.length - 1);
+	tui.maxLinesRendered = Math.max(tui.maxLinesRendered ?? 0, new_lines.length);
+	tui.previousViewportTop = viewport_top;
+	tui.previousWidth = width;
+	tui.previousHeight = height;
+
+	if (typeof tui.positionHardwareCursor === "function") {
+		tui.positionHardwareCursor(cursor_pos, new_lines.length);
+	}
 	return true;
 }
 

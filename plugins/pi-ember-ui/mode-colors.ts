@@ -59,19 +59,19 @@ export function setShellMode(active: boolean): void {
 	(globalThis as any)[SHELL_MODE_KEY] = active;
 }
 
-/** Questionnaire-overlay-active flag stored on `globalThis` via `Symbol.for`
+/** Quiz-overlay-active flag stored on `globalThis` via `Symbol.for`
  *  so it survives jiti module duplication (same pattern as SHELL_MODE_KEY).
- *  Set by the questionnaire tool when a custom overlay opens/closes. Read
- *  by the Thinking/Working widget to suppress itself while a questionnaire
+ *  Set by the quiz tool when a custom overlay opens/closes. Read
+ *  by the Thinking/Working widget to suppress itself while a quiz
  *  (e.g. Plan Review, Tool Loop Detected) is showing. */
-const QUESTIONNAIRE_ACTIVE_KEY = Symbol.for("pi-ember-ui:questionnaire-active");
+const QUIZ_ACTIVE_KEY = Symbol.for("pi-ember-ui:quiz-active");
 
-export function isQuestionnaireActive(): boolean {
-	return (globalThis as any)[QUESTIONNAIRE_ACTIVE_KEY] === true;
+export function isQuizActive(): boolean {
+	return (globalThis as any)[QUIZ_ACTIVE_KEY] === true;
 }
 
-export function setQuestionnaireActive(active: boolean): void {
-	(globalThis as any)[QUESTIONNAIRE_ACTIVE_KEY] = active;
+export function setQuizActive(active: boolean): void {
+	(globalThis as any)[QUIZ_ACTIVE_KEY] = active;
 }
 
 let latestSubagentRunningFlag = false;
@@ -211,9 +211,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 
 	// Markdown chrome tokens stay non-mode-colored:
 	// - mdHeading / mdListBullet ("1." / "-") use MUTED_COLOR
-	// - mdLink stays frozen at the code-mode accent (#EB6E00)
-	//   and never follows the live mode accent
-	const codeAccent90 = blendToHex(MODE_COLORS.code, PAGE_BG, 0.9);
+	// mdLink follows the live mode accent via accent90.
 
 	return {
 		// Accent-derived tokens (90% opacity blend)
@@ -224,7 +222,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		toolTitle: accentDesat,
 		mdHeading: MUTED_COLOR,
 		mdListBullet: MUTED_COLOR,
-		mdLink: codeAccent90,
+		mdLink: accent90,
 
 		// Inline code foreground uses normal text color; the background
 		// rectangle uses the fixed MUTED_MESSAGE_BG (no accent tint).

@@ -5,7 +5,7 @@ import {
 } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { promisify } from "node:util";
 import type { OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import {
@@ -57,7 +57,7 @@ function find_on_path(
 		if (!dir) continue;
 		for (const ext of extensions) {
 			const candidate =
-				platform === "win32" ? win32.join(dir, `${name}${ext}`) : join(dir, `${name}${ext}`);
+				platform === "win32" ? win32.join(dir, `${name}${ext}`) : posix.join(dir, `${name}${ext}`);
 			if (check_exists(candidate)) return candidate;
 		}
 	}
@@ -115,9 +115,11 @@ export function resolve_cursor_agent_executable(
 
 	// Official install: ~/.local/bin/cursor-agent. Also cover legacy,
 	// Homebrew, and /usr/local paths. Never fall back to bare `agent`.
+	// Use posix.join so non-win32 paths use forward slashes even when the
+	// host is Windows (tests mock platform="linux" with POSIX home paths).
 	const known_paths = [
-		join(home, ".local", "bin", "cursor-agent"),
-		join(home, ".cursor-agent", "cursor-agent"),
+		posix.join(home, ".local", "bin", "cursor-agent"),
+		posix.join(home, ".cursor-agent", "cursor-agent"),
 		"/opt/homebrew/bin/cursor-agent",
 		"/usr/local/bin/cursor-agent",
 	];

@@ -93,6 +93,49 @@ describe("CompactRenderer streaming edit stats", () => {
 		expect(row).toContain("-0");
 	});
 
+	test("edits as a truncated JSON string still yields live +N -N", () => {
+		// Regression: GLM / Opus 4.6 stream `edits` as a JSON string
+		// token-by-token. The renderer used parseJsonWithRepair, which
+		// throws on the unterminated string mid-stream, silently killing
+		// the live +N -N path until the tool completed. parseStreamingJson
+		// returns a partial array so the row updates in real time.
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const state: Record<string, any> = {};
+		const ctx = makeContext("e4b", state) as any;
+
+		// Partial fragment: only oldText has streamed so far (no newText
+		// key yet). parseStreamingJson yields [{ oldText: "a" }] (newText
+		// missing -> ""), so lineDiffCounts("a", "") = +0 -1. Before the
+		// fix this threw inside parseJsonWithRepair and the row had no
+		// live stats at all.
+		r.renderCall(
+			"edit",
+			{
+				file_path: "foo.ts",
+				edits: '[{"oldText":"a',
+			},
+			theme,
+			ctx,
+		);
+		let row = stripAnsi((state.callText as any).text);
+		expect(row).toContain("-1");
+
+		// Completed string: same as the array-form +1 -0.
+		r.renderCall(
+			"edit",
+			{
+				file_path: "foo.ts",
+				edits: '[{"oldText":"a","newText":"a\\nb"}]',
+			},
+			theme,
+			ctx,
+		);
+		row = stripAnsi((state.callText as any).text);
+		expect(row).toContain("+1");
+		expect(row).toContain("-0");
+	});
+
 	test("empty oldText/newText suppresses +0 -0 placeholder", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;

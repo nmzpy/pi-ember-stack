@@ -31,6 +31,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import {
+	MODE_COLORS,
 	mutedBullet,
 	setActiveMode,
 	setPlanAutoContinuing,
@@ -54,10 +55,10 @@ import {
 	wrapModelPickerEditor,
 } from "../pi-ember-ui/index.ts";
 import {
-	askQuestionnaire,
-	type QuestionnaireQuestion,
-	registerQuestionnaireTool,
-} from "./questionnaire-tool.ts";
+	askQuiz,
+	type QuizQuestion,
+	registerQuizTool,
+} from "./quiz-tool.ts";
 import {
 	build_auto_continue_content,
 	COMPACT_FOCUS_INSTRUCTIONS,
@@ -271,7 +272,7 @@ const READONLY_TOOLS = [
 	"grep",
 	"find",
 	"ls",
-	"questionnaire",
+	"quiz",
 	...WEB_ACCESS_TOOLS,
 ];
 const READONLY_DELEGATING_TOOLS = [
@@ -279,7 +280,7 @@ const READONLY_DELEGATING_TOOLS = [
 	"grep",
 	"find",
 	"ls",
-	"questionnaire",
+	"quiz",
 	"subagent",
 	...WEB_ACCESS_TOOLS,
 ];
@@ -291,7 +292,7 @@ const FULL_TOOLS = [
 	"grep",
 	"find",
 	"ls",
-	"questionnaire",
+	"quiz",
 	...WEB_ACCESS_TOOLS,
 ];
 
@@ -371,7 +372,7 @@ should be comprehensive yet concise, detailed enough to execute effectively whil
 avoiding unnecessary verbosity. Include the goal as first part of the plan.
 
 Ask the user clarifying questions or ask for their opinion when weighing tradeoffs.
-Use the questionnaire tool for decision-oriented questions so the user can answer inline.
+Use the quiz tool for decision-oriented questions so the user can answer inline.
 
 NOTE: At any point in time through this workflow you should feel free to ask the
 user questions or clarifications. Don't make large assumptions about user intent.
@@ -415,7 +416,7 @@ Module 2: <action>
 
 Acceptance Criteria: <what done looks like>
 
-Open Questions: <any clarifications needed from the user>
+If you need clarifications before or during the plan, ask the user using the quiz tool; do not emit an Open Questions section.
 ${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
 
@@ -790,7 +791,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	// map. MODES stays the single source of truth for mode labels here.
 	setModeLabelResolver((modeId: string) => MODES[modeId]?.label ?? modeId);
 
-	registerQuestionnaireTool(pi);
+	registerQuizTool(pi);
 
 	for (const modeId of MODE_IDS) {
 		const mode = MODES[modeId];
@@ -1080,7 +1081,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	async function showPlanReview(
 		ctx: any,
 	): Promise<"implement" | "copy" | { action: "refine"; instruction: string } | undefined> {
-		const questions: QuestionnaireQuestion[] = [
+		const questions: QuizQuestion[] = [
 			{
 				id: "plan-review",
 				label: "Plan Review",
@@ -1091,7 +1092,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				],
 			},
 		];
-		const answers = await askQuestionnaire(ctx, "Plan Review", questions);
+		const answers = await askQuiz(ctx, "Plan Review", questions);
 		const answer = answers?.[0];
 		if (answer?.value === "implement") return "implement";
 		if (answer?.value === "copy") return "copy";
@@ -1104,7 +1105,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	async function showLoopRecovery(
 		ctx: any,
 	): Promise<{ action: "end" | "retry" | "custom"; instruction?: string } | undefined> {
-		const questions: QuestionnaireQuestion[] = [
+		const questions: QuizQuestion[] = [
 			{
 				id: "loop-recovery",
 				label: "Tool Loop Detected",
@@ -1115,7 +1116,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				],
 			},
 		];
-		const answers = await askQuestionnaire(ctx, "Tool Loop Detected", questions);
+		const answers = await askQuiz(ctx, "Tool Loop Detected", questions);
 		const choice = answers?.[0]?.value;
 		if (choice === "end") return { action: "end" };
 		if (choice === "retry") return { action: "retry" };
@@ -1129,12 +1130,37 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			pi.sendUserMessage("Execute the plan following the modules.");
 			return;
 		}
-		const target = await ctx.ui.select("Implement via", ["Code", "Orchestrate"]);
-		if (!target) {
+		const implementQuestions: QuizQuestion[] = [
+			{
+				id: "implement-via",
+				label: "Implement",
+				prompt: "Implement the plan via which mode?",
+				options: [
+					{
+						value: "code",
+						label: "Code",
+						description: "Execute the plan with full tool access.",
+						selectedColor: MODE_COLORS.code,
+					},
+					{
+						value: "orchestrate",
+						label: "Orchestrate",
+						description: "Delegate the plan to subagents.",
+						selectedColor: MODE_COLORS.orchestrate,
+					},
+				],
+			},
+		];
+		const answers = await askQuiz(ctx, "Implement via", implementQuestions, {
+			includeNone: false,
+		});
+		const answer = answers?.[0];
+		if (!answer) {
 			ctx.ui.notify("Plan implementation cancelled.");
 			return;
 		}
-		const targetMode = target === "Orchestrate" ? "orchestrate" : DEFAULT_MODE;
+		const target = answer.value === "orchestrate" ? "Orchestrate" : "Code";
+		const targetMode = answer.value === "orchestrate" ? "orchestrate" : DEFAULT_MODE;
 		await switchMode(targetMode, ctx);
 		const msg =
 			target === "Orchestrate"

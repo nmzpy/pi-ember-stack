@@ -53,8 +53,8 @@
     duplicate the output-limit suppression logic that sets it. The flag
     suppresses the length-error row during auto-continue recovery in all
     modes, not only plan mode.
-  - The questionnaire-active flag (`isQuestionnaireActive`/
-    `setQuestionnaireActive`) lives in `pi-ember-ui/mode-colors.ts` — never
+  - The quiz-active flag (`isQuizActive`/
+    `setQuizActive`) lives in `pi-ember-ui/mode-colors.ts` — never
     duplicate the overlay-active logic that sets it.
 - **DRY:** Keep one canonical implementation for each tool, mode, provider, and
   configuration rule. Do not recreate functionality in parallel plugin folders.
@@ -75,12 +75,20 @@
   terminal scrollback and pins the viewport to the bottom (the "can't
   scroll anymore" bug). Use `requestTuiRenderSnapToBottom()` (re-exported
   from `pi-ember-ui/layout.ts` `snap_tui_to_bottom`) for any snap that must
-  re-pin the chatbox to the bottom after a line-count shrink: it clears only
-  the visible screen (`\x1b[2J\x1b[H`, never `3J`), resets Pi's
-  differential bookkeeping, and requests a normal render whose first-render
-  path re-anchors `previousViewportTop` to the bottom. The slash-command
-  exit snap, the thinking-toggle snap, and the compact-group auto-settle
-  snap all use this helper.
+  re-pin the chatbox to the bottom after a line-count shrink: it renders
+  the full content via `tui.render(width)`, runs the same pipeline as
+  `doRender` (composite overlays, extract cursor, apply line resets), then
+  writes ONLY the bottom `height` lines (the visible viewport) to the
+  terminal with `\x1b[2J\x1b[H` (clears the visible screen, never `3J`).
+  The full `newLines` array is stored in `previousLines` so the next render
+  is a correct differential against the full transcript. Printing only
+  `height` lines means nothing spills into scrollback — holding the
+  thinking-blocks toggle no longer pushes duplicate transcript snapshots
+  into the terminal buffer. The snap completes the render synchronously
+  and does NOT call `requestRender`; any pending `requestRender` from Pi
+  fires next tick as a harmless no-op diff. The slash-command exit snap,
+  the thinking-toggle snap, and the compact-group auto-settle snap all use
+  this helper.
 - **Token-First Theming:** All UI colors must flow through theme tokens (`theme.fg`,
   `theme.bg`) or the shared `mode-colors.ts` helpers. Never embed raw hex or ANSI
   escape sequences directly in renderer or component code. The live accent color is
@@ -245,8 +253,8 @@
   `agentRunPending`, and `summarizingActive` and remains visible while compact
   groups are active, so the chatbox state is never hidden by an
   `Exploring`/`Editing`/`Writing`/`Bashing` transcript group. It is
-  suppressed when a questionnaire overlay is active
-  (`isQuestionnaireActive()` in `mode-colors.ts`, set by the questionnaire
+  suppressed when a quiz overlay is active
+  (`isQuizActive()` in `mode-colors.ts`, set by the quiz
   tool) so the Thinking/Working header does not show behind a Plan Review
   or Tool Loop Detected prompt. The
   `agentRunPending` flag (SSOT in `pi-ember-ui/index.ts`, never duplicated)
@@ -298,8 +306,8 @@
   these backgrounds and never re-derive them from the accent. The subagent
   background is applied per completed/failed row only; running rows and the
   `Subagents` header remain transparent.
-- **User-message / questionnaire / compaction border style:**
-  `UserMessageComponent`, the questionnaire `renderCall`/`renderResult`, and
+- **User-message / quiz / compaction border style:**
+  `UserMessageComponent`, the quiz `renderCall`/`renderResult`, and
   `CompactionSummaryMessageComponent` use chatbox-style horizontal rules (`──`)
   at 50% opacity over `PAGE_BG`, sourced from `TEXT_COLOR` via
   `colorWithOpacity(..., 0.5)` in `pi-ember-ui/index.ts`. The
@@ -323,22 +331,21 @@
   `pi-agents-loop-retry`) telling the model which tools it lost, which it
   gained, and its current tool set. This steers the next turn without
   cluttering the transcript. Never duplicate this reminder in other plugins.
-- **Frozen code-accent visuals:** The Pi header logo gradient and the header
-  bullet (`•`) are frozen at the code-mode accent (`MODE_COLORS.code` =
-  `#EB6E00`) in every mode — they never follow the live mode accent. The
-  Markdown token `mdLink` is also frozen at the code accent.
-  `mdHeading` and `mdListBullet` (ordered `1.` / unordered `-` markers)
-  use `MUTED_COLOR` — never the live or code accent. Compact-tool match
-  counts (`N matches`) also use `muted`. The header render closure in
-  `pi-ember-ui/index.ts` passes `MODE_COLORS.code` to
-  `renderLogoWithGradient` and paints the header bullet via `fgAnsi` +
-  `MODE_COLORS.code` directly (not `mdListBullet`). Pi's startup update
-  notice (`pi update` / changelog URL) is patched in
-  `installUpdateNotificationPatch` to use `text`/`muted` instead of
-  `accent`, so it never inherits the startup mode color (e.g. plan purple).
-  Everything else (footer mode label, thinking/working gradient, borders,
-  tool titles, `customMessageLabel`) continues to follow the live mode
-  accent. Never rewire the logo/header-bullet to `getActiveModeColor()`.
+- **Frozen code-accent visuals:** The startup animated Pi header logo gradient
+  and the startup header bullet (`•`) follow the live mode accent via
+  `getActiveModeColor()`. Once the logo settles to static gray (after the first
+  streamed assistant token or at shutdown), the bullet switches to `dim` and no
+  longer tracks the accent. The Markdown token `mdLink` follows the live accent
+  (90% blend from `buildThemeFgColors`). `mdHeading` and `mdListBullet` (ordered
+  `1.` / unordered `-` markers) use `MUTED_COLOR` — never the live or code accent.
+  Compact-tool match counts (`N matches`) also use `muted`. The header render
+  closure in `pi-ember-ui/index.ts` calls `getActiveModeColor()` for the animated
+  logo bullet; the static branch stays muted. Pi's startup update notice
+  (`pi update` / changelog URL) is patched in `installUpdateNotificationPatch` to
+  use `text`/`muted` instead of `accent`, so it never inherits the startup mode
+  color (e.g. plan purple). Everything else (footer mode label, thinking/working
+  gradient, borders, tool titles, `customMessageLabel`) continues to follow the
+  live mode accent.
 - **Fail Fast, No Fallbacks:** If a plugin cannot register its tools, apply its
   theme, or resolve its bundled agents, surface the error — do not silently
   degrade to a partial experience.
@@ -364,7 +371,7 @@ Pi
     ├── plugins/pi-compact-tools/
     │   └── compact native tool rendering
     ├── plugins/pi-custom-agents/
-    │   ├── primary modes, plans, questionnaire
+    │   ├── primary modes, plans, quiz
     │   └── subagent implementation and bundled agent definitions
     ├── plugins/devin-auth/
     │   └── Devin provider, OAuth, catalog, and streaming
@@ -535,16 +542,17 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `index.ts` is injected into every mode prompt (`plan`, `code`, `debug`,
   `orchestrate`) and mode transitions (`EXIT_TO_CODER`, `PLAN_IMPLEMENT_PROMPT`).
   Plan mode's output contract uses labeled lines (`Task:`, `Investigation:`,
-  `Module N:`, `Acceptance Criteria:`, `Open Questions:`) instead of `##`/`###`
-  markdown. Bundled subagent `.md` definitions (`coder.md`, `scout.md`) inline the
+  `Module N:`, `Acceptance Criteria:`) instead of `##`/`###`
+  markdown. The model uses the quiz tool for any clarifications instead of an
+  `Open Questions:` section. Bundled subagent `.md` definitions (`coder.md`, `scout.md`) inline the
   same directive. `pi-ember-ui` Markdown rendering remains display-only and works
   on plain text.
-- Owns the plan-review flow, questionnaire tool, mode cycling, and
+- Owns the plan-review flow, quiz tool, mode cycling, and
   `/subagent-model`. Registers the mode-id → label resolver
   (`setModeLabelResolver`) so the `pi-ember-ui` footer can render the active
   mode label without duplicating the `MODES` map.
-- **Questionnaire "None" option:** Every question rendered by the
-  questionnaire tool automatically appends a user-only "None" option
+- **Quiz "None" option:** Every question rendered by the
+  quiz tool automatically appends a user-only "None" option
   (value `__none__`, description "Specify the proper answer") that is not
   part of the tool schema or model-supplied options. Selecting it replaces
   the description with an inline multiline `Editor` (from `@earendil-works/pi-tui`)
@@ -552,9 +560,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
   answer (`wasCustom: true`); Escape returns to the option list. The typed
   text flows to the model as the answer value/label.
 - **Plan review:** Every completed plan turn, including turns where the model
-  invoked and received a questionnaire answer, opens the canonical
-  `showPlanReview()` questionnaire. The user can implement, copy, or use the
+  invoked and received a quiz answer, opens the canonical
+  `showPlanReview()` quiz. The user can implement, copy, or use the
   automatic custom `None` option; typed None guidance refines the plan directly.
+  The `Implement via` follow-up uses the quiz renderer (not `ctx.ui.select`)
+  so its dim chatbox borders stay out of the live plan accent; `Code` lights
+  orange (`MODE_COLORS.code`) and `Orchestrate` lights yellow
+  (`MODE_COLORS.orchestrate`) only when selected.
 - **Output-limit auto-continue:** When the model hits the maximum output
   token limit (`stopReason === "length"`) in any mode, the extension
   silently sends a hidden `pi-agents-auto-continue` custom message
@@ -590,7 +602,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - **Repeated tool-call guard:** `pi-custom-agents` tracks consecutive identical
   tool name/argument signatures across turns. After three repetitions it aborts
   the stream, notifies the user with the active model name, and uses the shared
-  questionnaire UI with `End stream`, `Retry`, and the automatic custom `None`
+  quiz UI with `End stream`, `Retry`, and the automatic custom `None`
   option. Retry injects the hidden `pi-agents-loop-retry` message instructing the
   model to back off and use a different tool; a custom None answer is injected
   as hidden guidance. Tracking resets at each agent run and session shutdown.
@@ -634,12 +646,17 @@ field. Keep that mechanism aligned with the actual plugin folders.
   contract), which changes the line count. Without the snap, Pi's
   differential `clearOnShrink` path can leave the viewport not pinned to
   the bottom (the "janked up" chatbox). `requestTuiRenderSnapToBottom()`
-  (re-exported from `pi-ember-ui/layout.ts` `snap_tui_to_bottom`) clears
-  only the visible screen (`\x1b[2J\x1b[H`, never `\x1b[3J`), resets
-  `previousViewportTop`/`maxLinesRendered`/`previousLines`, and requests a
-  normal render whose first-render path (`fullRender(false)`) re-anchors
-  `previousViewportTop` to the bottom — pinning the chatbox without
-  destroying terminal scrollback. The `queueMicrotask` ensures the snap
+  (re-exported from `pi-ember-ui/layout.ts` `snap_tui_to_bottom`) renders
+  the full content via `tui.render(width)`, runs the same pipeline as
+  `doRender` (composite overlays, extract cursor, apply line resets), then
+  writes ONLY the bottom `height` lines (the visible viewport) to the
+  terminal with `\x1b[2J\x1b[H` (never `\x1b[3J`). The full `newLines`
+  array is stored in `previousLines` so the next render is a correct
+  differential against the full transcript. Printing only `height` lines
+  means nothing spills into scrollback — holding the toggle no longer
+  pushes duplicate transcript snapshots into the terminal buffer. The snap
+  completes the render synchronously and does NOT call `requestRender`.
+  The `queueMicrotask` ensures the snap
   fires after the synchronous rebuild but before Pi's next differential
   render tick, winning the race. The detection is O(1) (one keybinding
   match) and only schedules a render when the toggle actually fired, so it
@@ -656,10 +673,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `requestTuiRenderSnapToBottom()` alongside the owner invalidate on the
   same microtask. This is the primary snap — it fires on every auto-settle
   during a run. `requestTuiRenderSnapToBottom()` (re-exported from
-  `pi-ember-ui/layout.ts` `snap_tui_to_bottom`) clears only the visible
-  screen (`\x1b[2J\x1b[H`, never `\x1b[3J`), resets Pi's differential
-  bookkeeping, and requests a normal render whose first-render path pins
-  the chatbox to the bottom without destroying terminal scrollback.
+  `pi-ember-ui/layout.ts` `snap_tui_to_bottom`) renders the full content
+  via `tui.render(width)`, runs the same pipeline as `doRender`, then
+  writes ONLY the bottom `height` lines (the visible viewport) to the
+  terminal with `\x1b[2J\x1b[H` (never `\x1b[3J`). The full `newLines`
+  array is stored in `previousLines` so the next render is a correct
+  differential. Printing only `height` lines means nothing spills into
+  scrollback. The snap completes the render synchronously and does NOT
+  call `requestRender`.
   Non-collapse invalidations (live gradient tick, mid-run bullet pulse,
   appending a new member) stay differential so the TUI stays smooth while
   a group is active. The `will_collapse` check is O(n) over group members
@@ -986,7 +1007,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `plugins/pi-custom-agents/index.ts` is the SSOT for the directive; subagent `.md`
   files inline it since their bodies are standalone system prompts. Plan mode uses a
   labeled-line contract (`Task:`, `Investigation:`, `Module N:`, `Acceptance Criteria:`,
-  `Open Questions:`) instead of `##`/`###` headers.
+  `Acceptance Criteria:`) instead of `##`/`###` headers. The model uses the
+  quiz tool for any clarifications instead of an `Open Questions:` section.
 - Catch specific errors and surface actionable failures. Do not silently swallow
   extension-load, tool-registration, path-resolution, or package-install errors.
 - Do not use absolute Windows paths in published source. Resolve package-owned files

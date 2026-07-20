@@ -30,7 +30,7 @@ function mock_editor_with_tui(options: {
 	max_lines_rendered?: number;
 	requestRender?: (force?: boolean) => void;
 }) {
-	const lines = Array.from({ length: options.line_count }, () => "line");
+	const lines = Array.from({ length: options.line_count }, (_v, i) => `line-${String(i).padStart(3, "0")}`);
 	const tui: Record<string, unknown> = {
 		terminal: {
 			rows: options.rows,
@@ -38,8 +38,18 @@ function mock_editor_with_tui(options: {
 			clearScreen: () => {
 				tui.screenCleared = true;
 			},
+			write: (data: string) => {
+				tui.written = ((tui.written as string) ?? "") + data;
+			},
 		},
 		render: () => lines,
+		overlayStack: [],
+		compositeOverlays: (l: string[]) => l,
+		extractCursorPosition: () => null,
+		applyLineResets: (l: string[]) => l,
+		deleteKittyImages: () => "",
+		collectKittyImageIds: () => new Set<number>(),
+		positionHardwareCursor: () => {},
 		maxLinesRendered: options.max_lines_rendered ?? options.line_count,
 		previousViewportTop: 0,
 		setClearOnShrink: (enabled: boolean) => {
@@ -96,14 +106,31 @@ describe("snap_tui_to_bottom", () => {
 	function mock_tui(options: {
 		stopped?: boolean;
 		with_clear_screen?: boolean;
-		with_request_render?: boolean;
+		with_write?: boolean;
+		with_render?: boolean;
+		line_count?: number;
+		rows?: number;
+		columns?: number;
 	}) {
+		const height = options.rows ?? 10;
+		const line_count = options.line_count ?? 50;
+		const lines = Array.from({ length: line_count }, (_v, i) => `line-${String(i).padStart(3, "0")}`);
+		let written = "";
 		let screen_cleared = false;
-		let render_force: boolean | undefined;
-		const tui = {
-			terminal: options.with_clear_screen === false
-				? {}
-				: { clearScreen: () => { screen_cleared = true; } },
+		const tui: Record<string, unknown> = {
+			terminal: {
+				rows: height,
+				columns: options.columns ?? 80,
+				clearScreen: options.with_clear_screen === false
+					? undefined
+					: () => { screen_cleared = true; },
+				write: options.with_write === false
+					? undefined
+					: (data: string) => { written += data; },
+			},
+			render: options.with_render === false
+				? undefined
+				: () => lines,
 			previousLines: ["a", "b"],
 			previousKittyImageIds: new Set([1, 2]),
 			previousWidth: 80,
@@ -113,33 +140,63 @@ describe("snap_tui_to_bottom", () => {
 			maxLinesRendered: 30,
 			previousViewportTop: 6,
 			stopped: options.stopped ?? false,
-			requestRender: options.with_request_render === false
-				? undefined
-				: (force?: boolean) => { render_force = force; },
+			overlayStack: [],
+			compositeOverlays: (l: string[]) => l,
+			extractCursorPosition: () => null,
+			applyLineResets: (l: string[]) => l,
+			deleteKittyImages: () => "",
+			collectKittyImageIds: () => new Set<number>(),
+			positionHardwareCursor: () => {},
 		};
-		return { tui, screen_cleared: () => screen_cleared, render_force: () => render_force };
+		return { tui, written: () => written, screen_cleared: () => screen_cleared, lines, height, line_count };
 	}
 
-	test("clears visible screen, resets bookkeeping, and requests a normal (non-forced) render", () => {
-		const { tui, screen_cleared, render_force } = mock_tui({});
+	test("writes only the visible viewport (bottom height lines) and stores full newLines", () => {
+		const { tui, written, lines, height, line_count } = mock_tui({});
 		expect(snap_tui_to_bottom(tui as never)).toBe(true);
-		expect(screen_cleared()).toBe(true);
-		expect(render_force()).toBe(false);
-		expect(tui.previousLines).toEqual([]);
+		// Only the bottom `height` lines should be written.
+		const expected_visible = lines.slice(line_count - height);
+		for (const line of expected_visible) {
+			expect(written()).toContain(line);
+		}
+		// Lines above the viewport must NOT be written (no scrollback bloat).
+		for (let i = 0; i < line_count - height; i++) {
+			expect(written()).not.toContain(lines[i]);
+		}
+		// Full newLines stored in previousLines for correct next differential render.
+		expect(tui.previousLines).toEqual(lines);
+		expect(tui.previousViewportTop).toBe(line_count - height);
+		expect(tui.cursorRow).toBe(line_count - 1);
+		expect(tui.hardwareCursorRow).toBe(line_count - 1);
+		expect(tui.maxLinesRendered).toBe(Math.max(30, line_count));
+		expect(tui.previousWidth).toBe(80);
+		expect(tui.previousHeight).toBe(height);
 		expect(tui.previousKittyImageIds).toEqual(new Set());
-		expect(tui.previousWidth).toBe(0);
-		expect(tui.previousHeight).toBe(0);
-		expect(tui.cursorRow).toBe(0);
-		expect(tui.hardwareCursorRow).toBe(0);
-		expect(tui.maxLinesRendered).toBe(0);
+	});
+
+	test("does not call requestRender (render completes synchronously)", () => {
+		let render_called = false;
+		const { tui } = mock_tui({});
+		tui.requestRender = () => { render_called = true; };
+		expect(snap_tui_to_bottom(tui as never)).toBe(true);
+		expect(render_called).toBe(false);
+	});
+
+	test("content shorter than height prints all lines with viewportTop 0", () => {
+		const { tui, written, lines, line_count } = mock_tui({ line_count: 3, rows: 10 });
+		expect(snap_tui_to_bottom(tui as never)).toBe(true);
+		for (const line of lines) {
+			expect(written()).toContain(line);
+		}
+		expect(tui.previousLines).toEqual(lines);
 		expect(tui.previousViewportTop).toBe(0);
+		expect(tui.cursorRow).toBe(line_count - 1);
 	});
 
 	test("returns false and does nothing when the TUI is stopped", () => {
-		const { tui, screen_cleared, render_force } = mock_tui({ stopped: true });
+		const { tui, written } = mock_tui({ stopped: true });
 		expect(snap_tui_to_bottom(tui as never)).toBe(false);
-		expect(screen_cleared()).toBe(false);
-		expect(render_force()).toBeUndefined();
+		expect(written()).toBe("");
 		expect(tui.previousViewportTop).toBe(6);
 	});
 
@@ -149,31 +206,47 @@ describe("snap_tui_to_bottom", () => {
 	});
 
 	test("returns false when the terminal lacks clearScreen", () => {
-		const { tui, screen_cleared, render_force } = mock_tui({ with_clear_screen: false });
+		const { tui, written } = mock_tui({ with_clear_screen: false });
 		expect(snap_tui_to_bottom(tui as never)).toBe(false);
-		expect(screen_cleared()).toBe(false);
-		expect(render_force()).toBeUndefined();
+		expect(written()).toBe("");
 	});
 
-	test("returns false when the TUI lacks requestRender", () => {
-		const { tui, screen_cleared, render_force } = mock_tui({ with_request_render: false });
+	test("returns false when the terminal lacks write", () => {
+		const { tui, written } = mock_tui({ with_write: false });
 		expect(snap_tui_to_bottom(tui as never)).toBe(false);
-		expect(screen_cleared()).toBe(false);
-		expect(render_force()).toBeUndefined();
+		expect(written()).toBe("");
+	});
+
+	test("returns false when the TUI lacks render", () => {
+		const { tui, written } = mock_tui({ with_render: false });
+		expect(snap_tui_to_bottom(tui as never)).toBe(false);
+		expect(written()).toBe("");
 	});
 });
 
 describe("request_overlay_collapse_render (delegates to snap_tui_to_bottom)", () => {
 	test("snaps via the shared helper when the editor has a live TUI", () => {
 		reset_slash_command_tracking();
-		let screen_cleared = false;
+		let written = "";
 		let render_force: boolean | undefined;
 		const editor = {
 			getText: () => "/model ",
 			isShowingAutocomplete: () => true,
 			tui: {
-				terminal: { rows: 24, columns: 80, clearScreen: () => { screen_cleared = true; } },
-				render: () => Array.from({ length: 50 }, () => "line"),
+				terminal: {
+					rows: 24,
+					columns: 80,
+					clearScreen: () => {},
+					write: (data: string) => { written += data; },
+				},
+				render: () => Array.from({ length: 50 }, (_v, i) => `line-${String(i).padStart(3, "0")}`),
+				overlayStack: [],
+				compositeOverlays: (l: string[]) => l,
+				extractCursorPosition: () => null,
+				applyLineResets: (l: string[]) => l,
+				deleteKittyImages: () => "",
+				collectKittyImageIds: () => new Set<number>(),
+				positionHardwareCursor: () => {},
 				maxLinesRendered: 58,
 				previousViewportTop: 12,
 				setClearOnShrink(enabled: boolean) {
@@ -184,10 +257,13 @@ describe("request_overlay_collapse_render (delegates to snap_tui_to_bottom)", ()
 			},
 		};
 		request_overlay_collapse_render(editor as never);
-		expect(render_force).toBe(false);
-		expect(screen_cleared).toBe(true);
-		expect(editor.tui.maxLinesRendered).toBe(0);
-		expect(editor.tui.previousViewportTop).toBe(0);
+		// snap_tui_to_bottom completes synchronously and does not call requestRender.
+		expect(render_force).toBeUndefined();
+		// It writes the visible viewport (bottom 24 of 50 lines) in-place.
+		expect(written).toContain("line-049");
+		expect(written).not.toContain("line-000");
+		expect(editor.tui.maxLinesRendered).toBe(58);
+		expect(editor.tui.previousViewportTop).toBe(50 - 24);
 	});
 });
 
@@ -206,10 +282,13 @@ describe("slash command exit render", () => {
 		finalize_editor_input_after(editor);
 		editor.getText = () => "";
 		finalize_editor_input_after(editor);
-		expect(force).toBe(false);
-		expect(editor.tui.maxLinesRendered).toBe(0);
-		expect(editor.tui.previousViewportTop).toBe(0);
-		expect(editor.tui.screenCleared).toBe(true);
+		// snap_tui_to_bottom completes synchronously; requestRender is NOT called.
+		expect(force).toBeUndefined();
+		// maxLinesRendered is a high-water mark: Math.max(56, 50) = 56.
+		expect(editor.tui.maxLinesRendered).toBe(56);
+		expect(editor.tui.previousViewportTop).toBe(50 - 24);
+		// The snap writes the 2J clear sequence directly via terminal.write.
+		expect((editor.tui.written as string) ?? "").toContain("\x1b[2J");
 		expect(editor.tui.clearOnShrink).toBe(false);
 	});
 
@@ -227,17 +306,19 @@ describe("slash command exit render", () => {
 		finalize_editor_input_after(editor);
 		editor.getText = () => "";
 		finalize_editor_input_after(editor);
-		expect(force).toBe(false);
-		expect(editor.tui.maxLinesRendered).toBe(0);
+		// Content shorter than height: all lines printed, viewportTop 0.
+		expect(force).toBeUndefined();
+		// maxLinesRendered is a high-water mark: Math.max(16, 10) = 16.
+		expect(editor.tui.maxLinesRendered).toBe(16);
 		expect(editor.tui.previousViewportTop).toBe(0);
-		expect(editor.tui.screenCleared).toBe(true);
+		expect((editor.tui.written as string) ?? "").toContain("\x1b[2J");
 		expect(editor.tui.clearOnShrink).toBe(false);
 	});
 
 	test("requests a normal render when overflow autocomplete collapses", () => {
 		reset_slash_command_tracking();
 		let force: boolean | undefined;
-		let screen_cleared = false;
+		let written = "";
 		const editor = {
 			getText: () => "/model ",
 			isShowingAutocomplete: () => true,
@@ -245,11 +326,17 @@ describe("slash command exit render", () => {
 				terminal: {
 					rows: 24,
 					columns: 80,
-					clearScreen: () => {
-						screen_cleared = true;
-					},
+					clearScreen: () => {},
+					write: (data: string) => { written += data; },
 				},
-				render: () => Array.from({ length: 50 }, () => "line"),
+				render: () => Array.from({ length: 50 }, (_v, i) => `line-${String(i).padStart(3, "0")}`),
+				overlayStack: [],
+				compositeOverlays: (l: string[]) => l,
+				extractCursorPosition: () => null,
+				applyLineResets: (l: string[]) => l,
+				deleteKittyImages: () => "",
+				collectKittyImageIds: () => new Set<number>(),
+				positionHardwareCursor: () => {},
 				maxLinesRendered: 58,
 				previousViewportTop: 0,
 				setClearOnShrink(enabled: boolean) {
@@ -264,10 +351,12 @@ describe("slash command exit render", () => {
 		finalize_editor_input_after(editor);
 		editor.isShowingAutocomplete = () => false;
 		finalize_editor_input_after(editor);
-		expect(force).toBe(false);
-		expect(editor.tui.maxLinesRendered).toBe(0);
-		expect(editor.tui.previousViewportTop).toBe(0);
-		expect(screen_cleared).toBe(true);
+		expect(force).toBeUndefined();
+		// maxLinesRendered is a high-water mark: Math.max(58, 50) = 58.
+		expect(editor.tui.maxLinesRendered).toBe(58);
+		expect(editor.tui.previousViewportTop).toBe(50 - 24);
+		expect(written).toContain("line-049");
+		expect(written).toContain("\x1b[2J");
 		expect(editor.tui.clearOnShrink).toBe(false);
 	});
 

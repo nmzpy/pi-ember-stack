@@ -27,14 +27,12 @@ import {
 } from "@earendil-works/pi-tui";
 import {
 	DIM_COLOR,
-	MODE_COLORS,
 	MUTED_MESSAGE_BG,
 	buildThemeBgColors,
 	buildThemeExportColors,
 	buildThemeFgColors,
 	getActiveModeColor,
-	isPlanAutoContinuing,
-	isQuestionnaireActive,
+	isQuizActive,
 	isShellMode,
 	isLatestSubagentRunning,
 	MUTED_COLOR,
@@ -400,7 +398,10 @@ export function requestTuiRender(force = false): void {
  * requestRender might be stale due to jiti module duplication. Falls back to
  * the module-level scheduler if the editor has no live TUI.
  */
-export function requestTuiRenderFromEditor(editor: { tui?: { requestRender?: (force?: boolean) => void } }, force = false): void {
+export function requestTuiRenderFromEditor(
+	editor: { tui?: { requestRender?: (force?: boolean) => void } },
+	force = false,
+): void {
 	if (editor?.tui?.requestRender) {
 		editor.tui.requestRender(force);
 		return;
@@ -475,6 +476,13 @@ function installShellModeInputListener(ctx: any): void {
 	getShellEditor = (): ShellModeEditor | undefined => {
 		const focused = tui.focusedComponent as any;
 		if (!focused) return undefined;
+		// Only wrap actual editor instances. Custom UI components (e.g. the
+		// quiz overlay) sit in the editor container while focused but are
+		// not Editors; wrapping their render with the shell-aware Editor transform
+		// corrupts their cached output and can overdraw the terminal width.
+		if (typeof focused.getText !== "function" || typeof focused.setText !== "function") {
+			return undefined;
+		}
 		wrapEditorRenderForShell(focused);
 		return focused as ShellModeEditor;
 	};
@@ -483,7 +491,7 @@ function installShellModeInputListener(ctx: any): void {
 		const editor = getShellEditor?.();
 		if (!editor) return undefined;
 
-		// Ignore shell mode while an overlay is visible (questionnaire,
+		// Ignore shell mode while an overlay is visible (quiz,
 		// model picker, etc.) because the editor does not have input focus.
 		if (tui.hasOverlay?.()) return undefined;
 
@@ -838,8 +846,15 @@ function installThinkingBorderOverride(): void {
  * per-instance, which is necessary when `@earendil-works/pi-tui` is loaded
  * from multiple module copies and prototype patching only lands on one.
  */
-function render_shell_aware_editor(instance: EditorWithBorder, originalRender: (width: number) => string[], width: number): string[] {
-	const borderColor = isShellMode() || workingActive || agentRunPending || summarizingActive ? MUTED_COLOR : TEXT_COLOR;
+function render_shell_aware_editor(
+	instance: EditorWithBorder,
+	originalRender: (width: number) => string[],
+	width: number,
+): string[] {
+	const borderColor =
+		isShellMode() || workingActive || agentRunPending || summarizingActive
+			? MUTED_COLOR
+			: TEXT_COLOR;
 	const border = (text: string): string => colorize(text, borderColor);
 	const dimBorder = (text: string): string => colorize(text, DIM_COLOR);
 	const INSET = 0;
@@ -851,89 +866,89 @@ function render_shell_aware_editor(instance: EditorWithBorder, originalRender: (
 	const lines = originalRender.call(instance, innerWidth);
 	instance.borderColor = originalBorderColor;
 
-		if (!cursorVisible) {
-			for (let i = 0; i < lines.length; i++) {
-				lines[i] = lines[i].replace(/\x1b\[7m([^\x1b]*)\x1b\[0m/g, (_m: string, p1: string) => p1);
-			}
-		}
-
-		const stripped = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
-		const isBorderLine = (s: string): boolean => {
-			const raw = stripped(s);
-			return (
-				raw.length > 0 &&
-				[...raw].some((ch) => ch === "\u2500") &&
-				[...raw].every((ch) => ch === "\u2500" || ch === " ")
-			);
-		};
-		const borderIndices: number[] = [];
+	if (!cursorVisible) {
 		for (let i = 0; i < lines.length; i++) {
-			if (isBorderLine(lines[i])) borderIndices.push(i);
+			lines[i] = lines[i].replace(/\x1b\[7m([^\x1b]*)\x1b\[0m/g, (_m: string, p1: string) => p1);
 		}
-		const topIdx = borderIndices[0] ?? 0;
-		const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
-		const isSlashMode = instance.getText?.().trimStart().startsWith("/") === true;
-		const hasAutocompleteRows = bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
-		// Slash autocomplete menu expands downward from the chatbox. The
-		// autocomplete rows stay after the editor body, so the menu grows below.
-		const middleBorderIdx = -1;
-
-		const pad = " ".repeat(INSET);
-		const innerPad = " ".repeat(INNER_PAD);
-		const promptGlyph = isShellMode() ? "!" : ">";
-		const promptStr = border(`${promptGlyph} `);
-		const gutter = "  ";
-		const padRight = (s: string): string => {
-			const visLen = visibleWidth(s);
-			return s + " ".repeat(Math.max(0, width - visLen));
-		};
-		const bottomRule = " " + chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2))) + " ";
-		const topRule = bottomRule;
-		const slashMiddleSep =
-			" ".repeat(SLASH_MIDDLE_INSET) +
-			dimBorder("\u2500".repeat(Math.max(1, width - SLASH_MIDDLE_INSET * 2)));
-		const middleSep = padRight(
-			isSlashMode
-				? slashMiddleSep
-				: `${pad}${innerPad}${gutter}${border("\u2500".repeat(innerWidth))}`,
-		);
-
-		let firstBody = true;
-		for (let i = 1; i < lines.length; i++) {
-			const borderIdxPos = borderIndices.indexOf(i);
-			const isMiddleBorder =
-				i === middleBorderIdx ||
-				(middleBorderIdx < 0 && borderIdxPos > 0 && borderIdxPos < borderIndices.length - 1);
-			if (i === bottomBorderIdx && !isMiddleBorder) continue;
-			if (isMiddleBorder) {
-				lines[i] = middleSep;
-				firstBody = false;
-				continue;
-			}
-			const gutterStr = firstBody ? promptStr : gutter;
-			lines[i] = padRight(`${pad}${innerPad}${gutterStr}${lines[i]}`);
-			firstBody = false;
-		}
-		lines[topIdx] = topRule;
-		if (bottomBorderIdx >= 0) {
-			lines[bottomBorderIdx] = middleBorderIdx >= 0 ? middleSep : bottomRule;
-		}
-		const lastLineIdx = lines.length - 1;
-		if (lastLineIdx > bottomBorderIdx && lastLineIdx > 0) {
-			lines.push(bottomRule);
-		}
-		if (hasAutocompleteRows && bottomBorderIdx >= 0) {
-			// The loop above has already applied the chatbox gutter to
-			// autocomplete rows and appended the shell's bottom rule. Keep
-			// them after the editor body so the slash menu expands downward.
-			const bottomRuleIdx = lines.length - 1;
-			const autocompleteLines = lines.slice(bottomBorderIdx + 1, bottomRuleIdx);
-			const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
-			return [topRule, ...editorLines, middleSep, ...autocompleteLines, bottomRule];
-		}
-		if (lines.length === 0) return lines;
-		return lines;
 	}
+
+	const stripped = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+	const isBorderLine = (s: string): boolean => {
+		const raw = stripped(s);
+		return (
+			raw.length > 0 &&
+			[...raw].some((ch) => ch === "\u2500") &&
+			[...raw].every((ch) => ch === "\u2500" || ch === " ")
+		);
+	};
+	const borderIndices: number[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (isBorderLine(lines[i])) borderIndices.push(i);
+	}
+	const topIdx = borderIndices[0] ?? 0;
+	const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
+	const isSlashMode = instance.getText?.().trimStart().startsWith("/") === true;
+	const hasAutocompleteRows = bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
+	// Slash autocomplete menu expands downward from the chatbox. The
+	// autocomplete rows stay after the editor body, so the menu grows below.
+	const middleBorderIdx = -1;
+
+	const pad = " ".repeat(INSET);
+	const innerPad = " ".repeat(INNER_PAD);
+	const promptGlyph = isShellMode() ? "!" : ">";
+	const promptStr = border(`${promptGlyph} `);
+	const gutter = "  ";
+	const padRight = (s: string): string => {
+		const visLen = visibleWidth(s);
+		return s + " ".repeat(Math.max(0, width - visLen));
+	};
+	const bottomRule = " " + chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2))) + " ";
+	const topRule = bottomRule;
+	const slashMiddleSep =
+		" ".repeat(SLASH_MIDDLE_INSET) +
+		dimBorder("\u2500".repeat(Math.max(1, width - SLASH_MIDDLE_INSET * 2)));
+	const middleSep = padRight(
+		isSlashMode
+			? slashMiddleSep
+			: `${pad}${innerPad}${gutter}${border("\u2500".repeat(innerWidth))}`,
+	);
+
+	let firstBody = true;
+	for (let i = 1; i < lines.length; i++) {
+		const borderIdxPos = borderIndices.indexOf(i);
+		const isMiddleBorder =
+			i === middleBorderIdx ||
+			(middleBorderIdx < 0 && borderIdxPos > 0 && borderIdxPos < borderIndices.length - 1);
+		if (i === bottomBorderIdx && !isMiddleBorder) continue;
+		if (isMiddleBorder) {
+			lines[i] = middleSep;
+			firstBody = false;
+			continue;
+		}
+		const gutterStr = firstBody ? promptStr : gutter;
+		lines[i] = padRight(`${pad}${innerPad}${gutterStr}${lines[i]}`);
+		firstBody = false;
+	}
+	lines[topIdx] = topRule;
+	if (bottomBorderIdx >= 0) {
+		lines[bottomBorderIdx] = middleBorderIdx >= 0 ? middleSep : bottomRule;
+	}
+	const lastLineIdx = lines.length - 1;
+	if (lastLineIdx > bottomBorderIdx && lastLineIdx > 0) {
+		lines.push(bottomRule);
+	}
+	if (hasAutocompleteRows && bottomBorderIdx >= 0) {
+		// The loop above has already applied the chatbox gutter to
+		// autocomplete rows and appended the shell's bottom rule. Keep
+		// them after the editor body so the slash menu expands downward.
+		const bottomRuleIdx = lines.length - 1;
+		const autocompleteLines = lines.slice(bottomBorderIdx + 1, bottomRuleIdx);
+		const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
+		return [topRule, ...editorLines, middleSep, ...autocompleteLines, bottomRule];
+	}
+	if (lines.length === 0) return lines;
+	return lines;
+}
 
 function installAssistantMessagePatch(): void {
 	const proto = (AssistantMessageComponent as any).prototype;
@@ -1038,11 +1053,10 @@ function installAssistantMessagePatch(): void {
 
 		const hasToolCalls = message.content.some((c: any) => c.type === "toolCall");
 		this.hasToolCalls = hasToolCalls;
-		// Suppress the output-limit error when auto-continue is active —
-		// the extension compacts and silently sends "continue" so the user
-		// never sees this error or the recovery message.
-		const suppressLengthError =
-			message.stopReason === "length" && isPlanAutoContinuing();
+		// Suppress the output-limit error row entirely — auto-continue
+		// handles recovery within budget; when the budget is exhausted the
+		// model simply stops and no error noise is useful to the user.
+		const suppressLengthError = message.stopReason === "length";
 		if (message.stopReason === "length" && !suppressLengthError) {
 			this.contentContainer.addChild(new Spacer(1));
 			this.contentContainer.addChild(
@@ -1170,7 +1184,12 @@ function installUpdateNotificationPatch(): void {
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
 		// Consecutive info statuses still update the previous status line.
-		if (last && last === this.lastStatusText && secondLast && secondLast === this.lastStatusSpacer) {
+		if (
+			last &&
+			last === this.lastStatusText &&
+			secondLast &&
+			secondLast === this.lastStatusSpacer
+		) {
 			this.lastStatusText.setText(theme.fg("dim", message));
 			this.ui.requestRender();
 			return;
@@ -1253,8 +1272,7 @@ function installUpdateNotificationPatch(): void {
 		}
 
 		const action = theme.fg("text", `${UPDATE_APP_NAME} update --extensions`);
-		const updateInstruction =
-			theme.fg("muted", "Package updates are available. Run ") + action;
+		const updateInstruction = theme.fg("muted", "Package updates are available. Run ") + action;
 		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
@@ -1301,7 +1319,9 @@ function installCompactionStatusPatch(): void {
 
 	proto.clearStatusIndicator = function emberClearStatusIndicator(this: any, kind?: string): any {
 		const active = this.activeStatusIndicator;
-		const wasCompaction = active?.kind === "compaction" && (kind === undefined || kind === "compaction" || kind === active.kind);
+		const wasCompaction =
+			active?.kind === "compaction" &&
+			(kind === undefined || kind === "compaction" || kind === active.kind);
 		if (wasCompaction) stopSummarizingAnimation();
 		return originalClearStatusIndicator.call(this, kind);
 	};
@@ -1361,7 +1381,7 @@ function installBashExecutionPatch(): void {
 }
 
 /** Chatbox-style horizontal-rule color using the dim token. */
-function chatboxBorderColor(text: string): string {
+export function chatboxBorderColor(text: string): string {
 	return colorize(text, DIM_COLOR);
 }
 
@@ -1369,7 +1389,7 @@ function chatboxBorderColor(text: string): string {
  * Wrap a content component in chatbox-style horizontal lines: top and bottom
  * `──` rules at 50% opacity, with 1-column left/right inner padding and no
  * background fill. Replaces the old `userMessageBg` block style for user
- * messages and questionnaire rows.
+ * messages and quiz rows.
  */
 export function chatboxBorderContainer(content: any, paddingX = 1): any {
 	const wrapper = new Container();
@@ -1420,27 +1440,20 @@ function installCompactionSummaryPatch(): void {
 		const after = Math.ceil(this.message.summary.length / 4).toLocaleString();
 
 		const wrapper = new Container();
-		const header = new Text(theme.fg("customMessageLabel", "\x1b[1mCompaction\x1b[22m"), 0, 0);
+		const header = new Text(theme.fg("text", "\x1b[1mCompaction\x1b[22m"), 0, 0);
 		wrapper.addChild(header);
 		wrapper.addChild(new Spacer(1));
 
 		const bodyText = `Summarized ${before} tokens into ~${after}.`;
 		let body: any;
 		if (this.expanded) {
-			body = new Markdown(
-				this.message.summary,
-				0,
-				0,
-				this.markdownTheme,
-				{
-					color: (text: string) => theme.fg("customMessageText", text),
-				},
-			);
+			body = new Markdown(this.message.summary, 0, 0, this.markdownTheme, {
+				color: (text: string) => theme.fg("customMessageText", text),
+			});
 		} else {
 			const expandKey = (globalThis as any).process?.env?.["PI_EXPAND_KEY"] || "ctrl+o";
 			body = new Text(
-				theme.fg("customMessageText", bodyText) +
-					theme.fg("dim", ` (${expandKey} to expand)`),
+				theme.fg("customMessageText", bodyText) + theme.fg("dim", ` (${expandKey} to expand)`),
 				0,
 				0,
 			);
@@ -1757,7 +1770,7 @@ const ACCENT_TEXT_RECOLORERS: Array<{
 }> = [
 	{
 		match: (s) => s === "\u2713 New session started",
-		recolor: (theme) => `${theme.fg("accent", "\u2713 New session started")}`,
+		recolor: (theme) => `${theme.fg("text", "\u2713 New session started")}`,
 	},
 	{
 		match: (s) => s === "What's New",
@@ -1809,7 +1822,7 @@ function invalidateLoadedResources(): void {
 					node.setText(entry.recolor(theme));
 					break;
 				}
-		}
+			}
 		}
 
 		// Recurse into children.
@@ -1834,17 +1847,17 @@ function installStartupHeader(ctx: any): void {
 				const model = ctx.model;
 				const modelName = model?.name ?? model?.id ?? "no model";
 
-				// Logo gradient + header bullet are frozen at the code-mode accent
-				// (#EB6E00) in every mode — they never follow the live mode accent.
+				// The animated startup logo and header bullet follow the live mode
+				// accent (plan/code/orchestrate/debug). After the first assistant
+				// token the logo goes static gray and the bullet goes dim.
 				// mdListBullet is muted (list "1." / "-" markers); do not reuse it here.
-				const accent = MODE_COLORS.code;
+				const accent = getActiveModeColor();
 				const logoLines = renderLogoWithGradient(accent);
 				const logoWidth = visibleWidth(logoLines[0] ?? "");
 				const leftPad = Math.max(0, Math.floor((width - logoWidth) / 2));
 				const padStr = " ".repeat(leftPad);
 				// Once the logo turns static/gray (after the first assistant token
-				// or at shutdown), the header bullet should match the dim model/dir
-				// color instead of staying code-orange.
+				// or at shutdown), the header bullet goes dim to match the model/dir.
 				const headerBullet = logoStatic
 					? theme.fg("dim", "\u2022")
 					: `${fgAnsi(accent)}\u2022\x1b[39m`;
@@ -1935,9 +1948,10 @@ function installThinkingWidget(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
 		render(_width: number): string[] {
-			if (isQuestionnaireActive() || isLatestSubagentRunning()) return [];
+			if (isQuizActive() || isLatestSubagentRunning()) return [];
 			const elapsedMs = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
-			const elapsedText = elapsedMs >= 1000 && !summarizingActive ? ` ${formatElapsed(elapsedMs)}` : "";
+			const elapsedText =
+				elapsedMs >= 1000 && !summarizingActive ? ` ${formatElapsed(elapsedMs)}` : "";
 			const WIDGET_INSET = 1;
 			const widgetPad = " ".repeat(WIDGET_INSET);
 			const theme = resolve_live_theme();

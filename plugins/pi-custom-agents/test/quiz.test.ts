@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { format_answers_for_model, type QuestionnaireQuestion } from "../questionnaire-tool.ts";
+import { format_answers_for_model, type QuizQuestion } from "../quiz-tool.ts";
 
-const questions: QuestionnaireQuestion[] = [
+const questions: QuizQuestion[] = [
 	{
 		id: "plan-review",
 		label: "Plan Review",
