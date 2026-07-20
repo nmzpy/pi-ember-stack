@@ -74,13 +74,17 @@ export function disable_tui_clear_on_shrink(tui: TUI): void {
 }
 
 /**
- * Reset only the visible terminal screen before the collapse render. Pi's
+ * Reset only the visible terminal screen before a snap render. Pi's
  * normal full reset also emits `3J`, which destroys scrollback. Clearing the
  * screen through the terminal abstraction preserves scrollback, while making
  * the next ordinary render rebuild from the current top-down layout instead
- * of leaving stale autocomplete rows behind.
+ * of leaving stale rows behind. After this reset, `doRender()` sees
+ * `previousLines.length === 0` and takes the first-render branch
+ * (`fullRender(false)` — no `3J`), which re-renders every line and sets
+ * `previousViewportTop = bufferLength - height`, pinning the chatbox to the
+ * bottom without touching scrollback.
  */
-function reset_collapse_screen_without_scrollback(tui: TuiRenderInternals): void {
+function reset_screen_without_scrollback(tui: TuiRenderInternals): void {
 	tui.terminal.clearScreen?.();
 	tui.previousLines = [];
 	tui.previousKittyImageIds = new Set();
@@ -93,6 +97,32 @@ function reset_collapse_screen_without_scrollback(tui: TuiRenderInternals): void
 }
 
 /**
+ * Pin the chatbox to the bottom of the viewport while preserving terminal
+ * scrollback. This is the scrollback-safe equivalent of Pi's
+ * `requestRender(true)`: it clears only the visible screen (`2J`, never `3J`),
+ * resets Pi's differential bookkeeping, and requests a normal render whose
+ * first-render path re-anchors `previousViewportTop` to the bottom. Use this
+ * for any snap that must re-pin the viewport after a line-count shrink
+ * (compact-group collapse, thinking-toggle rebuild). Never call
+ * `tui.requestRender(true)` from render/lifecycle paths — it emits `3J` and
+ * destroys scrollback.
+ *
+ * Returns true when the snap was applied, false when it could not run safely
+ * (no TUI bound, or the TUI is stopped). Callers MUST NOT fall back to
+ * `requestRender(true)` on a false return — a missing TUI means we are outside
+ * a live TUI session where a snap is meaningless.
+ */
+export function snap_tui_to_bottom(tui: TuiRenderInternals | undefined | null): boolean {
+	if (!tui) return false;
+	if (tui.stopped) return false;
+	if (typeof tui.terminal?.clearScreen !== "function") return false;
+	if (typeof tui.requestRender !== "function") return false;
+	reset_screen_without_scrollback(tui);
+	tui.requestRender(false);
+	return true;
+}
+
+/**
  * After slash/autocomplete overlay collapse, preserve the chatbox viewport and
  * request only Pi's normal differential render. This lets the terminal remain
  * the owner of scrollback instead of priming Pi's full clear/redraw path.
@@ -102,12 +132,7 @@ export function request_overlay_collapse_render(editor?: EditorWithTui): void {
 	const run = (): void => {
 		if (generation !== slash_exit_redraw_generation) return;
 		const tui = editor?.tui;
-		if (tui?.stopped) return;
-		if (tui?.requestRender) {
-			reset_collapse_screen_without_scrollback(tui);
-			tui.requestRender(false);
-			return;
-		}
+		if (snap_tui_to_bottom(tui)) return;
 		slash_command_exit_render?.(false);
 	};
 	if (editor?.tui?.requestRender) {

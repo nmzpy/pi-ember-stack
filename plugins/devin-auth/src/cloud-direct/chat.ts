@@ -43,7 +43,7 @@ import { getCachedCatalog, ModelNotAvailableError } from './catalog.js';
  */
 const CLOUD_STREAM_IDLE_MS = 120_000;
 /** Time-to-first-byte timeout. */
-const CLOUD_STREAM_TTFB_MS = 60_000;
+const CLOUD_STREAM_TTFB_MS = 120_000;
 
 /**
  * Compose multiple AbortSignals into a single signal that aborts when ANY

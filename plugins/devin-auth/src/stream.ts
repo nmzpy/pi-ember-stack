@@ -19,6 +19,7 @@ import {
     type SimpleStreamOptions,
     calculateCost,
     createAssistantMessageEventStream,
+    parseStreamingJson,
 } from '@earendil-works/pi-ai';
 import { streamChatEvents, type CloudChatEvent } from './cloud-direct/index.js';
 import { mapContextToChat } from './context-map.js';
@@ -221,11 +222,12 @@ export function streamDevin(
                     partialJson += ev.argsDelta;
                     const block = output.content[currentToolCallIndex];
                     if (block.type === 'toolCall') {
-                        try {
-                            block.arguments = JSON.parse(partialJson);
-                        } catch {
-                            // Incomplete JSON — keep accumulating deltas.
-                        }
+                        // Use partial JSON parsing so arguments (path, oldText,
+                        // newText, ...) are available incrementally as the
+                        // model streams them. This lets compact tool rows
+                        // show the file path and live +N / -N edit stats in
+                        // real time, before the tool call completes.
+                        block.arguments = parseStreamingJson(partialJson);
                     }
                     stream.push({
                         type: 'toolcall_delta',
@@ -327,11 +329,9 @@ function closeToolCall(
     const block = output.content[index];
     if (block.type !== 'toolCall') return;
     // One last parse attempt in case the final delta completed the JSON.
-    try {
-        block.arguments = JSON.parse(partialJson);
-    } catch {
-        // Leave arguments as the last successfully-parsed value (or `{}`).
-    }
+    // Use partial JSON parsing for consistency with the streaming path;
+    // on a complete JSON string this is equivalent to JSON.parse.
+    block.arguments = parseStreamingJson(partialJson);
     stream.push({
         type: 'toolcall_end',
         contentIndex: index,

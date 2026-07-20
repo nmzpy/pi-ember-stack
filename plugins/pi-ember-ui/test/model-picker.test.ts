@@ -3,6 +3,7 @@ import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 import {
 	find_exact_model_reference,
 	find_session_reference,
+	should_auto_submit_slash_text,
 } from "../model-picker.ts";
 
 const MODELS = [
@@ -77,5 +78,26 @@ describe("find_session_reference", () => {
 
 	test("rejects empty reference", () => {
 		expect(find_session_reference("  ", sessions)).toBeUndefined();
+	});
+});
+
+describe("should_auto_submit_slash_text", () => {
+	test("commits slash commands that already have an argument", () => {
+		expect(should_auto_submit_slash_text("/model anthropic/claude-sonnet-4")).toBe(true);
+		expect(should_auto_submit_slash_text("/resume /sessions/a.jsonl")).toBe(true);
+		expect(should_auto_submit_slash_text("/login anthropic")).toBe(true);
+		expect(should_auto_submit_slash_text("/export path/to/file")).toBe(true);
+	});
+
+	test("skips bare commands, command-name picks, and unfinished paths", () => {
+		expect(should_auto_submit_slash_text("")).toBe(false);
+		expect(should_auto_submit_slash_text("/")).toBe(false);
+		expect(should_auto_submit_slash_text("hello")).toBe(false);
+		expect(should_auto_submit_slash_text("/settings")).toBe(false);
+		expect(should_auto_submit_slash_text("/model")).toBe(false);
+		expect(should_auto_submit_slash_text("/resume")).toBe(false);
+		expect(should_auto_submit_slash_text("/model ")).toBe(false);
+		expect(should_auto_submit_slash_text("/export path/to/dir/")).toBe(false);
+		expect(should_auto_submit_slash_text('/export "path/to/dir/"')).toBe(false);
 	});
 });

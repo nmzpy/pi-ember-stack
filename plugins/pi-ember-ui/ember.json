@@ -23,13 +23,12 @@
 		"darkGray": "#505050",
 		"accent": "#EB6E00",
 		"selectedBg": "#3a3a4a",
-		"userMsgBg": "#343541",
-		"subagentBg": "#32333f",
+		"userMsgBg": "#262626",
+		"subagentBg": "#262626",
 		"toolPendingBg": "#282832",
 		"toolSuccessBg": "#283228",
 		"toolErrorBg": "#3c2828",
-		"customMsgBg": "#343541",
-		"toolMatchCountFg": "#82430f"
+		"customMsgBg": "#262626"
 	},
 	"colors": {
 		"accent": "emberAccent",
@@ -66,7 +65,7 @@
 		"mdQuote": "gray",
 		"mdQuoteBorder": "gray",
 		"mdHr": "gray",
-		"mdListBullet": "emberAccent",
+		"mdListBullet": "gray",
 
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
@@ -90,8 +89,7 @@
 		"thinkingXhigh": "emberAccent75",
 		"thinkingMax": "emberAccent90",
 
-		"bashMode": "green",
-		"toolMatchCount": "toolMatchCountFg"
+		"bashMode": "green"
 	},
 	"export": {
 		"pageBg": "#18181e",

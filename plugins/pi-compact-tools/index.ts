@@ -18,7 +18,10 @@ import {
 	type ToolRenderContext,
 	type ToolRenderResultOptions,
 } from "./renderer.ts";
-import { setToolGroupActive } from "../pi-ember-ui/mode-colors.ts";
+import {
+	isThinkingBlocksHidden,
+	setToolGroupActive,
+} from "../pi-ember-ui/mode-colors.ts";
 import { subscribe_theme_refresh } from "../pi-ember-ui/theme-refresh.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -105,17 +108,22 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		if (event?.message?.role === "user") renderer.noteUserMessage();
 	});
 	pi.on("message_update", (event: any) => {
-		// When the model streams visible user-facing text, settle the
-		// current group so the next groupable tool call starts a fresh
-		// group instead of appending to the previous one. Thinking deltas
-		// do NOT settle the group — the model routinely thinks between
-		// consecutive discovery calls (read/grep/find/ls), and settling on
-		// every thinking delta would prevent those calls from ever folding
-		// into a single Exploring group. Only visible text (the agent
-		// writing its response to the user) marks the boundary between one
-		// exploration batch and the next.
+		// Visible text always marks a boundary: settle the active group so the
+		// next groupable tool starts a fresh one.
+		// Thinking blocks are trickier:
+		// - When thinking blocks are HIDDEN, a thinking_delta produces no visible
+		//   transcript break, so the active group can keep updating.
+		// - When thinking blocks are SHOWN, the thinking stream appears as its own
+		//   visible block below the group, so we must settle the group first so it
+		//   flips from "Exploring" to "Explored" instead of continuing to mutate
+		//   under the thinking text.
 		const ev = event?.assistantMessageEvent;
-		if (ev && (ev.type === "text_start" || ev.type === "text_delta")) {
+		if (!ev) return;
+		const isText = ev.type === "text_start" || ev.type === "text_delta";
+		const isVisibleThinking =
+			(ev.type === "thinking_start" || ev.type === "thinking_delta") &&
+			!isThinkingBlocksHidden();
+		if (isText || isVisibleThinking) {
 			renderer.noteVisibleText();
 		}
 	});

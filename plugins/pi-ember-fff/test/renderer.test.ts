@@ -6,6 +6,10 @@ import {
 	formatCallBody,
 	PULSE_INTERVAL_MS,
 } from "../../pi-compact-tools/renderer.ts";
+import {
+	isThinkingBlocksHidden,
+	setThinkingBlocksHidden,
+} from "../../pi-ember-ui/mode-colors.ts";
 
 function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -60,17 +64,73 @@ describe("CompactRenderer", () => {
 		expect(stripAnsi(ownerComp.text)).toContain("Read");
 	});
 
-	test("visible thinking blocks do not settle the group", () => {
-		const r = new CompactRenderer();
-		const theme = makeTheme() as any;
-		r.renderCall("read", { file_path: "foo.ts" }, theme, makeContext("a") as any);
-		r.endTurn(false);
-		r.beginTurn();
-		r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
-		const recA = (r as any).calls.get("a");
-		const recB = (r as any).calls.get("b");
-		expect(recB.group).toBe(recA.group);
-		expect(recB.group).toBeDefined();
+	test("visible thinking blocks settle the group when shown", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		try {
+			const r = new CompactRenderer();
+			const theme = makeTheme() as any;
+			const stateA: Record<string, any> = {};
+			const stateB: Record<string, any> = {};
+			const ctxA = makeContext("a", stateA);
+			const ctxB = makeContext("b", stateB);
+			r.renderCall("read", { file_path: "foo.ts" }, theme, ctxA as any);
+			r.renderCall("grep", { pattern: "foo" }, theme, ctxB as any);
+			r.renderResult(
+				"read",
+				{ file_path: "foo.ts" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ isPartial: false },
+				theme,
+				{ ...ctxA, isError: false } as any,
+			);
+			r.renderResult(
+				"grep",
+				{ pattern: "foo" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ isPartial: false },
+				theme,
+				{ ...ctxB, isError: false } as any,
+			);
+			// Simulate thinking blocks visible.
+			setThinkingBlocksHidden(false);
+			r.endTurn(false);
+			r.beginTurn();
+			// A visible thinking block in the new turn acts as a transcript boundary.
+			r.noteVisibleText();
+			r.renderCall("read", { file_path: "bar.ts" }, theme, makeContext("c") as any);
+			const record = (r as any).calls.get("c");
+			expect(record.group).toBeUndefined();
+			// The previous group is now settled and past-tense.
+			const ownerComp = r.renderCall(
+				"read",
+				{ file_path: "foo.ts" },
+				theme,
+				makeContext("a", stateA) as any,
+			) as any;
+			expect(stripAnsi(ownerComp.text)).toContain("Explored 2 files");
+		} finally {
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("hidden thinking blocks do not settle the group", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		try {
+			const r = new CompactRenderer();
+			const theme = makeTheme() as any;
+			r.renderCall("read", { file_path: "foo.ts" }, theme, makeContext("a") as any);
+			// Thinking blocks hidden: no visible transcript boundary.
+			setThinkingBlocksHidden(true);
+			r.endTurn(true);
+			r.beginTurn();
+			r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b") as any);
+			const recA = (r as any).calls.get("a");
+			const recB = (r as any).calls.get("b");
+			expect(recB.group).toBe(recA.group);
+			expect(recB.group).toBeDefined();
+		} finally {
+			setThinkingBlocksHidden(prev_hidden);
+		}
 	});
 
 	test("a user message prevents hidden-thinking carry-over", () => {
@@ -226,7 +286,7 @@ describe("CompactRenderer", () => {
 		expect((call as any).text).not.toContain("second");
 	});
 
-	test("refreshThemeColors repaints grep match counts for live accent changes", () => {
+	test("refreshThemeColors repaints grep match counts as muted, not accent", () => {
 		const r = new CompactRenderer();
 		const theme_a = makeTheme() as any;
 		const theme_b = makeTheme() as any;
@@ -242,13 +302,13 @@ describe("CompactRenderer", () => {
 			{ ...ctx, isError: false } as any,
 		);
 		const callText = state.callText as { text: string; setText: (text: string) => void };
-		expect(callText.text).toContain("[toolMatchCount:2 matches]");
+		expect(callText.text).toContain("[muted:2 matches]");
 		r.refreshThemeColors(theme_b);
-		expect(theme_b.fg).toHaveBeenCalledWith("toolMatchCount", "2 matches");
-		expect(callText.text).toContain("[toolMatchCount:2 matches]");
+		expect(theme_b.fg).toHaveBeenCalledWith("muted", "2 matches");
+		expect(callText.text).toContain("[muted:2 matches]");
 	});
 
-	test("grep match count uses toolMatchCount foreground, not success green", () => {
+	test("grep match count uses muted foreground, not accent or success", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const state: Record<string, any> = {};
@@ -261,8 +321,10 @@ describe("CompactRenderer", () => {
 			theme,
 			{ ...makeContext("a", state), isError: false } as any,
 		);
-		expect((call as any).text).toContain("[toolMatchCount:3 matches]");
+		expect((call as any).text).toContain("[muted:3 matches]");
 		expect((call as any).text).not.toContain("[success:3 matches]");
+		expect((call as any).text).not.toContain("[toolMatchCount:3 matches]");
+		expect((call as any).text).not.toContain("[accent:3 matches]");
 	});
 
 	test("bash output skips trailing blank lines", () => {
@@ -982,5 +1044,129 @@ describe("CompactRenderer", () => {
 		expect(recB.invalidate).toBe(invB2);
 		expect(recA.invalidate).not.toBe(invA1);
 		expect(recB.invalidate).not.toBe(invB1);
+	});
+
+	test("settled group collapses to header-only when thinking blocks are hidden", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		try {
+			const r = new CompactRenderer();
+			const theme = makeTheme() as any;
+			const stateA: Record<string, any> = {};
+			const stateB: Record<string, any> = {};
+			r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any);
+			r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b", stateB) as any);
+			r.renderResult(
+				"read",
+				{ file_path: "a.ts" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ isPartial: false },
+				theme,
+				{ ...makeContext("a", stateA), isError: false } as any,
+			);
+			r.renderResult(
+				"grep",
+				{ pattern: "foo" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ isPartial: false },
+				theme,
+				{ ...makeContext("b", stateB), isError: false } as any,
+			);
+			r.settleAllGroups();
+
+			// Verbose (thinking visible): children render.
+			setThinkingBlocksHidden(false);
+			const verboseOwner = r.renderCall(
+				"read",
+				{ file_path: "a.ts" },
+				theme,
+				makeContext("a", stateA) as any,
+			) as any;
+			expect(stripAnsi(verboseOwner.text)).toContain("Explored 2 files");
+			expect(stripAnsi(verboseOwner.text)).toContain("a.ts");
+			expect(stripAnsi(verboseOwner.text)).toContain("foo");
+
+			// Compact (thinking hidden): settled group collapses to header-only.
+			setThinkingBlocksHidden(true);
+			const collapsedOwner = r.renderCall(
+				"read",
+				{ file_path: "a.ts" },
+				theme,
+				makeContext("a", stateA) as any,
+			) as any;
+			expect(stripAnsi(collapsedOwner.text)).toContain("Explored 2 files");
+			expect(stripAnsi(collapsedOwner.text)).not.toContain("a.ts");
+			expect(stripAnsi(collapsedOwner.text)).not.toContain("foo");
+
+			// Toggling back to verbose reveals children again (simulates the
+		// rebuildChatFromMessages() path triggered by Ctrl+T).
+			setThinkingBlocksHidden(false);
+			const revealedOwner = r.renderCall(
+				"read",
+				{ file_path: "a.ts" },
+				theme,
+				makeContext("a", stateA) as any,
+			) as any;
+			expect(stripAnsi(revealedOwner.text)).toContain("a.ts");
+			expect(stripAnsi(revealedOwner.text)).toContain("foo");
+		} finally {
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("settled group hides per-member error row when collapsed", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		try {
+			const r = new CompactRenderer();
+			const theme = makeTheme() as any;
+			const stateA: Record<string, any> = {};
+			const stateB: Record<string, any> = {};
+			r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any);
+			r.renderCall("grep", { pattern: "foo" }, theme, makeContext("b", stateB) as any);
+			// Owner (read) fails; second member succeeds.
+			r.renderResult(
+				"read",
+				{ file_path: "a.ts" },
+				{ content: [{ type: "text", text: "Error: boom" }] },
+				{ isPartial: false },
+				theme,
+				{ ...makeContext("a", stateA), isError: true } as any,
+			);
+			r.renderResult(
+				"grep",
+				{ pattern: "foo" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ isPartial: false },
+				theme,
+				{ ...makeContext("b", stateB), isError: false } as any,
+			);
+			r.settleAllGroups();
+
+			// Verbose: the owner's error row renders below the group header.
+			setThinkingBlocksHidden(false);
+			const verboseResult = r.renderResult(
+				"read",
+				{ file_path: "a.ts" },
+				{ content: [{ type: "text", text: "Error: boom" }] },
+				{ isPartial: false },
+				theme,
+				{ ...makeContext("a", stateA), isError: true } as any,
+			) as any;
+			expect(stripAnsi(verboseResult.text)).toContain("boom");
+
+			// Compact: the owner's error row is suppressed; the header bullet
+			// already signals the failure (red).
+			setThinkingBlocksHidden(true);
+			const collapsedResult = r.renderResult(
+				"read",
+				{ file_path: "a.ts" },
+				{ content: [{ type: "text", text: "Error: boom" }] },
+				{ isPartial: false },
+				theme,
+				{ ...makeContext("a", stateA), isError: true } as any,
+			) as any;
+			expect(stripAnsi(collapsedResult.text)).not.toContain("boom");
+		} finally {
+			setThinkingBlocksHidden(prev_hidden);
+		}
 	});
 });

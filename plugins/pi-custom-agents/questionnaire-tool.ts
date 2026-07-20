@@ -1,6 +1,5 @@
 import { Type } from "typebox";
 import {
-	Box,
 	type EditorTheme,
 	Editor,
 	Key,
@@ -9,6 +8,8 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { requestTuiRender } from "../pi-ember-ui/index.ts";
+import { setQuestionnaireActive } from "../pi-ember-ui/mode-colors.ts";
 
 export interface QuestionnaireOption {
 	value: string;
@@ -33,6 +34,30 @@ interface QuestionnaireAnswer {
 interface QuestionnaireResult {
 	answers: QuestionnaireAnswer[];
 	cancelled: boolean;
+}
+
+/**
+ * Single canonical serializer for the model-facing questionnaire result.
+ * Emits one inline line per answer, pairing the answer with its question's
+ * label (or id fallback) and full prompt so the model has the same context
+ * the user saw. Question metadata is sourced only from `params.questions`
+ * (SSOT) — never mirrored onto `QuestionnaireAnswer`.
+ */
+export function format_answers_for_model(
+	questions: QuestionnaireQuestion[],
+	answers: QuestionnaireAnswer[],
+): string {
+	const by_id = new Map<string, QuestionnaireQuestion>();
+	for (const q of questions) by_id.set(q.id, q);
+	return answers
+		.map((answer) => {
+			const q = by_id.get(answer.id);
+			const q_title = q?.label ?? q?.id ?? answer.id;
+			const q_prompt = q?.prompt ?? "";
+			const marker = answer.wasCustom ? "custom" : "selected";
+			return `Q(${q_title}): ${q_prompt} → A(${marker}): ${answer.label}`;
+		})
+		.join("\n");
 }
 
 const QuestionnaireParams = Type.Object({
@@ -61,6 +86,13 @@ export async function askQuestionnaire(
 
 	const result = await ctx.ui.custom(
 		(_tui: any, theme: any, _keybindings: any, done: (result: QuestionnaireResult) => void) => {
+			setQuestionnaireActive(true);
+			requestTuiRender();
+			const finish = (r: QuestionnaireResult): void => {
+				setQuestionnaireActive(false);
+				requestTuiRender();
+				done(r);
+			};
 			let questionIndex = 0;
 			let optionIndex = 0;
 			let cachedLines: string[] | undefined;
@@ -71,10 +103,10 @@ export async function askQuestionnaire(
 			const NONE_DESC = "Specify the proper answer";
 
 			const editorTheme: EditorTheme = {
-				borderColor: (s: string) => theme.fg("accent", s),
+				borderColor: (s: string) => theme.fg("text", s),
 				selectList: {
-					selectedPrefix: (t: string) => theme.fg("accent", t),
-					selectedText: (t: string) => theme.fg("accent", t),
+					selectedPrefix: (t: string) => theme.fg("text", t),
+					selectedText: (t: string) => theme.fg("text", t),
 					description: (t: string) => theme.fg("muted", t),
 					scrollInfo: (t: string) => theme.fg("dim", t),
 					noMatch: (t: string) => theme.fg("warning", t),
@@ -148,7 +180,7 @@ export async function askQuestionnaire(
 
 			function advance(): void {
 				if (questionIndex === questions.length - 1) {
-					done({ answers: Array.from(answers.values()), cancelled: false });
+					finish({ answers: Array.from(answers.values()), cancelled: false });
 					return;
 				}
 				questionIndex++;
@@ -160,8 +192,8 @@ export async function askQuestionnaire(
 				if (cachedLines) return cachedLines;
 				const renderWidth = Math.max(1, width);
 				const question = currentQuestion();
-				const lines: string[] = [theme.fg("accent", "─".repeat(renderWidth))];
-				addWrappedWithPrefix(lines, " ", theme.fg("accent", theme.bold(title)), renderWidth);
+				const lines: string[] = [theme.fg("text", "─".repeat(renderWidth))];
+				addWrappedWithPrefix(lines, " ", theme.fg("text", theme.bold(title)), renderWidth);
 				addWrappedWithPrefix(
 					lines,
 					" ",
@@ -186,8 +218,8 @@ export async function askQuestionnaire(
 					const noneIdx = question.options.length;
 					addWrappedWithPrefix(
 						lines,
-						theme.fg("accent", "> "),
-						theme.fg("accent", `${noneIdx + 1}. None ✎`),
+						theme.fg("text", "> "),
+						theme.fg("text", `${noneIdx + 1}. None ✎`),
 						renderWidth,
 					);
 					lines.push("");
@@ -202,7 +234,7 @@ export async function askQuestionnaire(
 						theme.fg("dim", "Enter to submit • Esc back to options"),
 						renderWidth,
 					);
-					lines.push(theme.fg("accent", "─".repeat(renderWidth)));
+					lines.push(theme.fg("text", "─".repeat(renderWidth)));
 					cachedLines = lines;
 					return lines;
 				}
@@ -211,8 +243,8 @@ export async function askQuestionnaire(
 				for (let i = 0; i < opts.length; i++) {
 					const { option, isNone } = opts[i];
 					const selected = i === optionIndex;
-					const prefix = selected ? theme.fg("accent", "> ") : "  ";
-					const color = selected ? "accent" : "text";
+					const prefix = selected ? theme.fg("text", "> ") : "  ";
+					const color = selected ? "text" : "muted";
 					const labelSuffix = isNone && inputMode ? " ✎" : "";
 					addWrappedWithPrefix(
 						lines,
@@ -237,7 +269,7 @@ export async function askQuestionnaire(
 					theme.fg("dim", "Up/Down navigate | Enter select | Left/Right revisit | Esc cancel"),
 					renderWidth,
 				);
-				lines.push(theme.fg("accent", "─".repeat(renderWidth)));
+				lines.push(theme.fg("text", "─".repeat(renderWidth)));
 				cachedLines = lines;
 				return lines;
 			}
@@ -301,7 +333,7 @@ export async function askQuestionnaire(
 					return;
 				}
 				if (matchesKey(data, Key.escape)) {
-					done({ answers: [], cancelled: true });
+					finish({ answers: [], cancelled: true });
 				}
 			}
 
@@ -361,59 +393,55 @@ export function registerQuestionnaireTool(pi: any): void {
 						text:
 							answers === undefined
 								? "User cancelled the questionnaire."
-								: answers
-										.map((answer) =>
-											answer.wasCustom
-												? `${answer.id}: ${answer.label}`
-												: `${answer.id}: ${answer.label}`,
-										)
-										.join("\n"),
+								: format_answers_for_model(params.questions, answers),
 					},
 				],
 				details: { answers: answers ?? [], cancelled: answers === undefined },
 			};
 		},
-		renderCall(args: { questions?: QuestionnaireQuestion[] }, theme: any): any {
+		renderCall(args: { questions?: QuestionnaireQuestion[] }, _theme: any): any {
+			// Compact bullet row, consistent with every other tool. The
+			// interactive overlay (askQuestionnaire) owns the two chatbox
+			// horizontal rules the user sees; wrapping the transcript tag in
+			// chatboxBorderContainer here added a third/fourth `─` line.
 			const count = args.questions?.length ?? 0;
-			const box = new Box(1, 1, (text: string) => theme.bg("userMessageBg", text));
-			box.addChild(
-				new Text(
-					theme.fg("muted", "• ") +
-						theme.fg("toolTitle", theme.bold("questionnaire ")) +
-						theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`),
-					0,
-					0,
-				),
+			return new Text(
+				`${_theme.fg("muted", "• ")}${_theme.fg("toolTitle", _theme.bold("questionnaire "))}${_theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`)}`,
+				0,
+				0,
 			);
-			return box;
 		},
-		renderResult(result: any, _options: unknown, theme: any): any {
+		renderResult(
+			result: any,
+			_options: unknown,
+			theme: any,
+			context: { args?: { questions?: QuestionnaireQuestion[] } },
+		): any {
 			const details = result.details as
 				| {
 						answers?: QuestionnaireAnswer[];
 						cancelled?: boolean;
 				  }
 				| undefined;
-			const box = new Box(1, 1, (text: string) => theme.bg("userMessageBg", text));
 			if (details?.cancelled) {
-				box.addChild(new Text(theme.fg("warning", "Cancelled"), 0, 0));
-				return box;
+				return new Text(theme.fg("warning", "Cancelled"), 0, 0);
 			}
 			const answers = details?.answers ?? [];
-			box.addChild(
-				new Text(
-					answers
-						.map((answer) => {
-							const prefix = answer.wasCustom ? "(custom) " : "";
-							const label = `${answer.id}: ${prefix}${answer.label}`;
-							return `${theme.fg("success", "Selected: ")}${theme.fg("accent", label)}`;
-						})
-						.join("\n"),
-					0,
-					0,
-				),
+			const questions = context?.args?.questions ?? [];
+			return new Text(
+				answers
+					.map((answer) => {
+						const q = questions.find((q: QuestionnaireQuestion) => q.id === answer.id);
+						const q_title = q?.label ?? q?.id ?? answer.id;
+						const q_prompt = q?.prompt ?? "";
+						const prefix = answer.wasCustom ? "(custom) " : "";
+						const label = `${q_title}: ${q_prompt} → ${prefix}${answer.label}`;
+						return `${theme.fg("success", "Selected: ")}${theme.fg("text", label)}`;
+					})
+					.join("\n"),
+				0,
+				0,
 			);
-			return box;
 		},
 	});
 }

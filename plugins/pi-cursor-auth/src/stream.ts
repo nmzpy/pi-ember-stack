@@ -11,7 +11,13 @@ import type {
 } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { CURSOR_MODEL_ID_PATTERN } from "./constants.js";
-import { spawn_cursor_agent, strip_ansi, terminate_cursor_process } from "./cli.js";
+import {
+	cursor_agent_spawn_error,
+	ensure_cursor_agent_executable,
+	spawn_cursor_agent,
+	strip_ansi,
+	terminate_cursor_process,
+} from "./cli.js";
 import { build_cursor_prompt, normalize_tool_arguments, resolve_pi_tool_name } from "./context.js";
 
 type CursorEvent = Record<string, unknown>;
@@ -317,6 +323,7 @@ export function stream_cursor_subscription(
 				throw new Error(`Invalid Cursor model id: ${model.id}`);
 			}
 			const prompt = build_cursor_prompt(context);
+			const executable = await ensure_cursor_agent_executable();
 			child = spawn_cursor_agent(
 				[
 					"--print",
@@ -327,7 +334,7 @@ export function stream_cursor_subscription(
 					model.id,
 					"--force",
 				],
-				{ cwd: active_cwd || process.cwd() },
+				{ cwd: active_cwd || process.cwd(), executable },
 			);
 			active_processes.add(child);
 
@@ -336,7 +343,9 @@ export function stream_cursor_subscription(
 				stderr = (stderr + chunk.toString("utf8")).slice(-MAX_STDERR_CHARS);
 			});
 			const close = new Promise<number>((resolve, reject) => {
-				child?.once("error", reject);
+				child?.once("error", (error: NodeJS.ErrnoException) => {
+					reject(cursor_agent_spawn_error(error));
+				});
 				child?.once("close", (code) => resolve(code ?? 1));
 			});
 			const abort = (): void => {

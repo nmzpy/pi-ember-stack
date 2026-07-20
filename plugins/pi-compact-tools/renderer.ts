@@ -1,11 +1,14 @@
 import { Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { parseJsonWithRepair } from "@earendil-works/pi-ai/compat";
+import * as Diff from "diff";
 import {
 	MUTED_GROUP_GRADIENT_PRESET,
 	renderLiveGradient,
+	requestTuiRenderSnapToBottom,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
-import { TOOL_MATCH_COUNT_FG } from "../pi-ember-ui/mode-colors.ts";
+import { isThinkingBlocksHidden } from "../pi-ember-ui/mode-colors.ts";
 
 const BULLET = "• ";
 
@@ -236,6 +239,99 @@ function diffStats(result: any): { additions: number; removals: number } {
 	return { additions, removals };
 }
 
+/**
+ * Extract edits from streaming edit args. Handles both the structured
+ * array form and models that stream `edits` as a JSON string (e.g.
+ * Opus 4.6 / GLM-5.1). The native tool's `prepareArguments` repairs the
+ * string at execution time, but the renderer needs the array during
+ * streaming so live +N | -N counts can update in real time.
+ */
+function extractStreamingEdits(args: any): Array<{ oldText: string; newText: string }> | undefined {
+	if (args == null) return undefined;
+	if (Array.isArray(args.edits)) return args.edits;
+	if (typeof args.edits === "string") {
+		const trimmed = args.edits.trim();
+		if (!trimmed) return undefined;
+		try {
+			const parsed = parseJsonWithRepair<any>(trimmed);
+			if (Array.isArray(parsed)) return parsed;
+		} catch {
+			// Partial / unparseable string: fall through.
+		}
+	}
+	if (typeof args.oldText === "string" || typeof args.newText === "string") {
+		return [{ oldText: args.oldText ?? "", newText: args.newText ?? "" }];
+	}
+	return undefined;
+}
+
+/**
+ * Live line-diff counts from streaming edit args (before the tool runs).
+ * As the model streams oldText/newText token-by-token, renderCall fires
+ * repeatedly; this computes a running +N | -N so the row updates in real
+ * time from 1 toward the final count. Returns undefined when there is
+ * nothing to diff yet (no edits or empty strings).
+ */
+function streamingEditStats(args: any): { additions: number; removals: number } | undefined {
+	const edits = extractStreamingEdits(args);
+	if (!edits || edits.length === 0) return undefined;
+	let additions = 0;
+	let removals = 0;
+	let hasContent = false;
+	for (const edit of edits) {
+		const oldText = typeof edit?.oldText === "string" ? edit.oldText : "";
+		const newText = typeof edit?.newText === "string" ? edit.newText : "";
+		if (oldText.length > 0 || newText.length > 0) hasContent = true;
+		const counts = lineDiffCounts(oldText, newText);
+		additions += counts.additions;
+		removals += counts.removals;
+	}
+	// Suppress +0 | -0 placeholders while the model is still filling args.
+	if (!hasContent) return undefined;
+	return { additions, removals };
+}
+
+/** Live line count from streaming write args (before the tool runs). */
+function streamingWriteStats(args: any): { additions: number; removals: number } | undefined {
+	const content = typeof args?.content === "string" ? args.content : "";
+	if (content.length === 0) return undefined;
+	const additions = contentLineCount(content);
+	// Suppress +0 | -0 placeholders while the model is still filling args.
+	if (additions === 0) return undefined;
+	return { additions, removals: 0 };
+}
+
+/** Count non-empty lines in a text block, normalizing trailing newlines. */
+function contentLineCount(text: string): number {
+	if (!text) return 0;
+	const lines = text.replace(/\r\n/g, "\n").split("\n");
+	if (lines.length > 1 && text.endsWith("\n")) lines.pop();
+	let count = 0;
+	for (const line of lines) {
+		if (line.length > 0) count++;
+	}
+	return count;
+}
+
+/** Count added/removed lines between two text blocks via a line-level diff. */
+function lineDiffCounts(oldText: string, newText: string): { additions: number; removals: number } {
+	if (!oldText && !newText) return { additions: 0, removals: 0 };
+	const oldLines = oldText.length ? oldText.replace(/\r\n/g, "\n").split("\n") : [];
+	const newLines = newText.length ? newText.replace(/\r\n/g, "\n").split("\n") : [];
+	// Drop a single trailing empty string from the final newline so a
+	// trailing \n doesn't count as an extra line.
+	if (oldLines.length > 1 && oldText.endsWith("\n")) oldLines.pop();
+	if (newLines.length > 1 && newText.endsWith("\n")) newLines.pop();
+	const parts = Diff.diffArrays(oldLines, newLines);
+	let additions = 0;
+	let removals = 0;
+	for (const part of parts) {
+		if (part.added) additions += part.value.length;
+		else if (part.removed) removals += part.value.length;
+	}
+	return { additions, removals };
+}
+
 function matchCount(result: any): number | undefined {
 	const total = result?.details?.totalMatched;
 	if (typeof total === "number") return total;
@@ -246,8 +342,8 @@ function matchLabel(result: any, theme: any): string {
 	const total = matchCount(result);
 	if (total === undefined) return "";
 	const label = total === 1 ? "1 match" : `${total} matches`;
-	const color = total > 0 ? TOOL_MATCH_COUNT_FG : "muted";
-	return theme.fg("dim", "  ") + theme.fg(color, label);
+	// Match counts stay muted/normal — never the live mode accent.
+	return theme.fg("dim", "  ") + theme.fg("muted", label);
 }
 
 export const PULSE_INTERVAL_MS = 600;
@@ -325,9 +421,25 @@ function bulletColor(record: CompactCall, theme: any): string {
 function formatStandaloneCallRow(record: CompactCall, theme: any): string {
 	const { name, args, result } = record;
 	const prefix = bulletColor(record, theme) + formatCallBody(name, args, theme);
+	// Live edit/write stats: while the model streams args (before the tool
+	// runs), show a running +N | -N count that updates on each token. Once the
+	// edit completes, the authoritative diff stats take over; write has no
+	// diff, so it keeps the args-based content line count as final.
+	if ((name === "edit" || name === "write") && !record._completed) {
+		const live = name === "edit" ? streamingEditStats(args) : streamingWriteStats(args);
+		if (live) {
+			return prefix + theme.fg("dim", "  ") + formatEditStatsFromCounts(live, theme);
+		}
+		return prefix;
+	}
 	if (!record._completed || result === undefined) return prefix;
 	if (name === "edit") {
 		return prefix + theme.fg("dim", "  ") + formatEditStats(result, theme);
+	}
+	if (name === "write") {
+		const final = streamingWriteStats(args);
+		if (final) return prefix + theme.fg("dim", "  ") + formatEditStatsFromCounts(final, theme);
+		return prefix;
 	}
 	if (name === "grep" || name === "find") {
 		return prefix + matchLabel(result, theme);
@@ -340,10 +452,16 @@ function formatStandaloneCallRow(record: CompactCall, theme: any): string {
 
 function formatEditStats(result: any, theme: any): string {
 	const { additions, removals } = diffStats(result);
+	return formatEditStatsFromCounts({ additions, removals }, theme);
+}
+
+function formatEditStatsFromCounts(counts: { additions: number; removals: number }, theme: any): string {
+	// Avoid noisy +0 | -0 placeholders when there is nothing to diff.
+	if (counts.additions === 0 && counts.removals === 0) return "";
 	return (
-		theme.fg("success", `+${additions}`) +
-		theme.fg("dim", " / ") +
-		theme.fg("error", `-${removals}`)
+		theme.fg("success", `+${counts.additions}`) +
+		theme.fg("dim", " | ") +
+		theme.fg("error", `-${counts.removals}`)
 	);
 }
 
@@ -422,8 +540,20 @@ function groupHeaderLabel(group: DiscoveryGroup): string {
 
 function formatGroupCallBody(record: CompactCall, theme: any): string {
 	const body = formatCallBody(record.name, record.args, theme, true);
-	if (record.name !== "edit" || !record._completed) return body;
-	return body + theme.fg("dim", "  ") + formatEditStats(record.result, theme);
+	// Live edit/write stats while streaming, authoritative diff once edit completes.
+	// Write has no post-run diff, so its final stats come from args.content line count.
+	if (record.name !== "edit" && record.name !== "write") return body;
+	if (!record._completed) {
+		const live = record.name === "edit" ? streamingEditStats(record.args) : streamingWriteStats(record.args);
+		if (live) return body + theme.fg("dim", "  ") + formatEditStatsFromCounts(live, theme);
+		return body;
+	}
+	if (record.name === "edit") {
+		return body + theme.fg("dim", "  ") + formatEditStats(record.result, theme);
+	}
+	const final = streamingWriteStats(record.args);
+	if (final) return body + theme.fg("dim", "  ") + formatEditStatsFromCounts(final, theme);
+	return body;
 }
 
 function formatGroup(group: DiscoveryGroup, theme: any): string {
@@ -431,17 +561,26 @@ function formatGroup(group: DiscoveryGroup, theme: any): string {
 		group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
 	const headerLabel = groupHeaderLabel(group);
 	const headerText = allCompleted
-		? theme.fg("text", theme.bold(headerLabel))
+		? theme.fg("muted", theme.bold(headerLabel))
 		: renderLiveGradient(headerLabel, MUTED_GROUP_GRADIENT_PRESET);
 	const lines = [groupBulletColor(group, theme) + headerText];
-	for (const [index, record] of group.records.entries()) {
-		const prefix =
-			index === group.records.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE;
-		const suffix =
-			record._completed && (record.name === "grep" || record.name === "find")
-				? matchLabel(record.result, theme)
-				: "";
-		lines.push(theme.fg("dim", prefix) + formatGroupCallBody(record, theme) + suffix);
+	// Settled groups collapse to header-only when thinking blocks are hidden
+	// (compact mode). The shared isThinkingBlocksHidden() flag in
+	// pi-ember-ui/mode-colors.ts is the SSOT, mirrored from Pi's Ctrl+T toggle.
+	// Ctrl+T (show thinking) triggers rebuildChatFromMessages(), which re-runs
+	// renderCall on every owner and reveals the child rows again. Never
+	// duplicate this collapse condition in other plugins.
+	const collapse_children = allCompleted && isThinkingBlocksHidden();
+	if (!collapse_children) {
+		for (const [index, record] of group.records.entries()) {
+			const prefix =
+				index === group.records.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE;
+			const suffix =
+				record._completed && (record.name === "grep" || record.name === "find")
+					? matchLabel(record.result, theme)
+					: "";
+			lines.push(theme.fg("dim", prefix) + formatGroupCallBody(record, theme) + suffix);
+		}
 	}
 	return lines.join("\n");
 }
@@ -581,9 +720,27 @@ export class CompactRenderer {
 	private scheduleGroupInvalidation(group: DiscoveryGroup): void {
 		if (this.pendingGroupInvalidations.has(group)) return;
 		this.pendingGroupInvalidations.add(group);
+		// When the group is about to collapse (settled + all completed + thinking
+		// hidden), the re-render shrinks the line count. Pi's differential
+		// clearOnShrink path then fires a fullRender with a stale
+		// previousViewportTop, leaving the chatbox not pinned to the bottom
+		// (the "janked up" state). Snap the viewport to the bottom via the
+		// scrollback-preserving helper: it clears only the visible screen (`2J`,
+		// never `3J`), resets previousViewportTop/maxLinesRendered, and requests
+		// a normal render whose first-render path re-anchors the chatbox to the
+		// bottom without destroying terminal scrollback. Never use
+		// requestTuiRender(true) here — it emits `3J` and nukes scrollback.
+		// Only when collapsing — non-collapse invalidations (live gradient
+		// tick, mid-run bullet pulse) stay differential.
+		const will_collapse =
+			group.settled === true &&
+			group.records.length > 0 &&
+			group.records.every((r) => r._completed) &&
+			isThinkingBlocksHidden();
 		queueMicrotask(() => {
 			if (!this.pendingGroupInvalidations.delete(group)) return;
 			group.renderOwner?.invalidate?.();
+			if (will_collapse) requestTuiRenderSnapToBottom();
 		});
 	}
 
@@ -744,9 +901,17 @@ export class CompactRenderer {
 			// renders the owner's selfRenderContainer with the updated component.
 			record.group.callText?.setText(formatGroup(record.group, theme));
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
+			// When the group is collapsed (settled + thinking hidden), hide the
+			// per-member error row too — the header bullet already turns red to
+			// signal the failure. Reuses the same collapse gate as formatGroup.
+			const group_collapsed =
+				record.group.settled === true &&
+				record.group.records.length > 0 &&
+				record.group.records.every((r) => r._completed) &&
+				isThinkingBlocksHidden();
 			const error = errorText(result, context.isError);
-			if (error) return compactErrorComponent(error, theme);
-			if (expanded && !options.isPartial) {
+			if (error && !group_collapsed) return compactErrorComponent(error, theme);
+			if (expanded && !options.isPartial && !group_collapsed) {
 				const output = formatExpandedOutput(result, theme);
 				if (output) return new Text(output, 0, 0);
 			}

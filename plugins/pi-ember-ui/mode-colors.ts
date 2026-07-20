@@ -6,10 +6,22 @@ export const MODE_COLORS: Record<string, string> = {
 };
 
 export const MUTED_BULLET_COLOR = "#666666";
+export const DIM_COLOR = MUTED_BULLET_COLOR;
 export const MUTED_COLOR = "#808080";
+export const PAGE_BG = "#18181e";
 export const TEXT_COLOR = "#d4d4d4";
 
-export const PAGE_BG = "#18181e";
+/**
+ * Shared muted background for user messages, subagent completed/failed rows,
+ * and custom/compaction messages. White (#ffffff) at 5% opacity over PAGE_BG,
+ * then desaturated to a pure neutral grey so the PAGE_BG blue bias does not
+ * bleed through. Mode-independent — no orange/purple/green/yellow accent
+ * tint. Matches the neutral character of MUTED_COLOR text.
+ */
+export const MUTED_MESSAGE_BG = desaturateHex(
+	blendToHex("#ffffff", PAGE_BG, 0.05),
+	1,
+);
 
 let activeModeId = "code";
 
@@ -29,14 +41,37 @@ export function setActiveMode(modeId: string): void {
 	activeModeId = modeId in MODE_COLORS ? modeId : "code";
 }
 
-let shellModeActive = false;
+/** Shell-mode flag stored on `globalThis` via a `Symbol.for` key so it
+ *  survives jiti module duplication. `mode-colors.ts` can be loaded as
+ *  separate module instances when imported via different importer chains
+ *  (shell-mode.ts vs index.ts vs pi-custom-agents/index.ts); a module-level
+ *  `let` would be duplicated per instance, so `setShellMode(true)` in one
+ *  instance wouldn't be visible to `isShellMode()` in another. `Symbol.for`\ *  returns the same symbol from the global registry regardless of which
+ *  module instance calls it, and `globalThis` is a true singleton — same
+ *  pattern used for `THEME_KEY` in index.ts. */
+const SHELL_MODE_KEY = Symbol.for("pi-ember-ui:shell-mode");
 
 export function isShellMode(): boolean {
-	return shellModeActive;
+	return (globalThis as any)[SHELL_MODE_KEY] === true;
 }
 
 export function setShellMode(active: boolean): void {
-	shellModeActive = active;
+	(globalThis as any)[SHELL_MODE_KEY] = active;
+}
+
+/** Questionnaire-overlay-active flag stored on `globalThis` via `Symbol.for`
+ *  so it survives jiti module duplication (same pattern as SHELL_MODE_KEY).
+ *  Set by the questionnaire tool when a custom overlay opens/closes. Read
+ *  by the Thinking/Working widget to suppress itself while a questionnaire
+ *  (e.g. Plan Review, Tool Loop Detected) is showing. */
+const QUESTIONNAIRE_ACTIVE_KEY = Symbol.for("pi-ember-ui:questionnaire-active");
+
+export function isQuestionnaireActive(): boolean {
+	return (globalThis as any)[QUESTIONNAIRE_ACTIVE_KEY] === true;
+}
+
+export function setQuestionnaireActive(active: boolean): void {
+	(globalThis as any)[QUESTIONNAIRE_ACTIVE_KEY] = active;
 }
 
 let latestSubagentRunningFlag = false;
@@ -161,16 +196,6 @@ export function buildUserMessageBgHex(accentHex: string): string {
 	return blendToHex(accentHex, PAGE_BG, 0.1);
 }
 
-/** Grep/find inline match-count label — accent at 50% over PAGE_BG (fg only). */
-export const TOOL_MATCH_COUNT_BLEND = 0.5;
-
-export function buildToolMatchCountFgHex(accentHex: string): string {
-	return blendToHex(accentHex, PAGE_BG, TOOL_MATCH_COUNT_BLEND);
-}
-
-/** Theme fg token for compact-tool match counts — use via theme.fg(), never theme.bg(). */
-export const TOOL_MATCH_COUNT_FG = "toolMatchCount" as const;
-
 export function buildThemeFgColors(accentHex: string): Record<string, string> {
 	const userMsgBg = buildUserMessageBgHex(accentHex);
 	const accent90 = blendToHex(accentHex, PAGE_BG, 0.9);
@@ -184,6 +209,12 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 	const accent75 = blendToHex(accentHex, PAGE_BG, 0.75);
 	const accentDesat = blendToHex(accentHex, TEXT_COLOR, 0.8);
 
+	// Markdown chrome tokens stay non-mode-colored:
+	// - mdHeading / mdListBullet ("1." / "-") use MUTED_COLOR
+	// - mdLink stays frozen at the code-mode accent (#EB6E00)
+	//   and never follows the live mode accent
+	const codeAccent90 = blendToHex(MODE_COLORS.code, PAGE_BG, 0.9);
+
 	return {
 		// Accent-derived tokens (90% opacity blend)
 		accent: accentDesat,
@@ -191,12 +222,12 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		borderAccent: accent90,
 		customMessageLabel: accent90,
 		toolTitle: accentDesat,
-		mdHeading: accent90,
-		mdListBullet: accent90,
-		mdLink: accent90,
+		mdHeading: MUTED_COLOR,
+		mdListBullet: MUTED_COLOR,
+		mdLink: codeAccent90,
 
-		// Inline code foreground uses normal text color; only the
-		// background rectangle (buildCodeBgHex) carries the accent tint.
+		// Inline code foreground uses normal text color; the background
+		// rectangle uses the fixed MUTED_MESSAGE_BG (no accent tint).
 		mdCode: TEXT_COLOR,
 
 		// Border muted (30% opacity)
@@ -216,11 +247,10 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		error: "#cc6666",
 		warning: "#ffff00",
 		muted: MUTED_COLOR,
-		dim: "#666666",
+		dim: MUTED_BULLET_COLOR,
 		text: TEXT_COLOR,
 		thinkingText: MUTED_COLOR,
 		userMessageText: TEXT_COLOR,
-		[TOOL_MATCH_COUNT_FG]: buildToolMatchCountFgHex(accentHex),
 		customMessageText: TEXT_COLOR,
 		toolOutput: MUTED_COLOR,
 		mdLinkUrl: "#666666",
@@ -246,12 +276,11 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 }
 
 export function buildThemeBgColors(accentHex: string): Record<string, string> {
-	const userMsgBg = buildUserMessageBgHex(accentHex);
 	return {
 		selectedBg: "#3a3a4a",
-		userMessageBg: userMsgBg,
-		subagentBg: blendToHex(accentHex, PAGE_BG, 0.09),
-		customMessageBg: userMsgBg,
+		userMessageBg: MUTED_MESSAGE_BG,
+		subagentBg: MUTED_MESSAGE_BG,
+		customMessageBg: MUTED_MESSAGE_BG,
 		toolPendingBg: "#282832",
 		toolSuccessBg: "#283228",
 		toolErrorBg: "#3c2828",

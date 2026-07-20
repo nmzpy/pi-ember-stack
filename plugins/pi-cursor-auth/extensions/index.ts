@@ -59,8 +59,22 @@ function register_cursor_provider(pi: ExtensionAPI, models: ProviderModelConfig[
 
 export default async function pi_cursor_auth(pi: ExtensionAPI): Promise<void> {
 	active_pi = pi;
-	const models = build_cursor_models(await discover_cursor_models());
-	register_cursor_provider(pi, models);
+
+	// Register with an empty catalog first so a missing/unauthenticated
+	// cursor-agent CLI cannot take down the whole pi-ember-stack load.
+	// Live discovery fills the list when the CLI is available; otherwise
+	// /login cursor and /cursor-refresh-models remain the recovery path.
+	register_cursor_provider(pi, []);
+	try {
+		// Do not auto-install during factory load — only probe an existing CLI.
+		const discovered = await discover_cursor_models({ ensure: false });
+		const models = build_cursor_models(discovered);
+		if (models.length > 0) {
+			register_cursor_provider(pi, models);
+		}
+	} catch {
+		// CLI missing, not logged in, or empty model list — keep empty catalog.
+	}
 
 	pi.on("session_start", (_event, ctx) => {
 		set_cursor_cwd(ctx.cwd);

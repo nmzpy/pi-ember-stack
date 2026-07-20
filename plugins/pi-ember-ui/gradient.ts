@@ -7,6 +7,7 @@
 
 import chalk from "chalk";
 import {
+	DIM_COLOR,
 	getActiveModeColor,
 	hexToRgbTriplet,
 	MUTED_COLOR,
@@ -120,17 +121,18 @@ export function invalidate_gradient_cache(): void {
 
 /**
  * Accent palette: 3-stop RGB-space blend.
- *   muted 10% tail (position 0) → dim 40% (position 0.5) → accent peak (position 1)
+ *   DIM_COLOR base (position 0) → 50% toward accent (position 0.5) → accent peak (position 1)
+ * The sweep starts at dim text and brightens toward the live mode accent.
  * Used by: thinking, working, subagent.
  */
 function get_accent_palette(): GradientPalette {
 	if (!cached_accent_palette) {
 		const accent_rgb = hexToRgbTriplet(getActiveModeColor());
-		const bg_rgb = hexToRgbTriplet(PAGE_BG);
+		const dim_rgb = hexToRgbTriplet(DIM_COLOR);
 		cached_accent_palette = {
 			stops: [
-				{ rgb: clamp_lerp(bg_rgb, accent_rgb, 0.1), position: 0 },
-				{ rgb: clamp_lerp(bg_rgb, accent_rgb, 0.4), position: 0.5 },
+				{ rgb: dim_rgb, position: 0 },
+				{ rgb: clamp_lerp(dim_rgb, accent_rgb, 0.5), position: 0.5 },
 				{ rgb: accent_rgb, position: 1 },
 			],
 		};

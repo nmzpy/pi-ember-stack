@@ -4,11 +4,19 @@ import { fileURLToPath } from "node:url";
 import {
 	AssistantMessageComponent,
 	BashExecutionComponent,
+	CompactionSummaryMessageComponent,
+	DynamicBorder,
+	InteractiveMode,
 	Theme,
+	UserMessageComponent,
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
+	Box,
+	Container,
 	Editor,
+	getCapabilities,
+	hyperlink,
 	Markdown,
 	Spacer,
 	Text,
@@ -18,12 +26,15 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import {
-	buildCodeBgHex,
+	DIM_COLOR,
+	MODE_COLORS,
+	MUTED_MESSAGE_BG,
 	buildThemeBgColors,
 	buildThemeExportColors,
 	buildThemeFgColors,
 	getActiveModeColor,
 	isPlanAutoContinuing,
+	isQuestionnaireActive,
 	isShellMode,
 	isLatestSubagentRunning,
 	MUTED_COLOR,
@@ -57,6 +68,7 @@ import {
 	disable_tui_clear_on_shrink,
 	ensure_chatbox_leading_spacer,
 	reset_slash_command_tracking,
+	snap_tui_to_bottom,
 } from "./layout.ts";
 import {
 	bind_model_picker_session,
@@ -70,10 +82,40 @@ export { wrap_model_picker_editor as wrapModelPickerEditor } from "./model-picke
 export {
 	finalize_editor_input_after as finalizeEditorInputAfter,
 	reset_slash_command_tracking as resetSlashCommandTracking,
+	snap_tui_to_bottom as snapTuiToBottom,
 	sync_slash_command_active as syncSlashCommandActive,
 } from "./layout.ts";
-export { intercept_shell_input as interceptShellInput } from "./shell-mode.ts";
+export {
+	intercept_shell_input as interceptShellInput,
+	process_shell_input as processShellInput,
+	type ShellModeEditor,
+} from "./shell-mode.ts";
+export {
+	cancel_footer_stats_schedule as cancelFooterStatsSchedule,
+	init_footer_thinking_level as initFooterThinkingLevel,
+	installEmberFooter,
+	recompute_footer_stats as recomputeFooterStats,
+	refresh_footer as refreshFooter,
+	reset_footer_state as resetFooterState,
+	schedule_footer_stats as scheduleFooterStats,
+	set_footer_thinking_level as setFooterThinkingLevel,
+	set_mode_label_resolver as setModeLabelResolver,
+} from "./footer.ts";
 import { notify_theme_refresh } from "./theme-refresh.ts";
+import {
+	cancel_footer_stats_schedule,
+	init_footer_thinking_level,
+	installEmberFooter,
+	recompute_footer_stats,
+	refresh_footer,
+	reset_footer_state,
+	schedule_footer_stats,
+	set_footer_thinking_level,
+} from "./footer.ts";
+import {
+	process_shell_input as processShellInput,
+	type ShellModeEditor,
+} from "./shell-mode.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const THEME_JSON = path.join(SOURCE_ROOT, "ember.json");
@@ -176,6 +218,15 @@ function placeBoxShadow(
 
 let thinkingActive = false;
 let workingActive = false;
+/** Whether the agent loop is still running across retries/compactions/
+ *  queued follow-ups. `agent_end` fires between each low-level run, but
+ *  Pi may auto-retry, auto-compact and retry, or continue with queued
+ *  follow-ups afterwards — only `agent_settled` means Pi will not run
+ *  again automatically. This flag keeps the Thinking/Working widget
+ *  visible during those inter-run gaps so the header state is never
+ *  lost while the agent is still working on the user's task. Cleared on
+ *  `agent_settled` and `session_shutdown` (the safety floor). */
+let agentRunPending = false;
 let logoAnimating = false;
 let logoStatic = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
@@ -219,11 +270,15 @@ let renderGeneration = 0;
 let lastRenderAt = 0;
 let forceRenderPending = false;
 let sessionCtx: any;
+let shellInputUnsubscribe: (() => void) | undefined;
+let getShellEditor: (() => ShellModeEditor | undefined) | undefined;
 
 type EditorWithBorder = Editor & {
 	borderColor: (text: string) => string;
 	getText: () => string;
 };
+
+export type { EditorWithBorder };
 
 /**
  * Recompute whether the latest tool call in the session is a `subagent`
@@ -324,6 +379,107 @@ export { MUTED_GROUP_GRADIENT_PRESET } from "./gradient.ts";
  */
 export function requestTuiRender(force = false): void {
 	requestRender?.(force);
+}
+
+/**
+ * Request a render starting from a live editor instance. Use this when the
+ * editor is known (e.g. inside a handleInput wrapper) and module-level
+ * requestRender might be stale due to jiti module duplication. Falls back to
+ * the module-level scheduler if the editor has no live TUI.
+ */
+export function requestTuiRenderFromEditor(editor: { tui?: { requestRender?: (force?: boolean) => void } }, force = false): void {
+	if (editor?.tui?.requestRender) {
+		editor.tui.requestRender(force);
+		return;
+	}
+	requestRender?.(force);
+}
+
+/** Request a non-forced render of the live editor and refresh the footer so
+ *  shell-mode visual indicators (prompt glyph, border, footer left stats)
+ *  update together. Use the captured session ctx when available.
+ */
+export function requestShellModeVisualRefresh(
+	editor: { tui?: { requestRender?: (force?: boolean) => void } },
+	ctx?: any,
+): void {
+	requestTuiRenderFromEditor(editor, false);
+	if (ctx?.mode === "tui") {
+		refresh_footer(ctx);
+	}
+}
+
+/**
+ * Apply the shell-aware straight-rule chatbox render wrap to a concrete
+ * Editor instance. Needed in addition to the prototype patch because Pi's
+ * loader can load `@earendil-works/pi-tui` from a different copy than the
+ * extension, so prototype-only decoration may miss the live Editor class.
+ */
+export function wrapEditorRenderForShell(editor: EditorWithBorder): void {
+	const marker = Symbol.for("pi-ember-ui:shell-render-wrapped");
+	if ((editor as any)[marker]) return;
+	(editor as any)[marker] = true;
+	const originalRender = editor.render.bind(editor);
+	editor.render = function shellAwareRender(width: number): string[] {
+		return render_shell_aware_editor(editor, originalRender, width);
+	};
+}
+
+/**
+ * Pin the chatbox to the bottom of the viewport while preserving terminal
+ * scrollback. This is the scrollback-safe replacement for
+ * `requestTuiRender(true)`: it clears only the visible screen (`2J`, never
+ * `3J`), resets Pi's differential bookkeeping, and requests a normal render
+ * whose first-render path re-anchors `previousViewportTop` to the bottom.
+ *
+ * Use this for any snap that must re-pin the viewport after a line-count
+ * shrink (compact-group collapse, thinking-toggle rebuild). Never call
+ * `requestTuiRender(true)` from render/lifecycle paths — it emits `3J` and
+ * destroys scrollback.
+ *
+ * Returns true when the snap was applied. Returns false when no live TUI is
+ * bound (e.g. pre-`session_start` or post-`session_shutdown`); callers MUST
+ * NOT fall back to `requestTuiRender(true)` on a false return — a missing
+ * TUI means we are outside a live TUI session where a snap is meaningless.
+ */
+export function requestTuiRenderSnapToBottom(): boolean {
+	return snap_tui_to_bottom(tuiRef);
+}
+
+/** Install a TUI-level input listener that intercepts shell-mode `!` before
+ *  the focused editor sees it. This is more reliable than the per-instance
+ *  handleInput wrap because Pi may replace or unwrap the focused editor,
+ *  while `tui.addInputListener` persists for the TUI session.
+ */
+function installShellModeInputListener(ctx: any): void {
+	const tui = tuiRef ?? ctx?.ui;
+	if (!tui?.addInputListener) return;
+	if (shellInputUnsubscribe) {
+		shellInputUnsubscribe();
+		shellInputUnsubscribe = undefined;
+	}
+
+	getShellEditor = (): ShellModeEditor | undefined => {
+		const focused = tui.focusedComponent as any;
+		if (!focused) return undefined;
+		wrapEditorRenderForShell(focused);
+		return focused as ShellModeEditor;
+	};
+
+	shellInputUnsubscribe = tui.addInputListener((data: string) => {
+		const editor = getShellEditor?.();
+		if (!editor) return undefined;
+
+		// Ignore shell mode while an overlay is visible (questionnaire,
+		// model picker, etc.) because the editor does not have input focus.
+		if (tui.hasOverlay?.()) return undefined;
+
+		const result = processShellInput(data, editor);
+		if (result?.consume) {
+			requestShellModeVisualRefresh(editor, ctx);
+		}
+		return result;
+	});
 }
 
 function stopThinkingAnimation(): void {
@@ -563,7 +719,7 @@ function applyDynamicTheme(options: { invalidate?: boolean; render?: boolean } =
 	const accent = getActiveModeColor();
 	const fgColors = buildThemeFgColors(accent);
 	const bgColors = buildThemeBgColors(accent);
-	const codeBg = buildCodeBgHex(accent);
+	const codeBg = MUTED_MESSAGE_BG;
 	// Export colors for HTML export are written once at install
 	// (ensureThemeInstalled + updateInstalledThemeExport) — never mid-session.
 	// Writing ember.json while Pi's theme watcher is active reloads a Theme
@@ -639,17 +795,34 @@ function installThinkingBorderOverride(): void {
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 	const originalRender = proto.render;
+	const wrapMarker = Symbol.for("pi-ember-ui:shell-render-wrapped");
 	proto.render = function renderThinkingBorder(this: EditorWithBorder, width: number): string[] {
-		const borderColor = isShellMode() || workingActive ? MUTED_COLOR : TEXT_COLOR;
-		const border = (text: string): string => colorize(text, borderColor);
-		const dimBorder = (text: string): string => colorWithOpacity(text, MUTED_COLOR, 0.1875);
-		const INSET = 1;
-		const INNER_PAD = 1;
-		const innerWidth = Math.max(1, width - INSET * 2 - 2 - INNER_PAD * 2);
-		const originalBorderColor = this.borderColor;
-		this.borderColor = border;
-		const lines = originalRender.call(this, innerWidth);
-		this.borderColor = originalBorderColor;
+		// If the instance was already wrapped by wrapEditorRenderForShell(),
+		// do not re-apply the shell-aware border/prompt transformation or the
+		// prompt glyph and gutter will render twice.
+		if ((this as any)[wrapMarker]) return originalRender.call(this, width);
+		return render_shell_aware_editor(this, originalRender, width);
+	};
+}
+
+/**
+ * Render an Editor instance with shell-mode prompt/border styling.
+ * Extracted from `installThinkingBorderOverride` so it can also be applied
+ * per-instance, which is necessary when `@earendil-works/pi-tui` is loaded
+ * from multiple module copies and prototype patching only lands on one.
+ */
+function render_shell_aware_editor(instance: EditorWithBorder, originalRender: (width: number) => string[], width: number): string[] {
+	const borderColor = isShellMode() || workingActive || agentRunPending ? MUTED_COLOR : TEXT_COLOR;
+	const border = (text: string): string => colorize(text, borderColor);
+	const dimBorder = (text: string): string => colorize(text, DIM_COLOR);
+	const INSET = 0;
+	const INNER_PAD = 1;
+	const SLASH_MIDDLE_INSET = 1;
+	const innerWidth = Math.max(1, width - INSET * 2 - 2 - INNER_PAD * 2);
+	const originalBorderColor = instance.borderColor;
+	instance.borderColor = border;
+	const lines = originalRender.call(instance, innerWidth);
+	instance.borderColor = originalBorderColor;
 
 		if (!cursorVisible) {
 			for (let i = 0; i < lines.length; i++) {
@@ -672,22 +845,33 @@ function installThinkingBorderOverride(): void {
 		}
 		const topIdx = borderIndices[0] ?? 0;
 		const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
-		const isSlashMode = this.getText?.().trimStart().startsWith("/") === true;
+		const isSlashMode = instance.getText?.().trimStart().startsWith("/") === true;
 		const hasAutocompleteRows = bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
-		// Autocomplete belongs above the chat pill so it grows upward while the
-		// editor stays anchored at the bottom of the TUI. This avoids needing
-		// viewport/high-water-mark manipulation when the popup collapses.
-		const middleBorderIdx = hasAutocompleteRows ? bottomBorderIdx : -1;
+		// Slash autocomplete menu expands downward from the chatbox. The
+		// autocomplete rows stay after the editor body, so the menu grows below.
+		const middleBorderIdx = -1;
 
 		const pad = " ".repeat(INSET);
 		const innerPad = " ".repeat(INNER_PAD);
-		const borderWidth = innerWidth + INNER_PAD * 2;
-		const topCorners = `${pad}${border("\u256d")}${border("\u2500".repeat(borderWidth))}${border("\u256e")}${pad}`;
-		const bottomCorners = `${pad}${border("\u2570")}${border("\u2500".repeat(borderWidth))}${border("\u256f")}${pad}`;
-		const middleSep = isSlashMode
-			? `${pad}${border("\u2502")}${innerPad}${dimBorder("\u2500".repeat(innerWidth))}${innerPad}${border("\u2502")}${pad}`
-			: `${pad}${border("\u2502")}${innerPad}${border("\u2500".repeat(innerWidth))}${innerPad}${border("\u2502")}${pad}`;
+		const promptGlyph = isShellMode() ? "!" : ">";
+		const promptStr = border(`${promptGlyph} `);
+		const gutter = "  ";
+		const padRight = (s: string): string => {
+			const visLen = visibleWidth(s);
+			return s + " ".repeat(Math.max(0, width - visLen));
+		};
+		const bottomRule = " " + chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2))) + " ";
+		const topRule = bottomRule;
+		const slashMiddleSep =
+			" ".repeat(SLASH_MIDDLE_INSET) +
+			dimBorder("\u2500".repeat(Math.max(1, width - SLASH_MIDDLE_INSET * 2)));
+		const middleSep = padRight(
+			isSlashMode
+				? slashMiddleSep
+				: `${pad}${innerPad}${gutter}${border("\u2500".repeat(innerWidth))}`,
+		);
 
+		let firstBody = true;
 		for (let i = 1; i < lines.length; i++) {
 			const borderIdxPos = borderIndices.indexOf(i);
 			const isMiddleBorder =
@@ -696,32 +880,33 @@ function installThinkingBorderOverride(): void {
 			if (i === bottomBorderIdx && !isMiddleBorder) continue;
 			if (isMiddleBorder) {
 				lines[i] = middleSep;
-			} else {
-				lines[i] =
-					`${pad}${border("\u2502")}${innerPad}${lines[i]}${innerPad}${border("\u2502")}${pad}`;
+				firstBody = false;
+				continue;
 			}
+			const gutterStr = firstBody ? promptStr : gutter;
+			lines[i] = padRight(`${pad}${innerPad}${gutterStr}${lines[i]}`);
+			firstBody = false;
 		}
-		lines[topIdx] = topCorners;
+		lines[topIdx] = topRule;
 		if (bottomBorderIdx >= 0) {
-			lines[bottomBorderIdx] = middleBorderIdx >= 0 ? middleSep : bottomCorners;
+			lines[bottomBorderIdx] = middleBorderIdx >= 0 ? middleSep : bottomRule;
 		}
 		const lastLineIdx = lines.length - 1;
 		if (lastLineIdx > bottomBorderIdx && lastLineIdx > 0) {
-			lines.push(bottomCorners);
+			lines.push(bottomRule);
 		}
 		if (hasAutocompleteRows && bottomBorderIdx >= 0) {
-			// The loop above has already applied the chat-pill side borders to
-			// autocomplete rows and appended the shell's bottom corners. Move
-			// those rows before the editor body, keeping one shared outer shell.
-			const bottomCornersIdx = lines.length - 1;
-			const autocompleteLines = lines.slice(bottomBorderIdx + 1, bottomCornersIdx);
+			// The loop above has already applied the chatbox gutter to
+			// autocomplete rows and appended the shell's bottom rule. Keep
+			// them after the editor body so the slash menu expands downward.
+			const bottomRuleIdx = lines.length - 1;
+			const autocompleteLines = lines.slice(bottomBorderIdx + 1, bottomRuleIdx);
 			const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
-			return [topCorners, ...autocompleteLines, middleSep, ...editorLines, bottomCorners];
+			return [topRule, ...editorLines, middleSep, ...autocompleteLines, bottomRule];
 		}
 		if (lines.length === 0) return lines;
 		return lines;
-	};
-}
+	}
 
 function installAssistantMessagePatch(): void {
 	const proto = (AssistantMessageComponent as any).prototype;
@@ -845,14 +1030,20 @@ function installAssistantMessagePatch(): void {
 			);
 		} else if (!hasToolCalls) {
 			if (message.stopReason === "aborted") {
-				const abortMessage =
-					message.errorMessage && message.errorMessage !== "Request was aborted"
-						? message.errorMessage
-						: "Operation aborted";
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(
-					new Text(theme.fg("error", abortMessage), this.outputPad, 0),
-				);
+				// User-canceled runs should not print a red "Operation aborted" row.
+				// If the assistant had no visible content and no custom errorMessage,
+				// skip the default status text entirely. A non-generic errorMessage
+				// (e.g. from a tool or provider) still surfaces as an error row.
+				if (
+					message.errorMessage &&
+					message.errorMessage !== "Request was aborted" &&
+					message.errorMessage !== "Operation aborted"
+				) {
+					this.contentContainer.addChild(new Spacer(1));
+					this.contentContainer.addChild(
+						new Text(theme.fg("error", message.errorMessage), this.outputPad, 0),
+					);
+				}
 			} else if (message.stopReason === "error") {
 				const errorMsg = message.errorMessage || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
@@ -901,6 +1092,157 @@ function installExpandableTextPatch(): void {
 	};
 }
 
+/** CLI name used in Pi's update-notice action strings (`pi update`). */
+const UPDATE_APP_NAME = "pi";
+const CHANGELOG_URL = "https://pi.dev/changelog";
+
+/**
+ * Pi bakes `theme.fg("accent", …)` into the startup update notice
+ * (`pi update`, changelog URL). That follows the live mode accent, so a
+ * plan-mode startup paints those strings purple. Force muted/text instead —
+ * update notices are informational chrome, not mode-colored UI.
+ */
+function installUpdateNotificationPatch(): void {
+	const proto = (InteractiveMode as any).prototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+
+	// Helper: does the component tree render a blank line as its last line?
+	// We only walk Container children recursively; leaf components like Spacer
+	// are terminal. This avoids adding a second blank row when the previous
+	// assistant message (or compact tool block) already ends with one.
+	function component_ends_with_blank_row(component: any): boolean {
+		if (!component) return false;
+		if (component instanceof Spacer) {
+			return component.render(1).length > 0;
+		}
+		if (component.children) {
+			for (let i = component.children.length - 1; i >= 0; i--) {
+				const child = component.children[i];
+				if (child instanceof Spacer) {
+					return child.render(1).length > 0;
+				}
+				if (child?.children || child?.contentContainer?.children) {
+					return component_ends_with_blank_row(child);
+				}
+			}
+		}
+		return false;
+	}
+
+	const originalShowStatus = proto.showStatus;
+	proto.showStatus = function emberShowStatus(this: any, message: string): void {
+		const theme = resolve_live_theme();
+		if (!theme || !this.chatContainer) {
+			originalShowStatus.call(this, message);
+			return;
+		}
+
+		const children = this.chatContainer.children;
+		const last = children.length > 0 ? children[children.length - 1] : undefined;
+		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
+
+		// Consecutive info statuses still update the previous status line.
+		if (last && last === this.lastStatusText && secondLast && secondLast === this.lastStatusSpacer) {
+			this.lastStatusText.setText(theme.fg("dim", message));
+			this.ui.requestRender();
+			return;
+		}
+
+		// Only add a spacer if the previous component does not already end
+		// with a blank row. This prevents two blank rows after an assistant
+		// message or a compact tool block that already ends with a spacer.
+		if (!component_ends_with_blank_row(last)) {
+			const spacer = new Spacer(1);
+			this.chatContainer.addChild(spacer);
+			this.lastStatusSpacer = spacer;
+		} else {
+			this.lastStatusSpacer = undefined;
+		}
+
+		const text = new Text(theme.fg("dim", message), 1, 0);
+		this.chatContainer.addChild(text);
+		this.lastStatusText = text;
+		this.ui.requestRender();
+	};
+
+	const originalShowNewVersion = proto.showNewVersionNotification;
+	proto.showNewVersionNotification = function emberShowNewVersionNotification(
+		this: any,
+		release: { version?: string; note?: string },
+	): void {
+		const theme = resolve_live_theme();
+		if (!theme || !this.chatContainer) {
+			originalShowNewVersion.call(this, release);
+			return;
+		}
+
+		const version = release?.version ?? "";
+		const action = theme.fg("text", `${UPDATE_APP_NAME} update`);
+		const updateInstruction =
+			theme.fg("muted", `New version ${version} is available. Run `) + action;
+		const changelogLink = getCapabilities().hyperlinks
+			? hyperlink(theme.fg("muted", CHANGELOG_URL), CHANGELOG_URL)
+			: theme.fg("muted", CHANGELOG_URL);
+		const changelogLine = theme.fg("muted", "Changelog: ") + changelogLink;
+		const note = release?.note?.trim();
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
+		this.chatContainer.addChild(
+			new Text(
+				`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`,
+				1,
+				0,
+			),
+		);
+		if (note) {
+			this.chatContainer.addChild(new Spacer(1));
+			const markdownTheme =
+				typeof this.getMarkdownThemeWithSettings === "function"
+					? this.getMarkdownThemeWithSettings()
+					: undefined;
+			this.chatContainer.addChild(
+				new Markdown(note, 1, 0, markdownTheme, {
+					color: (text: string) => theme.fg("muted", text),
+				}),
+			);
+			this.chatContainer.addChild(new Spacer(1));
+		}
+		this.chatContainer.addChild(new Text(changelogLine, 1, 0));
+		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
+		this.ui?.requestRender?.();
+	};
+
+	const originalShowPackageUpdate = proto.showPackageUpdateNotification;
+	proto.showPackageUpdateNotification = function emberShowPackageUpdateNotification(
+		this: any,
+		packages: string[],
+	): void {
+		const theme = resolve_live_theme();
+		if (!theme || !this.chatContainer) {
+			originalShowPackageUpdate.call(this, packages);
+			return;
+		}
+
+		const action = theme.fg("text", `${UPDATE_APP_NAME} update --extensions`);
+		const updateInstruction =
+			theme.fg("muted", "Package updates are available. Run ") + action;
+		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
+		this.chatContainer.addChild(
+			new Text(
+				`${theme.bold(theme.fg("warning", "Package Updates Available"))}\n${updateInstruction}\n${theme.fg("muted", "Packages:")}\n${packageLines}`,
+				1,
+				0,
+			),
+		);
+		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
+		this.ui?.requestRender?.();
+	};
+}
+
 function installBashExecutionPatch(): void {
 	const proto = (BashExecutionComponent as any).prototype;
 	if (proto[EMBER_PATCH_MARKER]) return;
@@ -933,23 +1275,118 @@ function installBashExecutionPatch(): void {
 		const innerWidth = Math.max(1, width - 2);
 		const rawLines = originalRender.call(this, innerWidth) as string[];
 
-		const filtered: string[] = [];
-		for (const line of rawLines) {
-			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
-			if (/^[\s\u2500]*$/.test(stripped)) continue;
-			filtered.push(line);
-		}
-
 		const result: string[] = [];
 		const pad = " ";
-		for (const line of filtered) {
+		for (const line of rawLines) {
+			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+			if (/^[\s\u2500]*$/.test(stripped)) {
+				if (stripped.includes("\u2500")) {
+					result.push(chatboxBorderColor("\u2500".repeat(width)));
+				}
+				continue;
+			}
+
 			const padded = pad + line;
 			const visLen = visibleWidth(padded);
 			const padNeeded = Math.max(0, width - visLen);
 			const fullLine = padded + " ".repeat(padNeeded);
-			result.push(theme.bg("userMessageBg", fullLine));
+			result.push(fullLine);
 		}
 		return result;
+	};
+}
+
+/** Chatbox-style horizontal-rule color using the dim token. */
+function chatboxBorderColor(text: string): string {
+	return colorize(text, DIM_COLOR);
+}
+
+/**
+ * Wrap a content component in chatbox-style horizontal lines: top and bottom
+ * `──` rules at 50% opacity, with 1-column left/right inner padding and no
+ * background fill. Replaces the old `userMessageBg` block style for user
+ * messages and questionnaire rows.
+ */
+export function chatboxBorderContainer(content: any, paddingX = 1): any {
+	const wrapper = new Container();
+	wrapper.addChild(new DynamicBorder(chatboxBorderColor));
+	const inner = new Box(paddingX, 0, undefined);
+	inner.addChild(content);
+	wrapper.addChild(inner);
+	wrapper.addChild(new DynamicBorder(chatboxBorderColor));
+	return wrapper;
+}
+
+function installUserMessagePatch(): void {
+	const proto = (UserMessageComponent as any).prototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+
+	proto.rebuild = function emberUserMessageRebuild(this: any): void {
+		this.outputPad = 1;
+		this.clear();
+		const theme = resolve_live_theme();
+		const markdown = new Markdown(
+			this.text,
+			0,
+			0,
+			this.markdownTheme,
+			{
+				color: (text: string) => theme.fg("userMessageText", text),
+			},
+			{ preserveOrderedListMarkers: true, preserveBackslashEscapes: true },
+		);
+		this.addChild(chatboxBorderContainer(markdown, this.outputPad));
+	};
+}
+
+function installCompactionSummaryPatch(): void {
+	const proto = (CompactionSummaryMessageComponent as any).prototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+
+	proto.updateDisplay = function emberCompactionUpdateDisplay(this: any): void {
+		this.setBgFn(undefined);
+		this.paddingX = 0;
+		this.paddingY = 0;
+		this.clear();
+
+		const theme = resolve_live_theme();
+		const before = this.message.tokensBefore.toLocaleString();
+		const after = Math.ceil(this.message.summary.length / 4).toLocaleString();
+
+		const wrapper = new Container();
+		const header = new Text(theme.fg("customMessageLabel", "\x1b[1mCompaction\x1b[22m"), 0, 0);
+		wrapper.addChild(header);
+		wrapper.addChild(new Spacer(1));
+
+		const bodyText = `Summarized ${before} tokens into ~${after}.`;
+		let body: any;
+		if (this.expanded) {
+			body = new Markdown(
+				this.message.summary,
+				0,
+				0,
+				this.markdownTheme,
+				{
+					color: (text: string) => theme.fg("customMessageText", text),
+				},
+			);
+		} else {
+			const expandKey = (globalThis as any).process?.env?.["PI_EXPAND_KEY"] || "ctrl+o";
+			body = new Text(
+				theme.fg("customMessageText", bodyText) +
+					theme.fg("dim", ` (${expandKey} to expand)`),
+				0,
+				0,
+			);
+		}
+
+		const bodyWrapper = new Box(0, 0, undefined);
+		bodyWrapper.addChild(body);
+		wrapper.addChild(bodyWrapper);
+
+		this.addChild(chatboxBorderContainer(wrapper, 1));
 	};
 }
 
@@ -1333,13 +1770,22 @@ function installStartupHeader(ctx: any): void {
 				const model = ctx.model;
 				const modelName = model?.name ?? model?.id ?? "no model";
 
-				const accent = getActiveModeColor();
+				// Logo gradient + header bullet are frozen at the code-mode accent
+				// (#EB6E00) in every mode — they never follow the live mode accent.
+				// mdListBullet is muted (list "1." / "-" markers); do not reuse it here.
+				const accent = MODE_COLORS.code;
 				const logoLines = renderLogoWithGradient(accent);
 				const logoWidth = visibleWidth(logoLines[0] ?? "");
 				const leftPad = Math.max(0, Math.floor((width - logoWidth) / 2));
 				const padStr = " ".repeat(leftPad);
+				// Once the logo turns static/gray (after the first assistant token
+				// or at shutdown), the header bullet should match the dim model/dir
+				// color instead of staying code-orange.
+				const headerBullet = logoStatic
+					? theme.fg("dim", "\u2022")
+					: `${fgAnsi(accent)}\u2022\x1b[39m`;
 
-				const infoLine = `${theme.fg("text", modelName)} ${theme.fg("accent", "\u2022")} ${theme.fg("dim", dir)}`;
+				const infoLine = `${theme.fg("text", modelName)} ${headerBullet} ${theme.fg("dim", dir)}`;
 				const infoPad = Math.max(0, Math.floor((width - visibleWidth(infoLine)) / 2));
 				const infoPadStr = " ".repeat(infoPad);
 
@@ -1425,16 +1871,17 @@ function installThinkingWidget(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
 		render(_width: number): string[] {
-			if (isLatestSubagentRunning()) return [];
-			if (!thinkingActive && !workingActive) return [];
-			const preset: GradientPreset = thinkingActive ? "thinking" : "working";
-			const labelText = thinkingActive ? "Thinking" : "Working";
+			if (isQuestionnaireActive() || isLatestSubagentRunning()) return [];
+			if (!thinkingActive && !workingActive && !agentRunPending) return [];
+			const isThinking = thinkingActive || (!workingActive && agentRunPending);
+			const preset: GradientPreset = isThinking ? "thinking" : "working";
+			const labelText = isThinking ? "Thinking" : "Working";
 			const elapsedMs = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
 			const elapsedText = elapsedMs >= 1000 ? ` ${formatElapsed(elapsedMs)}` : "";
-			const WIDGET_INSET = 3;
+			const WIDGET_INSET = 1;
 			const widgetPad = " ".repeat(WIDGET_INSET);
 			const theme = resolve_live_theme();
-			const elapsedColored = elapsedText ? theme.fg("muted", elapsedText) : "";
+			const elapsedColored = elapsedText ? theme.fg("dim", elapsedText) : "";
 			const labelGradient = renderLiveGradient(labelText, preset);
 			return [`${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`];
 		},
@@ -1453,6 +1900,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	installAssistantMessagePatch();
 	installExpandableTextPatch();
 	installBashExecutionPatch();
+	installUserMessagePatch();
+	installCompactionSummaryPatch();
+	installUpdateNotificationPatch();
 	applyDynamicTheme();
 
 	pi.on("session_start", (event, ctx) => {
@@ -1488,6 +1938,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			if (event.reason === "startup" || event.reason === "new") {
 				startLogoAnimation();
 			}
+			installEmberFooter(ctx);
+			init_footer_thinking_level(pi);
+			recompute_footer_stats(ctx);
+			installShellModeInputListener(ctx);
 		}
 	});
 
@@ -1504,8 +1958,8 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			// and invalidate the TUI. applyDynamicTheme bumps
 			// markdownThemeGeneration; the updateContent skip-guard includes
 			// that generation so assistant messages fully rebuild their
-			// CachedMarkdown children with the new accent — MD headers,
-			// links, and list bullets all track the live mode color.
+			// CachedMarkdown children with the new accent — MD headers
+			// and links recolor; list markers stay muted.
 			applyDynamicTheme({ invalidate: true, render: false });
 			invalidateLoadedResources();
 			requestRender?.();
@@ -1532,12 +1986,20 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("message_end", () => {
+	pi.on("message_end", (_event, ctx) => {
 		stopThinkingAnimation();
+		schedule_footer_stats(ctx);
+	});
+
+	pi.on("thinking_level_select", (event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		set_footer_thinking_level(event.level ?? "off");
+		refresh_footer(ctx);
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		agentRunPending = true;
 		startWorkingAnimation();
 	});
 
@@ -1558,6 +2020,18 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		requestRender?.();
 	});
 
+	// `agent_settled` is the only event that means Pi will not auto-retry,
+	// auto-compact and retry, or continue with queued follow-ups. Drop the
+	// inter-run hold here so the widget finally hides once the agent is truly
+	// done. `agent_end` only fires for the current low-level run and may be
+	// followed by another `agent_start` after compaction/retry/follow-ups.
+	pi.on("agent_settled", (_event, ctx) => {
+		agentRunPending = false;
+		stopThinkingAnimation();
+		stopWorkingAnimation();
+		if (ctx.mode === "tui") requestRender?.();
+	});
+
 	pi.on("tool_execution_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		if (event.toolName === "subagent") recompute_latest_subagent_running();
@@ -1566,6 +2040,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("tool_execution_end", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		schedule_footer_stats(ctx);
 		if (event.toolName === "subagent") {
 			// The subagent tool has finished executing. Recompute would race the
 			// toolResult being appended to the session branch and could keep the
@@ -1624,15 +2099,22 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		stopCursorBlink();
 		thinkingActive = false;
 		workingActive = false;
+		agentRunPending = false;
 		userPromptAt = 0;
 		setShellMode(false);
 		setLatestSubagentRunning(false);
 		setThinkingBlocksHidden(false);
 		setToolGroupActive(false);
 		setPlanAutoContinuing(false);
+		reset_footer_state();
 		if (ctx.hasUI) {
 			ctx.ui.setWidget("ember-thinking", undefined);
 			ctx.ui.setHeader(undefined);
 		}
+		if (shellInputUnsubscribe) {
+			shellInputUnsubscribe();
+			shellInputUnsubscribe = undefined;
+		}
+		getShellEditor = undefined;
 	});
 }

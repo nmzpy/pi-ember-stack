@@ -26,15 +26,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	getKeybindings,
-	truncateToWidth,
-	visibleWidth,
 	matchesKey,
 	type EditorTheme,
 	type TUI,
 } from "@earendil-works/pi-tui";
 import {
-	isShellMode,
-	liveAccentFg,
 	mutedBullet,
 	setActiveMode,
 	setPlanAutoContinuing,
@@ -45,19 +41,100 @@ import {
 	finalizeEditorInputAfter,
 	interceptShellInput,
 	pickModelInEditor,
+	processShellInput,
+	requestShellModeVisualRefresh,
+	requestTuiRenderFromEditor,
+	requestTuiRenderSnapToBottom,
 	resetSlashCommandTracking,
+	scheduleFooterStats,
+	setModeLabelResolver,
+	wrapEditorRenderForShell,
 	wrapModelPickerEditor,
 } from "../pi-ember-ui/index.ts";
-import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	askQuestionnaire,
 	type QuestionnaireQuestion,
 	registerQuestionnaireTool,
 } from "./questionnaire-tool.ts";
+import {
+	build_auto_continue_content,
+	COMPACT_FOCUS_INSTRUCTIONS,
+	is_benign_compact_error,
+	should_skip_compact,
+} from "./auto-continue.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 
-function modelIdentityString(model: Model<any> | undefined): string {
-	return model ? `${model.provider}/${model.id}` : "";
+/**
+ * Promisify ctx.compact() into a result discriminated union.
+ * Never throws — both callback errors and synchronous throws are caught.
+ */
+function compact_async(
+	ctx: any,
+	customInstructions: string,
+): Promise<{ ok: true } | { ok: false; error: Error }> {
+	return new Promise((resolve) => {
+		try {
+			ctx.compact({
+				customInstructions,
+				onComplete: () => resolve({ ok: true }),
+				onError: (err: unknown) => {
+					const error = err instanceof Error ? err : new Error(String(err));
+					resolve({ ok: false, error });
+				},
+			});
+		} catch (err) {
+			const error = err instanceof Error ? err : new Error(String(err));
+			resolve({ ok: false, error });
+		}
+	});
+}
+
+type ModelIdentity = { readonly provider: string; readonly modelId: string };
+
+function model_identity_of(model: Model<any> | undefined): ModelIdentity | undefined {
+	return model ? { provider: model.provider, modelId: model.id } : undefined;
+}
+
+function identities_equal(a?: ModelIdentity, b?: ModelIdentity): boolean {
+	if (!a && !b) return true;
+	if (!a || !b) return false;
+	return a.provider === b.provider && a.modelId === b.modelId;
+}
+
+function normalize_mode_models(raw: unknown): Partial<Record<string, ModelIdentity>> {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+	const obj = raw as Record<string, unknown>;
+	const result: Partial<Record<string, ModelIdentity>> = {};
+	for (const [key, value] of Object.entries(obj)) {
+		if (
+			value &&
+			typeof value === "object" &&
+			!Array.isArray(value) &&
+			typeof (value as Record<string, unknown>).provider === "string" &&
+			typeof (value as Record<string, unknown>).modelId === "string"
+		) {
+			result[key] = {
+				provider: (value as Record<string, unknown>).provider as string,
+				modelId: (value as Record<string, unknown>).modelId as string,
+			};
+		}
+	}
+	return result;
+}
+
+function get_mode_model(
+	modeModels: Partial<Record<string, ModelIdentity>>,
+	modeId: string,
+): ModelIdentity | undefined {
+	return modeModels[modeId];
+}
+
+function bind_mode_model(
+	modeModels: Partial<Record<string, ModelIdentity>>,
+	modeId: string,
+	identity: ModelIdentity,
+): Partial<Record<string, ModelIdentity>> {
+	return { ...modeModels, [modeId]: identity };
 }
 
 function stable_serialize(value: unknown): string {
@@ -115,7 +192,9 @@ function intercept_slash_escape(data: string, editor: any): boolean {
 
 type PersistedState = {
 	readonly mode?: string;
-	readonly model?: { provider: string; modelId: string };
+	/** @deprecated migrated into modeModels; stop writing */
+	readonly model?: ModelIdentity;
+	readonly modeModels?: Readonly<Partial<Record<string, ModelIdentity>>>;
 };
 
 function getPersistedStatePath(): string {
@@ -127,14 +206,38 @@ function getPersistedStatePath(): string {
 
 function readPersistedState(): PersistedState {
 	try {
-		const raw = fs.readFileSync(getPersistedStatePath(), "utf8");
-		return JSON.parse(raw) as PersistedState;
+		const raw = JSON.parse(fs.readFileSync(getPersistedStatePath(), "utf8")) as Record<string, unknown>;
+		const mode = typeof raw.mode === "string" ? raw.mode : undefined;
+		const modeModels = normalize_mode_models(raw.modeModels);
+		// Migration: if legacy top-level `model` exists and modeModels lacks an
+		// entry for the persisted mode (fallback DEFAULT_MODE/"code"), seed only
+		// that one mode. Never fan-out legacy model to all modes.
+		const legacyModel = raw.model;
+		if (
+			legacyModel &&
+			typeof legacyModel === "object" &&
+			!Array.isArray(legacyModel) &&
+			typeof (legacyModel as Record<string, unknown>).provider === "string" &&
+			typeof (legacyModel as Record<string, unknown>).modelId === "string"
+		) {
+			const migrationMode = mode && mode in MODES ? mode : DEFAULT_MODE;
+			if (!get_mode_model(modeModels, migrationMode)) {
+				modeModels[migrationMode] = {
+					provider: (legacyModel as Record<string, unknown>).provider as string,
+					modelId: (legacyModel as Record<string, unknown>).modelId as string,
+				};
+			}
+		}
+		return { mode, modeModels };
 	} catch {
 		return {};
 	}
 }
 
-function writePersistedState(state: PersistedState): void {
+function writePersistedState(state: {
+	readonly mode?: string;
+	readonly modeModels?: Partial<Record<string, ModelIdentity>>;
+}): void {
 	const file = getPersistedStatePath();
 	try {
 		fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -144,19 +247,16 @@ function writePersistedState(state: PersistedState): void {
 		} catch {
 			// file doesn't exist or is invalid — start fresh
 		}
-		const merged = { ...existing, ...state } as Record<string, unknown>;
+		const merged = { ...existing } as Record<string, unknown>;
+		// modeModels is the sole authority for per-mode model bindings.
+		// Actively delete the legacy top-level `model` key so dual-truth dies.
+		delete merged.model;
+		if (state.mode !== undefined) merged.mode = state.mode;
+		merged.modeModels = state.modeModels ?? {};
 		fs.writeFileSync(file, `${JSON.stringify(merged, null, "\t")}\n`);
 	} catch {
 		// best-effort persistence
 	}
-}
-
-function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-	return `${Math.round(count / 1000000)}M`;
 }
 
 // Web-access tools are read-only research tools (web_search, fetch_content,
@@ -201,7 +301,7 @@ const SUBAGENT_FILES: Record<string, string> = {
 
 const PARALLEL_TOOL_CALL_GUIDANCE = `
 
-## Tool Call Efficiency
+Tool Call Efficiency:
 
 When multiple independent tool calls are needed (e.g. reading several files,
 searching for different patterns), emit them all in a single response rather
@@ -209,20 +309,28 @@ than one at a time. The runtime executes independent tool calls in parallel,
 so batching them saves round-trips and reduces latency.
 `;
 
+const OUTPUT_STYLE_DIRECTIVE = `
+
+Output style: Reply in plain dense text. No markdown headers (#, ##, ###), no
+bold or italics (**, *), no decorative bulleted lists (-, *). Use short labeled
+lines (Label: value) or compact key: value pairs. Keep code fences only for
+multi-line code blocks. Be concise.
+`;
+
 const SUBAGENT_AWARENESS_PROMPT = `
 
-## Available Subagents
+Available Subagents:
 
-You have the \`subagent\` tool available for delegating tasks to specialized agents
+You have the subagent tool available for delegating tasks to specialized agents
 with isolated context. Use it to keep your own context lean.
 
-- **Scout**: Fast agent specialized for exploring codebases. Use when you need to
-  quickly find files by patterns (e.g. "src/components/**/*.tsx"), search code for
-  keywords (e.g. "API endpoints"), or answer questions about the codebase (e.g.
-  "how do API endpoints work?").
-- **Coder**: Implementation agent for writing, editing, testing, and verifying
-  code. Full tool access. Use for focused implementation tasks — bug fixes,
-  feature additions, refactors, file edits.
+Scout: Fast agent specialized for exploring codebases. Use when you need to
+quickly find files by patterns (e.g. "src/components/**/*.tsx"), search code for
+keywords (e.g. "API endpoints"), or answer questions about the codebase (e.g.
+"how do API endpoints work?").
+Coder: Implementation agent for writing, editing, testing, and verifying code.
+Full tool access. Use for focused implementation tasks — bug fixes, feature
+additions, refactors, file edits.
 
 Modes: single (agent + task), parallel (tasks array, max 8), chain (sequential
 with {previous}).
@@ -242,7 +350,7 @@ interface ModeConfig {
 }
 
 const ARCHITECT_PROMPT = `<system-reminder>
-# Plan Mode - System Reminder
+Plan Mode - System Reminder
 
 CRITICAL: Plan mode ACTIVE — you are in READ-ONLY planning phase. STRICTLY
 FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use sed, tee,
@@ -253,7 +361,7 @@ modification attempt is a critical violation. ZERO exceptions.
 
 ---
 
-## Responsibility
+Responsibility:
 
 Your current responsibility is to think, read, search, and discuss to construct a
 well-formed plan that accomplishes the goal the user wants to achieve. Your plan
@@ -263,287 +371,307 @@ avoiding unnecessary verbosity. Include the goal as first part of the plan.
 Ask the user clarifying questions or ask for their opinion when weighing tradeoffs.
 Use the questionnaire tool for decision-oriented questions so the user can answer inline.
 
-**NOTE:** At any point in time through this workflow you should feel free to ask
-the user questions or clarifications. Don't make large assumptions about user
-intent. The goal is to present a well researched plan to the user, and tie any
-loose ends before implementation begins.
+NOTE: At any point in time through this workflow you should feel free to ask the
+user questions or clarifications. Don't make large assumptions about user intent.
+The goal is to present a well researched plan to the user, and tie any loose ends
+before implementation begins.
 
 ---
 
-## Planning Requirements
+Planning Requirements:
 
 The plan must be explicit — concrete, sequential modules that map directly to single
 logical changes.
 
-For each module:
-- Module N: <action>
-- Files: <full paths to read or modify>
-- What: <precise change>
-- Why: <user-facing or architectural rationale>
-- Risks: <regression surfaces>
-- Validation: <how to verify, e.g. \`bash t.gate.sh <files>\>
+For each module, provide: action, Files (full paths to read or modify), What
+(precise change), Why (user-facing or architectural rationale), Risks (regression
+surfaces), and Validation (how to verify, e.g. bash t.gate.sh <files>).
 
-## Output Format
+---
 
-## Task
-<one-sentence goal>
+Output Format — use plain labeled lines, NO markdown headers or bullets:
 
-## Investigation
-<files read, patterns found, relevant file:line references>
+Task: <one-sentence goal>
 
-## Plan
+Investigation: <files read, patterns found, relevant file:line references>
 
-### Module 1: <action>
-- Files: <paths>
-- What: <change>
-- Why: <rationale>
-- Risks: <surfaces>
-- Validation: bash t.gate.sh <files>
+Plan:
 
-### Module 2: ...
+Module 1: <action>
+  Files: <paths>
+  What: <change>
+  Why: <rationale>
+  Risks: <regression surfaces>
+  Validation: bash t.gate.sh <files>
 
-## Acceptance Criteria
-<what done looks like>
+Module 2: <action>
+  Files: <paths>
+  What: <change>
+  Why: <rationale>
+  Risks: <regression surfaces>
+  Validation: bash t.gate.sh <files>
 
-## Open Questions
-<any clarifications needed from the user>
-${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
+Acceptance Criteria: <what done looks like>
+
+Open Questions: <any clarifications needed from the user>
+${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
+
+
 
 const DOCTOR_PROMPT = `<system-reminder>
-# Debug Mode - System Reminder
+Debug Mode - System Reminder
 
 CRITICAL: Debug mode ACTIVE — you are the Debugger, a health-check auditor and
 diagnostician for the Ember project (PySide6 subtitle + DaVinci Resolve integration
 app).
 
 You do NOT edit files directly. You investigate, diagnose, and report findings. If
-a fix is straightforward, you may DELEGATE the implementation to the \`Coder\`
+a fix is straightforward, you may DELEGATE the implementation to the Coder
 subagent (full tool access) — the read-only constraint applies to your direct tool
 usage only, not to delegated subagent work. Otherwise, report the correction and
 let the user or Orchestrator handle it.
 
 ---
 
-## Health Check Focus Areas
+Health Check Focus Areas:
 
-- **Structural architecture risk:** prioritize ownership conflicts, hidden coupling,
-  duplicated state, complex control flow, unsafe cross-layer dependencies, changes
-  that violate documented golden paths, and high-change-entropy files.
-- **Verified dead code:** flag unused imports, unreachable functions, never-called
-  methods, orphaned variables, and stale tests only after tool output and call-site
-  verification. Avoid flagging public APIs, plugin hooks, signal/slot targets,
-  reflection/dynamic dispatch, localized catalog entries, or config/schema fields
-  without proof they are unreachable.
-- **Single source of truth (SSOT):** every piece of data, config, constant, or
-  business logic must have exactly one authoritative source. Flag duplicated
-  constants, parallel config files, mirrored state, overlapping services,
-  copy-pasted logic, and derived data that should reference a canonical source.
-- **Production readiness:** check fail-fast behavior, actionable error surfacing,
-  EmberLogger use instead of print(), no bare except:, and no silent degradation
-  of offline/core runtime behavior.
-- **Threading/UI safety:** flag worker-thread UI/state mutation, missing
-  signal/slot boundaries, hot-loop sleeps, unsafe Resolve API changes, and
-  animations that ignore animation-disabled settings.
-- **GUI localization/styling:** new user-facing UI text must be localized for all
-  supported languages; UI colors must use Colors tokens. Do not flag intentional
-  tuned one-off layout values or proven timeline/playback golden paths without a
-  concrete regression.
-- **Tests and validation:** prefer meaningful tests or targeted validation over
-  brittle assertions that encode stale architecture. Python/app edits use
-  \`bash t.gate.sh <files>\`; site edits follow site/AGENTS.md.
-- **Performance traps:** flag large linear scans in hot paths, blocking UI work,
-  unnecessary repeated Resolve calls, and avoidable recomputation in
-  timeline/editor interactions.
-- **Boundary checks:** keep site/marketing concerns separate from Ember runtime
-  GUI concerns and do not apply GUI-only rules to site/ unless its own
-  instructions require them.
+Structural architecture risk: prioritize ownership conflicts, hidden coupling,
+duplicated state, complex control flow, unsafe cross-layer dependencies, changes
+that violate documented golden paths, and high-change-entropy files.
 
-## Classification
+Verified dead code: flag unused imports, unreachable functions, never-called
+methods, orphaned variables, and stale tests only after tool output and call-site
+verification. Avoid flagging public APIs, plugin hooks, signal/slot targets,
+reflection/dynamic dispatch, localized catalog entries, or config/schema fields
+without proof they are unreachable.
+
+Single source of truth (SSOT): every piece of data, config, constant, or
+business logic must have exactly one authoritative source. Flag duplicated
+constants, parallel config files, mirrored state, overlapping services,
+copy-pasted logic, and derived data that should reference a canonical source.
+
+Production readiness: check fail-fast behavior, actionable error surfacing,
+EmberLogger use instead of print(), no bare except:, and no silent degradation
+of offline/core runtime behavior.
+
+Threading/UI safety: flag worker-thread UI/state mutation, missing signal/slot
+boundaries, hot-loop sleeps, unsafe Resolve API changes, and animations that
+ignore animation-disabled settings.
+
+GUI localization/styling: new user-facing UI text must be localized for all
+supported languages; UI colors must use Colors tokens. Do not flag intentional
+tuned one-off layout values or proven timeline/playback golden paths without a
+concrete regression.
+
+Tests and validation: prefer meaningful tests or targeted validation over
+brittle assertions that encode stale architecture. Python/app edits use
+bash t.gate.sh <files>; site edits follow site/AGENTS.md.
+
+Performance traps: flag large linear scans in hot paths, blocking UI work,
+unnecessary repeated Resolve calls, and avoidable recomputation in
+timeline/editor interactions.
+
+Boundary checks: keep site/marketing concerns separate from Ember runtime
+GUI concerns and do not apply GUI-only rules to site/ unless its own
+instructions require them.
+
+---
+
+Classification:
 
 Label each finding as:
-- Confirmed issue — verified by tool output, ready for implementation
-- Needs owner decision — requires user input, do not guess
-- False positive — investigated and cleared
+  Confirmed issue — verified by tool output, ready for implementation
+  Needs owner decision — requires user input, do not guess
+  False positive — investigated and cleared
 
 Only report Confirmed issues and Needs owner decision items. Drop false positives
 from the final report.
 
-## Output Format
+---
 
-For each finding:
-- Classification: Confirmed issue / Needs owner decision
-- Category: which health-check focus area
-- File: file_path:line_number
-- Evidence: tool output or call-site proof
-- Impact: what breaks or degrades
-- Correction: smallest architectural change that removes the cause
-- Risks: regression surfaces
+Output Format:
 
-## Constraints
-
-- You do not edit or write files directly. You may delegate fixes to the
-  \`Coder\` subagent when a correction is straightforward and well-scoped.
-- Use \`bash t.gate.sh <files>\` only for targeted validation of files you are checking.
-- Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
-- Ignore git status / git diff changes unrelated to the files you were asked to check.
+For each finding, return:
+  Classification: Confirmed issue / Needs owner decision
+  Category: which health-check focus area
+  File: file_path:line_number
+  Evidence: tool output or call-site proof
+  Impact: what breaks or degrades
+  Correction: smallest architectural change that removes the cause
+  Risks: regression surfaces
 
 ---
 
-## UI/Qt Pipeline Diagnostics
+Constraints:
 
-In addition to structural health checks, diagnose PySide6/Qt UI pipeline issues:
+You do not edit or write files directly. You may delegate fixes to the Coder
+subagent when a correction is straightforward and well-scoped.
+Use bash t.gate.sh <files> only for targeted validation of files you are checking.
+Do not run bash gate.sh (full gate) — that is the user's responsibility.
+Ignore git status / git diff changes unrelated to the files you were asked to check.
 
-### Failure Modes To Investigate
+---
 
-1. **Event-loop blockage:** Does any GUI-thread callback perform blocking I/O or
+UI/Qt Pipeline Diagnostics:
+
+In addition to structural health checks, diagnose PySide6/Qt UI pipeline issues.
+
+Failure Modes To Investigate:
+1. Event-loop blockage: Does any GUI-thread callback perform blocking I/O or
    unbounded CPU work?
-2. **Excessive synchronous UI mutation:** Does one state transition perform many
+2. Excessive synchronous UI mutation: Does one state transition perform many
    independent widget/layout/geometry operations?
-3. **Recursive signal/callback propagation:** Can a signal or layout refresh
+3. Recursive signal/callback propagation: Can a signal or layout refresh
    indirectly re-enter the same pipeline?
-4. **Eager expensive construction:** Are complex widgets constructed before needed?
-5. **Stale delayed callbacks:** Can queued callbacks execute after state changed?
-6. **Uncontrolled async-to-UI mutation:** Do background results mutate UI directly?
-7. **Competing layout authorities:** Do multiple functions independently control the
+4. Eager expensive construction: Are complex widgets constructed before needed?
+5. Stale delayed callbacks: Can queued callbacks execute after state changed?
+6. Uncontrolled async-to-UI mutation: Do background results mutate UI directly?
+7. Competing layout authorities: Do multiple functions independently control the
    same widget geometry?
 
-### Commit Architecture (Healthy Reference)
+Commit Architecture (Healthy Reference):
 
 event/signal/async completion -> validate generation -> mutate semantic state ->
-mark dirty -> request one coalesced commit -> measure once -> apply geometry once
--> repaint
+mark dirty -> request one coalesced commit -> measure once -> apply geometry once ->
+repaint
 
-### UI Report Format
+UI Report Format:
 
 For every UI failure mode, report: Verdict, Evidence, Trigger, Duplicated work,
 Re-entry path, Stale-state risk, Authority conflict, Impact, Correction,
 Invariant, Verification.
 
-### Invalid UI Fix Patterns
+Invalid UI Fix Patterns:
 
 Reject fixes that: add more invalidate()/activate() calls, use
 QApplication.processEvents(), replace deferred passes with blocking callbacks,
 add arbitrary QTimer.singleShot() delays, perform geometry repair both
 immediately and later, introduce parallel build paths duplicating normal layout.
-
-${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
+${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
 const ORCHESTRATOR_PROMPT = `<system-reminder>
-# Orchestrate Mode - System Reminder
+Orchestrate Mode - System Reminder
 
 CRITICAL: Orchestrate mode ACTIVE — you are the Orchestrator, an implementation
 coordinator for the Ember project (PySide6 subtitle + DaVinci Resolve integration
 app).
 
 You do NOT edit files directly. Your job is to decompose work into modules and
-DELEGATE implementation to the \`Coder\` subagent (full tool access). The
+DELEGATE implementation to the Coder subagent (full tool access). The
 read-only constraint applies to YOUR direct tool usage only — you may read,
 search, and inspect to build accurate delegation prompts, but you must not edit,
 write, or run mutating bash commands yourself. Delegating implementation work to
-the \`Coder\` subagent is the ENTIRE POINT of this mode. Do it eagerly.
+the Coder subagent is the ENTIRE POINT of this mode. Do it eagerly.
 
 ---
 
-## Task Decomposition Into Digestible Modules
+Task Decomposition Into Digestible Modules:
 
 Break the work into the smallest self-contained modules an agent can implement
 without cross-talk. A good module is one clear responsibility, a bounded file set,
 and an independently verifiable outcome.
 
-- **Slice by cohesion, not by line count:** Each module owns one logical change
-  (one feature seam, one bug, one refactor boundary). If a module touches two
-  unrelated concerns, split it.
-- **One owner per file:** A file belongs to exactly one module. If two modules
-  both need the same file, either merge them or extract the shared change into a
-  prerequisite module that runs first.
-- **Right-size the unit:** Aim for a module an agent can finish and self-validate
-  with \`bash t.gate.sh <files>\` in a single pass. If the prompt needs more than
-  6 owned files or a long list of unrelated steps, split it further.
-- **Order by dependency:** Group independent modules into parallel clusters;
-  chain modules that depend on another module's output so the producer completes
-  before the consumer starts.
-- **Define the seam explicitly:** When modules share an interface (function
-  signature, data model, signal), pin that contract in every dependent prompt so
-  parallel agents integrate cleanly without seeing each other's work.
+Slice by cohesion, not by line count: Each module owns one logical change
+(one feature seam, one bug, one refactor boundary). If a module touches two
+unrelated concerns, split it.
 
-## Delegation Prompt Quality
+One owner per file: A file belongs to exactly one module. If two modules both
+need the same file, either merge them or extract the shared change into a
+prerequisite module that runs first.
+
+Right-size the unit: Aim for a module an agent can finish and self-validate with
+bash t.gate.sh <files> in a single pass. If the prompt needs more than 6 owned
+files or a long list of unrelated steps, split it further.
+
+Order by dependency: Group independent modules into parallel clusters; chain
+modules that depend on another module's output so the producer completes before
+the consumer starts.
+
+Define the seam explicitly: When modules share an interface (function
+signature, data model, signal), pin that contract in every dependent prompt so
+parallel agents integrate cleanly without seeing each other's work.
+
+---
+
+Delegation Prompt Quality:
 
 Each subagent starts with zero shared context. Treat every prompt as a complete
 brief that a competent engineer could execute cold. A thorough prompt includes:
 
-- Goal and rationale: What outcome the module must achieve and why.
-- Exact owned files: Full paths, plus explicit "do not touch anything else."
-- Anchored context: Relevant existing functions, classes, patterns, and
-  file_path:line_number references the agent should read first and mirror.
-- Interface contract: The precise signatures, data shapes, tokens, or catalog
-  keys the module must produce or consume.
-- Step sequence: Concrete, ordered steps mapping to single logical changes.
-- Constraints: Applicable AGENTS.md rules (typing, logging, localization,
-  Colors tokens, error handling, DRY/SSOT), and any golden paths to preserve.
-- Acceptance criteria and validation: What "done" looks like and the exact
-  \`bash t.gate.sh <files>\` command to run.
-- Risks and edge cases: Known pitfalls, regression surfaces, and behavior that
-  must be preserved.
-- No redundancy, dead code cleanup after implementations of the given files.
-- No DRY violations.
-- Ignore git status / git diff changes unrelated to owned files.
+Goal and rationale: What outcome the module must achieve and why.
+Exact owned files: Full paths, plus explicit "do not touch anything else."
+Anchored context: Relevant existing functions, classes, patterns, and
+file_path:line_number references the agent should read first and mirror.
+Interface contract: The precise signatures, data shapes, tokens, or catalog
+keys the module must produce or consume.
+Step sequence: Concrete, ordered steps mapping to single logical changes.
+Constraints: Applicable AGENTS.md rules (typing, logging, localization,
+Colors tokens, error handling, DRY/SSOT), and any golden paths to preserve.
+Acceptance criteria and validation: What "done" looks like and the exact
+bash t.gate.sh <files> command to run.
+Risks and edge cases: Known pitfalls, regression surfaces, and behavior that
+must be preserved.
+No redundancy, dead code cleanup after implementations of the given files.
+No DRY violations.
+Ignore git status / git diff changes unrelated to owned files.
 
-## Output Format
+---
 
-Return a structured plan:
+Output Format:
 
-## Task Summary
-<one-sentence goal>
+Return a structured plan using plain labeled lines, NO markdown headers or bullets.
 
-## Modules
+Task Summary: <one-sentence goal>
 
-### Module 1: <name>
-- Owned files: <full paths>
-- Goal: <what this module achieves>
-- Dependencies: <none | Module N>
-- Parallel cluster: <A | B | sequential>
-- Steps:
-  1. <step>
-  2. <step>
-- Acceptance: <done criteria>
-- Validation: bash t.gate.sh <files>
-- Risks: <regression surfaces>
+Modules:
 
-## Execution Order
-1. Cluster A (parallel): Module 1, Module 2
-2. Cluster B (parallel): Module 3, Module 4
-3. Sequential: Module 5 (depends on Module 3)
+Module 1: <name>
+  Owned files: <full paths>
+  Goal: <what this module achieves>
+  Dependencies: <none | Module N>
+  Parallel cluster: <A | B | sequential>
+  Steps:
+    1. <step>
+    2. <step>
+  Acceptance: <done criteria>
+  Validation: bash t.gate.sh <files>
+  Risks: <regression surfaces>
 
-## Delegation Prompts
-<full self-contained prompt for each module, ready to paste into a subagent>
+Module 2: <name>
+  ...
 
-## Constraints
+Execution Order:
+  1. Cluster A (parallel): Module 1, Module 2
+  2. Cluster B (parallel): Module 3, Module 4
+  3. Sequential: Module 5 (depends on Module 3)
 
-- You do not edit or write files directly — delegate implementation to the
-  \`Coder\` subagent. That is your primary mechanism for getting work done.
-- Do not run \`bash gate.sh\` (full gate) — that is the user's responsibility.
-- If task scope is unclear, say so and request clarification rather than guessing.
-${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
+Delegation Prompts: <full self-contained prompt for each module, ready to paste into a subagent>
+
+Constraints:
+  You do not edit or write files directly — delegate implementation to the Coder subagent. That is your primary mechanism for getting work done.
+  Do not run bash gate.sh (full gate) — that is the user's responsibility.
+  If task scope is unclear, say so and request clarification rather than guessing.
+${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
 const CODER_PROMPT = `<system-reminder>
 Your operational mode has changed to code.
 You are in full-access mode. You are permitted to make file changes, run shell
 commands, and utilize your arsenal of tools as needed. You are the default
 implementation agent — write, test, and verify code with full autonomy.
-</system-reminder>`;
+${OUTPUT_STYLE_DIRECTIVE}</system-reminder>`;
 
 const EXIT_TO_CODER = `<system-reminder>
 Your operational mode has changed from {mode} to code.
 You are permitted to make file changes, run shell commands, and utilize your
 arsenal of tools as needed.
-</system-reminder>`;
+${OUTPUT_STYLE_DIRECTIVE}</system-reminder>`;
 
 const PLAN_IMPLEMENT_PROMPT = `<system-reminder>
 The user has approved the plan above. Execute it now in full.
 Follow the plan modules in order. Implement, test, and verify each module before
-moving to the next. Run \`bash t.gate.sh <files>\` after each logical change.
+moving to the next. Run bash t.gate.sh <files> after each logical change.
 Report what you did and any deviations from the plan.
-</system-reminder>`;
+${OUTPUT_STYLE_DIRECTIVE}</system-reminder>`;
 
 interface ModeConfig {
 	id: string;
@@ -617,46 +745,6 @@ function getLastModeFromSession(ctx: any): string | null {
 
 const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
 
-/**
- * Cached footer stats. The footer render closure fires every animation
- * frame (~30fps). Iterating all session entries + calling
- * ctx.getContextUsage() (which runs estimateContextTokens over the FULL
- * LLM context — JSON.stringify on every tool call, chars/4 on all text)
- * is O(total context) per frame and can exceed the frame budget on long
- * sessions, causing infini-lock. These stats are recomputed on session_start
- * and through one zero-delay dirty timer shared by message_end and
- * tool_execution_end events, never from the footer render path.
- */
-let footerStatsCache:
-	| {
-			totalCost: number;
-			latestCacheHitRate: number | undefined;
-			contextTokens: number | null;
-			contextWindow: number;
-	  }
-	| undefined;
-let footerThinkingLevel = "off";
-
-function recompute_footer_stats(ctx: any): void {
-	let totalCost = 0;
-	let latestCacheHitRate: number | undefined;
-	for (const entry of ctx.sessionManager.getEntries()) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		const usage = entry.message.usage;
-		totalCost += usage.cost.total;
-		const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-		latestCacheHitRate = promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
-	}
-	const model = ctx.model;
-	const contextUsage = ctx.getContextUsage();
-	footerStatsCache = {
-		totalCost,
-		latestCacheHitRate,
-		contextTokens: contextUsage?.tokens ?? null,
-		contextWindow: contextUsage?.contextWindow ?? model?.contextWindow ?? 0,
-	};
-}
-
 export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
@@ -665,8 +753,6 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let active_session_manager: any;
 	let session_ready = false;
 	let pending_mode_id: string | undefined;
-	let footer_stats_timer: ReturnType<typeof setTimeout> | undefined;
-	let footer_stats_dirty = false;
 
 	function is_live_session(ctx: any): boolean {
 		return session_ready && ctx.sessionManager === active_session_manager;
@@ -680,29 +766,27 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	}
 
-	function schedule_footer_stats(ctx: any): void {
-		if (!is_live_session(ctx)) return;
-		footer_stats_dirty = true;
-		if (footer_stats_timer !== undefined) return;
-		footer_stats_timer = setTimeout(() => {
-			footer_stats_timer = undefined;
-			if (!footer_stats_dirty) return;
-			footer_stats_dirty = false;
-			if (is_live_session(ctx)) recompute_footer_stats(ctx);
-		}, 0);
-	}
-
-	function cancel_footer_stats_schedule(): void {
-		if (footer_stats_timer !== undefined) clearTimeout(footer_stats_timer);
-		footer_stats_timer = undefined;
-		footer_stats_dirty = false;
-	}
-
 	const persistedAtLoad = readPersistedState();
 	if (persistedAtLoad.mode && persistedAtLoad.mode in MODES) {
 		setActiveMode(persistedAtLoad.mode);
 		currentMode = persistedAtLoad.mode;
 	}
+
+	// Per-mode model memory: each mode remembers its own last user-selected
+	// model. Loaded once at factory start and re-read on session_start; updated
+	// in-memory on bind and written through on changes.
+	let mode_models: Partial<Record<string, ModelIdentity>> = {
+		...(persistedAtLoad.modeModels ?? {}),
+	};
+	// Suppress bind during our own programmatic setModel (mode restore).
+	let applying_mode_model = false;
+	// Stale async apply guard — incremented at each apply_mode start.
+	let mode_apply_generation = 0;
+
+	// Register the canonical mode-id → label resolver so the pi-ember-ui
+	// footer can render the active mode label without duplicating the MODES
+	// map. MODES stays the single source of truth for mode labels here.
+	setModeLabelResolver((modeId: string) => MODES[modeId]?.label ?? modeId);
 
 	registerQuestionnaireTool(pi);
 
@@ -731,9 +815,12 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		request_live_mode_render(ctx);
 	}
 
-	function apply_mode(modeId: string, ctx: any): void {
+	async function apply_mode(modeId: string, ctx: any): Promise<void> {
 		const mode = MODES[modeId];
 		if (!mode) return;
+
+		const prevModeId = currentMode;
+		const prevMode = MODES[prevModeId];
 
 		// Mode changes are deliberately live-only. The active tool set and the
 		// next-turn prompt change immediately, while the transcript stays lazy
@@ -743,9 +830,57 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		pi.setActiveTools(mode.tools);
 		pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
 		updateStatus(ctx);
+
+		// Remind the model which tools it lost and which it now has whenever the
+		// mode (and therefore the tool set) actually changes. Hidden so it steers
+		// the next turn without cluttering the transcript — same channel as the
+		// plan-auto-continue and loop-retry hidden messages.
+		if (prevMode && prevModeId !== modeId) {
+			const prevTools = prevMode.tools;
+			const newTools = mode.tools;
+			const lost = prevTools.filter((t) => !newTools.includes(t));
+			const gained = newTools.filter((t) => !prevTools.includes(t));
+			const lines: string[] = [
+				`You have switched from ${prevMode.label} mode to ${mode.label} mode.`,
+			];
+			if (lost.length > 0) {
+				lines.push(
+					`You no longer have access to these tools: ${lost.join(", ")}. Do not attempt to call them.`,
+				);
+			}
+			if (gained.length > 0) {
+				lines.push(`You now also have access to: ${gained.join(", ")}.`);
+			}
+			lines.push(`Your current tool set is: ${newTools.join(", ")}.`);
+			pi.sendMessage({
+				customType: "pi-agents-tool-access",
+				content: lines.join("\n"),
+				display: false,
+			});
+		}
+
+		// Per-mode model restore: if this mode has a bound model and it differs
+		// from the live model, restore it. Fail soft on missing auth — leave the
+		// live model, no throw.
+		const my_generation = ++mode_apply_generation;
+		const bound = get_mode_model(mode_models, modeId);
+		if (!bound) return;
+		const current = ctx.model as Model<any> | undefined;
+		const current_identity = model_identity_of(current);
+		if (identities_equal(bound, current_identity)) return;
+		const target = ctx.modelRegistry.find(bound.provider, bound.modelId) as Model<any> | undefined;
+		if (!target || !ctx.modelRegistry.hasConfiguredAuth(target)) return;
+		// Stale guard: if a newer apply_mode was started, abort.
+		if (my_generation !== mode_apply_generation) return;
+		applying_mode_model = true;
+		try {
+			await pi.setModel(target);
+		} finally {
+			applying_mode_model = false;
+		}
 	}
 
-	function switchMode(modeId: string, ctx: any): void {
+	async function switchMode(modeId: string, ctx: any): Promise<void> {
 		if (!MODES[modeId]) return;
 		if (!is_live_session(ctx)) {
 			// Queue only for the session that is currently binding. Never retain a
@@ -753,7 +888,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			if (ctx.sessionManager === active_session_manager) pending_mode_id = modeId;
 			return;
 		}
-		apply_mode(modeId, ctx);
+		await apply_mode(modeId, ctx);
 	}
 
 	for (const modeId of MODE_IDS) {
@@ -764,9 +899,9 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			}`,
 			handler: async (_args: any, ctx: any) => {
 				if (currentMode === modeId) {
-					switchMode(DEFAULT_MODE, ctx);
+					await switchMode(DEFAULT_MODE, ctx);
 				} else {
-					switchMode(modeId, ctx);
+					await switchMode(modeId, ctx);
 				}
 			},
 		});
@@ -776,7 +911,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		const baseMode = pending_mode_id ?? currentMode;
 		const idx = CYCLE_ORDER.indexOf(baseMode);
 		const next = CYCLE_ORDER[(idx + 1) % CYCLE_ORDER.length];
-		switchMode(next, ctx);
+		await switchMode(next, ctx);
 	};
 
 	pi.registerShortcut("tab", {
@@ -795,13 +930,52 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		ctx.ui.setEditorComponent((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => {
 			const editor =
 				previous_editor?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+			// Also apply the shell-aware render wrap at instance level. Pi can load
+			// @earendil-works/pi-tui from a different module copy than the extension,
+			// so the prototype patch in pi-ember-ui/index.ts may not affect the live
+			// Editor class that actually renders the chatbox.
+			wrapEditorRenderForShell(editor);
 			const original_handle_input = editor.handleInput.bind(editor);
 			editor.handleInput = (data: string): void => {
 				prepare_app_clear_input(data, editor);
-				if (interceptShellInput(data, editor)) return;
+				const shellResult = processShellInput(data, editor);
+				if (shellResult?.consume) {
+					requestShellModeVisualRefresh(editor, ctx);
+					return;
+				}
+				if (shellResult?.data !== undefined && shellResult.data !== data) {
+					data = shellResult.data;
+				}
+				if (interceptShellInput(data, editor)) {
+					// Shell mode was entered/exited — the editor text didn't change
+					// (empty → empty) so Pi's differential renderer won't re-render
+					// the chatbox row. Force a render so the prompt glyph (`>` ↔ `!`)
+					// and border color update immediately, and refresh the footer so
+					// the left stats flip to / from `shell`.
+					requestShellModeVisualRefresh(editor, ctx);
+					return;
+				}
 				if (intercept_slash_escape(data, editor)) return;
+				// Detect the thinking-blocks toggle (Ctrl+T by default, user-remappable)
+				// before Pi's handler runs. toggleThinkingBlockVisibility() rebuilds
+				// the chat synchronously inside original_handle_input; when groups
+				// collapse/expand the line count shrinks/grows and Pi's differential
+				// render path (clearOnShrink) can leave the viewport not pinned to
+				// the bottom. Schedule a scrollback-preserving snap on the next
+				// microtask so it fires after the rebuild but before Pi's next
+				// (differential) render tick — requestTuiRenderSnapToBottom() clears
+				// only the visible screen (`2J`, never `3J`), resets
+				// previousViewportTop/maxLinesRendered, and requests a normal render
+				// whose first-render path pins the chatbox to the bottom without
+				// destroying terminal scrollback. Same lever the slash-command exit
+				// snap uses. Never use requestTuiRender(true) here — it emits `3J`
+				// and nukes scrollback.
+				const is_thinking_toggle = getKeybindings().matches(data, "app.thinking.toggle");
 				original_handle_input(data);
 				finalizeEditorInputAfter(editor);
+				if (is_thinking_toggle) {
+					queueMicrotask(() => requestTuiRenderSnapToBottom());
+				}
 			};
 			wrapModelPickerEditor(editor, pi, ctx);
 			return editor;
@@ -934,10 +1108,10 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			return;
 		}
 		const targetMode = target === "Orchestrate" ? "orchestrate" : DEFAULT_MODE;
-		switchMode(targetMode, ctx);
+		await switchMode(targetMode, ctx);
 		const msg =
 			target === "Orchestrate"
-				? "Orchestrate focused modules for subagents."
+				? "Delegate the plan to subagents."
 				: "Execute the plan following the modules.";
 		pi.sendMessage({
 			customType: "pi-agents-plan-implement",
@@ -991,6 +1165,50 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let loop_tool_call_count = 0;
 	let loop_detected = false;
 	let loop_prompt_active = false;
+
+	/**
+	 * Single-path output-limit recovery. Compact is best-effort: if the
+	 * branch tip is already a compaction entry ("Already compacted") the
+	 * compact call is skipped; if compact fails with a non-benign error we
+	 * still resume — the user asked for unconditional continue within budget.
+	 *
+	 * The compact customInstructions (COMPACT_FOCUS_INSTRUCTIONS SSOT) steer
+	 * the single session checkpoint to plain Goal/Done/Left/Files labeled
+	 * lines. Pi injects that checkpoint into LLM context after compact().
+	 * The hidden pi-agents-auto-continue message is a short non-duplicating
+	 * resume directive built by build_auto_continue_content — it does NOT
+	 * re-paste the compaction summary.
+	 */
+	async function resume_after_output_limit(ctx: any): Promise<void> {
+		setPlanAutoContinuing(true);
+		const branch = (ctx?.sessionManager?.getBranch?.() ?? []) as
+			| Array<{ type?: string } | null | undefined>
+			| undefined;
+		const skip = should_skip_compact(branch ?? []);
+		if (!skip) {
+			const compact_result = await compact_async(
+				ctx,
+				COMPACT_FOCUS_INSTRUCTIONS,
+			);
+			if (!compact_result.ok && !is_benign_compact_error(compact_result.error)) {
+				// Non-benign compact error: still resume. Pi may already show
+				// compaction_end error. Do not throw; do not abort resume.
+			}
+		}
+
+		const content = build_auto_continue_content({
+			latest_plan_text: currentMode === "plan" ? latest_plan_text : undefined,
+		});
+
+		// Keep suppression true until the message is dispatched so the
+		// length-error row stays hidden in the TUI.
+		pi.sendMessage(
+			{ customType: "pi-agents-auto-continue", content, display: false },
+			{ triggerTurn: true },
+		);
+		// Clear after dispatch; the next length stop can re-arm via message_end.
+		setPlanAutoContinuing(false);
+	}
 
 	function reset_tool_loop_tracking(): void {
 		loop_tool_call_signature = undefined;
@@ -1071,10 +1289,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 
 		// Output-limit recovery: when the model hits the max output token limit,
-		// compact the context and silently send "continue" as a hidden custom
-		// message so the user never sees the error message or the recovery
-		// prompt. The suppression flag in mode-colors.ts is set in the
-		// message_end handler (before the TUI renders the error row).
+		// compact is best-effort and resume is unconditional within budget.
+		// If the branch tip is already a compaction entry ("Already compacted"),
+		// compact is skipped. If compact fails with a non-benign error we still
+		// resume — the user never sees the error row or a recovery prompt.
+		// The suppression flag in mode-colors.ts is set in the message_end
+		// handler (before the TUI renders the error row) and cleared after the
+		// hidden pi-agents-auto-continue message is dispatched.
 		if (
 			lastTurnLengthStopped &&
 			!lastTurnAborted &&
@@ -1082,23 +1303,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		) {
 			planAutoContinueCount++;
 			lastTurnLengthStopped = false;
-			setPlanAutoContinuing(true);
-			ctx.compact({
-				customInstructions:
-					"The assistant response was cut off by the output token limit. " +
-					"Summarize the incomplete turn and continue from where it left off, " +
-					"picking up the same thought or tool call without repeating work.",
-				onComplete: () => {
-					setPlanAutoContinuing(false);
-					pi.sendMessage(
-						{ customType: "pi-agents-auto-continue", content: "continue", display: false },
-						{ triggerTurn: true },
-					);
-				},
-				onError: () => {
-					setPlanAutoContinuing(false);
-				},
-			});
+			await resume_after_output_limit(ctx);
 			return;
 		}
 		// Reset auto-continue state once the turn completes normally.
@@ -1126,96 +1331,20 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	});
 
-	function installCustomFooter(ctx: any) {
-		if (ctx.mode !== "tui") return;
-		ctx.ui.setFooter((_tui: any, theme: any, footerData: any) => {
-			return {
-				render(width: number): string[] {
-					const PAD = "  ";
-					const innerWidth = Math.max(0, width - 4);
-					const stats = footerStatsCache;
-					const totalCost = stats?.totalCost ?? 0;
-					const latestCacheHitRate = stats?.latestCacheHitRate;
-					const contextWindow = stats?.contextWindow ?? 0;
-					const usedTokens = stats?.contextTokens;
-
-					const model = ctx.model;
-					const usedLabel =
-						usedTokens === null || usedTokens === undefined ? "?" : formatTokens(usedTokens);
-					const cwd = ctx.sessionManager.getCwd();
-					const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
-
-					// --- Left side: folderdir • context/cache/cost ---
-					const statsParts: string[] = [];
-					statsParts.push(`${usedLabel}/${formatTokens(contextWindow)}`);
-					if (latestCacheHitRate !== undefined) {
-						statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-					}
-					if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
-						statsParts.push(`$${totalCost.toFixed(3)}`);
-					}
-					const statsStr = isShellMode() ? "shell" : statsParts.join(" ");
-					const leftSide =
-						theme.fg("dim", folderName) +
-						` ${theme.fg("dim", "\u2022")} ` +
-						theme.fg("dim", statsStr);
-					let statsLeft = leftSide;
-					if (visibleWidth(statsLeft) > innerWidth) {
-						statsLeft = truncateToWidth(statsLeft, innerWidth, "...");
-					}
-
-					// --- Right side: Mode • model thinking-level provider tps ---
-					const mode = MODES[currentMode];
-					const modeLabel = mode.label.charAt(0).toUpperCase() + mode.label.slice(1);
-					const modelName = model?.name ?? model?.id ?? "no model";
-					const provider = model?.provider ?? "unknown";
-					const variant = footerThinkingLevel !== "off" ? ` ${footerThinkingLevel}` : "";
-					const tps = getLiveTps();
-					let tpsSegment = "";
-					if (tps > 0) {
-						const tpsStr =
-							tps < 10 ? tps.toFixed(1) : tps < 100 ? tps.toFixed(0) : `${Math.round(tps)}`;
-						const tpsColored =
-							tps < 50
-								? theme.fg("muted", `${tpsStr} tps`)
-								: tps < 100
-									? theme.fg("text", `${tpsStr} tps`)
-									: liveAccentFg(`${tpsStr} tps`);
-						tpsSegment = ` ${tpsColored}`;
-					}
-					const rightSide =
-						liveAccentFg(modeLabel) +
-						` ${theme.fg("dim", "\u2022")} ` +
-						theme.fg("text", `${modelName}${variant}`) +
-						theme.fg("dim", ` ${provider}`) +
-						tpsSegment;
-					const availableForRight = innerWidth - visibleWidth(statsLeft) - 2;
-					const displayedRight =
-						availableForRight > 0 ? truncateToWidth(rightSide, availableForRight, "") : "";
-					const padding = " ".repeat(
-						Math.max(0, innerWidth - visibleWidth(statsLeft) - visibleWidth(displayedRight)),
-					);
-					const statsLine = PAD + statsLeft + padding + displayedRight + PAD;
-
-					return [statsLine];
-				},
-			};
-		});
-	}
-
-	async function restoreSavedModel(ctx: any): Promise<void> {
-		const persisted = readPersistedState();
-		const saved = persisted.model;
-		if (!saved) return;
+	async function restore_mode_model(ctx: any, modeId: string): Promise<void> {
+		const bound = get_mode_model(mode_models, modeId);
+		if (!bound) return;
 		const current = ctx.model as Model<any> | undefined;
-		if (current && modelIdentityString(current) === `${saved.provider}/${saved.modelId}`) {
-			return;
+		const current_identity = model_identity_of(current);
+		if (identities_equal(bound, current_identity)) return;
+		const target = ctx.modelRegistry.find(bound.provider, bound.modelId) as Model<any> | undefined;
+		if (!target || !ctx.modelRegistry.hasConfiguredAuth(target)) return;
+		applying_mode_model = true;
+		try {
+			await pi.setModel(target);
+		} finally {
+			applying_mode_model = false;
 		}
-		const model = ctx.modelRegistry.find(saved.provider, saved.modelId) as Model<any> | undefined;
-		if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
-			return;
-		}
-		await pi.setModel(model);
 	}
 
 	async function restoreMode(ctx: any): Promise<void> {
@@ -1241,39 +1370,39 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		active_session_manager = ctx.sessionManager;
 		session_ready = false;
 		resetSlashCommandTracking();
-		cancel_footer_stats_schedule();
-		footerStatsCache = undefined;
-		footerThinkingLevel = "off";
 		install_thinking_editor(ctx);
+		// Re-read persisted state to pick up any mode-model bindings written by
+		// another session or by the migration on first read.
+		const persisted = readPersistedState();
+		mode_models = { ...(persisted.modeModels ?? {}) };
 		await restoreMode(ctx);
-		await restoreSavedModel(ctx);
-		footerThinkingLevel = pi.getThinkingLevel() ?? "off";
+		await restore_mode_model(ctx, currentMode);
 		session_ready = true;
-		recompute_footer_stats(ctx);
 		const pending_mode = pending_mode_id;
 		pending_mode_id = undefined;
-		if (pending_mode) apply_mode(pending_mode, ctx);
+		if (pending_mode) await apply_mode(pending_mode, ctx);
 		else updateStatus(ctx);
-		installCustomFooter(ctx);
 	});
 
 	pi.on("model_select", async (event: any, _ctx: any) => {
 		const model = event.model as Model<any> | undefined;
 		if (!model) return;
-		const persisted = readPersistedState();
-		const identity = { provider: model.provider, modelId: model.id };
-		if (
-			persisted.model?.provider === identity.provider &&
-			persisted.model?.modelId === identity.modelId
-		) {
-			return;
-		}
-		writePersistedState({ ...persisted, model: identity });
+		// Suppress bind during our own programmatic setModel (mode restore).
+		if (applying_mode_model) return;
+		// Only bind on explicit user picks: "set" (/model, Ctrl+P select) or
+		// "cycle" (Ctrl+P cycle). Ignore restore/unknown sources.
+		const source = event.source as string | undefined;
+		if (source !== "set" && source !== "cycle") return;
+		const identity = model_identity_of(model);
+		if (!identity) return;
+		const existing = get_mode_model(mode_models, currentMode);
+		if (identities_equal(existing, identity)) return;
+		mode_models = bind_mode_model(mode_models, currentMode, identity);
+		writePersistedState({ mode: currentMode, modeModels: mode_models });
 	});
 
-	pi.on("thinking_level_select", (event: any, ctx: any) => {
+	pi.on("thinking_level_select", (_event: any, ctx: any) => {
 		if (!is_live_session(ctx)) return;
-		footerThinkingLevel = event.level ?? "off";
 		request_live_mode_render(ctx);
 	});
 
@@ -1281,12 +1410,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	// coalesces parallel tool completions into one O(n) recomputation per
 	// event-loop burst, away from the footer render closure.
 	pi.on("message_end", (event: any, ctx: any) => {
-		schedule_footer_stats(ctx);
+		scheduleFooterStats(ctx);
 		// Set the auto-continue suppression flag BEFORE the TUI renders the
 		// assistant message (extension message_end fires before the interactive-mode
 		// handler that calls updateContent). When the model hits the output token
 		// limit and we haven't exhausted the retry budget, suppress the error row —
-		// agent_settled will compact and send a hidden "continue" message to resume.
+		// agent_settled will best-effort compact and send a hidden
+		// pi-agents-auto-continue message with a checkpoint digest to resume.
 		const msg = event?.message;
 		if (
 			msg?.role === "assistant" &&
@@ -1298,19 +1428,16 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	});
 	pi.on("tool_execution_end", (_event: any, ctx: any) => {
-		schedule_footer_stats(ctx);
+		scheduleFooterStats(ctx);
 	});
 
-	pi.on("session_shutdown", (_event: any, ctx: any) => {
+	pi.on("session_shutdown", (_event: any, _ctx: any) => {
 		// Invalidate shortcut contexts before the old runtime is disposed. A Tab
 		// press during /resume is ignored instead of calling setActiveTools or
 		// mutating UI state through a stale session.
 		session_ready = false;
 		active_session_manager = undefined;
 		pending_mode_id = undefined;
-		cancel_footer_stats_schedule();
-		footerStatsCache = undefined;
-		footerThinkingLevel = "off";
 		setShellMode(false);
 		setPlanAutoContinuing(false);
 		planAutoContinueCount = 0;
@@ -1320,10 +1447,10 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		latest_plan_text = "";
 		resetSlashCommandTracking();
 		thinking_editor_installed = false;
-		const persisted = readPersistedState();
-		const model = ctx.model as Model<any> | undefined;
-		const modelIdentity = model ? { provider: model.provider, modelId: model.id } : persisted.model;
-		writePersistedState({ ...persisted, mode: currentMode, model: modelIdentity });
+		// Write per-mode model bindings only. Do NOT bind the current live model
+		// onto the current mode — only explicit user picks bind (model_select
+		// handler). Do NOT write top-level legacy `model` key.
+		writePersistedState({ mode: currentMode, modeModels: mode_models });
 	});
 
 	await subagentPlugin(pi);

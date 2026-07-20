@@ -17,7 +17,13 @@ conversation, tool loop, tool permissions, rendering, and session persistence.
 The provider deliberately does not fall back to an executable named `agent`,
 because other products use that ambiguous command name. It also does not provide
 an API-key or `cursor/auto` fallback: the CLI must be installed, authenticated,
-and able to list models before the provider registers.
+and able to list models before Cursor models appear in `/model`.
+
+If `cursor-agent` is missing at startup, the rest of `pi-ember-stack` still
+loads; the Cursor provider registers with an empty catalog. On `/login cursor`,
+streaming, or `/cursor-refresh-models`, the plugin ensures the official CLI is
+installed (via Cursor.app's `cursor agent` helper on macOS when present, otherwise
+`https://cursor.com/install`) and then proceeds.
 
 ## Usage
 

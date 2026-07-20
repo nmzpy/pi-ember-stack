@@ -89,7 +89,7 @@ afterEach(() => {
 });
 
 describe("live Markdown headings", () => {
-	test("all Markdown instances follow the active mode despite a Code-seed global theme", () => {
+	test("headings and list bullets stay muted across modes; colon-split headings keep text after the colon", () => {
 		temp_home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ember-ui-theme-"));
 		process.env.HOME = temp_home;
 		setActiveMode("code");
@@ -103,9 +103,23 @@ describe("live Markdown headings", () => {
 		const code_theme = make_theme("code");
 		const plan_theme = make_theme("plan");
 		const debug_theme = make_theme("debug");
+		// mdHeading / mdListBullet are mode-independent MUTED_COLOR — same ANSI
+		// in every mode. The live-theme patch must still resolve headings through
+		// the live Theme (not a construction-time closure).
+		expect(code_theme.getFgAnsi("mdHeading")).toBe(plan_theme.getFgAnsi("mdHeading"));
+		expect(code_theme.getFgAnsi("mdListBullet")).toBe(plan_theme.getFgAnsi("mdListBullet"));
+		expect(code_theme.getFgAnsi("mdHeading")).toBe(code_theme.getFgAnsi("muted"));
+		expect(code_theme.getFgAnsi("mdListBullet")).toBe(code_theme.getFgAnsi("muted"));
+
 		const markdown = new Markdown("# Live heading", 0, 0, make_markdown_theme(code_theme));
 		const split_markdown = new Markdown(
 			"### Module 3: Live heading",
+			0,
+			0,
+			make_markdown_theme(code_theme),
+		);
+		const list_markdown = new Markdown(
+			"1. first\n- second",
 			0,
 			0,
 			make_markdown_theme(code_theme),
@@ -116,23 +130,30 @@ describe("live Markdown headings", () => {
 		(globalThis as Record<PropertyKey, unknown>)[THEME_KEY] = code_theme;
 		markdown.invalidate();
 		split_markdown.invalidate();
+		list_markdown.invalidate();
 		const plan_output = markdown.render(80).join("\n");
 		const plan_split_output = split_markdown.render(80).join("\n");
+		const plan_list_output = list_markdown.render(80).join("\n");
 		expect(plan_output).toContain(plan_theme.getFgAnsi("mdHeading"));
-		expect(plan_output).not.toContain(code_theme.getFgAnsi("mdHeading"));
 		expect(plan_split_output).toContain(plan_theme.getFgAnsi("mdHeading"));
 		expect(plan_split_output).toContain(plan_theme.getFgAnsi("text"));
+		expect(plan_list_output).toContain(plan_theme.getFgAnsi("mdListBullet"));
+		// List markers must not pick up the plan purple accent.
+		expect(plan_list_output).not.toContain(plan_theme.getFgAnsi("accent"));
 
 		setActiveMode("debug");
 		mode_change?.({ liveOnly: true }, {});
 		(globalThis as Record<PropertyKey, unknown>)[THEME_KEY] = code_theme;
 		markdown.invalidate();
 		split_markdown.invalidate();
+		list_markdown.invalidate();
 		const debug_output = markdown.render(80).join("\n");
 		const debug_split_output = split_markdown.render(80).join("\n");
+		const debug_list_output = list_markdown.render(80).join("\n");
 		expect(debug_output).toContain(debug_theme.getFgAnsi("mdHeading"));
-		expect(debug_output).not.toContain(code_theme.getFgAnsi("mdHeading"));
 		expect(debug_split_output).toContain(debug_theme.getFgAnsi("mdHeading"));
 		expect(debug_split_output).toContain(debug_theme.getFgAnsi("text"));
+		expect(debug_list_output).toContain(debug_theme.getFgAnsi("mdListBullet"));
+		expect(debug_list_output).not.toContain(debug_theme.getFgAnsi("accent"));
 	});
 });

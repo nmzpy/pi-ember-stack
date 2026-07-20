@@ -44,10 +44,17 @@ retain assumptions about one editor instance.
 - `TUI.requestRender()` schedules a normal render through Pi's 16 ms scheduler.
 - `TUI.requestRender(true)` clears Pi's differential state
   (`previousLines`, dimensions, cursor rows, high-water rows, and viewport)
-  and runs a full clear/redraw on the next tick. Never use this on normal
-  slash/autocomplete collapse — it homes the buffer and can clear terminal
-  scrollback. `disable_tui_clear_on_shrink()` explicitly keeps Pi's
-  `clearOnShrink` path off for the live TUI.
+  and runs a full clear/redraw on the next tick. **Never call this from any
+  Ember plugin** — it emits `\x1b[3J`, which destroys terminal scrollback
+  and pins the viewport to the bottom (the "can't scroll anymore" bug).
+  `disable_tui_clear_on_shrink()` explicitly keeps Pi's `clearOnShrink` path
+  off for the live TUI. Use `snap_tui_to_bottom()` / `requestTuiRenderSnapToBottom()`
+  (exported from `layout.ts` / `index.ts`) for any snap that must re-pin the
+  chatbox to the bottom: it clears only the visible screen (`\x1b[2J\x1b[H`,
+  never `3J`), resets the same bookkeeping, and requests a normal render
+  whose first-render path re-anchors `previousViewportTop` to the bottom.
+  The slash-command exit snap, the thinking-toggle snap, and the
+  compact-group auto-settle snap all use this helper.
 - `clearOnShrink` controls whether Pi performs a full redraw when the rendered
   content becomes shorter than the previous high-water mark. Pi defaults it **off**
   (`PI_CLEAR_ON_SHRINK=1` to enable globally); Ember explicitly disables it per
@@ -77,13 +84,14 @@ retain assumptions about one editor instance.
 4. Autocomplete rows, when active
 
 The Ember render override reorders active autocomplete rows above the editor
-body, so the chat-pill grows upward and the editor remains terminal-bottom
-anchored. Its outer shell uses a rounded top border for the menu, a shared
-separator, the editor body, and rounded bottom corners.
+body, so the chatbox grows upward and the editor remains terminal-bottom
+anchored. Its outer shell uses a straight top rule for the menu, a shared
+separator, the editor body, and a straight bottom rule.
 
 The base editor has no side borders. The Ember `Editor.prototype.render`
-override owns the chat-pill border, content insets, slash separator, and
-autocomplete boundary. Keep all of that logic in `plugins/pi-ember-ui/index.ts`.
+override owns the chatbox rules, content insets, prompt gutter, slash
+separator, and autocomplete boundary. Keep all of that logic in
+`plugins/pi-ember-ui/index.ts`.
 
 The editor's `handleInput()` mutates editor state and may update autocomplete;
 after the focused component handles input, `TUI.handleInput()` requests a normal
@@ -102,10 +110,23 @@ scrollback-clearing path.
 - `setWidget(key, content, options)` places components in the above-editor or
   below-editor widget container. Widget render closures must remain O(1).
 - `setFooter(factory)` removes the current footer and adds the custom footer as
-  a direct TUI child.
+  a direct TUI child. The Ember bottom footer is owned by `pi-ember-ui`
+  (`footer.ts`): `installEmberFooter(ctx)` installs it on `session_start`, and
+  the render closure reads cached stats (`footerStatsCache`), the live model,
+  cwd, the active mode label (via the resolver registered by
+  `pi-custom-agents` through `setModeLabelResolver`), the thinking level, and
+  the live TPS. The footer has a **1-column inset** on each side
+  (`FOOTER_INSET` = 1, SSOT in `footer.ts`) — never duplicate the inset or
+  re-derive `innerWidth` elsewhere. Stats recomputation is O(total context)
+  (iterates session entries + `ctx.getContextUsage()`), so it is cached on
+  `session_start` via `recompute_footer_stats` and recomputed through one
+  zero-delay dirty timer (`schedule_footer_stats`) shared by `message_end`
+  and `tool_execution_end`, never from the render closure. `reset_footer_state`
+  clears all session-bound footer state on `session_shutdown`. The mode label
+  resolver keeps `MODES` the single source of truth in `pi-custom-agents`; the footer only renders.
 - Pi's base autocomplete list is rendered after its bottom border, but the
   Ember patch moves active autocomplete rows above the editor body so the
-  chat-pill grows upward. Detect borders from their characters, not fixed row
+  chatbox grows upward. Detect borders from their characters, not fixed row
   indexes.
 
 ## Model / Resume Picker (`model-picker.ts`)
@@ -120,23 +141,28 @@ scrollback-clearing path.
   is called from the `pi-custom-agents` editor factory as the outermost
   `handleInput` wrap. `Editor.prototype.submitValue` blocks Pi's overlay
   selectors for `/model` and `/resume`. `CustomEditor.handleInput` routes
-  `app.model.select` and `app.session.resume` into the chat-pill flow.
+  `app.model.select` and `app.session.resume` into the chatbox flow.
   Entry pickers show `AUTOCOMPLETE_MAX_VISIBLE` (7) rows — not Pi's default 5.
 - Session switch uses `switchSession` captured from
   `ExtensionRunner.prototype.bindCommandContext` (same binding InteractiveMode
   uses). Completions via `ctx.ui.addAutocompleteProvider` on `session_start`.
-- Chat-pill chrome (rounded corners, pipes, dim inset separator) comes from the
-  existing `Editor.prototype.render` override when editor text starts with `/`.
-- **Auto-submit on argument completion:** When the user selects a model or
-  session from the autocomplete popup (Enter / `tui.select.confirm`), Pi only
-  falls through to submit for command-name completions (prefix starts with
-  `/`), not for argument completions (model names, session paths). The
-  `wrapModelPickerEditor` `handleInput` wrapper detects when a confirm key
-  closes the autocomplete and the editor text is a completed `/model
-  provider/id` or `/resume <session>` command, and auto-submits via
-  `handleSlashOverrideText`. This makes `/model` and `/subagent-model`
-  (which uses `pickModelInEditor`) apply the selection immediately without
-  requiring a second Enter.
+- Chatbox chrome (straight rules, prompt gutter, dim inset separator) comes
+  from the existing `Editor.prototype.render` override when editor text starts
+  with `/`.
+- **Auto-submit on slash autocomplete confirm or Tab:** When the user selects
+  a slash-menu entry with Enter (`tui.select.confirm` / `tui.input.submit`) or
+  Tab (`tui.input.tab`), Pi only falls through to submit for command-name
+  completions (prefix starts with `/`), not for argument completions (model
+  names, session paths, login providers, etc.). The `wrapModelPickerEditor`
+  `handleInput` wrapper detects when a completion key closes the autocomplete
+  and the editor still holds a complete slash command (`should_auto_submit_slash_text`),
+  then calls `submitValue()` so the command commits immediately — no second
+  Enter/Tab. Bare `/model` or `/resume` selected with Tab also call `submitValue()`
+  to advance to their argument picker. Directory-style completions ending in `/`
+  or `"/` are skipped so path expansion can continue. `/model` and `/resume`
+  still route through the existing `Editor.prototype.submitValue` override;
+  `/subagent-model` (via `pickModelInEditor`) benefits from the same
+  confirm/Tab→submit path.
 
 ## Override Rules
 
@@ -146,7 +172,9 @@ scrollback-clearing path.
 - Do not scan session entries, calculate context usage, or perform synchronous
   filesystem work from editor/header/footer/TUI render closures.
 - Keep `requestTuiRender(force)` throttled through the shared scheduler. Do not
-  call `tui.requestRender(true)` directly from unrelated plugins.
+  call `tui.requestRender(true)` or `requestTuiRender(true)` from any plugin —
+  it emits `\x1b[3J` and destroys scrollback. Use
+  `requestTuiRenderSnapToBottom()` for bottom-pin snaps.
 - Preserve Pi's cursor marker and row ordering. Do not insert terminal fill
   rows, welcome padding, or custom bottom-anchor layout in `TUI.render()`.
 - Treat `node_modules` source as an inspected dependency contract, not a second

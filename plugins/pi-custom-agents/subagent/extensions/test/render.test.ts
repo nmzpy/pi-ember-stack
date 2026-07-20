@@ -179,6 +179,10 @@ describe("renderSubagentLayout (string)", () => {
 		result.errorMessage = "timeout during read";
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [result], theme);
 		expect(stripAnsi(out)).toContain("timeout during read");
+		// Inline failure reason is rendered with the error color tag, not muted,
+		// so the real reason stands out next to the agent name.
+		expect(out).toContain("[error:timeout during read]");
+		expect(out).not.toContain("[muted:timeout during read]");
 	});
 
 	test("completed single mode does not include error text", () => {
@@ -287,7 +291,7 @@ describe("renderSubagentLayout (string)", () => {
 	});
 });
 
-describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
+describe("buildSubagentLayoutComponent (transparent rows)", () => {
 	test("running single mode has no subagentBg background", () => {
 		const theme = makeTheme() as any;
 		const component = buildSubagentLayoutComponent({ agent: "Coder", task: "do stuff" }, [makeRunning("Coder")], theme);
@@ -296,7 +300,7 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 		expect(out).not.toContain("[bg:subagentBg:");
 	});
 
-	test("completed single mode gets a subagentBg Box", () => {
+	test("completed single mode has no subagentBg Box (plain text color)", () => {
 		const theme = makeTheme() as any;
 		const component = buildSubagentLayoutComponent(
 			{ agent: "Coder", task: "do stuff" },
@@ -305,7 +309,10 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 		);
 		const out = renderComponent(component);
 		expect(stripAnsi(out)).toContain("Coder");
-		expect(out).toContain("[bg:subagentBg:");
+		expect(out).not.toContain("[bg:subagentBg:");
+		// Completed agent name renders in plain text color, not the live accent.
+		expect(out).toContain("[text:Coder]");
+		expect(out).not.toContain("[accent:Coder]");
 	});
 
 	test("failed single mode does not get a subagentBg Box", () => {
@@ -335,7 +342,7 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 		expect(lines[0]).not.toContain("[bg:subagentBg:");
 	});
 
-	test("mixed parallel: running row transparent, completed row has subagentBg", () => {
+	test("mixed parallel: running and completed rows are both transparent", () => {
 		const theme = makeTheme() as any;
 		const args = { tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] };
 		const component = buildSubagentLayoutComponent(
@@ -347,23 +354,22 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 		const lines = out.split("\n");
 		// Line 0: header (transparent)
 		// Line 1: Coder A running (transparent, gradient)
-		// Line 2+: Scout A completed (subagentBg)
+		// Line 2+: Scout A completed (transparent, plain text color)
 		expect(stripAnsi(lines[1])).toContain("Coder A");
 		expect(lines[1]).not.toContain("[bg:subagentBg:");
 		expect(lines[1]).toContain("\u001b[38;2;");
-		// Scout A completed row should have subagentBg
 		const scoutLine = lines.find((l) => stripAnsi(l).includes("Scout A"));
 		expect(scoutLine).toBeDefined();
-		expect(scoutLine).toContain("[bg:subagentBg:");
+		expect(scoutLine).not.toContain("[bg:subagentBg:");
+		expect(scoutLine).toContain("[text:Scout A]");
 		// Tree-prefix column alignment: the completed row's prefix must start at
-		// the same column as the running row's prefix (no extra left padding
-		// from the subagentBg Box). Both rows should start with the same tree
-		// glyph (`├ ` / `└ `) at column 0.
+		// the same column as the running row's prefix. Both rows should start
+		// with the same tree glyph (`├ ` / `└ `) at column 0.
 		expect(stripAnsi(lines[1]).startsWith("[dim:  ├ ")).toBe(true);
-		expect(stripAnsi(scoutLine!).startsWith("[bg:subagentBg:[dim:  └ ")).toBe(true);
+		expect(stripAnsi(scoutLine!).startsWith("[dim:  └ ")).toBe(true);
 	});
 
-	test("all completed parallel: each row gets its own subagentBg", () => {
+	test("all completed parallel: no subagentBg on any row", () => {
 		const theme = makeTheme() as any;
 		const args = { tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] };
 		const component = buildSubagentLayoutComponent(
@@ -372,11 +378,12 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 			theme,
 		);
 		const out = renderComponent(component);
-		// Both completed rows should have subagentBg backgrounds.
-		expect(out).toContain("[bg:subagentBg:");
-		// Verify both agent names are present
+		expect(out).not.toContain("[bg:subagentBg:");
+		// Verify both agent names are present, rendered in plain text color.
 		expect(stripAnsi(out)).toContain("Coder A");
 		expect(stripAnsi(out)).toContain("Scout A");
+		expect(out).toContain("[text:Coder A]");
+		expect(out).toContain("[text:Scout A]");
 	});
 
 	test("failed parallel row does not get subagentBg", () => {
@@ -392,7 +399,7 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 		expect(out).not.toContain("[bg:subagentBg:");
 	});
 
-	test("chain mode: only started steps appear, completed gets subagentBg", () => {
+	test("chain mode: only started steps appear, completed is transparent", () => {
 		const theme = makeTheme() as any;
 		const args = { chain: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] };
 		const component = buildSubagentLayoutComponent(
@@ -403,7 +410,7 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 		const out = renderComponent(component);
 		expect(stripAnsi(out)).toContain("Scout A");
 		expect(stripAnsi(out)).not.toContain("Coder");
-		expect(out).toContain("[bg:subagentBg:");
+		expect(out).not.toContain("[bg:subagentBg:");
 	});
 
 	test("chain mode: running step is transparent", () => {
@@ -454,7 +461,7 @@ describe("buildSubagentLayoutComponent (per-row backgrounds)", () => {
 });
 
 describe("renderSubagentExpanded", () => {
-	test("single mode wraps in one subagentBg Box", () => {
+	test("single mode is transparent (no subagentBg Box)", () => {
 		const theme = makeTheme() as any;
 		const result = makeResult("Coder", 0);
 		result.messages = [{ role: "assistant", content: [{ type: "text", text: "done" }] }];
@@ -464,7 +471,11 @@ describe("renderSubagentExpanded", () => {
 		);
 		expect(component).toBeDefined();
 		const out = renderComponent(component!);
-		expect(out).toContain("[bg:subagentBg:");
+		expect(stripAnsi(out)).toContain("Coder");
+		expect(out).not.toContain("[bg:subagentBg:");
+		// Agent name renders in plain text color, not the live accent.
+		expect(out).toContain("[text:");
+		expect(out).not.toContain("[accent:Coder]");
 	});
 
 	test("single mode failed does not wrap in subagentBg Box", () => {
@@ -481,7 +492,7 @@ describe("renderSubagentExpanded", () => {
 		expect(out).not.toContain("[bg:subagentBg:");
 	});
 
-	test("parallel mode: each agent section gets its own subagentBg Box (no aggregate outer box)", () => {
+	test("parallel mode: all agent sections are transparent (no subagentBg)", () => {
 		const theme = makeTheme() as any;
 		const r1 = makeResult("Coder A", 0);
 		r1.messages = [{ role: "assistant", content: [{ type: "text", text: "result1" }] }];
@@ -493,13 +504,15 @@ describe("renderSubagentExpanded", () => {
 		);
 		expect(component).toBeDefined();
 		const out = renderComponent(component!);
-		// Both agent names should appear within subagentBg-tinted sections.
 		expect(stripAnsi(out)).toContain("Coder A");
 		expect(stripAnsi(out)).toContain("Scout A");
-		expect(out).toContain("[bg:subagentBg:");
+		expect(out).not.toContain("[bg:subagentBg:");
 		// Verify both agents' content is present
 		expect(stripAnsi(out)).toContain("result1");
 		expect(stripAnsi(out)).toContain("result2");
+		// Agent names render in plain text color.
+		expect(out).toContain("[text:Coder A]");
+		expect(out).toContain("[text:Scout A]");
 	});
 
 	test("parallel mode failed sections do not get subagentBg Box", () => {
@@ -517,13 +530,6 @@ describe("renderSubagentExpanded", () => {
 		expect(stripAnsi(out)).toContain("Coder A");
 		expect(stripAnsi(out)).toContain("Scout A");
 		expect(stripAnsi(out)).toContain("result2");
-		// Only the completed Scout section should be tinted, not the failed Coder.
-		expect(out).toContain("[bg:subagentBg:");
-		const scoutLine = out.split("\n").find((l) => stripAnsi(l).includes("Scout A"));
-		expect(scoutLine).toBeDefined();
-		expect(scoutLine).toContain("[bg:subagentBg:");
-		const coderLine = out.split("\n").find((l) => stripAnsi(l).includes("Coder A"));
-		expect(coderLine).toBeDefined();
-		expect(coderLine).not.toContain("[bg:subagentBg:");
+		expect(out).not.toContain("[bg:subagentBg:");
 	});
 });

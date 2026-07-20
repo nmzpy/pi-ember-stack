@@ -7,7 +7,9 @@ import {
 	disable_tui_clear_on_shrink,
 	ensure_chatbox_leading_spacer,
 	finalize_editor_input_after,
+	request_overlay_collapse_render,
 	reset_slash_command_tracking,
+	snap_tui_to_bottom,
 } from "../layout.ts";
 
 function mock_tui_with_widget_above(widget_children: unknown[]): {
@@ -87,6 +89,105 @@ describe("TUI shrink redraw", () => {
 		} };
 		disable_tui_clear_on_shrink(tui as never);
 		expect(enabled).toBe(false);
+	});
+});
+
+describe("snap_tui_to_bottom", () => {
+	function mock_tui(options: {
+		stopped?: boolean;
+		with_clear_screen?: boolean;
+		with_request_render?: boolean;
+	}) {
+		let screen_cleared = false;
+		let render_force: boolean | undefined;
+		const tui = {
+			terminal: options.with_clear_screen === false
+				? {}
+				: { clearScreen: () => { screen_cleared = true; } },
+			previousLines: ["a", "b"],
+			previousKittyImageIds: new Set([1, 2]),
+			previousWidth: 80,
+			previousHeight: 24,
+			cursorRow: 5,
+			hardwareCursorRow: 5,
+			maxLinesRendered: 30,
+			previousViewportTop: 6,
+			stopped: options.stopped ?? false,
+			requestRender: options.with_request_render === false
+				? undefined
+				: (force?: boolean) => { render_force = force; },
+		};
+		return { tui, screen_cleared: () => screen_cleared, render_force: () => render_force };
+	}
+
+	test("clears visible screen, resets bookkeeping, and requests a normal (non-forced) render", () => {
+		const { tui, screen_cleared, render_force } = mock_tui({});
+		expect(snap_tui_to_bottom(tui as never)).toBe(true);
+		expect(screen_cleared()).toBe(true);
+		expect(render_force()).toBe(false);
+		expect(tui.previousLines).toEqual([]);
+		expect(tui.previousKittyImageIds).toEqual(new Set());
+		expect(tui.previousWidth).toBe(0);
+		expect(tui.previousHeight).toBe(0);
+		expect(tui.cursorRow).toBe(0);
+		expect(tui.hardwareCursorRow).toBe(0);
+		expect(tui.maxLinesRendered).toBe(0);
+		expect(tui.previousViewportTop).toBe(0);
+	});
+
+	test("returns false and does nothing when the TUI is stopped", () => {
+		const { tui, screen_cleared, render_force } = mock_tui({ stopped: true });
+		expect(snap_tui_to_bottom(tui as never)).toBe(false);
+		expect(screen_cleared()).toBe(false);
+		expect(render_force()).toBeUndefined();
+		expect(tui.previousViewportTop).toBe(6);
+	});
+
+	test("returns false when no TUI is bound", () => {
+		expect(snap_tui_to_bottom(undefined)).toBe(false);
+		expect(snap_tui_to_bottom(null)).toBe(false);
+	});
+
+	test("returns false when the terminal lacks clearScreen", () => {
+		const { tui, screen_cleared, render_force } = mock_tui({ with_clear_screen: false });
+		expect(snap_tui_to_bottom(tui as never)).toBe(false);
+		expect(screen_cleared()).toBe(false);
+		expect(render_force()).toBeUndefined();
+	});
+
+	test("returns false when the TUI lacks requestRender", () => {
+		const { tui, screen_cleared, render_force } = mock_tui({ with_request_render: false });
+		expect(snap_tui_to_bottom(tui as never)).toBe(false);
+		expect(screen_cleared()).toBe(false);
+		expect(render_force()).toBeUndefined();
+	});
+});
+
+describe("request_overlay_collapse_render (delegates to snap_tui_to_bottom)", () => {
+	test("snaps via the shared helper when the editor has a live TUI", () => {
+		reset_slash_command_tracking();
+		let screen_cleared = false;
+		let render_force: boolean | undefined;
+		const editor = {
+			getText: () => "/model ",
+			isShowingAutocomplete: () => true,
+			tui: {
+				terminal: { rows: 24, columns: 80, clearScreen: () => { screen_cleared = true; } },
+				render: () => Array.from({ length: 50 }, () => "line"),
+				maxLinesRendered: 58,
+				previousViewportTop: 12,
+				setClearOnShrink(enabled: boolean) {
+					(this as { clearOnShrink: boolean }).clearOnShrink = enabled;
+				},
+				clearOnShrink: false,
+				requestRender: (f?: boolean) => { render_force = f; },
+			},
+		};
+		request_overlay_collapse_render(editor as never);
+		expect(render_force).toBe(false);
+		expect(screen_cleared).toBe(true);
+		expect(editor.tui.maxLinesRendered).toBe(0);
+		expect(editor.tui.previousViewportTop).toBe(0);
 	});
 });
 

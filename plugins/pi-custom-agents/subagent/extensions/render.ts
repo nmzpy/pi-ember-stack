@@ -20,15 +20,7 @@ import {
 	TREE_NESTED_PIPE,
 	TREE_SINGLE_TOOL,
 } from "../../../pi-compact-tools/renderer.ts";
-import {
-	Box,
-	Container,
-	type Component,
-	Markdown,
-	Spacer,
-	Text,
-	truncateToWidth,
-} from "@earendil-works/pi-tui";
+import { Container, type Component, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Message } from "@earendil-works/pi-ai";
 import { type SubAgentResult, isFailedResult, getResultOutput } from "./runner.ts";
 
@@ -262,7 +254,7 @@ export function renderSingleResult(
 	if (expanded) {
 		const mdTheme = getMarkdownTheme();
 		const container = new Container();
-		let header = `${icon} ${theme.fg("toolTitle", theme.bold(result.agent))}`;
+		let header = `${icon} ${theme.fg("text", theme.bold(result.agent))}`;
 		if (isError && result.stopReason) {
 			const reasonColor = result.stopReason === "timeout" ? "warning" : "error";
 			header += ` ${theme.fg(reasonColor, `[${result.stopReason}]`)}`;
@@ -384,15 +376,17 @@ function renderAgentLabel(
 		const output = getResultOutput(result).trim();
 		if (output) {
 			const clipped = output.length > 60 ? `${output.slice(0, 60)}...` : output;
-			suffix = ` ${theme.fg("muted", clipped)}`;
+			suffix = ` ${theme.fg("error", clipped)}`;
 		}
 	}
-	return prefix + theme.fg("accent", agentName) + suffix + agentStatusSuffix(status, theme);
+	// Completed/failed agent names render in plain text color (not the live
+	// mode accent) so finished subagents don't flash the active mode color.
+	return prefix + theme.fg("text", agentName) + suffix + agentStatusSuffix(status, theme);
 }
 
 /**
  * Render a single agent row as a plain string (no background). Terminal
- * rows are wrapped in a per-row `subagentBg` Box by `buildSubagentLayout`;
+ * rows are wrapped in a plain Text (no background) by `buildSubagentLayout`;
  * running rows and the group header stay transparent.
  */
 function renderAgentRow(
@@ -610,10 +604,9 @@ export function renderSubagentLayout(args: any, results: SubAgentResult[], theme
 
 /**
  * Build the compact grouped layout as a Component tree with per-terminal-row
- * `subagentBg` Box backgrounds. Running rows and the group header remain
- * transparent. Each completed/failed row gets its own full-width Box so
- * mixed parallel/chain layouts show transparent live rows alongside
- * independently tinted terminal rows.
+ * `subagentBg` Box backgrounds. All rows (running, completed, failed) and the
+ * group header are transparent. Completed agent names render in plain text
+ * color (not the live mode accent). No per-row background tint.
  *
  * The returned Container is rebuilt on every renderCall/renderResult, so
  * it always reflects the latest statuses. The stable tick subscription
@@ -656,19 +649,9 @@ export function buildSubagentLayoutComponent(
 				agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 				row.isSingle,
 			);
-			if (row.status === "completed") {
-				// Completed rows get the user-message-style subagentBg background.
-				// paddingX=0 keeps the tree prefix (├/└) aligned with running rows
-				// (plain Text, no Box) so a mid-pipeline completion doesn't shift
-				// left and break the vertical tree. applyBg still fills the full
-				// terminal width with the tint regardless of paddingX.
-				const rowBox = new Box(0, 0, (s: string) => theme.bg("subagentBg", s));
-				rowBox.addChild(new Text(rowText, 0, 0));
-				container.addChild(rowBox);
-			} else {
-				// Running and failed rows are transparent.
-				container.addChild(new Text(rowText, 0, 0));
-			}
+			// All agent rows (running, completed, failed) are transparent — no
+			// subagentBg background. Completed rows render in plain text color.
+			container.addChild(new Text(rowText, 0, 0));
 		} else {
 			const toolRow = renderLatestToolRow(row, theme, treePrefix);
 			if (toolRow) container.addChild(new SubagentToolText(toolRow));
@@ -705,7 +688,7 @@ export function anySubagentRunning(args: any, results: SubAgentResult[]): boolea
 
 /**
  * Detailed per-agent output for the expanded view. Each terminal agent
- * gets its own `subagentBg` Box; running agents are transparent. No
+ * gets its own transparent section (no subagentBg). No aggregate outer box.
  * aggregate outer box — each section is independently tinted.
  */
 export function renderSubagentExpanded(
@@ -716,20 +699,14 @@ export function renderSubagentExpanded(
 	const mdTheme = getMarkdownTheme();
 
 	if (details.mode === "single" && details.results.length === 1) {
-		const inner = renderSingleResult(details.results[0], true, theme);
-		if (isFailedResult(details.results[0])) {
-			return inner;
-		}
-		const box = new Box(1, 0, (s: string) => theme.bg("subagentBg", s));
-		box.addChild(inner);
-		return box;
+		return renderSingleResult(details.results[0], true, theme);
 	}
 
 	const container = new Container();
 	for (const r of details.results) {
 		const rowContent = new Container();
 		const stepIcon = isFailedResult(r) ? fg("error", "✗") : fg("success", "✓");
-		rowContent.addChild(new Text(`${stepIcon} ${fg("accent", r.agent)}`, 0, 0));
+		rowContent.addChild(new Text(`${stepIcon} ${fg("text", r.agent)}`, 0, 0));
 		if (r.errorMessage) {
 			rowContent.addChild(new Text(fg("error", `Error: ${r.errorMessage}`), 0, 0));
 		}
@@ -740,15 +717,8 @@ export function renderSubagentExpanded(
 		}
 		const usageStr = formatUsageStats(r.usage, r.model);
 		if (usageStr) rowContent.addChild(new Text(fg("dim", usageStr), 0, 0));
-		if (isFailedResult(r)) {
-			// Failed expanded sections are transparent, not tinted.
-			container.addChild(rowContent);
-		} else {
-			// Each terminal completed agent section gets its own subagentBg Box.
-			const rowBox = new Box(1, 0, (s: string) => theme.bg("subagentBg", s));
-			rowBox.addChild(rowContent);
-			container.addChild(rowBox);
-		}
+		// All expanded sections are transparent — no subagentBg background.
+		container.addChild(rowContent);
 		container.addChild(new Spacer(1));
 	}
 	const totalUsage = formatUsageStats(aggregateUsage(details.results));

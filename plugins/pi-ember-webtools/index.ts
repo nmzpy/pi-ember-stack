@@ -169,12 +169,11 @@ function normalizeCuratorTimeoutSeconds(value: unknown): number | undefined {
 	return Math.min(normalized, MAX_CURATOR_TIMEOUT_SECONDS);
 }
 
-function resolveWorkflow(input: unknown, hasUI: boolean): WebSearchWorkflow {
+function resolveWorkflow(input: unknown): WebSearchWorkflow {
 	const normalized = typeof input === "string" ? input.trim().toLowerCase() : "";
 	if (normalized === "auto-summary") return "auto-summary";
-	if (!hasUI) return "none";
-	if (normalized === "none") return "none";
-	return "summary-review";
+	if (normalized === "summary-review") return "summary-review";
+	return "none";
 }
 
 function normalizeQueryList(queryList: unknown[]): string[] {
@@ -1386,7 +1385,7 @@ export default function (pi: ExtensionAPI) {
 			name: "web_search",
 			label: "Web Search",
 			renderShell: "self",
-			description: `Search the web using OpenAI or Exa. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched in the background. Searches auto-open the interactive browser curator and stream results live; set workflow to "none" to skip curation or "auto-summary" for a model-generated summary without the browser curator. Provider auto-selects: OpenAI when suitable and available, then Exa.`,
+			description: `Search the web using OpenAI or Exa. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched in the background. Searches default to returning raw results without opening a curator; set workflow to "summary-review" to open the interactive browser curator, or "auto-summary" for a model-generated summary without the browser curator. Provider auto-selects: OpenAI when suitable and available, then Exa.`,
 			promptSnippet:
 				"Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage.",
 			parameters: Type.Object({
@@ -1420,7 +1419,7 @@ export default function (pi: ExtensionAPI) {
 				workflow: Type.Optional(
 					StringEnum(["none", "summary-review", "auto-summary"], {
 						description:
-							"Search workflow mode: none = no curator, summary-review = open curator with auto summary draft (default), auto-summary = generate summary without opening curator",
+							"Search workflow mode: none = no curator (default), summary-review = open curator with auto summary draft, auto-summary = generate summary without opening curator",
 					}),
 				),
 			}),
@@ -1433,7 +1432,7 @@ export default function (pi: ExtensionAPI) {
 						: [];
 				const queryList = normalizeQueryList(rawQueryList);
 				const configWorkflow = loadConfigForExtensionInit().workflow;
-				const workflow = resolveWorkflow(params.workflow ?? configWorkflow, ctx?.hasUI !== false);
+				const workflow = resolveWorkflow(params.workflow ?? configWorkflow);
 				const shouldCurate = workflow === "summary-review";
 
 				if (queryList.length === 0) {
@@ -2897,7 +2896,7 @@ export default function (pi: ExtensionAPI) {
 
 			let newWorkflow: WebSearchWorkflow;
 			if (arg.length === 0) {
-				const current = resolveWorkflow(loadConfigForExtensionInit().workflow, true);
+				const current = resolveWorkflow(loadConfigForExtensionInit().workflow);
 				newWorkflow = current === "none" ? "summary-review" : "none";
 			} else if (arg === "on") {
 				newWorkflow = "summary-review";

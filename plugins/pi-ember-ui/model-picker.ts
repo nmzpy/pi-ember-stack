@@ -272,6 +272,26 @@ function intercept_slash_override_command(data: string, editor: any): boolean {
 	return handle_slash_override_text(editor, getText().trim());
 }
 
+/**
+ * After a slash autocomplete confirm, decide whether the remaining editor text
+ * should be committed immediately. Pi only auto-submits command-name picks
+ * (prefix starts with "/"); argument picks leave "/cmd value" in the editor.
+ * Skip unfinished path completions (trailing "/" or quoted "/") so directory
+ * expansion continues. Bare slash commands are not auto-committed; a slash
+ * command must have a non-whitespace argument (or be /model / /resume selected
+ * with Tab, handled separately in the wrapper).
+ */
+export function should_auto_submit_slash_text(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith("/")) return false;
+	// Bare "/" or whitespace-only after slash is not a command yet.
+	if (!/^\/\S/.test(trimmed)) return false;
+	// Directory-style completions end with "/" or quoted "/" and should keep expanding.
+	if (trimmed.endsWith("/") || trimmed.endsWith('/"')) return false;
+	// Require a non-whitespace argument (command + whitespace + non-whitespace).
+	return /^\S+\s+\S/.test(trimmed);
+}
+
 /** Outermost editor wrap — call from pi-custom-agents editor factory after other wraps. */
 export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any): void {
 	live_editor = editor;
@@ -286,10 +306,26 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 		const was_showing = editor_is_showing_autocomplete(editor);
 		const kb = getKeybindings();
 		const is_confirm = kb.matches(data, "tui.select.confirm");
+		const is_submit = kb.matches(data, "tui.input.submit");
+		const is_tab = kb.matches(data, "tui.input.tab");
 		original_handle_input(data);
-		if (was_showing && is_confirm && !editor_is_showing_autocomplete(editor)) {
+		// Pi only falls through to submit for command-name completions with
+		// Enter (prefix starts with "/"). Tab always applies the completion and
+		// returns, leaving "/cmd value" in the editor. Commit any remaining
+		// complete slash command so Tab and Enter both run — not just insert.
+		// Native command-name submits with Enter already clear the editor, so
+		// the argument-only guard makes this a no-op for them. submitValue
+		// routes /model and /resume through our patch.
+		if (was_showing && !editor_is_showing_autocomplete(editor)) {
 			const text = editor.getText?.()?.trim() ?? "";
-			if (text && handle_slash_override_text(editor, text)) {
+			// Tab-selecting /model or /resume should advance to the argument picker.
+			if (is_tab && (text === MODEL_PREFIX || text === RESUME_PREFIX)) {
+				editor.submitValue?.();
+				finalize_editor_input_after(editor);
+				return;
+			}
+			if ((is_confirm || is_submit || is_tab) && should_auto_submit_slash_text(text) && typeof editor.submitValue === "function") {
+				editor.submitValue();
 				finalize_editor_input_after(editor);
 				return;
 			}

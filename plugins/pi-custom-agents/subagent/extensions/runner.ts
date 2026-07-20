@@ -20,10 +20,15 @@ import {
 	getAgentDir,
 	loadProjectContextFiles,
 	type ModelRegistry,
-	type ModelRuntime,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+
+// ModelRuntime is only exported from Pi 0.80.10+. Import it as a dynamic,
+// optional symbol so this module loads cleanly on 0.80.6 (where the parent
+// ModelRegistry is self-contained and createAgentSession takes modelRegistry
+// directly) while still using the canonical runtime bridge on 0.80.10+.
+type ModelRuntime = unknown;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -70,25 +75,36 @@ export interface SubAgentResult {
 // Public API
 // ---------------------------------------------------------------------------
 
-interface ModelRegistryRuntimeBridge {
-	readonly runtime?: ModelRuntime;
-}
-
 /**
- * Pi exposes ModelRegistry to extensions as a synchronous compatibility facade,
- * while createAgentSession consumes the canonical ModelRuntime. Keep the one
- * unavoidable bridge at this SDK boundary so every subagent path reuses the
- * parent's exact provider/auth runtime instead of copying credentials or
+ * Pi 0.80.10+ exposes ModelRegistry to extensions as a synchronous
+ * compatibility facade over the canonical ModelRuntime, and createAgentSession
+ * consumes ModelRuntime directly. Pi 0.80.6 instead ships a self-contained
+ * ModelRegistry (authStorage + modelsJsonPath) and createAgentSession takes
+ * modelRegistry directly. Detect which API is available so the subagent runner
+ * works against either installed Pi version without copying credentials or
  * rebuilding provider catalogs.
  */
-function resolve_parent_model_runtime(model_registry: ModelRegistry): ModelRuntime {
-	const model_runtime = (model_registry as unknown as ModelRegistryRuntimeBridge).runtime;
-	if (!model_runtime) {
-		throw new Error(
-			"Subagent requires a Pi ModelRegistry backed by ModelRuntime (Pi 0.80.10 or newer).",
-		);
-	}
-	return model_runtime;
+interface ModelRegistryRuntimeBridge {
+	readonly runtime?: unknown;
+}
+
+interface ModelRegistryLegacy {
+	readonly authStorage?: unknown;
+	readonly modelsJsonPath?: string;
+}
+
+function resolve_parent_model_runtime(model_registry: ModelRegistry): unknown {
+	const bridge = model_registry as unknown as ModelRegistryRuntimeBridge;
+	if (bridge.runtime) return bridge.runtime;
+	// Pi 0.80.6: no runtime field — createAgentSession accepts modelRegistry
+	// directly. Return undefined so the caller skips the modelRuntime option.
+	return undefined;
+}
+
+function is_legacy_model_registry(model_registry: ModelRegistry): boolean {
+	const legacy = model_registry as unknown as ModelRegistryLegacy;
+	return !((model_registry as unknown as ModelRegistryRuntimeBridge).runtime) &&
+		Boolean(legacy.authStorage || legacy.modelsJsonPath !== undefined);
 }
 
 const GENERIC_ABORT_PHRASES = [
@@ -113,6 +129,44 @@ function extractFailureMessage(error: unknown): string {
 	}
 	if (error instanceof Error) return error.message;
 	return String(error);
+}
+
+/**
+ * Pull the last assistant `errorMessage` from the message stream. Providers
+ * fold real failure reasons (HTTP status + body, auth errors, etc.) into the
+ * assistant message's `errorMessage` via `formatProviderError` before the
+ * generic abort catch block can overwrite it.
+ */
+function lastAssistantErrorMessage(messages: Message[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role !== "assistant") continue;
+		const candidate = (msg as { errorMessage?: string }).errorMessage;
+		if (candidate && candidate.trim() && !isGenericAbortMessage(candidate)) {
+			return candidate;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Resolve the best human-readable failure reason for a failed result, in
+ * priority order: a non-generic `errorMessage`, the last assistant message's
+ * non-generic `errorMessage`, non-empty `stderr`, or the last assistant text
+ * output. Returns undefined when nothing useful is available so callers can
+ * fall back to short status labels.
+ */
+export function resolve_failure_message(result: SubAgentResult): string | undefined {
+	if (!isFailedResult(result)) return undefined;
+	if (result.errorMessage && !isGenericAbortMessage(result.errorMessage)) {
+		return result.errorMessage;
+	}
+	const fromMessages = lastAssistantErrorMessage(result.messages);
+	if (fromMessages) return fromMessages;
+	if (result.stderr && result.stderr.trim()) return result.stderr.trim();
+	const finalOutput = getFinalOutput(result.messages).trim();
+	if (finalOutput) return finalOutput;
+	return undefined;
 }
 
 export async function runSubAgent(options: {
@@ -208,6 +262,7 @@ export async function runSubAgent(options: {
 		retry: { enabled: false },
 	});
 	const model_runtime = resolve_parent_model_runtime(modelRegistry);
+	const legacy_registry = is_legacy_model_registry(modelRegistry);
 
 	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 	let unsubscribe: (() => void) | undefined;
@@ -237,16 +292,25 @@ export async function runSubAgent(options: {
 	}
 
 	try {
-		const created = await createAgentSession({
+		const session_options: Record<string, unknown> = {
 			cwd,
 			model,
 			thinkingLevel,
-			modelRuntime: model_runtime,
 			resourceLoader,
 			tools,
 			sessionManager: SessionManager.inMemory(cwd),
 			settingsManager,
-		});
+		};
+		// Pi 0.80.10+ exposes the canonical ModelRuntime via the registry facade;
+		// pass it through so child sessions inherit every registered provider,
+		// credential source, and custom models.json entry. Pi 0.80.6 has no
+		// ModelRuntime — createAgentSession takes modelRegistry directly.
+		if (model_runtime) {
+			session_options.modelRuntime = model_runtime;
+		} else if (legacy_registry) {
+			session_options.modelRegistry = modelRegistry;
+		}
+		const created = await createAgentSession(session_options);
 		session = created.session;
 
 		if (aborted) {
@@ -319,8 +383,12 @@ export async function runSubAgent(options: {
 		} else {
 			result.stopReason = result.stopReason || "error";
 		}
-		if (!result.errorMessage) {
-			result.errorMessage = extractFailureMessage(error);
+		const caught = extractFailureMessage(error);
+		// Prefer a richer caught message over a generic/empty existing one so
+		// real provider/network errors surfaced by the catch block are not
+		// dropped in favor of opaque abort strings.
+		if (caught && (!result.errorMessage || isGenericAbortMessage(result.errorMessage))) {
+			result.errorMessage = caught;
 		}
 	} finally {
 		if (timeoutId) clearTimeout(timeoutId);
@@ -332,7 +400,9 @@ export async function runSubAgent(options: {
 	}
 
 	// Surface the actual failure reason instead of the provider's generic
-	// "This operation was aborted" / "Request was aborted" string.
+	// "This operation was aborted" / "Request was aborted" string. Only run
+	// when the run actually failed — a successful stop with no errorMessage
+	// must not be force-marked failed.
 	if (timeoutController?.signal.aborted && !parentSignal?.aborted) {
 		result.exitCode = 1;
 		result.stopReason = "timeout";
@@ -343,11 +413,14 @@ export async function runSubAgent(options: {
 		if (isGenericAbortMessage(result.errorMessage)) {
 			result.errorMessage = "Cancelled: parent operation aborted";
 		}
-	} else if (isGenericAbortMessage(result.errorMessage)) {
-		result.exitCode = 1;
-		result.stopReason = result.stopReason || "error";
-		result.errorMessage =
-			result.stopReason === "aborted" ? "Subagent aborted" : "Subagent failed";
+	} else if (isFailedResult(result)) {
+		const resolved = resolve_failure_message(result);
+		if (resolved) {
+			result.errorMessage = resolved;
+		} else if (isGenericAbortMessage(result.errorMessage)) {
+			result.errorMessage =
+				result.stopReason === "aborted" ? "Subagent aborted" : "Subagent failed";
+		}
 	}
 
 	return result;
