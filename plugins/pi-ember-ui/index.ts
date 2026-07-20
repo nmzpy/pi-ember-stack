@@ -88,12 +88,17 @@ export {
 export {
 	intercept_shell_input as interceptShellInput,
 	process_shell_input as processShellInput,
+	sync_shell_mode_from_editor_text as syncShellModeFromEditorText,
+	set_shell_sync_callback as setShellSyncCallback,
+	install_shell_history_sync_patch as installShellHistorySyncPatch,
 	type ShellModeEditor,
 } from "./shell-mode.ts";
 export {
 	cancel_footer_stats_schedule as cancelFooterStatsSchedule,
+	get_baked_thinking_variant as getBakedThinkingVariant,
 	init_footer_thinking_level as initFooterThinkingLevel,
 	installEmberFooter,
+	model_name_has_thinking_variant as modelNameHasThinkingVariant,
 	recompute_footer_stats as recomputeFooterStats,
 	refresh_footer as refreshFooter,
 	reset_footer_state as resetFooterState,
@@ -114,6 +119,9 @@ import {
 } from "./footer.ts";
 import {
 	process_shell_input as processShellInput,
+	sync_shell_mode_from_editor_text as syncShellModeFromEditorText,
+	set_shell_sync_callback as setShellSyncCallback,
+	install_shell_history_sync_patch as installShellHistorySyncPatch,
 	type ShellModeEditor,
 } from "./shell-mode.ts";
 
@@ -227,6 +235,11 @@ let workingActive = false;
  *  lost while the agent is still working on the user's task. Cleared on
  *  `agent_settled` and `session_shutdown` (the safety floor). */
 let agentRunPending = false;
+/** Whether context compaction (manual, threshold, or overflow recovery)
+ *  is in progress. When true the Thinking widget displays `Summarizing`
+ *  with the Thinking accent gradient and hides Thinking/Working labels.
+ *  Cleared on compaction_end and `session_shutdown`. */
+let summarizingActive = false;
 let logoAnimating = false;
 let logoStatic = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
@@ -477,7 +490,9 @@ function installShellModeInputListener(ctx: any): void {
 		const result = processShellInput(data, editor);
 		if (result?.consume) {
 			requestShellModeVisualRefresh(editor, ctx);
+			return result;
 		}
+
 		return result;
 	});
 }
@@ -503,6 +518,18 @@ function startWorkingAnimation(): void {
 function stopWorkingAnimation(): void {
 	workingActive = false;
 	deactivate_gradient("working");
+	requestRender?.();
+}
+
+function startSummarizingAnimation(): void {
+	summarizingActive = true;
+	activate_gradient("summarizing");
+	if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
+}
+
+function stopSummarizingAnimation(): void {
+	summarizingActive = false;
+	deactivate_gradient("summarizing");
 	requestRender?.();
 }
 
@@ -812,7 +839,7 @@ function installThinkingBorderOverride(): void {
  * from multiple module copies and prototype patching only lands on one.
  */
 function render_shell_aware_editor(instance: EditorWithBorder, originalRender: (width: number) => string[], width: number): string[] {
-	const borderColor = isShellMode() || workingActive || agentRunPending ? MUTED_COLOR : TEXT_COLOR;
+	const borderColor = isShellMode() || workingActive || agentRunPending || summarizingActive ? MUTED_COLOR : TEXT_COLOR;
 	const border = (text: string): string => colorize(text, borderColor);
 	const dimBorder = (text: string): string => colorize(text, DIM_COLOR);
 	const INSET = 0;
@@ -1240,6 +1267,43 @@ function installUpdateNotificationPatch(): void {
 		);
 		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
 		this.ui?.requestRender?.();
+	};
+}
+
+const STATUS_PATCH_MARKER = Symbol.for("pi-ember-ui:status-patched");
+
+function installCompactionStatusPatch(): void {
+	const proto = (InteractiveMode as any).prototype;
+	if (proto[STATUS_PATCH_MARKER]) return;
+	proto[STATUS_PATCH_MARKER] = true;
+
+	const originalShowStatusIndicator = proto.showStatusIndicator;
+	const originalClearStatusIndicator = proto.clearStatusIndicator;
+
+	function suppress_compaction_status_indicator(indicator: any): void {
+		if (indicator?.kind !== "compaction") return;
+		// Stop Pi's spinner/timer so it does not keep requesting renders.
+		if (typeof indicator.stop === "function") indicator.stop();
+		// Replace render so the status row contributes no visible lines.
+		indicator.render = () => [];
+	}
+
+	proto.showStatusIndicator = function emberShowStatusIndicator(this: any, indicator: any): any {
+		if (indicator?.kind === "compaction") {
+			startSummarizingAnimation();
+			suppress_compaction_status_indicator(indicator);
+			// Still flow through original so activeStatusIndicator is set and
+			// clearStatusIndicator can dispose it. The suppressed render makes
+			// the container empty.
+		}
+		return originalShowStatusIndicator.call(this, indicator);
+	};
+
+	proto.clearStatusIndicator = function emberClearStatusIndicator(this: any, kind?: string): any {
+		const active = this.activeStatusIndicator;
+		const wasCompaction = active?.kind === "compaction" && (kind === undefined || kind === "compaction" || kind === active.kind);
+		if (wasCompaction) stopSummarizingAnimation();
+		return originalClearStatusIndicator.call(this, kind);
 	};
 }
 
@@ -1872,16 +1936,20 @@ function installThinkingWidget(ctx: any): void {
 	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
 		render(_width: number): string[] {
 			if (isQuestionnaireActive() || isLatestSubagentRunning()) return [];
-			if (!thinkingActive && !workingActive && !agentRunPending) return [];
-			const isThinking = thinkingActive || (!workingActive && agentRunPending);
-			const preset: GradientPreset = isThinking ? "thinking" : "working";
-			const labelText = isThinking ? "Thinking" : "Working";
 			const elapsedMs = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
-			const elapsedText = elapsedMs >= 1000 ? ` ${formatElapsed(elapsedMs)}` : "";
+			const elapsedText = elapsedMs >= 1000 && !summarizingActive ? ` ${formatElapsed(elapsedMs)}` : "";
 			const WIDGET_INSET = 1;
 			const widgetPad = " ".repeat(WIDGET_INSET);
 			const theme = resolve_live_theme();
 			const elapsedColored = elapsedText ? theme.fg("dim", elapsedText) : "";
+			if (summarizingActive) {
+				const labelGradient = renderLiveGradient("Summarizing", "thinking");
+				return [`${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`];
+			}
+			if (!thinkingActive && !workingActive && !agentRunPending) return [];
+			const isThinking = thinkingActive || (!workingActive && agentRunPending);
+			const preset: GradientPreset = isThinking ? "thinking" : "working";
+			const labelText = isThinking ? "Thinking" : "Working";
 			const labelGradient = renderLiveGradient(labelText, preset);
 			return [`${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`];
 		},
@@ -1894,6 +1962,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// /model + /resume: prototype intercepts only (no registerCommand — that
 	// conflicts with built-ins and shows in Extension issues).
 	install_model_picker_patches();
+	installShellHistorySyncPatch();
 	ensureThemeInstalled();
 	installThinkingBorderOverride();
 	install_markdown_theme_patch();
@@ -1902,6 +1971,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	installBashExecutionPatch();
 	installUserMessagePatch();
 	installCompactionSummaryPatch();
+	installCompactionStatusPatch();
 	installUpdateNotificationPatch();
 	applyDynamicTheme();
 
@@ -1926,6 +1996,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			ctx.ui.setHiddenThinkingLabel("");
 			installThinkingWidget(ctx);
 			startCursorBlink();
+			setShellSyncCallback(() => {
+				const focused = tuiRef?.focusedComponent as any;
+				if (focused) requestShellModeVisualRefresh(focused, ctx);
+			});
 		}
 		applyDynamicTheme();
 		if (ctx.mode === "tui") {
@@ -1989,6 +2063,15 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("message_end", (_event, ctx) => {
 		stopThinkingAnimation();
 		schedule_footer_stats(ctx);
+	});
+
+	pi.on("session_compact", (_event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		// Context has just been compacted; refresh the footer token count
+		// immediately so it shows the new post-compaction usage instead of
+		// the old full value.
+		recompute_footer_stats(ctx);
+		requestRender?.();
 	});
 
 	pi.on("thinking_level_select", (event, ctx) => {
@@ -2100,12 +2183,14 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		thinkingActive = false;
 		workingActive = false;
 		agentRunPending = false;
+		summarizingActive = false;
 		userPromptAt = 0;
 		setShellMode(false);
 		setLatestSubagentRunning(false);
 		setThinkingBlocksHidden(false);
 		setToolGroupActive(false);
 		setPlanAutoContinuing(false);
+		setShellSyncCallback(undefined);
 		reset_footer_state();
 		if (ctx.hasUI) {
 			ctx.ui.setWidget("ember-thinking", undefined);

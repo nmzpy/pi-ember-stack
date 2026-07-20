@@ -40,9 +40,11 @@ import {
 	cancelPendingModelPick,
 	finalizeEditorInputAfter,
 	interceptShellInput,
+	modelNameHasThinkingVariant,
 	pickModelInEditor,
 	processShellInput,
 	requestShellModeVisualRefresh,
+	syncShellModeFromEditorText,
 	requestTuiRenderFromEditor,
 	requestTuiRenderSnapToBottom,
 	resetSlashCommandTracking,
@@ -971,7 +973,32 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				// snap uses. Never use requestTuiRender(true) here — it emits `3J`
 				// and nukes scrollback.
 				const is_thinking_toggle = getKeybindings().matches(data, "app.thinking.toggle");
+
+				// Suppress thinking-level cycling for provider-locked model variants
+				// (e.g. "Grok 4.5 High") so the user does not see "Thinking level: off"
+				// / "Thinking level: high" flip-flops with no effect.
+				const is_thinking_cycle = getKeybindings().matches(data, "app.thinking.cycle");
+				if (is_thinking_cycle && ctx.model) {
+					const modelName = ctx.model.name ?? ctx.model.id ?? "";
+					if (modelNameHasThinkingVariant(modelName)) {
+						ctx.ui.notify(
+							"Switching thinking variant suppressed. Using provider-locked model variant.",
+							"info",
+						);
+						return;
+					}
+				}
+
 				original_handle_input(data);
+
+				// History restore (up/down arrows) can land a previously-submitted
+				// bash command like `!git status` in the editor body. Convert that
+				// into shell mode so the `!` is rendered as the prompt glyph and the
+				// body is just `git status`.
+				if (syncShellModeFromEditorText(editor)) {
+					requestShellModeVisualRefresh(editor, ctx);
+				}
+
 				finalizeEditorInputAfter(editor);
 				if (is_thinking_toggle) {
 					queueMicrotask(() => requestTuiRenderSnapToBottom());

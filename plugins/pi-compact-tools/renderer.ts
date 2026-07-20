@@ -244,7 +244,7 @@ function diffStats(result: any): { additions: number; removals: number } {
  * array form and models that stream `edits` as a JSON string (e.g.
  * Opus 4.6 / GLM-5.1). The native tool's `prepareArguments` repairs the
  * string at execution time, but the renderer needs the array during
- * streaming so live +N | -N counts can update in real time.
+ * streaming so live +N -N counts can update in real time.
  */
 function extractStreamingEdits(args: any): Array<{ oldText: string; newText: string }> | undefined {
 	if (args == null) return undefined;
@@ -268,7 +268,7 @@ function extractStreamingEdits(args: any): Array<{ oldText: string; newText: str
 /**
  * Live line-diff counts from streaming edit args (before the tool runs).
  * As the model streams oldText/newText token-by-token, renderCall fires
- * repeatedly; this computes a running +N | -N so the row updates in real
+ * repeatedly; this computes a running +N -N so the row updates in real
  * time from 1 toward the final count. Returns undefined when there is
  * nothing to diff yet (no edits or empty strings).
  */
@@ -286,7 +286,7 @@ function streamingEditStats(args: any): { additions: number; removals: number } 
 		additions += counts.additions;
 		removals += counts.removals;
 	}
-	// Suppress +0 | -0 placeholders while the model is still filling args.
+	// Suppress +0 -0 placeholders while the model is still filling args.
 	if (!hasContent) return undefined;
 	return { additions, removals };
 }
@@ -296,7 +296,7 @@ function streamingWriteStats(args: any): { additions: number; removals: number }
 	const content = typeof args?.content === "string" ? args.content : "";
 	if (content.length === 0) return undefined;
 	const additions = contentLineCount(content);
-	// Suppress +0 | -0 placeholders while the model is still filling args.
+	// Suppress +0 -0 placeholders while the model is still filling args.
 	if (additions === 0) return undefined;
 	return { additions, removals: 0 };
 }
@@ -422,7 +422,7 @@ function formatStandaloneCallRow(record: CompactCall, theme: any): string {
 	const { name, args, result } = record;
 	const prefix = bulletColor(record, theme) + formatCallBody(name, args, theme);
 	// Live edit/write stats: while the model streams args (before the tool
-	// runs), show a running +N | -N count that updates on each token. Once the
+	// runs), show a running +N -N count that updates on each token. Once the
 	// edit completes, the authoritative diff stats take over; write has no
 	// diff, so it keeps the args-based content line count as final.
 	if ((name === "edit" || name === "write") && !record._completed) {
@@ -456,11 +456,11 @@ function formatEditStats(result: any, theme: any): string {
 }
 
 function formatEditStatsFromCounts(counts: { additions: number; removals: number }, theme: any): string {
-	// Avoid noisy +0 | -0 placeholders when there is nothing to diff.
+	// Avoid noisy +0 -0 placeholders when there is nothing to diff.
 	if (counts.additions === 0 && counts.removals === 0) return "";
 	return (
 		theme.fg("success", `+${counts.additions}`) +
-		theme.fg("dim", " | ") +
+		theme.fg("dim", " ") +
 		theme.fg("error", `-${counts.removals}`)
 	);
 }

@@ -235,14 +235,14 @@
   dispatches a stable snapshot of subscribers each tick — callbacks added
   or removed during dispatch are not visited until the next tick, preventing
   same-tick re-addition loops.
-- **Thinking Widget & Tool Group Precedence:** The Thinking/Working gradient
-  label is rendered in a `setWidget("ember-thinking", …)` row directly above the
-  editor (default `aboveEditor` placement; `CHATBOX_LEADING_ROWS` in `layout.ts`
-  is 1 blank row above the label when visible, or above the chatbox when hidden;
-  the label is flush to the editor), NOT
-  inside the editor top border. The widget row has a 3-column inset on left and
-  right. The widget render closure is O(1): it reads `thinkingActive`,
-  `workingActive`, and `agentRunPending` and remains visible while compact
+- **Thinking/Summarizing Widget & Tool Group Precedence:** The Thinking/Working
+  gradient label is rendered in a `setWidget("ember-thinking", …)` row directly
+  above the editor (default `aboveEditor` placement; `CHATBOX_LEADING_ROWS` in
+  `layout.ts` is 1 blank row above the label when visible, or above the chatbox
+  when hidden; the label is flush to the editor), NOT inside the editor top
+  border. The widget row has a 3-column inset on left and right. The widget
+  render closure is O(1): it reads `thinkingActive`, `workingActive`,
+  `agentRunPending`, and `summarizingActive` and remains visible while compact
   groups are active, so the chatbox state is never hidden by an
   `Exploring`/`Editing`/`Writing`/`Bashing` transcript group. It is
   suppressed when a questionnaire overlay is active
@@ -256,8 +256,15 @@
   automatically. `agent_start` sets it true; `agent_settled` (and
   `session_shutdown`, the safety floor) clear it. While it is true the
   widget stays visible (showing `Thinking` when neither `thinkingActive`
-  nor `workingActive` is set) and the editor border stays muted, so the
-  header state is never lost during compaction/retry/follow-up gaps.
+  nor `workingActive` is set) and the editor border stays muted, so the header
+  state is never lost during compaction/retry/follow-up gaps.
+  When Pi is compacting context (manual `/compact`, threshold, or overflow
+  recovery), `summarizingActive` is set by a prototype patch on
+  `InteractiveMode.showStatusIndicator`/`clearStatusIndicator`. The widget then
+  shows `Summarizing` with the live `thinking` gradient, suppresses the stock
+  `CompactionStatusIndicator` text, and hides `Thinking`/`Working`. The flag is
+  cleared on `compaction_end` (success, abort, or error) and `session_shutdown`.
+  Escape-to-cancel remains wired by Pi's `compaction_start` editor handler.
   Never clear `thinkingActive`/`workingActive` from `agent_end` alone and
   expect the widget to stay — `agent_end` is not the end of the user's
   task. Group headers still carry their own muted/text gradient
@@ -405,8 +412,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
   group. Consecutive `edit`, `write`, and non-grep `bash` calls form separate
   `Editing`/`Edited N files`, `Writing`/`Written N files`, and
   `Bashing`/`Bashed N commands` groups. Grouped edit children show only their
-  path plus `+N | -N`; grouped write children show only their path plus
-  `+N | -0`; grouped Bash children show only a `$` command preview. Grouped read children include
+  path plus `+N -N`; grouped write children show only their path plus
+  `+N -0`; grouped Bash children show only a `$` command preview. Grouped read children include
   their supplied offset and line limit. Final file counts use distinct
   tool-call target paths; Bash counts all command entries. Every group header
   and child is one ANSI-aware, width-truncated terminal row. The

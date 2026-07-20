@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { intercept_shell_input, process_shell_input } from "../shell-mode.ts";
+import {
+	intercept_shell_input,
+	process_shell_input,
+	sync_shell_mode_from_editor_text,
+	with_suppressed_shell_history_sync,
+} from "../shell-mode.ts";
 import { isShellMode, setShellMode } from "../mode-colors.ts";
 
 function makeEditorWithTui(initialText: string): {
@@ -233,11 +238,120 @@ describe("shell mode input result", () => {
 		expect(editor.getText()).toBe("!git status");
 	});
 
+	test("submit setText is not stripped by sync_shell_mode when suppressed", () => {
+		setShellMode(true);
+		const editor = makeEditorWithTui("git status");
+		let text = "";
+		const result = with_suppressed_shell_history_sync(() => {
+			text = `!${editor.getText()}`;
+			editor.setText(text);
+			return "ok";
+		});
+		expect(result).toBe("ok");
+		expect(text).toBe("!git status");
+		expect(editor.getText()).toBe("!git status");
+	});
+
 	test("regular printable key is not consumed", () => {
 		setShellMode(true);
 		const editor = makeEditorWithTui("");
 		const result = process_shell_input("a", editor);
 		expect(result?.consume).toBeUndefined();
 		expect(isShellMode()).toBe(true);
+	});
+});
+
+describe("sync shell mode from editor text", () => {
+	test("bang-prefixed history becomes shell mode with stripped body", () => {
+		setShellMode(true);
+		const editor = makeEditor("!git status");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(true);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("git status");
+	});
+
+	test("bang-prefixed history while not in shell mode enters shell mode and strips body", () => {
+		setShellMode(false);
+		const editor = makeEditor("!git status");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(true);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("git status");
+	});
+
+	test("single typed `!` while not in shell mode enters shell mode and clears body", () => {
+		setShellMode(false);
+		const editor = makeEditor("!");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(true);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("");
+	});
+
+	test("double-bang history while not in shell mode enters shell mode and strips both bangs", () => {
+		setShellMode(false);
+		const editor = makeEditor("!!excluded command");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(true);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("excluded command");
+	});
+
+	test("double-bang history strips both bangs", () => {
+		setShellMode(true);
+		const editor = makeEditor("!!excluded command");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(true);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("excluded command");
+	});
+
+	test("plain text does not activate shell mode", () => {
+		setShellMode(false);
+		const editor = makeEditor("hello world");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(false);
+		expect(isShellMode()).toBe(false);
+		expect(editor.getText()).toBe("hello world");
+	});
+
+	test("empty editor is unchanged", () => {
+		setShellMode(false);
+		const editor = makeEditor("");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(false);
+		expect(isShellMode()).toBe(false);
+		expect(editor.getText()).toBe("");
+	});
+
+	test("already in shell mode with plain body stays unchanged", () => {
+		setShellMode(true);
+		const editor = makeEditor("ls -la");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(false);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("ls -la");
+	});
+
+	test("preserves leading and trailing whitespace around body", () => {
+		setShellMode(true);
+		const editor = makeEditor("  !echo hi  ");
+		const changed = sync_shell_mode_from_editor_text(editor);
+		expect(changed).toBe(true);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("  echo hi  ");
+	});
+
+	test("typed `!` then `git status` enters shell mode and keeps body clean", () => {
+		setShellMode(false);
+		const editor = makeEditorWithTui("");
+		const first = process_shell_input("!", editor);
+		expect(first?.consume).toBe(true);
+		expect(isShellMode()).toBe(true);
+		expect(editor.getText()).toBe("");
+		editor.setText("git status");
+		expect(sync_shell_mode_from_editor_text(editor)).toBe(false);
+		expect(editor.getText()).toBe("git status");
 	});
 });

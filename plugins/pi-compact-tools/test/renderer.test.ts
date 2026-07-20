@@ -15,7 +15,7 @@ function makeContext(id: string, state: Record<string, any> = {}) {
 }
 
 describe("CompactRenderer streaming edit stats", () => {
-	test("live +N | -N updates as oldText/newText grow", () => {
+	test("live +N -N updates as oldText/newText grow", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const state: Record<string, any> = {};
@@ -70,12 +70,12 @@ describe("CompactRenderer streaming edit stats", () => {
 			makeContext("e3", state) as any,
 		);
 		const row = stripAnsi((state.callText as any).text);
-		// edit 1: +1|-0, edit 2: +0|-1 => +1|-1
+		// edit 1: +1 -0, edit 2: +0 -1 => +1 -1
 		expect(row).toContain("+1");
 		expect(row).toContain("-1");
 	});
 
-	test("edits as a JSON string is parsed for live +N | -N", () => {
+	test("edits as a JSON string is parsed for live +N -N", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const state: Record<string, any> = {};
@@ -93,7 +93,7 @@ describe("CompactRenderer streaming edit stats", () => {
 		expect(row).toContain("-0");
 	});
 
-	test("empty oldText/newText suppresses +0 | -0 placeholder", () => {
+	test("empty oldText/newText suppresses +0 -0 placeholder", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const state: Record<string, any> = {};
@@ -143,7 +143,7 @@ describe("CompactRenderer streaming edit stats", () => {
 });
 
 describe("CompactRenderer streaming write stats", () => {
-	test("live +N | -0 updates as content streams", () => {
+	test("live +N -0 updates as content streams", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const state: Record<string, any> = {};
@@ -186,7 +186,7 @@ describe("CompactRenderer streaming write stats", () => {
 		expect(row).toContain("-0");
 	});
 
-	test("empty content suppresses +0 | -0 placeholder for write", () => {
+	test("empty content suppresses +0 -0 placeholder for write", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const state: Record<string, any> = {};

@@ -31,6 +31,36 @@ const FOOTER_INSET = 1;
 
 const FOOTER_STATUS_KEY = "pi-ember-ui-footer";
 
+/** Thinking-level tokens that may be baked into a model display name. */
+const THINKING_VARIANT_TOKENS = [
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
+
+/** Determine whether `modelName` already contains a standalone thinking variant. */
+export function model_name_has_thinking_variant(modelName: string): boolean {
+	const normalized = modelName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+	const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
+	for (const token of THINKING_VARIANT_TOKENS) {
+		if (tokens.has(token)) return true;
+	}
+	return false;
+}
+
+/** Describe the variant baked into a model display name, or undefined. */
+export function get_baked_thinking_variant(modelName: string): string | undefined {
+	const normalized = modelName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+	const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
+	for (const token of THINKING_VARIANT_TOKENS) {
+		if (tokens.has(token)) return token;
+	}
+	return undefined;
+}
+
 /**
  * Cached footer stats. The footer render closure fires on every TUI render.
  * Iterating all session entries + calling `ctx.getContextUsage()` is
@@ -208,7 +238,11 @@ export function installEmberFooter(ctx: any): void {
 				const modeLabel = resolve_mode_label(getActiveModeId());
 				const modelName = model?.name ?? model?.id ?? "no model";
 				const provider = model?.provider ?? "unknown";
-				const variant = footerThinkingLevel !== "off" ? ` ${footerThinkingLevel}` : "";
+				const level = footerThinkingLevel;
+				const variant =
+					level !== "off" && !model_name_has_thinking_variant(modelName)
+						? ` ${level}`
+						: "";
 				const tps = getLiveTps();
 				let tpsSegment = "";
 				if (tps > 0) {

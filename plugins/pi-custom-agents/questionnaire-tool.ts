@@ -5,6 +5,7 @@ import {
 	Key,
 	Text,
 	matchesKey,
+	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -158,7 +159,13 @@ export async function askQuestionnaire(
 				const wrapped = wrapTextWithAnsi(text, width - prefixWidth);
 				const continuationPrefix = " ".repeat(prefixWidth);
 				for (let i = 0; i < wrapped.length; i++) {
-					lines.push(`${i === 0 ? prefix : continuationPrefix}${wrapped[i]}`);
+					const line = `${i === 0 ? prefix : continuationPrefix}${wrapped[i]}`;
+					// Ensure the assembled line never exceeds the terminal width;
+					// wrapTextWithAnsi can produce a line whose visible width equals
+					// the budget, but when joined with the prefix it can still overrun.
+					lines.push(
+						visibleWidth(line) > width ? truncateToWidth(line, width) : line,
+					);
 				}
 			}
 

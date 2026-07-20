@@ -109,6 +109,15 @@ scrollback-clearing path.
   container.
 - `setWidget(key, content, options)` places components in the above-editor or
   below-editor widget container. Widget render closures must remain O(1).
+- The `ember-thinking` widget renders `Thinking` or `Working` with the live
+  accent gradient. While Pi is compacting context, it renders `Summarizing`
+  with the same `thinking` gradient and hides the `Thinking`/`Working` labels.
+  The `summarizingActive` flag is driven by a prototype patch on
+  `InteractiveMode.showStatusIndicator`/`clearStatusIndicator` that suppresses
+  Pi's `CompactionStatusIndicator` (so no `Context overflow detected,
+  Auto-compacting...` text appears) while keeping the status lifecycle intact.
+  Escape-to-cancel is still wired on the editor by Pi's `compaction_start`
+  handler and is not affected by this patch.
 - `setFooter(factory)` removes the current footer and adds the custom footer as
   a direct TUI child. The Ember bottom footer is owned by `pi-ember-ui`
   (`footer.ts`): `installEmberFooter(ctx)` installs it on `session_start`, and
