@@ -51,12 +51,14 @@ export function setActiveMode(modeId: string): void {
  *  pattern used for `THEME_KEY` in index.ts. */
 const SHELL_MODE_KEY = Symbol.for("pi-ember-ui:shell-mode");
 
+type GlobalThis = typeof globalThis & Record<symbol, unknown>;
+
 export function isShellMode(): boolean {
-	return (globalThis as any)[SHELL_MODE_KEY] === true;
+	return (globalThis as GlobalThis)[SHELL_MODE_KEY] === true;
 }
 
 export function setShellMode(active: boolean): void {
-	(globalThis as any)[SHELL_MODE_KEY] = active;
+	(globalThis as GlobalThis)[SHELL_MODE_KEY] = active;
 }
 
 /** Quiz-overlay-active flag stored on `globalThis` via `Symbol.for`
@@ -67,11 +69,11 @@ export function setShellMode(active: boolean): void {
 const QUIZ_ACTIVE_KEY = Symbol.for("pi-ember-ui:quiz-active");
 
 export function isQuizActive(): boolean {
-	return (globalThis as any)[QUIZ_ACTIVE_KEY] === true;
+	return (globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] === true;
 }
 
 export function setQuizActive(active: boolean): void {
-	(globalThis as any)[QUIZ_ACTIVE_KEY] = active;
+	(globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] = active;
 }
 
 let latestSubagentRunningFlag = false;
@@ -197,11 +199,11 @@ export function buildUserMessageBgHex(accentHex: string): string {
 }
 
 export function buildThemeFgColors(accentHex: string): Record<string, string> {
-	const userMsgBg = buildUserMessageBgHex(accentHex);
+	const _userMsgBg = buildUserMessageBgHex(accentHex);
 	const accent90 = blendToHex(accentHex, PAGE_BG, 0.9);
 	const accent60 = blendToHex(accentHex, PAGE_BG, 0.6);
 	const accent30 = blendToHex(accentHex, PAGE_BG, 0.3);
-	const accent20 = blendToHex(accentHex, PAGE_BG, 0.2);
+	const _accent20 = blendToHex(accentHex, PAGE_BG, 0.2);
 	const accent15 = blendToHex(accentHex, PAGE_BG, 0.15);
 	const accent25 = blendToHex(accentHex, PAGE_BG, 0.25);
 	const accent35 = blendToHex(accentHex, PAGE_BG, 0.35);
@@ -273,7 +275,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 	};
 }
 
-export function buildThemeBgColors(accentHex: string): Record<string, string> {
+export function buildThemeBgColors(_accentHex: string): Record<string, string> {
 	return {
 		selectedBg: "#3a3a4a",
 		userMessageBg: MUTED_MESSAGE_BG,

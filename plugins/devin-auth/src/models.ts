@@ -30,7 +30,7 @@ const VARIANT_ALLOW: Map<string, Set<string>> = new Map([
 function matchesVariantFilter(uid: string): boolean {
     let bestPrefix: string | null = null;
     for (const prefix of VARIANT_ALLOW.keys()) {
-        if (uid === prefix || uid.startsWith(prefix + '-') || uid.startsWith(prefix + '_')) {
+        if (uid === prefix || uid.startsWith(`${prefix}-`) || uid.startsWith(`${prefix}_`)) {
             if (bestPrefix === null || prefix.length > bestPrefix.length) {
                 bestPrefix = prefix;
             }
@@ -39,7 +39,7 @@ function matchesVariantFilter(uid: string): boolean {
     if (bestPrefix === null) return true;
     if (uid === bestPrefix) return true;
     const suffix = uid.slice(bestPrefix.length + 1);
-    return VARIANT_ALLOW.get(bestPrefix)!.has(suffix);
+    return VARIANT_ALLOW.get(bestPrefix)?.has(suffix) ?? false;
 }
 
 /** Display-name overrides for catalog UIDs whose live label is undesired. */

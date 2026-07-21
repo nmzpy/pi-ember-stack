@@ -15,8 +15,6 @@ import {
 	Box,
 	Container,
 	Editor,
-	getCapabilities,
-	hyperlink,
 	Markdown,
 	Spacer,
 	Text,
@@ -1133,15 +1131,10 @@ function installExpandableTextPatch(): void {
 	};
 }
 
-/** CLI name used in Pi's update-notice action strings (`pi update`). */
-const UPDATE_APP_NAME = "pi";
-const CHANGELOG_URL = "https://pi.dev/changelog";
-
 /**
- * Pi bakes `theme.fg("accent", …)` into the startup update notice
- * (`pi update`, changelog URL). That follows the live mode accent, so a
- * plan-mode startup paints those strings purple. Force muted/text instead —
- * update notices are informational chrome, not mode-colored UI.
+ * Suppress Pi's startup update notices entirely (new Pi version, extension
+ * package updates, and the "What's New" changelog block). The startup screen
+ * should only show the normal context/skills/extensions/themes summary.
  */
 function installUpdateNotificationPatch(): void {
 	const proto = (InteractiveMode as any).prototype;
@@ -1212,79 +1205,19 @@ function installUpdateNotificationPatch(): void {
 		this.ui.requestRender();
 	};
 
-	const originalShowNewVersion = proto.showNewVersionNotification;
-	proto.showNewVersionNotification = function emberShowNewVersionNotification(
-		this: any,
-		release: { version?: string; note?: string },
-	): void {
-		const theme = resolve_live_theme();
-		if (!theme || !this.chatContainer) {
-			originalShowNewVersion.call(this, release);
-			return;
-		}
-
-		const version = release?.version ?? "";
-		const action = theme.fg("text", `${UPDATE_APP_NAME} update`);
-		const updateInstruction =
-			theme.fg("muted", `New version ${version} is available. Run `) + action;
-		const changelogLink = getCapabilities().hyperlinks
-			? hyperlink(theme.fg("muted", CHANGELOG_URL), CHANGELOG_URL)
-			: theme.fg("muted", CHANGELOG_URL);
-		const changelogLine = theme.fg("muted", "Changelog: ") + changelogLink;
-		const note = release?.note?.trim();
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
-			new Text(
-				`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`,
-				1,
-				0,
-			),
-		);
-		if (note) {
-			this.chatContainer.addChild(new Spacer(1));
-			const markdownTheme =
-				typeof this.getMarkdownThemeWithSettings === "function"
-					? this.getMarkdownThemeWithSettings()
-					: undefined;
-			this.chatContainer.addChild(
-				new Markdown(note, 1, 0, markdownTheme, {
-					color: (text: string) => theme.fg("muted", text),
-				}),
-			);
-			this.chatContainer.addChild(new Spacer(1));
-		}
-		this.chatContainer.addChild(new Text(changelogLine, 1, 0));
-		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
-		this.ui?.requestRender?.();
+	// Suppress version and package update notices entirely. The startup screen
+	// should only show the normal context/skills/extensions/themes summary.
+	proto.showNewVersionNotification = function emberShowNewVersionNotification() {
+		return;
 	};
 
-	const originalShowPackageUpdate = proto.showPackageUpdateNotification;
-	proto.showPackageUpdateNotification = function emberShowPackageUpdateNotification(
-		this: any,
-		packages: string[],
-	): void {
-		const theme = resolve_live_theme();
-		if (!theme || !this.chatContainer) {
-			originalShowPackageUpdate.call(this, packages);
-			return;
-		}
+	proto.showPackageUpdateNotification = function emberShowPackageUpdateNotification() {
+		return;
+	};
 
-		const action = theme.fg("text", `${UPDATE_APP_NAME} update --extensions`);
-		const updateInstruction = theme.fg("muted", "Package updates are available. Run ") + action;
-		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
-		this.chatContainer.addChild(
-			new Text(
-				`${theme.bold(theme.fg("warning", "Package Updates Available"))}\n${updateInstruction}\n${theme.fg("muted", "Packages:")}\n${packageLines}`,
-				1,
-				0,
-			),
-		);
-		this.chatContainer.addChild(new DynamicBorder((text: string) => theme.fg("warning", text)));
-		this.ui?.requestRender?.();
+	// Suppress the "What's New" startup changelog block.
+	proto.showStartupNoticesIfNeeded = function emberShowStartupNoticesIfNeeded() {
+		return;
 	};
 }
 

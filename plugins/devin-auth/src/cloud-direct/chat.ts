@@ -21,8 +21,8 @@
  * Wire-protocol reference: docs/CLOUD_DIRECT.md.
  */
 
-import * as crypto from 'crypto';
-import * as zlib from 'zlib';
+import * as crypto from 'node:crypto';
+import * as zlib from 'node:zlib';
 import {
   encodeMessage,
   encodeString,
@@ -472,7 +472,7 @@ function encodeToolDef(tool: ToolDef): Buffer {
   const rawDesc = tool.description ?? '';
   const desc =
     rawDesc.length > MAX_TOOL_DESC_LEN
-      ? rawDesc.slice(0, MAX_TOOL_DESC_LEN - 24) + '\n…(truncated for cloud)'
+      ? `${rawDesc.slice(0, MAX_TOOL_DESC_LEN - 24)}\n…(truncated for cloud)`
       : rawDesc;
   return Buffer.concat([
     encodeString(1, tool.name),
@@ -1011,7 +1011,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
           sawEos = true;
           // Trailer: {} on success, {"error":{code,message}} on failure.
           const text = payload.toString('utf8');
-          if (text && text.includes('"error"')) {
+          if (text?.includes('"error"')) {
             let code: string | undefined;
             let message = text;
             try {
@@ -1058,10 +1058,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
       /an internal error occurred/i.test(trailerError.message);
     if (isOpaquePermissionDenial) {
       const enriched =
-        `Cognition denied this request for model "${req.modelUid}" with the opaque ` +
-        `"an internal error occurred" message. This almost always means the model ` +
-        `is not enabled for your account/tier — see https://codeium.com/account. ` +
-        `(cloud trace ID: ${trailerError.traceId ?? 'n/a'}; raw message: ${trailerError.message})`;
+        `Cognition denied this request for model "${req.modelUid}" with the opaque "an internal error occurred" message. This almost always means the model is not enabled for your account/tier — see https://codeium.com/account. (cloud trace ID: ${trailerError.traceId ?? 'n/a'}; raw message: ${trailerError.message})`;
       throw new CloudChatError(enriched, trailerError.code, trailerError.traceId);
     }
     throw new CloudChatError(trailerError.message, trailerError.code, trailerError.traceId);
@@ -1074,8 +1071,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
   // had finished. Now we surface it.
   if (!sawEos) {
     throw new CloudChatError(
-      `Cloud stream ended without EOS trailer (${queuedBytes} bytes orphaned). ` +
-      `Connection likely dropped mid-response.`,
+      `Cloud stream ended without EOS trailer (${queuedBytes} bytes orphaned). Connection likely dropped mid-response.`,
       'truncated_stream',
     );
   }

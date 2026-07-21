@@ -107,7 +107,7 @@ export function branch_tool_call_ids(
 	}>) {
 		if (entry?.type !== "message") continue;
 		const msg = entry.message;
-		if (!msg || msg.role !== "toolResult") continue;
+		if (msg?.role !== "toolResult") continue;
 		if (!msg.toolCallId || !msg.toolName) continue;
 		if (protected_tools.has(msg.toolName)) continue;
 		out.push({ id: msg.toolCallId, toolName: msg.toolName });

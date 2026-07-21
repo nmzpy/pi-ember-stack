@@ -501,7 +501,7 @@ function updateWidget(ctx: ExtensionContext): void {
 	const entries = activityMonitor.getEntries();
 	const lines: string[] = [];
 
-	lines.push(theme.fg("accent", `─── Web Search Activity ${"─".repeat(36)}`));
+	lines.push(theme.fg("text", `─── Web Search Activity ${"─".repeat(36)}`));
 
 	if (entries.length === 0) {
 		lines.push(theme.fg("muted", "  No activity yet"));
@@ -511,7 +511,7 @@ function updateWidget(ctx: ExtensionContext): void {
 		}
 	}
 
-	lines.push(theme.fg("accent", "─".repeat(60)));
+	lines.push(theme.fg("dim", "─".repeat(60)));
 
 	const rateInfo = activityMonitor.getRateLimitInfo();
 	const resetMs = rateInfo.oldestTimestamp
@@ -917,7 +917,7 @@ export default function (pi: ExtensionAPI) {
 			typeof opts.approvedSummary === "string" && opts.approvedSummary.trim().length > 0;
 		let output = "";
 		if (hasApprovedSummary) {
-			output = opts.approvedSummary!.trim();
+			output = opts.approvedSummary?.trim() ?? "";
 		} else {
 			if (opts.curated) {
 				output +=
@@ -988,7 +988,7 @@ export default function (pi: ExtensionAPI) {
 				...(opts.workflow && hasApprovedSummary
 					? {
 							summary: {
-								text: opts.approvedSummary!.trim(),
+								text: opts.approvedSummary?.trim() ?? "",
 								workflow: opts.workflow,
 								model: opts.summaryMeta?.model ?? null,
 								durationMs: opts.summaryMeta?.durationMs ?? 0,
@@ -1782,14 +1782,14 @@ export default function (pi: ExtensionAPI) {
 					const q = queryList[0];
 					const display = q.length > 60 ? `${q.slice(0, 57)}...` : q;
 					return new Text(
-						theme.fg("toolTitle", theme.bold("search ")) + theme.fg("accent", `"${display}"`),
+						theme.fg("toolTitle", theme.bold("search ")) + theme.fg("text", `"${display}"`),
 						0,
 						0,
 					);
 				}
 				const lines = [
 					theme.fg("toolTitle", theme.bold("search ")) +
-						theme.fg("accent", `${queryList.length} queries`),
+						theme.fg("text", `${queryList.length} queries`),
 				];
 				for (const q of queryList.slice(0, 5)) {
 					const display = q.length > 50 ? `${q.slice(0, 47)}...` : q;
@@ -1873,7 +1873,7 @@ export default function (pi: ExtensionAPI) {
 								: details?.phase === "waiting-for-approval"
 									? "summary draft ready; approve in browser..."
 									: "waiting for summary approval in browser...";
-						const lines = [theme.fg("accent", phaseText)];
+						const lines = [theme.fg("text", phaseText)];
 						if (details?.curatorUrl) {
 							lines.push(theme.fg("muted", `  ${details.curatorUrl}`));
 						}
@@ -1891,18 +1891,29 @@ export default function (pi: ExtensionAPI) {
 					}
 					if (details?.phase === "searching") {
 						const progress = details?.progress ?? 0;
-						const bar =
-							"\u2588".repeat(Math.floor(progress * 10)) +
-							"\u2591".repeat(10 - Math.floor(progress * 10));
+						const full = Math.floor(progress * 10);
+						const barText = theme.fg("text", "\u2588".repeat(full));
+						const barDim = theme.fg("dim", "\u2591".repeat(10 - full));
 						const query = details?.currentQuery || "";
 						const display = query.length > 40 ? `${query.slice(0, 37)}...` : query;
-						return new Text(theme.fg("accent", `[${bar}] ${display}`), 0, 0);
+						return new Text(
+							theme.fg("text", "[") + barText + barDim + theme.fg("text", `] ${display}`),
+							0,
+							0,
+						);
 					}
 					const progress = details?.progress ?? 0;
-					const bar =
-						"\u2588".repeat(Math.floor(progress * 10)) +
-						"\u2591".repeat(10 - Math.floor(progress * 10));
-					return new Text(theme.fg("accent", `[${bar}] ${details?.phase || "searching"}`), 0, 0);
+					const full = Math.floor(progress * 10);
+					const barText = theme.fg("text", "\u2588".repeat(full));
+					const barDim = theme.fg("dim", "\u2591".repeat(10 - full));
+					return new Text(
+						theme.fg("text", "[") +
+							barText +
+							barDim +
+							theme.fg("text", `] ${details?.phase || "searching"}`),
+						0,
+						0,
+					);
 				}
 
 				if (details?.error) {
@@ -1936,7 +1947,7 @@ export default function (pi: ExtensionAPI) {
 				if (details?.summary?.text) {
 					lines.push("");
 					lines.push(
-						theme.fg("accent", `── Summary (${details.summary.workflow}) ${"─".repeat(32)}`),
+						theme.fg("text", `── Summary (${details.summary.workflow}) ${"─".repeat(32)}`),
 					);
 					lines.push("");
 					for (const line of details.summary.text.split("\n")) {
@@ -1963,7 +1974,7 @@ export default function (pi: ExtensionAPI) {
 					lines.push("");
 					lines.push(
 						theme.fg(
-							"accent",
+							"text",
 							`\u2500\u2500 Curated Results (${kept} of ${from} queries kept) ` +
 								"\u2500".repeat(24),
 						),
@@ -1973,7 +1984,9 @@ export default function (pi: ExtensionAPI) {
 						lines.push("");
 						const dq = cq.query.length > 65 ? `${cq.query.slice(0, 62)}...` : cq.query;
 						const providerLabel = cq.provider ? ` (${cq.provider})` : "";
-						lines.push(theme.fg("accent", `  "${dq}"${providerLabel}`));
+						lines.push(
+							theme.fg("text", `  "${dq}"`) + (providerLabel ? theme.fg("dim", providerLabel) : ""),
+						);
 
 						if (cq.error) {
 							lines.push(theme.fg("error", `  ${cq.error}`));
@@ -2042,7 +2055,7 @@ export default function (pi: ExtensionAPI) {
 							const suffix = cq.error
 								? theme.fg("error", " (error)")
 								: theme.fg("dim", ` · ${srcCount} sources`);
-							box.addChild(new Text(theme.fg("accent", `  "${dq}"`) + suffix, 0, 0));
+							box.addChild(new Text(theme.fg("text", `  "${dq}"`) + suffix, 0, 0));
 							collapsedLines++;
 						}
 						if (details.curatedQueries.length > 3) {
@@ -2548,7 +2561,7 @@ export default function (pi: ExtensionAPI) {
 			else if (urlIndex !== undefined) target = `urlIndex=${urlIndex}`;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("get_content ")) +
-					theme.fg("accent", target || responseId.slice(0, 8)),
+					theme.fg("text", target || responseId.slice(0, 8)),
 				0,
 				0,
 			);

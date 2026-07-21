@@ -40,7 +40,7 @@
  * TTL trades one extra roundtrip per ~10 min for clear errors on every chat.
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import { buildMetadata } from './metadata.js';
 import { getCachedUserJwt } from './auth.js';
 import { encodeMessage, iterFields } from './wire.js';
@@ -232,14 +232,8 @@ export class ModelNotAvailableError extends Error {
   ) {
     super(
       reason === 'disabled'
-        ? `Model "${label}" (uid=${modelUid}) is not enabled for your Cognition account. ` +
-          `The Cognition catalog returned it with disabled=true — meaning your current plan/tier ` +
-          `does not include this model. ` +
-          `Check the model picker on https://codeium.com/account, or pick a different model. ` +
-          `(This message replaces Cognition's "an internal error occurred" — same root cause.)`
-        : `Model uid "${modelUid}" is not listed in the Cognition catalog for your account. ` +
-          `Either the UID has been retired upstream or your account/region doesn't serve it. ` +
-          `Run \`curl http://127.0.0.1:42100/v1/models\` to see the canonical names your plan accepts.`,
+        ? `Model "${label}" (uid=${modelUid}) is not enabled for your Cognition account. The Cognition catalog returned it with disabled=true — meaning your current plan/tier does not include this model. Check the model picker on https://codeium.com/account, or pick a different model. (This message replaces Cognition's "an internal error occurred" — same root cause.)`
+        : `Model uid "${modelUid}" is not listed in the Cognition catalog for your account. Either the UID has been retired upstream or your account/region doesn't serve it. Run \`curl http://127.0.0.1:42100/v1/models\` to see the canonical names your plan accepts.`,
     );
     this.name = 'ModelNotAvailableError';
   }

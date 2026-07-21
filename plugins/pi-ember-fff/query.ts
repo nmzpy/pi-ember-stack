@@ -64,8 +64,8 @@ export function buildExternalAllowlist(): ExternalAllowlist {
       for (const entry of entries) {
         if (trimmed === entry.alias) return entry;
         if (
-          trimmed.startsWith(entry.alias + "/") ||
-          trimmed.startsWith(entry.alias + path.sep)
+          trimmed.startsWith(`${entry.alias}/`) ||
+          trimmed.startsWith(`${entry.alias}${path.sep}`)
         ) {
           return entry;
         }
@@ -119,8 +119,8 @@ export function resolveExternalTarget(
       return { entry, relativePath: "" };
     }
     // Check alias/ or alias\ as a prefix (cross-platform)
-    const aliasPrefixFwd = entry.alias + "/";
-    const aliasPrefixSep = entry.alias + path.sep;
+    const aliasPrefixFwd = `${entry.alias}/`;
+    const aliasPrefixSep = `${entry.alias}${path.sep}`;
     if (trimmed.startsWith(aliasPrefixFwd) || trimmed.startsWith(aliasPrefixSep)) {
       // Normalize to forward slashes for FFF
       const remainder = trimmed.startsWith(aliasPrefixFwd)

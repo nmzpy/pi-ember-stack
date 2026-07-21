@@ -1,6 +1,8 @@
 import { Type } from "typebox";
 import {
+	type Component,
 	type EditorTheme,
+	type TUI,
 	Editor,
 	Key,
 	Text,
@@ -9,6 +11,12 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	KeybindingsManager,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
 import { chatboxBorderColor, requestTuiRender } from "../pi-ember-ui/index.ts";
 import { colorize, setQuizActive } from "../pi-ember-ui/mode-colors.ts";
 
@@ -86,7 +94,7 @@ export interface AskQuizOptions {
 }
 
 export async function askQuiz(
-	ctx: any,
+	ctx: ExtensionContext,
 	title: string,
 	questions: QuizQuestion[],
 	options?: AskQuizOptions,
@@ -95,7 +103,7 @@ export async function askQuiz(
 	const includeNone = options?.includeNone !== false;
 
 	const result = await ctx.ui.custom(
-		(_tui: any, theme: any, _keybindings: any, done: (result: QuizResult) => void) => {
+		(_tui: TUI, theme: Theme, _keybindings: KeybindingsManager, done: (result: QuizResult) => void) => {
 			setQuizActive(true);
 			requestTuiRender();
 			const finish = (r: QuizResult): void => {
@@ -361,7 +369,7 @@ export async function askQuiz(
 	return result.cancelled ? undefined : result.answers;
 }
 
-export function registerQuizTool(pi: any): void {
+export function registerQuizTool(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "quiz",
 		label: "Quiz",
@@ -374,7 +382,7 @@ export function registerQuizTool(pi: any): void {
 			params: { questions: QuizQuestion[] },
 			_signal: AbortSignal,
 			_onUpdate: unknown,
-			ctx: any,
+			ctx: ExtensionContext,
 		) {
 			if (ctx.mode !== "tui") {
 				return {
@@ -416,7 +424,7 @@ export function registerQuizTool(pi: any): void {
 				details: { answers: answers ?? [], cancelled: answers === undefined },
 			};
 		},
-		renderCall(args: { questions?: QuizQuestion[] }, _theme: any): any {
+		renderCall(args: { questions?: QuizQuestion[] }, _theme: Theme): Component {
 			// Compact bullet row, consistent with every other tool. The
 			// interactive overlay (askQuiz) owns the two chatbox
 			// horizontal rules the user sees; wrapping the transcript tag in
@@ -429,17 +437,12 @@ export function registerQuizTool(pi: any): void {
 			);
 		},
 		renderResult(
-			result: any,
+			result: { details?: { answers?: QuizAnswer[]; cancelled?: boolean } },
 			_options: unknown,
-			theme: any,
+			theme: Theme,
 			context: { args?: { questions?: QuizQuestion[] } },
-		): any {
-			const details = result.details as
-				| {
-						answers?: QuizAnswer[];
-						cancelled?: boolean;
-				  }
-				| undefined;
+		): Component {
+			const details = result.details;
 			if (details?.cancelled) {
 				return new Text(theme.fg("warning", "Cancelled"), 0, 0);
 			}

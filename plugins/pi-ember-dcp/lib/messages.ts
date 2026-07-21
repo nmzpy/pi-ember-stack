@@ -185,7 +185,7 @@ const COMPRESSION_PLACEHOLDER_PREFIX = "[pi-dcp compression";
 /** True if this tool result's content is already a pi-dcp placeholder. */
 export function is_already_placeholder(m: ToolResultMessage): boolean {
 	const first = m.content[0] as TextContent | undefined;
-	if (!first || first.type !== "text") return false;
+	if (first?.type !== "text") return false;
 	return (
 		first.text.startsWith(PRUNED_PLACEHOLDER_PREFIX) ||
 		first.text.startsWith(COMPRESSION_PLACEHOLDER_PREFIX)

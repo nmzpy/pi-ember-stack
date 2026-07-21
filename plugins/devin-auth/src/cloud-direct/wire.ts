@@ -15,7 +15,7 @@
  * Kept tiny and dependency-free — same philosophy as src/plugin/protobuf.ts.
  */
 
-import * as zlib from 'zlib';
+import * as zlib from 'node:zlib';
 
 // ----------------------------------------------------------------------------
 // Proto wire encode

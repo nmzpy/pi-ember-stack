@@ -11,7 +11,6 @@ import {
 	getActiveModeColor,
 	hexToRgbTriplet,
 	MUTED_COLOR,
-	PAGE_BG,
 	TEXT_COLOR,
 } from "./mode-colors.ts";
 

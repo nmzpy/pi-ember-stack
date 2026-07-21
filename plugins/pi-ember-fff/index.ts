@@ -7,10 +7,10 @@
  * @nmzpy/pi-ember-stack so the TUI stays consistent across all tools.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import {
-	type AutocompleteItem,
-	type AutocompleteProvider,
+import type { AgentToolResult, ExtensionAPI, ToolCallEvent, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
+import type {
+	AutocompleteItem,
+	AutocompleteProvider,
 } from "@earendil-works/pi-tui";
 import type {
 	GrepCursor,
@@ -26,13 +26,28 @@ import {
 	buildQuery,
 	resolveExternalTarget,
 	type ExternalAllowlist,
-	type ExternalTarget,
 } from "./query.ts";
 import { getSharedRenderer, bashGrepInfo } from "../pi-compact-tools/index.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+
+/** Minimal structural theme type for render callbacks (matches compact renderer's ThemeLike). */
+interface RenderTheme {
+	fg(tag: string, text: string): string;
+	bold(text: string): string;
+}
+
+/** Minimal structural context type for render callbacks (matches compact renderer's ToolRenderContext). */
+interface RenderContext {
+	args: unknown;
+	toolCallId: string;
+	invalidate: () => void;
+	state: Record<string, unknown>;
+	expanded?: boolean;
+	isError?: boolean;
+}
 
 const DEFAULT_GREP_LIMIT = 20;
 const DEFAULT_FIND_LIMIT = 30;
@@ -133,7 +148,7 @@ function formatGrepOutput(result: GrepResult): string {
 		}
 
 		match.contextBefore?.forEach((line: string, i: number) => {
-			const lineNum = match.lineNumber - match.contextBefore!.length + i;
+			const lineNum = match.lineNumber - (match.contextBefore?.length ?? 0) + i;
 			lines.push(` ${lineNum}- ${truncateLine(line)}`);
 		});
 
@@ -246,7 +261,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 	let externalFinder: FileFinder | null = null;
 	let externalFinderDir: string | null = null;
 	let externalFinderPromise: Promise<FileFinder> | null = null;
-	let externalAllowlist: ExternalAllowlist = buildExternalAllowlist();
+	const externalAllowlist: ExternalAllowlist = buildExternalAllowlist();
 
 	const frecencyDbPath =
 		(pi.getFlag("fff-frecency-db") as string | undefined) ??
@@ -521,9 +536,9 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 
 		const rgArgs: string[] = ["rg"];
 		let pattern: string | undefined;
-		let paths: string[] = [];
-		let includeGlobs: string[] = [];
-		let excludeGlobs: string[] = [];
+		const paths: string[] = [];
+		const includeGlobs: string[] = [];
+		const excludeGlobs: string[] = [];
 		let caseInsensitive = false;
 		let fixedStrings = false;
 		let wordRegex = false;
@@ -617,7 +632,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		return prefix + rgCmd;
 	}
 
-	pi.on("tool_call", (event: any) => {
+	pi.on("tool_call", (event: ToolCallEvent) => {
 		if (event.toolName !== "bash") return;
 		const command = event.input?.command;
 		if (typeof command !== "string") return;
@@ -783,12 +798,12 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 			};
 		},
 
-		renderCall(args: any, theme: any, context: any) {
-			return renderer.renderCall("grep", args, theme, context);
+		renderCall(args: unknown, theme: RenderTheme, context: RenderContext) {
+			return renderer.renderCall("grep", args, theme, { ...context, isError: false });
 		},
 
-		renderResult(result: any, options: any, theme: any, context: any) {
-			return renderer.renderResult("grep", context.args, result, options, theme, context);
+		renderResult(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: RenderTheme, context: RenderContext) {
+			return renderer.renderResult("grep", context.args, result as Parameters<typeof renderer.renderResult>[2], options, theme, { ...context, isError: context.isError ?? false });
 		},
 	});
 
@@ -910,12 +925,12 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 			};
 		},
 
-		renderCall(args: any, theme: any, context: any) {
-			return renderer.renderCall("find", args, theme, context);
+		renderCall(args: unknown, theme: RenderTheme, context: RenderContext) {
+			return renderer.renderCall("find", args, theme, { ...context, isError: false });
 		},
 
-		renderResult(result: any, options: any, theme: any, context: any) {
-			return renderer.renderResult("find", context.args, result, options, theme, context);
+		renderResult(result: AgentToolResult<unknown>, options: ToolRenderResultOptions, theme: RenderTheme, context: RenderContext) {
+			return renderer.renderResult("find", context.args, result as Parameters<typeof renderer.renderResult>[2], options, theme, { ...context, isError: context.isError ?? false });
 		},
 	});
 

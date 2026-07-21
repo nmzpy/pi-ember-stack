@@ -82,13 +82,9 @@ export async function search(
 ): Promise<AttributedSearchResponse> {
 	const config = get_search_config();
 	const provider = options.provider ?? config.searchProvider;
+	const fallback_errors: string[] = [];
 
-	if (provider === "openai") {
-		const result = await searchWithOpenAI(query, options, options.extensionContext);
-		return { ...result, provider: "openai" };
-	}
-
-	if (provider === "exa") {
+	async function try_exa(): Promise<AttributedSearchResponse> {
 		const result = await searchWithExa(query, options);
 		if (!result) {
 			throw new Error("Exa search returned no results.");
@@ -96,13 +92,19 @@ export async function search(
 		return { ...result, provider: "exa" };
 	}
 
-	const fallback_errors: string[] = [];
+	async function try_openai(): Promise<AttributedSearchResponse> {
+		const result = await searchWithOpenAI(query, options, options.extensionContext);
+		return { ...result, provider: "openai" };
+	}
 
-	if (should_try_openai_in_auto(options)) {
+	if (provider === "exa") {
+		return try_exa();
+	}
+
+	if (provider === "openai" || should_try_openai_in_auto(options)) {
 		try {
-			if (await isOpenAISearchAvailable(options.extensionContext)) {
-				const result = await searchWithOpenAI(query, options, options.extensionContext);
-				return { ...result, provider: "openai" };
+			if (provider === "openai" || (await isOpenAISearchAvailable(options.extensionContext))) {
+				return await try_openai();
 			}
 		} catch (err) {
 			if (is_abort_error(err)) throw err;
@@ -112,8 +114,7 @@ export async function search(
 
 	if (isExaAvailable()) {
 		try {
-			const result = await searchWithExa(query, options);
-			if (result) return { ...result, provider: "exa" };
+			return await try_exa();
 		} catch (err) {
 			if (is_abort_error(err)) throw err;
 			fallback_errors.push(`Exa: ${error_message(err)}`);
@@ -121,7 +122,7 @@ export async function search(
 	}
 
 	if (fallback_errors.length > 0) {
-		throw new Error(`Auto provider search failed:\n  - ${fallback_errors.join("\n  - ")}`);
+		throw new Error(`Search failed; tried:\n  - ${fallback_errors.join("\n  - ")}`);
 	}
 
 	throw new Error(

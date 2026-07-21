@@ -35,6 +35,15 @@ const CURSOR_NATIVE_TOOL_CALLS = new Set([
 	"readMcpResourceToolCall",
 ]);
 
+const CURSOR_TOOL_CALL_KEY = /ToolCall$/;
+
+function find_tool_call_key(tool_call: Record<string, unknown>): string | undefined {
+	const candidates = Object.keys(tool_call).filter(
+		(key) => CURSOR_TOOL_CALL_KEY.test(key) && is_record(tool_call[key]),
+	);
+	return candidates[0];
+}
+
 function make_initial_message(model: Model<Api>): AssistantMessage {
 	return {
 		role: "assistant",
@@ -237,7 +246,8 @@ class CursorEventConsumer {
 
 	private parse_tool_call(event: CursorEvent): ToolCall | string | null {
 		if (!is_record(event.tool_call)) return "Cursor emitted a malformed tool call.";
-		const [raw_name, payload] = Object.entries(event.tool_call)[0] || [];
+		const raw_name = find_tool_call_key(event.tool_call);
+		const payload = raw_name ? event.tool_call[raw_name] : undefined;
 		if (!raw_name || !is_record(payload)) return "Cursor emitted a malformed tool call.";
 
 		// Several tool calls are Cursor-native MCP introspection calls (e.g.
@@ -267,7 +277,13 @@ class CursorEventConsumer {
 
 		const tool_name = resolve_pi_tool_name(resolved_raw_name, this.tools);
 		if (!tool_name) {
-			return `Cursor attempted unavailable tool ${resolved_raw_name}; the request was stopped before host execution.`;
+			const active = this.tools.map((tool) => tool.name).join(", ") || "none";
+			const mapped = resolve_pi_tool_name(resolved_raw_name, []) ?? resolved_raw_name;
+			// One maintainer-only breadcrumb. Never sent to the model or UI stream.
+			process.stderr.write(
+				`[pi-cursor-auth] unavailable tool raw=${resolved_raw_name} mapped=${mapped} active=[${active}]\n`,
+			);
+			return `Cursor attempted unavailable tool ${resolved_raw_name} (active tools: ${active}).`;
 		}
 		const input = is_record(raw_input) ? raw_input : {};
 		return {
@@ -333,6 +349,7 @@ export function stream_cursor_subscription(
 					"--model",
 					model.id,
 					"--force",
+					"--trust",
 				],
 				{ cwd: active_cwd || process.cwd(), executable },
 			);

@@ -1,5 +1,8 @@
 import type { Context, Message, Tool } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+
+function is_record(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export interface SerializedContent {
 	type: "text" | "image" | "thinking" | "toolCall";
@@ -197,18 +200,33 @@ export function normalize_tool_arguments(
 	if (tool_name === "write") {
 		return {
 			path: first_defined(input, ["path", "filePath", "file_path"]),
-			content: first_defined(input, ["content", "contents"]),
+			content: first_defined(input, ["content", "contents", "fileText"]),
 		};
 	}
 	if (tool_name === "edit") {
-		const edits = Array.isArray(input.edits)
-			? input.edits
-			: [
-					{
-						oldText: first_defined(input, ["oldText", "oldString", "old_string"]),
-						newText: first_defined(input, ["newText", "newString", "new_string"]),
-					},
-				];
+		let edits: unknown[] | undefined;
+		if (Array.isArray(input.edits)) {
+			edits = input.edits;
+		} else if (is_record(input.strReplace)) {
+			const sr = input.strReplace;
+			edits = [
+				{
+					oldText: first_defined(sr, ["oldText", "oldString", "old_string"]),
+					newText: first_defined(sr, ["newText", "newString", "new_string"]),
+				},
+			];
+		} else if (is_record(input.multiStrReplace)) {
+			const msr = input.multiStrReplace;
+			if (Array.isArray(msr.edits)) edits = msr.edits;
+		}
+		if (!edits) {
+			edits = [
+				{
+					oldText: first_defined(input, ["oldText", "oldString", "old_string"]),
+					newText: first_defined(input, ["newText", "newString", "new_string"]),
+				},
+			];
+		}
 		return {
 			path: first_defined(input, ["path", "filePath", "file_path"]),
 			edits,

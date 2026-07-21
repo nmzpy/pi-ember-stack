@@ -13,8 +13,9 @@
  * worker_thread boundary that previously prevented provider inheritance.
  */
 
-import type { Message, Model } from "@earendil-works/pi-ai";
+import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import {
+	type AgentSessionEvent,
 	createAgentSession,
 	createExtensionRuntime,
 	getAgentDir,
@@ -24,15 +25,11 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-// ModelRuntime is only exported from Pi 0.80.10+. Import it as a dynamic,
-// optional symbol so this module loads cleanly on 0.80.6 (where the parent
-// ModelRegistry is self-contained and createAgentSession takes modelRegistry
-// directly) while still using the canonical runtime bridge on 0.80.10+.
-type ModelRuntime = unknown;
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+
+export const DEFAULT_SUBAGENT_TIMEOUT_MS = 120_000;
 
 const PARALLEL_TOOL_CALL_GUIDANCE = `
 
@@ -47,6 +44,14 @@ so batching saves round-trips and reduces latency.
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+type PiModel = Model<Api>;
+
+type AbortSignalStatic = typeof AbortSignal & {
+	any?(signals: AbortSignal[]): AbortSignal;
+};
+
+const AbortSignalCtor = AbortSignal as AbortSignalStatic;
 
 export interface UsageStats {
 	input: number;
@@ -68,7 +73,7 @@ export interface SubAgentResult {
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
-	latestToolCall?: { name: string; args: any };
+	latestToolCall?: { name: string; args: Record<string, unknown> };
 }
 
 // ---------------------------------------------------------------------------
@@ -103,8 +108,10 @@ function resolve_parent_model_runtime(model_registry: ModelRegistry): unknown {
 
 function is_legacy_model_registry(model_registry: ModelRegistry): boolean {
 	const legacy = model_registry as unknown as ModelRegistryLegacy;
-	return !((model_registry as unknown as ModelRegistryRuntimeBridge).runtime) &&
-		Boolean(legacy.authStorage || legacy.modelsJsonPath !== undefined);
+	return (
+		!(model_registry as unknown as ModelRegistryRuntimeBridge).runtime &&
+		Boolean(legacy.authStorage || legacy.modelsJsonPath !== undefined)
+	);
 }
 
 const GENERIC_ABORT_PHRASES = [
@@ -115,10 +122,14 @@ const GENERIC_ABORT_PHRASES = [
 	"operation was aborted",
 ];
 
-function isGenericAbortMessage(message: string | undefined): boolean {
+export function isGenericAbortMessage(message: string | undefined): boolean {
 	if (!message) return true;
 	const lower = message.toLowerCase();
-	return GENERIC_ABORT_PHRASES.some((phrase) => lower.includes(phrase)) || lower === "aborted" || lower === "abort";
+	return (
+		GENERIC_ABORT_PHRASES.some((phrase) => lower.includes(phrase)) ||
+		lower === "aborted" ||
+		lower === "abort"
+	);
 }
 
 function extractFailureMessage(error: unknown): string {
@@ -142,7 +153,7 @@ function lastAssistantErrorMessage(messages: Message[]): string | undefined {
 		const msg = messages[i];
 		if (msg.role !== "assistant") continue;
 		const candidate = (msg as { errorMessage?: string }).errorMessage;
-		if (candidate && candidate.trim() && !isGenericAbortMessage(candidate)) {
+		if (candidate?.trim() && !isGenericAbortMessage(candidate)) {
 			return candidate;
 		}
 	}
@@ -163,7 +174,7 @@ export function resolve_failure_message(result: SubAgentResult): string | undefi
 	}
 	const fromMessages = lastAssistantErrorMessage(result.messages);
 	if (fromMessages) return fromMessages;
-	if (result.stderr && result.stderr.trim()) return result.stderr.trim();
+	if (result.stderr?.trim()) return result.stderr.trim();
 	const finalOutput = getFinalOutput(result.messages).trim();
 	if (finalOutput) return finalOutput;
 	return undefined;
@@ -174,7 +185,7 @@ export async function runSubAgent(options: {
 	systemPrompt: string;
 	task: string;
 	tools: string[];
-	model: Model<any>;
+	model: PiModel;
 	modelRegistry: ModelRegistry;
 	parentSignal?: AbortSignal;
 	timeoutMs?: number;
@@ -192,25 +203,24 @@ export async function runSubAgent(options: {
 		model,
 		modelRegistry,
 		parentSignal,
-		timeoutMs,
+		timeoutMs = DEFAULT_SUBAGENT_TIMEOUT_MS,
 		agentName = "subagent",
 		thinkingLevel = "off",
 		onMessage,
 		onToolCall,
 	} = options;
 
-	const timeoutController =
-		timeoutMs && timeoutMs > 0 ? new AbortController() : undefined;
+	const timeoutController = timeoutMs && timeoutMs > 0 ? new AbortController() : undefined;
 	const timeoutId = timeoutController
 		? setTimeout(() => timeoutController.abort(), timeoutMs)
 		: undefined;
-	const signals = [parentSignal, timeoutController?.signal].filter(
-		(value): value is AbortSignal => Boolean(value),
+	const signals = [parentSignal, timeoutController?.signal].filter((value): value is AbortSignal =>
+		Boolean(value),
 	);
 	const combinedSignal =
 		signals.length > 1
-			? typeof (AbortSignal as any).any === "function"
-				? (AbortSignal as any).any(signals)
+			? typeof AbortSignalCtor.any === "function"
+				? AbortSignalCtor.any(signals)
 				: signals[0]
 			: signals[0];
 
@@ -219,7 +229,7 @@ export async function runSubAgent(options: {
 	const contextFiles = loadProjectContextFilesCompat({ cwd, agentDir });
 	const contextPrefix =
 		contextFiles.length > 0
-			? contextFiles.map((f) => f.content).join("\n\n---\n\n") + "\n\n---\n\n"
+			? `${contextFiles.map((f) => f.content).join("\n\n---\n\n")}\n\n---\n\n`
 			: "";
 	const fullSystemPrompt = contextPrefix + systemPrompt + PARALLEL_TOOL_CALL_GUIDANCE;
 
@@ -331,13 +341,16 @@ export async function runSubAgent(options: {
 			onToolCall?.({ ...result, messages: [...result.messages] });
 		};
 
-		unsubscribe = session.subscribe((event: { type: string; [key: string]: any }) => {
+		unsubscribe = session.subscribe((event: AgentSessionEvent) => {
 			// Pi agent sessions emit tool_execution_start; extension hooks use tool_call.
-			if (event.type === "tool_execution_start" || event.type === "tool_call") {
+			if (
+				event.type === "tool_execution_start" ||
+				(event as { type: string }).type === "tool_call"
+			) {
 				capture_latest_tool_call(event as Parameters<typeof capture_latest_tool_call>[0]);
 			}
 			if (event.type === "message_end") {
-				const msg = event.message;
+				const msg = event.message as Message | undefined;
 				if (msg && msg.role === "assistant") {
 					result.usage.turns++;
 					if (msg.usage) {
@@ -360,7 +373,7 @@ export async function runSubAgent(options: {
 				}
 			}
 			if (event.type === "agent_end" && result.messages.length === 0 && event.messages) {
-				result.messages = event.messages;
+				result.messages = event.messages as Message[];
 			}
 		});
 

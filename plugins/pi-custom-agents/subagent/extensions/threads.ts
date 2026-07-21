@@ -86,7 +86,9 @@ export class ThreadStore {
 	}
 
 	getAllThreads(): SubagentThread[] {
-		return this.order.map((id) => this.threads.get(id)!).filter(Boolean);
+		return this.order
+			.map((id) => this.threads.get(id))
+			.filter((t): t is SubagentThread => t !== undefined);
 	}
 
 	clear(): void {

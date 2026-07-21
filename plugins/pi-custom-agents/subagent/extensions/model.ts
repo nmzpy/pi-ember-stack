@@ -12,10 +12,12 @@
  * are tried before assuming Anthropic.
  */
 
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
-type BuiltInModelResolver = (provider: string, id: string) => Model<any> | undefined;
+type PiModel = Model<Api>;
+
+type BuiltInModelResolver = (provider: string, id: string) => PiModel | undefined;
 
 interface ModelModule {
 	getModel: BuiltInModelResolver;
@@ -27,7 +29,7 @@ const { getModel } = (await import("@earendil-works/pi-ai/compat").catch(
 )) as ModelModule;
 
 export interface ResolvedModel {
-	model: Model<any> | null;
+	model: PiModel | null;
 	attempted: string[];
 }
 
@@ -46,22 +48,22 @@ function tryGetModel(
 	provider: string,
 	id: string,
 	modelRegistry?: ModelRegistry,
-): Model<any> | null {
+): PiModel | null {
 	// Query parent ModelRegistry first — it includes custom-configured models
 	// (overridden base URLs, headers, compatibility settings, per-model overrides).
 	// Fall back to built-in registry for unconfigured models.
 	if (modelRegistry) {
-		const found = modelRegistry.find(provider as any, id as any) ?? null;
+		const found = modelRegistry.find(provider, id) ?? null;
 		if (found) return found;
 	}
-	const builtIn = getModel(provider as any, id as any) ?? null;
+	const builtIn = getModel(provider, id) ?? null;
 	if (builtIn) return builtIn;
 	return null;
 }
 
 export function resolveModel(
 	modelName: string | undefined,
-	parentModel: Model<any> | undefined,
+	parentModel: PiModel | undefined,
 	modelRegistry?: ModelRegistry,
 ): ResolvedModel {
 	const attempted: string[] = [];

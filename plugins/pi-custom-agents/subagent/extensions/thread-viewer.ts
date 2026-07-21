@@ -9,7 +9,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth, Markdown } from "@earendil-works/pi-tui";
 import type { Message } from "@earendil-works/pi-ai";
 
-import { type SubAgentResult, isFailedResult, getResultOutput, getFinalOutput } from "./runner.ts";
+import { isFailedResult, getFinalOutput } from "./runner.ts";
 import { formatUsageStats } from "./render.ts";
 import type { SubagentThread } from "./threads.ts";
 import * as os from "node:os";

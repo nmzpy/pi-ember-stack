@@ -340,10 +340,11 @@
   `1.` / unordered `-` markers) use `MUTED_COLOR` — never the live or code accent.
   Compact-tool match counts (`N matches`) also use `muted`. The header render
   closure in `pi-ember-ui/index.ts` calls `getActiveModeColor()` for the animated
-  logo bullet; the static branch stays muted. Pi's startup update notice
-  (`pi update` / changelog URL) is patched in `installUpdateNotificationPatch` to
-  use `text`/`muted` instead of `accent`, so it never inherits the startup mode
-  color (e.g. plan purple). Everything else (footer mode label, thinking/working
+  logo bullet; the static branch stays muted. Pi's startup update notices
+  (`pi update` / changelog URL / "What's New") are suppressed in
+  `installUpdateNotificationPatch`; no update summary is shown on startup, so
+  the normal context/skills/extensions/themes summary is the only startup
+  content. Everything else (footer mode label, thinking/working
   gradient, borders, tool titles, `customMessageLabel`) continues to follow the
   live mode accent.
 - **Fail Fast, No Fallbacks:** If a plugin cannot register its tools, apply its
@@ -412,6 +413,23 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `streamingWriteStats` counts non-empty content lines from `args.content`
   (write has no `details.diff`); `-0` is shown because write is a full
   rewrite / new file.
+- Edit matching ladder ownership: Pi core `edit-diff.ts` (resolved from the
+  installed `@earendil-works/pi-coding-agent` package) owns the canonical edit
+  matching ladder. The pipeline is rung 1 exact `indexOf`, rung 2 LF
+  normalization of file content and edit args (`normalizeToLF`), rung 3
+  `normalizeForFuzzyMatch` (NFKC, strip trailing whitespace per line, smart
+  quotes/dashes/special Unicode spaces → ASCII), ambiguous rejection via
+  `countOccurrences` (throws a duplicate-context error when >1 match), and
+  distinct errors for empty oldText, not found, no change, and overlap.
+  Successful fuzzy matches apply through `applyReplacementsPreservingUnchangedLines`
+  so unchanged line blocks keep their original bytes. `pi-cursor-auth`
+  `normalize_tool_arguments` only remaps Cursor-style arg names
+  (`old_string`/`new_string` → `oldText`/`newText`) and must not do its own
+  whitespace normalization; `pi-compact-tools` only renders live counts and
+  must not touch matching. Per the override-delegation rule, any future
+  indentation-insensitive rung, candidate-location reporting on failure, or
+  line-range/hash/stable-context anchors belong upstream in pi-mono, not as a
+  pi-ember-stack edit override.
 - Consecutive discovery calls (`read`, `grep`, `find`, `ls`, and bash
   `grep` invocations) fold into one inset `Exploring`/`Explored N files` group
   with compact, bullet-free child rows; only the group header carries the

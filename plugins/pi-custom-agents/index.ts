@@ -24,12 +24,7 @@ import {
 	CustomEditor,
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
-import {
-	getKeybindings,
-	matchesKey,
-	type EditorTheme,
-	type TUI,
-} from "@earendil-works/pi-tui";
+import { getKeybindings, matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import {
 	MODE_COLORS,
 	mutedBullet,
@@ -54,11 +49,7 @@ import {
 	wrapEditorRenderForShell,
 	wrapModelPickerEditor,
 } from "../pi-ember-ui/index.ts";
-import {
-	askQuiz,
-	type QuizQuestion,
-	registerQuizTool,
-} from "./quiz-tool.ts";
+import { askQuiz, type QuizQuestion, registerQuizTool } from "./quiz-tool.ts";
 import {
 	build_auto_continue_content,
 	COMPACT_FOCUS_INSTRUCTIONS,
@@ -66,6 +57,7 @@ import {
 	should_skip_compact,
 } from "./auto-continue.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
+import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
 
 /**
  * Promisify ctx.compact() into a result discriminated union.
@@ -158,6 +150,10 @@ function tool_call_signature(tool_name: string, input: unknown): string {
 	return `${tool_name}:${stable_serialize(input)}`;
 }
 
+function is_non_generic_error(message: string | undefined): boolean {
+	return Boolean(message) && !isGenericAbortMessage(message);
+}
+
 function assistant_text(message: unknown): string {
 	if (!message || typeof message !== "object") return "";
 	const record = message as { role?: unknown; content?: unknown };
@@ -209,7 +205,10 @@ function getPersistedStatePath(): string {
 
 function readPersistedState(): PersistedState {
 	try {
-		const raw = JSON.parse(fs.readFileSync(getPersistedStatePath(), "utf8")) as Record<string, unknown>;
+		const raw = JSON.parse(fs.readFileSync(getPersistedStatePath(), "utf8")) as Record<
+			string,
+			unknown
+		>;
 		const mode = typeof raw.mode === "string" ? raw.mode : undefined;
 		const modeModels = normalize_mode_models(raw.modeModels);
 		// Migration: if legacy top-level `model` exists and modeModels lacks an
@@ -266,15 +265,7 @@ function writePersistedState(state: {
 // get_search_content) registered by the pi-ember-webtools plugin. They belong in
 // every mode so the agent can do web research regardless of mode.
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
-const READONLY_TOOLS = [
-	"read",
-	"bash",
-	"grep",
-	"find",
-	"ls",
-	"quiz",
-	...WEB_ACCESS_TOOLS,
-];
+const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "quiz", ...WEB_ACCESS_TOOLS];
 const READONLY_DELEGATING_TOOLS = [
 	"read",
 	"grep",
@@ -317,7 +308,9 @@ const OUTPUT_STYLE_DIRECTIVE = `
 Output style: Reply in plain dense text. No markdown headers (#, ##, ###), no
 bold or italics (**, *), no decorative bulleted lists (-, *). Use short labeled
 lines (Label: value) or compact key: value pairs. Keep code fences only for
-multi-line code blocks. Be concise.
+multi-line code blocks. Do not narrate your process ("I'll keep tracing...",
+"Next I'll...", "Now I...") and do not state what you are about to do. Just
+do the work and return the result. Be concise.
 `;
 
 const SUBAGENT_AWARENESS_PROMPT = `
@@ -355,11 +348,15 @@ interface ModeConfig {
 const ARCHITECT_PROMPT = `<system-reminder>
 Plan Mode - System Reminder
 
-CRITICAL: Plan mode ACTIVE — you are in READ-ONLY planning phase. STRICTLY
-FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use sed, tee,
-echo, cat, or ANY other bash command to manipulate files — commands may ONLY
-read/inspect. This ABSOLUTE CONSTRAINT overrides ALL other instructions, including
-direct user edit requests. You may ONLY observe, analyze, and plan. Any
+CRITICAL: Plan mode ACTIVE — you are in READ-ONLY planning phase. You do NOT
+have the edit or write tools, and no other file-modifying tools are available.
+Your allowed tools are: read, bash (read/inspect only), grep, find, ls, quiz,
+web_search, fetch_content, and get_search_content.
+
+STRICTLY FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use
+sed, tee, echo, cat, or ANY other bash command to manipulate files — commands may
+ONLY read/inspect. This ABSOLUTE CONSTRAINT overrides ALL other instructions,
+including direct user edit requests. You may ONLY observe, analyze, and plan. Any
 modification attempt is a critical violation. ZERO exceptions.
 
 ---
@@ -419,8 +416,6 @@ Acceptance Criteria: <what done looks like>
 If you need clarifications before or during the plan, ask the user using the quiz tool; do not emit an Open Questions section.
 ${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
 
-
-
 const DOCTOR_PROMPT = `<system-reminder>
 Debug Mode - System Reminder
 
@@ -428,11 +423,14 @@ CRITICAL: Debug mode ACTIVE — you are the Debugger, a health-check auditor and
 diagnostician for the Ember project (PySide6 subtitle + DaVinci Resolve integration
 app).
 
-You do NOT edit files directly. You investigate, diagnose, and report findings. If
-a fix is straightforward, you may DELEGATE the implementation to the Coder
-subagent (full tool access) — the read-only constraint applies to your direct tool
-usage only, not to delegated subagent work. Otherwise, report the correction and
-let the user or Orchestrator handle it.
+You do NOT have the edit or write tools, and no other file-modifying tools are
+available to you. Your allowed tools are: read, grep, find, ls, quiz, subagent,
+web_search, fetch_content, and get_search_content. Bash may be used only for
+non-mutating inspection/validation commands. You investigate, diagnose, and report
+findings. If a fix is straightforward, you may DELEGATE the implementation to the
+Coder subagent (full tool access) — the read-only constraint applies to your direct
+tool usage only, not to delegated subagent work. Otherwise, report the correction
+and let the user or Orchestrator handle it.
 
 ---
 
@@ -559,8 +557,11 @@ CRITICAL: Orchestrate mode ACTIVE — you are the Orchestrator, an implementatio
 coordinator for the Ember project (PySide6 subtitle + DaVinci Resolve integration
 app).
 
-You do NOT edit files directly. Your job is to decompose work into modules and
-DELEGATE implementation to the Coder subagent (full tool access). The
+You do NOT have the edit or write tools, and no other file-modifying tools are
+available to you. Your allowed tools are: read, grep, find, ls, quiz, subagent,
+web_search, fetch_content, and get_search_content. Bash may be used only for
+non-mutating inspection/validation commands. Your job is to decompose work into
+modules and DELEGATE implementation to the Coder subagent (full tool access). The
 read-only constraint applies to YOUR direct tool usage only — you may read,
 search, and inspect to build accurate delegation prompts, but you must not edit,
 write, or run mutating bash commands yourself. Delegating implementation work to
@@ -1210,6 +1211,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	let lastTurnAborted = false;
 	let lastTurnLengthStopped = false;
+	let lastTurnError = false;
 	/** Max consecutive auto-continues before giving up and surfacing the error. */
 	const PLAN_AUTO_CONTINUE_MAX = 5;
 	let planAutoContinueCount = 0;
@@ -1239,10 +1241,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			| undefined;
 		const skip = should_skip_compact(branch ?? []);
 		if (!skip) {
-			const compact_result = await compact_async(
-				ctx,
-				COMPACT_FOCUS_INSTRUCTIONS,
-			);
+			const compact_result = await compact_async(ctx, COMPACT_FOCUS_INSTRUCTIONS);
 			if (!compact_result.ok && !is_benign_compact_error(compact_result.error)) {
 				// Non-benign compact error: still resume. Pi may already show
 				// compaction_end error. Do not throw; do not abort resume.
@@ -1275,7 +1274,19 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	});
 
 	pi.on("tool_call", (event: any, ctx: any) => {
-		if (loop_detected || loop_prompt_active) return;
+		const activeTools = MODES[currentMode]?.tools ?? FULL_TOOLS;
+		if (!activeTools.includes(event.toolName)) {
+			return {
+				block: true,
+				reason: `Tool '${event.toolName}' is not available in ${MODES[currentMode]?.label ?? currentMode} mode. Available tools: ${activeTools.join(", ")}.`,
+			};
+		}
+		if (loop_detected || loop_prompt_active) {
+			return {
+				block: true,
+				reason: "Tool loop detected; blocking further tool calls.",
+			};
+		}
 		const signature = tool_call_signature(event.toolName, event.input);
 		if (signature === loop_tool_call_signature) {
 			loop_tool_call_count++;
@@ -1286,20 +1297,30 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		if (loop_tool_call_count >= LOOP_TOOL_CALL_LIMIT) {
 			loop_detected = true;
 			ctx.abort();
+			return {
+				block: true,
+				reason: `Tool '${event.toolName}' has been called ${LOOP_TOOL_CALL_LIMIT} times with identical arguments.`,
+			};
 		}
 	});
 
 	pi.on("turn_end", (event: any) => {
 		const msg = event?.message;
-		const plan_text =
-			waitingForPlan && currentMode === "plan" ? assistant_text(msg) : "";
+		const plan_text = waitingForPlan && currentMode === "plan" ? assistant_text(msg) : "";
 		if (plan_text) {
 			latest_plan_text = latest_plan_text ? `${latest_plan_text}\n\n${plan_text}` : plan_text;
 		}
-		lastTurnAborted =
-			msg?.stopReason === "aborted" ||
-			(msg?.role === "assistant" && msg?.content?.stopReason === "aborted");
+		const assistantStopReason =
+			msg?.role === "assistant" && typeof msg?.content === "object"
+				? (msg.content as { stopReason?: string }).stopReason
+				: undefined;
+		lastTurnAborted = msg?.stopReason === "aborted" || assistantStopReason === "aborted";
 		lastTurnLengthStopped = msg?.stopReason === "length";
+		lastTurnError =
+			msg?.stopReason === "error" ||
+			assistantStopReason === "error" ||
+			is_non_generic_error((msg as { errorMessage?: string }).errorMessage) ||
+			is_non_generic_error((msg?.content as { errorMessage?: string })?.errorMessage);
 	});
 
 	pi.on("agent_settled", async (_event: any, ctx: any) => {
@@ -1318,6 +1339,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			reset_tool_loop_tracking();
 			lastTurnAborted = false;
 			lastTurnLengthStopped = false;
+			lastTurnError = false;
 			setPlanAutoContinuing(false);
 			if (choice?.action === "retry") {
 				pi.sendMessage(
@@ -1363,11 +1385,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		setPlanAutoContinuing(false);
 		planAutoContinueCount = 0;
 		lastTurnLengthStopped = false;
+		lastTurnError = false;
 
 		if (waitingForPlan && currentMode === "plan") {
 			waitingForPlan = false;
-			if (lastTurnAborted) {
+			if (lastTurnAborted || lastTurnError) {
 				lastTurnAborted = false;
+				lastTurnError = false;
 				return;
 			}
 			const action = await showPlanReview(ctx);
@@ -1495,6 +1519,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		setPlanAutoContinuing(false);
 		planAutoContinueCount = 0;
 		lastTurnLengthStopped = false;
+		lastTurnError = false;
 		reset_tool_loop_tracking();
 		loop_prompt_active = false;
 		latest_plan_text = "";

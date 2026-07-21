@@ -10,6 +10,43 @@ import {
 } from "../pi-ember-ui/index.ts";
 import { isThinkingBlocksHidden } from "../pi-ember-ui/mode-colors.ts";
 
+/** Minimal theme shape used by compact rendering: fg(tag, text) and bold(text). */
+interface ThemeLike {
+	fg(tag: string, text: string): string;
+	bold(text: string): string;
+}
+
+/** Loose tool-argument shape covering fields accessed by the renderer. */
+interface ToolArgs {
+	file_path?: string;
+	path?: string;
+	pattern?: string;
+	command?: string;
+	content?: string;
+	oldText?: string;
+	newText?: string;
+	edits?: unknown;
+	offset?: number;
+	limit?: number;
+	[key: string]: unknown;
+}
+
+/** A single content item inside a tool result. */
+interface ToolContentItem {
+	type: string;
+	text?: string;
+}
+
+/** Loose tool-result shape covering fields read by the renderer. */
+interface ToolResult {
+	content?: ToolContentItem[];
+	details?: {
+		diff?: string;
+		totalMatched?: number;
+	};
+	[key: string]: unknown;
+}
+
 const BULLET = "• ";
 
 /** Exploring-style child tree gutter — SSOT for compact groups and subagents. */
@@ -27,11 +64,12 @@ const DISCOVERY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const GROUPABLE_TOOLS = new Set([...DISCOVERY_TOOLS, "edit", "write", "bash"]);
 
 export type ToolRenderContext = {
-	args: any;
+	args: unknown;
 	toolCallId: string;
 	invalidate: () => void;
-	state: Record<string, any>;
+	state: Record<string, unknown>;
 	expanded?: boolean;
+	isError?: boolean;
 };
 
 export type ToolRenderResultOptions = {
@@ -42,12 +80,12 @@ export type ToolRenderResultOptions = {
 export type CompactCall = {
 	id: string;
 	name: string;
-	args: any;
+	args: ToolArgs;
 	group?: DiscoveryGroup;
 	invalidate?: () => void;
 	isError: boolean;
 	_completed?: boolean;
-	result?: any;
+	result?: ToolResult;
 	/** Standalone (non-group-owner) call row visual — repainted on theme change. */
 	callText?: CompactGroupText;
 };
@@ -110,11 +148,11 @@ function textValue(value: unknown, fallback = ""): string {
 	return String(value).replace(/[\r\n]+/g, " ");
 }
 
-function toolPath(args: any): string {
+function toolPath(args: ToolArgs): string {
 	return textValue(args?.file_path ?? args?.path, ".");
 }
 
-function normalizedTargetPath(args: any): string {
+function normalizedTargetPath(args: ToolArgs): string {
 	const target = toolPath(args).replace(/\\/g, "/").replace(/\/+$/, "");
 	return target || ".";
 }
@@ -126,7 +164,7 @@ function targetPathForRecord(record: CompactCall): string {
 	return normalizedTargetPath(record.args);
 }
 
-function readRangeLabel(args: any): string {
+function readRangeLabel(args: ToolArgs): string {
 	const parts: string[] = [];
 	if (typeof args?.offset === "number") parts.push(`offset ${args.offset}`);
 	if (typeof args?.limit === "number") {
@@ -165,7 +203,7 @@ function bashGrepInfo(command: string): { pattern: string; path: string } | unde
 	return { pattern, path };
 }
 
-function groupKey(name: string, args: any): string | undefined {
+function groupKey(name: string, args: ToolArgs): string | undefined {
 	if (DISCOVERY_TOOLS.has(name)) return "__discovery__";
 	if (name === "edit") return "__editing__";
 	if (name === "write") return "__writing__";
@@ -177,27 +215,27 @@ function groupKey(name: string, args: any): string | undefined {
 	return undefined;
 }
 
-function errorText(result: any, isError: boolean): string | undefined {
-	const content = result?.content?.find((item: any) => item.type === "text");
+function errorText(result: ToolResult | undefined, isError: boolean): string | undefined {
+	const content = result?.content?.find((item: ToolContentItem) => item.type === "text");
 	if (!isError && !content?.text?.startsWith("Error")) return undefined;
 	const text = typeof content?.text === "string" ? content.text : "Tool failed";
 	return text.replace(/\r\n?/g, "\n").split("\n")[0] || "Tool failed";
 }
 
-function compactErrorComponent(error: string, theme: any): Component {
+function compactErrorComponent(error: string, theme: ThemeLike): Component {
 	const component = new CompactGroupText();
 	component.setText(theme.fg("error", error));
 	return component;
 }
 
-function fullOutputText(result: any): string {
-	const content = result?.content?.find((item: any) => item.type === "text");
+function fullOutputText(result: ToolResult | undefined): string {
+	const content = result?.content?.find((item: ToolContentItem) => item.type === "text");
 	const text = content?.text;
 	if (typeof text !== "string") return "";
 	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function formatExpandedOutput(result: any, theme: any): string {
+function formatExpandedOutput(result: ToolResult | undefined, theme: ThemeLike): string {
 	const text = fullOutputText(result).trimEnd();
 	if (!text) return "";
 	return (
@@ -209,8 +247,8 @@ function formatExpandedOutput(result: any, theme: any): string {
 	);
 }
 
-function bashLastLine(result: any): string | undefined {
-	const content = result?.content?.find((item: any) => item.type === "text");
+function bashLastLine(result: ToolResult | undefined): string | undefined {
+	const content = result?.content?.find((item: ToolContentItem) => item.type === "text");
 	const text = content?.text;
 	if (typeof text !== "string") return undefined;
 	const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
@@ -221,14 +259,18 @@ function bashLastLine(result: any): string | undefined {
 	return undefined;
 }
 
-function formatBashResultLine(result: any, theme: any, isError = false): string {
+function formatBashResultLine(
+	result: ToolResult | undefined,
+	theme: ThemeLike,
+	isError = false,
+): string {
 	if (isError) return "";
 	const lastLine = bashLastLine(result);
 	if (lastLine === undefined) return "";
-	return "\n" + theme.fg("dim", "  ") + theme.fg("text", lastLine);
+	return `\n${theme.fg("dim", "  ")}${theme.fg("text", lastLine)}`;
 }
 
-function diffStats(result: any): { additions: number; removals: number } {
+function diffStats(result: ToolResult | undefined): { additions: number; removals: number } {
 	const diff = typeof result?.details?.diff === "string" ? result.details.diff : "";
 	let additions = 0;
 	let removals = 0;
@@ -246,7 +288,9 @@ function diffStats(result: any): { additions: number; removals: number } {
  * string at execution time, but the renderer needs the array during
  * streaming so live +N -N counts can update in real time.
  */
-function extractStreamingEdits(args: any): Array<{ oldText: string; newText: string }> | undefined {
+function extractStreamingEdits(
+	args: ToolArgs,
+): Array<{ oldText: string; newText: string }> | undefined {
 	if (args == null) return undefined;
 	if (Array.isArray(args.edits)) return args.edits;
 	if (typeof args.edits === "string") {
@@ -274,7 +318,7 @@ function extractStreamingEdits(args: any): Array<{ oldText: string; newText: str
  * time from 1 toward the final count. Returns undefined when there is
  * nothing to diff yet (no edits or empty strings).
  */
-function streamingEditStats(args: any): { additions: number; removals: number } | undefined {
+function streamingEditStats(args: ToolArgs): { additions: number; removals: number } | undefined {
 	const edits = extractStreamingEdits(args);
 	if (!edits || edits.length === 0) return undefined;
 	let additions = 0;
@@ -294,7 +338,7 @@ function streamingEditStats(args: any): { additions: number; removals: number } 
 }
 
 /** Live line count from streaming write args (before the tool runs). */
-function streamingWriteStats(args: any): { additions: number; removals: number } | undefined {
+function streamingWriteStats(args: ToolArgs): { additions: number; removals: number } | undefined {
 	const content = typeof args?.content === "string" ? args.content : "";
 	if (content.length === 0) return undefined;
 	const additions = contentLineCount(content);
@@ -334,13 +378,13 @@ function lineDiffCounts(oldText: string, newText: string): { additions: number; 
 	return { additions, removals };
 }
 
-function matchCount(result: any): number | undefined {
+function matchCount(result: ToolResult | undefined): number | undefined {
 	const total = result?.details?.totalMatched;
 	if (typeof total === "number") return total;
 	return undefined;
 }
 
-function matchLabel(result: any, theme: any): string {
+function matchLabel(result: ToolResult | undefined, theme: ThemeLike): string {
 	const total = matchCount(result);
 	if (total === undefined) return "";
 	const label = total === 1 ? "1 match" : `${total} matches`;
@@ -355,7 +399,7 @@ export const PULSE_INTERVAL_MS = 600;
  * flashing muted/dim bullet driven by PULSE_INTERVAL_MS. Shared by the
  * compact and subagent renderers; only subagent rows own a pulse timer.
  */
-export function statusBulletColor(isError: boolean, isCompleted: boolean, theme: any): string {
+export function statusBulletColor(isError: boolean, isCompleted: boolean, theme: ThemeLike): string {
 	if (isError) return theme.fg("error", BULLET);
 	if (isCompleted) return theme.fg("success", BULLET);
 	const pulse = Math.floor(Date.now() / PULSE_INTERVAL_MS) % 2 === 0;
@@ -369,7 +413,7 @@ export function statusBulletColor(isError: boolean, isCompleted: boolean, theme:
 export function groupBulletColorFromFlags(
 	hasError: boolean,
 	allCompleted: boolean,
-	theme: any,
+	theme: ThemeLike,
 ): string {
 	return statusBulletColor(hasError, allCompleted, theme);
 }
@@ -416,11 +460,11 @@ export class PulseManager {
 	}
 }
 
-function bulletColor(record: CompactCall, theme: any): string {
+function bulletColor(record: CompactCall, theme: ThemeLike): string {
 	return statusBulletColor(record.isError, record._completed === true, theme);
 }
 
-function formatStandaloneCallRow(record: CompactCall, theme: any): string {
+function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string {
 	const { name, args, result } = record;
 	const prefix = bulletColor(record, theme) + formatCallBody(name, args, theme);
 	// Live edit/write stats: while the model streams args (before the tool
@@ -452,12 +496,12 @@ function formatStandaloneCallRow(record: CompactCall, theme: any): string {
 	return prefix;
 }
 
-function formatEditStats(result: any, theme: any): string {
+function formatEditStats(result: ToolResult | undefined, theme: ThemeLike): string {
 	const { additions, removals } = diffStats(result);
 	return formatEditStatsFromCounts({ additions, removals }, theme);
 }
 
-function formatEditStatsFromCounts(counts: { additions: number; removals: number }, theme: any): string {
+function formatEditStatsFromCounts(counts: { additions: number; removals: number }, theme: ThemeLike): string {
 	// Avoid noisy +0 -0 placeholders when there is nothing to diff.
 	if (counts.additions === 0 && counts.removals === 0) return "";
 	return (
@@ -467,7 +511,7 @@ function formatEditStatsFromCounts(counts: { additions: number; removals: number
 	);
 }
 
-export function formatCallBody(name: string, args: any, theme: any, inGroup = false): string {
+export function formatCallBody(name: string, args: ToolArgs, theme: ThemeLike, inGroup = false): string {
 	const pathName = toolPath(args);
 	switch (name) {
 		case "read":
@@ -515,7 +559,7 @@ export function formatCallBody(name: string, args: any, theme: any, inGroup = fa
 	}
 }
 
-function groupBulletColor(group: DiscoveryGroup, theme: any): string {
+function groupBulletColor(group: DiscoveryGroup, theme: ThemeLike): string {
 	const hasError = group.records.some((r) => r.isError);
 	const allCompleted = group.records.every((r) => r._completed);
 	return groupBulletColorFromFlags(hasError, allCompleted, theme);
@@ -540,7 +584,7 @@ function groupHeaderLabel(group: DiscoveryGroup): string {
 	return `${labels.past} ${count} ${count === 1 ? labels.noun : `${labels.noun}s`}`;
 }
 
-function formatGroupCallBody(record: CompactCall, theme: any): string {
+function formatGroupCallBody(record: CompactCall, theme: ThemeLike): string {
 	const body = formatCallBody(record.name, record.args, theme, true);
 	// Live edit/write stats while streaming, authoritative diff once edit completes.
 	// Write has no post-run diff, so its final stats come from args.content line count.
@@ -558,7 +602,7 @@ function formatGroupCallBody(record: CompactCall, theme: any): string {
 	return body;
 }
 
-function formatGroup(group: DiscoveryGroup, theme: any): string {
+function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
 	const allCompleted =
 		group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
 	const headerLabel = groupHeaderLabel(group);
@@ -648,17 +692,18 @@ export class CompactRenderer {
 	}
 
 	/** Re-paint compact rows after a live accent/theme rebuild. */
-	refreshThemeColors(theme: any): void {
+	refreshThemeColors(theme: unknown): void {
+		const t = theme as ThemeLike;
 		const groups_refreshed = new Set<DiscoveryGroup>();
 		for (const record of this.calls.values()) {
 			const group = record.group;
 			if (group?.callText && group.records.length > 1 && !groups_refreshed.has(group)) {
 				groups_refreshed.add(group);
-				group.callText.setText(formatGroup(group, theme));
+				group.callText.setText(formatGroup(group, t));
 				continue;
 			}
 			if (record.callText) {
-				record.callText.setText(formatStandaloneCallRow(record, theme));
+				record.callText.setText(formatStandaloneCallRow(record, t));
 			}
 		}
 	}
@@ -774,19 +819,20 @@ export class CompactRenderer {
 		return group;
 	}
 
-	registerCall(name: string, id: string, args: any, invalidate?: () => void): CompactCall {
+	registerCall(name: string, id: string, args: unknown, invalidate?: () => void): CompactCall {
+		const typed_args = args as ToolArgs;
 		const existing = this.calls.get(id);
 		if (existing) {
-			existing.args = args;
+			existing.args = typed_args;
 			if (invalidate) {
 				existing.invalidate = invalidate;
 			}
 			return existing;
 		}
 
-		const record: CompactCall = { id, name, args, isError: false };
+		const record: CompactCall = { id, name, args: typed_args, isError: false };
 		this.calls.set(id, record);
-		const key = groupKey(name, args);
+		const key = groupKey(name, typed_args);
 
 		if (key === undefined) {
 			this.settleGroups();
@@ -800,7 +846,7 @@ export class CompactRenderer {
 		return record;
 	}
 
-	setResult(record: CompactCall, result: any, isError: boolean): void {
+	setResult(record: CompactCall, result: ToolResult, isError: boolean): void {
 		if (record._completed && record.result === result && record.isError === isError) return;
 		record.isError = isError;
 		record._completed = true;
@@ -813,7 +859,7 @@ export class CompactRenderer {
 		// the owner component has been destroyed and recreated.
 	}
 
-	renderCall(name: string, args: any, theme: any, context: ToolRenderContext): Component {
+	renderCall(name: string, args: unknown, theme: ThemeLike, context: ToolRenderContext): Component {
 		try {
 			return this.renderCallInner(name, args, theme, context);
 		} catch {
@@ -821,15 +867,15 @@ export class CompactRenderer {
 			// compact call row instead. Use CompactGroupText (truncating) so
 			// even the fallback never wraps to multiple rows.
 			const fallback = new CompactGroupText();
-			fallback.setText(theme.fg("muted", BULLET) + formatCallBody(name, args, theme));
+			fallback.setText(theme.fg("muted", BULLET) + formatCallBody(name, args as ToolArgs, theme));
 			return fallback;
 		}
 	}
 
 	private renderCallInner(
 		name: string,
-		args: any,
-		theme: any,
+		args: unknown,
+		theme: ThemeLike,
 		context: ToolRenderContext,
 	): Component {
 		const record = this.registerCall(name, context.toolCallId, args, context.invalidate);
@@ -868,10 +914,10 @@ export class CompactRenderer {
 
 	renderResult(
 		name: string,
-		args: any,
-		result: any,
+		args: unknown,
+		result: ToolResult,
 		options: ToolRenderResultOptions,
-		theme: any,
+		theme: ThemeLike,
 		context: ToolRenderContext & { isError: boolean },
 	): Component {
 		try {
@@ -886,10 +932,10 @@ export class CompactRenderer {
 
 	private renderResultInner(
 		name: string,
-		args: any,
-		result: any,
+		args: unknown,
+		result: ToolResult,
 		options: ToolRenderResultOptions,
-		theme: any,
+		theme: ThemeLike,
 		context: ToolRenderContext & { isError: boolean },
 	): Component {
 		const record = this.registerCall(name, context.toolCallId, args, context.invalidate);

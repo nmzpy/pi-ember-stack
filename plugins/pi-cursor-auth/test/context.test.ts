@@ -148,6 +148,46 @@ describe("Cursor request mapping", () => {
 			path: "src/index.ts",
 			edits: [{ oldText: "before", newText: "after" }],
 		});
+
+		expect(
+			normalize_tool_arguments("edit", {
+				path: "src/index.ts",
+				strReplace: { oldText: "before", newText: "after" },
+			}),
+		).toEqual({
+			path: "src/index.ts",
+			edits: [{ oldText: "before", newText: "after" }],
+		});
+
+		expect(
+			normalize_tool_arguments("edit", {
+				path: "src/index.ts",
+				multiStrReplace: {
+					edits: [
+						{ oldText: "a", newText: "b" },
+						{ oldText: "c", newText: "d" },
+					],
+				},
+			}),
+		).toEqual({
+			path: "src/index.ts",
+			edits: [
+				{ oldText: "a", newText: "b" },
+				{ oldText: "c", newText: "d" },
+			],
+		});
+	});
+
+	test("maps Cursor write arguments including fileText", () => {
+		expect(
+			normalize_tool_arguments("write", {
+				path: "src/index.ts",
+				fileText: "console.log(1);",
+			}),
+		).toEqual({
+			path: "src/index.ts",
+			content: "console.log(1);",
+		});
 	});
 
 	test("maps glob tool call arguments to Pi's find schema", () => {

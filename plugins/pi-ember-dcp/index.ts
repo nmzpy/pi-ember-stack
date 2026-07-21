@@ -212,7 +212,7 @@ export default function piEmberDcpPlugin(pi: ExtensionAPI): void {
 	// 1. The pruning pipeline runs immediately before every LLM call.
 	//    Pipeline exceptions pass messages through unchanged so a broken prune
 	//    pass cannot destroy a request.
-	pi.on("context", (event: ContextEvent, ctx: ExtensionContext): ContextEventResult | void => {
+	pi.on("context", (event: ContextEvent, ctx: ExtensionContext): ContextEventResult | undefined => {
 		try {
 			const result = run_pipeline(
 				event.messages as AnyMessage[],

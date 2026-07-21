@@ -83,6 +83,7 @@ let footerThinkingLevel = "off";
 let footer_stats_timer: ReturnType<typeof setTimeout> | undefined;
 let footer_stats_dirty = false;
 
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 let footerCtx: any;
 
 /** Mode-id → display label resolver, registered by `pi-custom-agents`. */
@@ -105,6 +106,7 @@ export function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 function is_live_session(ctx: any): boolean {
 	return footerCtx !== undefined && ctx?.sessionManager === footerCtx?.sessionManager;
 }
@@ -114,6 +116,7 @@ function is_live_session(ctx: any): boolean {
  * completions into one O(n) recomputation per event-loop burst, away from
  * the footer render closure. Safe to call from any lifecycle handler.
  */
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 export function schedule_footer_stats(ctx: any): void {
 	if (!is_live_session(ctx)) return;
 	footer_stats_dirty = true;
@@ -142,11 +145,13 @@ export function reset_footer_state(): void {
 }
 
 /** Synchronously recompute footer stats from the session ctx. */
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 export function recompute_footer_stats(ctx: any): void {
 	footerCtx = ctx;
 	recompute_footer_stats_impl(ctx);
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 function recompute_footer_stats_impl(ctx: any): void {
 	let totalCost = 0;
 	let latestCacheHitRate: number | undefined;
@@ -168,6 +173,7 @@ function recompute_footer_stats_impl(ctx: any): void {
 }
 
 /** Seed the thinking level from Pi at session start. */
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 export function init_footer_thinking_level(pi: any): void {
 	footerThinkingLevel = pi.getThinkingLevel() ?? "off";
 }
@@ -181,6 +187,7 @@ export function set_footer_thinking_level(level: string): void {
  * Invalidate the footer frame. Cheaper than a full TUI render —
  * `setStatus` only re-renders the footer/editor frame.
  */
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 export function refresh_footer(ctx: any): void {
 	if (ctx?.mode === "tui") ctx.ui.setStatus(FOOTER_STATUS_KEY, undefined);
 }
@@ -195,9 +202,11 @@ function resolve_mode_label(modeId: string): string {
  * closure and stats recomputation. Call from `session_start` after the ctx
  * is bound.
  */
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 export function installEmberFooter(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 	footerCtx = ctx;
+	// biome-ignore lint/suspicious/noExplicitAny: Pi's setFooter callback signature is dynamic
 	ctx.ui.setFooter((_tui: any, theme: any, _footerData: any) => {
 		return {
 			render(width: number): string[] {

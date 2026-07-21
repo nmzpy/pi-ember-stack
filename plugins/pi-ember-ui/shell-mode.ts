@@ -233,13 +233,15 @@ const SHELL_HISTORY_SYNC_PATCH_MARKER = Symbol.for("pi-ember-ui:shell-history-sy
  * - a per-call recursion guard via `syncInProgress`
  */
 export function install_shell_history_sync_patch(): void {
-	const proto = (Editor as any).prototype as { setTextInternal?: (...args: any[]) => void };
+	// biome-ignore lint/suspicious/noExplicitAny: Pi's Editor prototype is dynamic at runtime
+	const proto = (Editor as any).prototype as { setTextInternal?: (...args: any[]) => any } & Record<symbol, unknown>;
 	if (!proto.setTextInternal) return;
-	if ((proto as any)[SHELL_HISTORY_SYNC_PATCH_MARKER]) return;
-	(proto as any)[SHELL_HISTORY_SYNC_PATCH_MARKER] = true;
+	if (proto[SHELL_HISTORY_SYNC_PATCH_MARKER]) return;
+	proto[SHELL_HISTORY_SYNC_PATCH_MARKER] = true;
 
 	const originalSetTextInternal = proto.setTextInternal;
 
+	// biome-ignore lint/suspicious/noExplicitAny: Pi's Editor prototype is dynamic at runtime
 	proto.setTextInternal = function setTextInternalPatched(this: any, text: string, ...rest: any[]): any {
 		let syncInProgress = false;
 		const doSync = () => {

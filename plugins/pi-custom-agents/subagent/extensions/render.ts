@@ -24,6 +24,18 @@ import { Container, type Component, Markdown, Spacer, Text, truncateToWidth } fr
 import type { Message } from "@earendil-works/pi-ai";
 import { type SubAgentResult, isFailedResult, getResultOutput } from "./runner.ts";
 
+interface ThemeLike {
+	fg(tag: string, text: string): string;
+	bold(text: string): string;
+}
+
+interface SubagentArgs {
+	agent?: string;
+	task?: string;
+	tasks?: Array<{ agent: string; task: string }>;
+	chain?: Array<{ agent: string; task: string }>;
+}
+
 /**
  * Width-aware truncating text for the latest-tool-call row under a running
  * subagent. Unlike pi-tui's `Text` (which wraps long lines), this truncates
@@ -244,7 +256,7 @@ function renderDisplayItems(
 export function renderSingleResult(
 	result: SubAgentResult,
 	expanded: boolean,
-	theme: { fg: (c: any, t: string) => string; bold: (t: string) => string },
+	theme: { fg: (c: string, t: string) => string; bold: (t: string) => string },
 ): Container | Text {
 	const isError = isFailedResult(result);
 	const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
@@ -349,7 +361,7 @@ function agentStatus(result: SubAgentResult | undefined): AgentStatus {
 	return isFailedResult(result) ? "failed" : "completed";
 }
 
-function agentStatusSuffix(status: AgentStatus, theme: any): string {
+function agentStatusSuffix(status: AgentStatus, theme: ThemeLike): string {
 	if (status === "failed") return theme.fg("error", " ✗");
 	if (status === "completed") return theme.fg("success", " ✓");
 	return "";
@@ -358,7 +370,7 @@ function agentStatusSuffix(status: AgentStatus, theme: any): string {
 function renderAgentLabel(
 	status: AgentStatus,
 	agentName: string,
-	theme: any,
+	theme: ThemeLike,
 	result?: SubAgentResult,
 	phaseOffsetMs: number = 0,
 	isSingle = false,
@@ -392,7 +404,7 @@ function renderAgentLabel(
 function renderAgentRow(
 	status: AgentStatus,
 	agentName: string,
-	theme: any,
+	theme: ThemeLike,
 	result?: SubAgentResult,
 	prefix = "",
 	phaseOffsetMs: number = 0,
@@ -439,7 +451,7 @@ function treePrefixForEntry(entry: FlatEntry, hasHeader: boolean, agentCount: nu
 
 function renderLatestToolRow(
 	row: AgentRowDescriptor,
-	theme: any,
+	theme: ThemeLike,
 	treePrefix: string,
 ): string | undefined {
 	if (row.status !== "running" || !row.result?.latestToolCall) return undefined;
@@ -461,7 +473,7 @@ export function isSubagentDelegating(results: SubAgentResult[]): boolean {
 }
 
 /** Compact single-row state while the parent invokes the subagent tool. */
-export function renderDelegatingRow(theme: any): string {
+export function renderDelegatingRow(theme: ThemeLike): string {
 	const bullet = groupBulletColorFromFlags(false, false, theme);
 	const label = renderLiveGradient(DELEGATING_LABEL, MUTED_GROUP_GRADIENT_PRESET);
 	return bullet + label;
@@ -471,7 +483,7 @@ function renderGroupLabel(
 	label: string,
 	_hasError: boolean,
 	_allDone: boolean,
-	theme: any,
+	theme: ThemeLike,
 ): string {
 	// Header is plain dim/bold with the same bullet spacing as a compact
 	// group header (e.g. "• Exploring") so the group columns align.
@@ -502,13 +514,13 @@ interface AgentRowDescriptor {
  * returned separately so callers can render it transparently.
  */
 function deriveAgentRows(
-	args: any,
+	args: SubagentArgs,
 	results: SubAgentResult[],
 ): {
 	headerLabel: string | undefined;
 	rows: AgentRowDescriptor[];
 } {
-	if (args.agent && args.task && !(args.tasks?.length > 0) && !(args.chain?.length > 0)) {
+	if (args.agent && args.task && !((args.tasks?.length ?? 0) > 0) && !((args.chain?.length ?? 0) > 0)) {
 		return {
 			headerLabel: undefined,
 			rows: [
@@ -564,7 +576,7 @@ function deriveAgentRows(
  *
  * No `⏳`, no `[scope]`, no `parallel (N tasks)` — just bullets and names.
  */
-export function renderSubagentLayout(args: any, results: SubAgentResult[], theme: any): string {
+export function renderSubagentLayout(args: SubagentArgs, results: SubAgentResult[], theme: ThemeLike): string {
 	if (isSubagentDelegating(results)) {
 		return renderDelegatingRow(theme);
 	}
@@ -613,9 +625,9 @@ export function renderSubagentLayout(args: any, results: SubAgentResult[], theme
  * (in index.ts) drives the invalidate that triggers the rebuild.
  */
 export function buildSubagentLayoutComponent(
-	args: any,
+	args: SubagentArgs,
 	results: SubAgentResult[],
-	theme: any,
+	theme: ThemeLike,
 ): Container {
 	const container = new Container();
 	if (isSubagentDelegating(results)) {
@@ -667,17 +679,17 @@ export function buildSubagentLayoutComponent(
 /**
  * Whether any agent in the layout is still running (flashing).
  */
-export function anySubagentRunning(args: any, results: SubAgentResult[]): boolean {
-	if (args.agent && args.task && !(args.tasks?.length > 0) && !(args.chain?.length > 0)) {
+export function anySubagentRunning(args: SubagentArgs, results: SubAgentResult[]): boolean {
+	if (args.agent && args.task && !((args.tasks?.length ?? 0) > 0) && !((args.chain?.length ?? 0) > 0)) {
 		return agentStatus(results[0]) === "running";
 	}
 	if (args.tasks && args.tasks.length > 0) {
-		return args.tasks.some((_t: any, i: number) => agentStatus(results[i]) === "running");
+		return args.tasks.some((_t: { agent: string; task: string }, i: number) => agentStatus(results[i]) === "running");
 	}
 	if (args.chain && args.chain.length > 0) {
 		return args.chain
 			.slice(0, results.length)
-			.some((_s: any, i: number) => agentStatus(results[i]) === "running");
+			.some((_s: { agent: string; task: string }, i: number) => agentStatus(results[i]) === "running");
 	}
 	return false;
 }
@@ -693,7 +705,7 @@ export function anySubagentRunning(args: any, results: SubAgentResult[]): boolea
  */
 export function renderSubagentExpanded(
 	details: { mode: "single" | "parallel" | "chain"; results: SubAgentResult[] },
-	theme: any,
+	theme: ThemeLike,
 ): Component | undefined {
 	const fg = theme.fg.bind(theme);
 	const mdTheme = getMarkdownTheme();

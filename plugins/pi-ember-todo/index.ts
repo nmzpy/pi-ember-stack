@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionUIContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import { Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
@@ -172,12 +172,12 @@ function restore_session_state(id: string): TaskState | undefined {
 	return undefined;
 }
 
-const session_id = (ctx: any): string => ctx.sessionManager.getSessionId() ?? "";
+const session_id = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId() ?? "";
 const fresh_state = (): TaskState => ({ tasks: [], nextId: 1 });
 const get_session_state = (id: string): TaskState => sessions.get(id) ?? fresh_state();
 
 // Reconstruct tasks state from session messages history.
-export function replay_from_branch(ctx: any): TaskState {
+export function replay_from_branch(ctx: ExtensionContext): TaskState {
 	const id = session_id(ctx);
 	const branch = ctx.sessionManager.getBranch();
 	const len = branch.length;
@@ -281,7 +281,7 @@ interface ReducerOutput {
 	error?: string;
 }
 
-function apply_mutation(state: TaskState, action: TaskAction, params: any): ReducerOutput {
+function apply_mutation(state: TaskState, action: TaskAction, params: TodoParams): ReducerOutput {
 	const tasks = state.tasks.map((t) => ({ ...t }));
 	let next_id = state.nextId;
 
@@ -362,15 +362,16 @@ function apply_mutation(state: TaskState, action: TaskAction, params: any): Redu
 				return err("subject cannot be empty");
 			}
 
-			let status = cur.status;
+			let status: TaskStatus = cur.status;
 			if (params.status !== undefined) {
 				if (params.status !== null && typeof params.status !== "string") {
 					return err("status must be a string");
 				}
-				if (status !== params.status && !VALID_TRANSITIONS[status].includes(params.status)) {
-					return err(`illegal transition ${status} → ${params.status}`);
+				const target = params.status as TaskStatus;
+				if (status !== target && !VALID_TRANSITIONS[status].includes(target)) {
+					return err(`illegal transition ${status} → ${target}`);
 				}
-				status = params.status;
+				status = target;
 			}
 
 			let blocked = cur.blockedBy ? [...cur.blockedBy] : [];
@@ -759,7 +760,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			const id = session_id(ctx);
 			const state = get_session_state(id);
 			// Defensive copy: some runtimes pass a frozen/partial params object.
-			const raw = { ...((params ?? {}) as Record<string, unknown>) };
+			const raw = { ...((params ?? {}) as Record<string, unknown>) } as TodoParams;
 			const result = apply_mutation(state, action, raw);
 			if (!result.error) {
 				sessions.set(id, result.state);
@@ -784,7 +785,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			};
 		},
 
-		renderCall(args: any, theme, _context) {
+		renderCall(args: TodoParams, theme: Theme, _context: unknown) {
 			const state = get_session_state(active_render_session);
 			const glyph = ACTION_GLYPH[args.action as TaskAction] ?? args.action;
 			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", glyph);
@@ -799,7 +800,8 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 					call_id !== undefined ? state.tasks.find((t) => t.id === call_id)?.subject : undefined;
 				text += ` ${theme.fg("accent", subj ?? `#${args.id}`)}`;
 			} else if (args.action === "list" && args.status) {
-				text += ` ${theme.fg("muted", args.status === "in_progress" ? "in progress" : args.status)}`;
+				const statusStr = args.status as string;
+				text += ` ${theme.fg("muted", statusStr === "in_progress" ? "in progress" : statusStr)}`;
 			}
 			return new Text(text, 0, 0);
 		},
@@ -811,12 +813,12 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			}
 			let status: TaskStatus | undefined;
 			if (details) {
-				const p = details.params as any;
+				const p = details.params as Record<string, unknown>;
 				if (details.action === "create") status = details.tasks[details.tasks.length - 1]?.status;
 				else if (details.action === "update") {
 					const call_id = coerce_id(p.id);
 					status =
-						p.status ??
+						(p.status as TaskStatus) ??
 						(call_id !== undefined
 							? details.tasks.find((t) => t.id === call_id)?.status
 							: undefined);
@@ -887,26 +889,29 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		},
 	});
 
-	const branch_has_todo_history = (ctx: any): boolean => {
+	const branch_has_todo_history = (ctx: ExtensionContext): boolean => {
 		const branch = ctx.sessionManager.getBranch() ?? [];
 		return branch.some(
-			(e: any) => e?.message?.role === "toolResult" && e?.message?.toolName === TOOL_NAME,
+			(e: SessionEntry) => {
+				if (e.type !== "message") return false;
+				return e.message?.role === "toolResult" && e.message?.toolName === TOOL_NAME;
+			},
 		);
 	};
 
 	/** Resolve state for compact/tree: branch wins when it has todo results; else keep live/disk. */
-	const resolve_state_for_refresh = (ctx: any): TaskState => {
+	const resolve_state_for_refresh = (ctx: ExtensionContext): TaskState => {
 		const id = session_id(ctx);
 		if (branch_has_todo_history(ctx)) {
 			return replay_from_branch(ctx);
 		}
 		// No todo tool results on the branch yet. Do not clobber in-memory progress
 		// with an empty replay (that was wiping tasks on compact).
-		if (sessions.has(id)) return sessions.get(id)!;
+		if (sessions.has(id)) return sessions.get(id) as TaskState;
 		return restore_session_state(id) ?? fresh_state();
 	};
 
-	const replay_and_refresh = (ctx: any): void => {
+	const replay_and_refresh = (ctx: ExtensionContext): void => {
 		let is_foreground = false;
 		try {
 			const id = session_id(ctx);

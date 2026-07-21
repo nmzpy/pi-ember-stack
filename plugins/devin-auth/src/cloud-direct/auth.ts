@@ -22,7 +22,7 @@
  * cache it and refresh shortly before `exp`.
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import { encodeMessage, iterFields } from './wire.js';
 import { buildMetadata } from './metadata.js';
 

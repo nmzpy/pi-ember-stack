@@ -46,7 +46,7 @@ export function make_nudge_handler(runtime: DcpRuntime) {
 	return async (
 		event: BeforeAgentStartEvent,
 		ctx: ExtensionContext,
-	): Promise<BeforeAgentStartEventResult | void> => {
+	): Promise<BeforeAgentStartEventResult | undefined> => {
 		const { config, state, prompts } = runtime;
 		if (config.compress.permission === "deny") return;
 		if (config.manualMode.enabled || state.manualMode) return;

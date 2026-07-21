@@ -21,7 +21,7 @@
  * the only shape that fits pi's callback contract.
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import type { OAuthCredentials, OAuthLoginCallbacks } from '@earendil-works/pi-ai';
 import { registerUser } from './register-user.js';
 import { DEFAULT_REGION, type WindsurfRegion } from './types.js';

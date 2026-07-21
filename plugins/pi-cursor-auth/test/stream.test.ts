@@ -90,6 +90,41 @@ describe("Cursor event conversion", () => {
 		expect(output.content.at(-1)).toEqual(result.toolCall);
 	});
 
+	test("selects the ToolCall key from multi-key cursor payloads", () => {
+		const tools: Tool[] = [
+			{
+				name: "bash",
+				description: "Run command",
+				parameters: Type.Object({ command: Type.String() }),
+			},
+		];
+		const { consumer, output } = make_consumer(tools);
+		const action = consumer.consume({
+			type: "tool_call",
+			subtype: "started",
+			call_id: "call-multi",
+			tool_call: {
+				shellToolCall: {
+					args: { command: "echo hello", workingDirectory: "", timeout: 30000 },
+					description: "Echo hello",
+				},
+				hookAdditionalContexts: [],
+				toolCallId: "call-multi",
+				startedAtMs: "1",
+			},
+		});
+		const result = consumer.finish();
+
+		expect(action).toBe("terminate");
+		expect(result.toolCall).toEqual({
+			type: "toolCall",
+			id: "call-multi",
+			name: "bash",
+			arguments: { command: "echo hello", timeout: 30000 },
+		});
+		expect(output.content.at(-1)).toEqual(result.toolCall);
+	});
+
 	test("unwraps mcpToolCall envelopes and resolves the inner tool", () => {
 		const tools: Tool[] = [
 			{
@@ -138,6 +173,7 @@ describe("Cursor event conversion", () => {
 		expect(action).toBe("terminate");
 		expect(result.toolCall).toBeUndefined();
 		expect(result.error).toContain("unavailable tool deleteToolCall");
+		expect(result.error).toContain("active tools: none");
 	});
 
 	test("skips Cursor-native MCP introspection tool calls and continues the stream", () => {

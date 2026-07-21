@@ -25,6 +25,46 @@ import {
 import { Container, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
+type AbortSignalStatic = typeof AbortSignal & {
+	any?(signals: AbortSignal[]): AbortSignal;
+};
+
+const AbortSignalCtor = AbortSignal as AbortSignalStatic;
+
+interface CustomFactoryTui {
+	requestRender(): void;
+}
+
+interface CustomFactoryTheme {
+	fg(tag: string, text: string): string;
+	bold(text: string): string;
+}
+
+interface CustomFactoryResult {
+	render(width: number): string[];
+	invalidate(): void;
+	handleInput(data: string): void;
+	dispose?(): void;
+}
+
+interface CustomFactoryOptions {
+	overlay?: boolean;
+	overlayOptions?: Record<string, unknown>;
+}
+
+interface CustomUi {
+	custom<T>(
+		factory: (
+			tui: CustomFactoryTui,
+			theme: CustomFactoryTheme,
+			kb: unknown,
+			done: (value: T) => void,
+		) => CustomFactoryResult,
+		opts?: CustomFactoryOptions,
+	): Promise<T>;
+}
+
+import { subscribeGradientTick, unsubscribeGradientTick } from "../../../pi-ember-ui/index.ts";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -34,23 +74,23 @@ import {
 	resolveAgent,
 } from "./agents.ts";
 import {
-	type SubAgentResult,
-	getFinalOutput,
-	getResultOutput,
-	isFailedResult,
-	mapWithConcurrencyLimit,
-	runSubAgent,
-} from "./runner.ts";
-import {
 	anySubagentRunning,
 	buildSubagentLayoutComponent,
 	isSubagentDelegating,
 	renderSubagentExpanded,
 } from "./render.ts";
-import { subscribeGradientTick, unsubscribeGradientTick } from "../../../pi-ember-ui/index.ts";
-import { type SubagentThread, threadStore } from "./threads.ts";
-import { SUBAGENT_REQUEST_EVENT, runNamedAgent, type SubagentRunRequest } from "./service.ts";
+import {
+	DEFAULT_SUBAGENT_TIMEOUT_MS,
+	getFinalOutput,
+	getResultOutput,
+	isFailedResult,
+	mapWithConcurrencyLimit,
+	runSubAgent,
+	type SubAgentResult,
+} from "./runner.ts";
+import { runNamedAgent, SUBAGENT_REQUEST_EVENT, type SubagentRunRequest } from "./service.ts";
 import { ThreadViewer, type ThreadViewerCallbacks } from "./thread-viewer.ts";
+import { type SubagentThread, threadStore } from "./threads.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -151,14 +191,22 @@ const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent" })),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in milliseconds for this task" })),
+	timeout: Type.Optional(
+		Type.Number({
+			description: `Timeout in milliseconds for this task. Default: ${DEFAULT_SUBAGENT_TIMEOUT_MS} (120s).`,
+		}),
+	),
 });
 
 const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent" })),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in milliseconds for this step" })),
+	timeout: Type.Optional(
+		Type.Number({
+			description: `Timeout in milliseconds for this step. Default: ${DEFAULT_SUBAGENT_TIMEOUT_MS} (120s).`,
+		}),
+	),
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -188,8 +236,7 @@ const SubagentParams = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory (single mode)" })),
 	timeout: Type.Optional(
 		Type.Number({
-			description:
-				"Global timeout in milliseconds for all sub-agents (overridden by per-task/step timeouts)",
+			description: `Global timeout in milliseconds for all sub-agents (overridden by per-task/step timeouts). Default: ${DEFAULT_SUBAGENT_TIMEOUT_MS} (120s).`,
 		}),
 	),
 	instructions: Type.Optional(
@@ -758,8 +805,8 @@ export default function (pi: ExtensionAPI) {
 							{ once: true },
 						);
 					}
-					if (typeof (AbortSignal as any).any === "function") {
-						parallelSignal = (AbortSignal as any).any([signal, parallelController.signal]);
+					if (typeof AbortSignalCtor.any === "function") {
+						parallelSignal = AbortSignalCtor.any([signal, parallelController.signal]);
 					} else {
 						parallelSignal = parallelController.signal;
 					}
@@ -1064,7 +1111,9 @@ export default function (pi: ExtensionAPI) {
 				rebindTickTarget(context.toolCallId, context.invalidate);
 			}
 			if (!details) {
-				const outputBlock = result.content.find((item: any) => item.type === "text");
+				const outputBlock = result.content.find(
+					(item: { type: string; text?: string }) => item.type === "text",
+				);
 				const output = outputBlock?.type === "text" ? outputBlock.text : "(no output)";
 				return new Text(output, 0, 0);
 			}
@@ -1174,11 +1223,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function showAgentPicker(
-		ctx: { ui: { custom: <T>(factory: any, opts?: any) => Promise<T> } },
+		ctx: { ui: CustomUi },
 		items: PickerItem[],
 	): Promise<string | null> {
 		return ctx.ui.custom<string | null>(
-			(tui: any, theme: any, _kb: any, done: (value: string | null) => void) => {
+			(
+				tui: CustomFactoryTui,
+				theme: CustomFactoryTheme,
+				_kb: unknown,
+				done: (value: string | null) => void,
+			) => {
 				const container = new Container();
 				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 				container.addChild(new Text(theme.fg("accent", theme.bold("Subagents")), 1, 0));
@@ -1222,7 +1276,7 @@ export default function (pi: ExtensionAPI) {
 	// Uses dynamic thread list + store subscriptions for live progress.
 	// Ctrl+P opens picker overlay to jump to any thread.
 	async function showThreadViewer(
-		ctx: { ui: { custom: <T>(factory: any, opts?: any) => Promise<T> } },
+		ctx: { ui: CustomUi },
 		_threads: SubagentThread[],
 		startIndex: number,
 	): Promise<void> {
@@ -1233,7 +1287,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Overlay mode: viewer appears above editor, Esc dismisses
 		await ctx.ui.custom<void>(
-			(tui: any, theme: any, _kb: any, done: () => void) => {
+			(tui: CustomFactoryTui, theme: CustomFactoryTheme, _kb: unknown, done: () => void) => {
 				let unsubscribe: (() => void) | undefined;
 				let closed = false;
 
