@@ -3,11 +3,11 @@ import { parseStreamingJson } from "@earendil-works/pi-ai/compat";
 import * as Diff from "diff";
 import {
 	MUTED_GROUP_GRADIENT_PRESET,
-	renderLiveGradient,
 	requestTuiRenderSnapToBottom,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
+import { get_gradient_phase, render_gradient } from "../pi-ember-ui/gradient.ts";
 import { isThinkingBlocksHidden } from "../pi-ember-ui/mode-colors.ts";
 
 /** Minimal theme shape used by compact rendering: fg(tag, text) and bold(text). */
@@ -105,10 +105,8 @@ export type DiscoveryGroup = {
 	/**
 	 * Whether the agent has demonstrably moved on from this group (emitted
 	 * visible user-facing text, started a non-group tool, or started a tool
-	 * in a different group). The label only flips to past tense when both
-	 * all members are complete AND the group is settled.
-	 * While complete-but-unsettled, the group stays active (gradient + present
-	 * tense) so there is no premature past-tense label.
+	 * in a different group). New same-key calls cannot join a settled group;
+	 * completed members are absorbed into the past-tense header summary.
 	 */
 	settled?: boolean;
 	/**
@@ -399,7 +397,11 @@ export const PULSE_INTERVAL_MS = 600;
  * flashing muted/dim bullet driven by PULSE_INTERVAL_MS. Shared by the
  * compact and subagent renderers; only subagent rows own a pulse timer.
  */
-export function statusBulletColor(isError: boolean, isCompleted: boolean, theme: ThemeLike): string {
+export function statusBulletColor(
+	isError: boolean,
+	isCompleted: boolean,
+	theme: ThemeLike,
+): string {
 	if (isError) return theme.fg("error", BULLET);
 	if (isCompleted) return theme.fg("success", BULLET);
 	const pulse = Math.floor(Date.now() / PULSE_INTERVAL_MS) % 2 === 0;
@@ -501,7 +503,10 @@ function formatEditStats(result: ToolResult | undefined, theme: ThemeLike): stri
 	return formatEditStatsFromCounts({ additions, removals }, theme);
 }
 
-function formatEditStatsFromCounts(counts: { additions: number; removals: number }, theme: ThemeLike): string {
+function formatEditStatsFromCounts(
+	counts: { additions: number; removals: number },
+	theme: ThemeLike,
+): string {
 	// Avoid noisy +0 -0 placeholders when there is nothing to diff.
 	if (counts.additions === 0 && counts.removals === 0) return "";
 	return (
@@ -511,49 +516,115 @@ function formatEditStatsFromCounts(counts: { additions: number; removals: number
 	);
 }
 
-export function formatCallBody(name: string, args: ToolArgs, theme: ThemeLike, inGroup = false): string {
+function presentTenseVerb(name: string, args: ToolArgs): string {
+	switch (name) {
+		case "read":
+			return "Reading";
+		case "grep":
+			return "Searching";
+		case "find":
+			return "Finding";
+		case "ls":
+			return "Listing";
+		case "bash": {
+			const cmd = textValue(args?.command);
+			return bashGrepInfo(cmd) ? "Searching" : "Bashing";
+		}
+		case "edit":
+			return "Editing";
+		case "write":
+			return "Writing";
+		default:
+			return name;
+	}
+}
+
+function pastTenseNoun(type: NonNullable<DiscoveryGroup["type"]>): { label: string; noun: string } {
+	switch (type) {
+		case "editing":
+			return { label: "Edited", noun: "file" };
+		case "writing":
+			return { label: "Written", noun: "file" };
+		case "bashing":
+			return { label: "Ran", noun: "command" };
+		default:
+			return { label: "Explored", noun: "file" };
+	}
+}
+
+function formatCallBodyDetails(
+	name: string,
+	args: ToolArgs,
+	theme: ThemeLike,
+	inGroup = false,
+): string {
 	const pathName = toolPath(args);
 	switch (name) {
 		case "read":
-			return (
-				theme.fg("dim", theme.bold("Read")) + theme.fg("dim", ` ${pathName}${readRangeLabel(args)}`)
-			);
+			return theme.fg("dim", ` ${pathName}${readRangeLabel(args)}`);
 		case "grep":
-			return (
-				theme.fg("dim", theme.bold("Search")) +
-				theme.fg("dim", ` ${textValue(args?.pattern)}`) +
-				theme.fg("dim", ` in ${pathName}`)
-			);
+			return theme.fg("dim", ` ${textValue(args?.pattern)}`) + theme.fg("dim", ` in ${pathName}`);
 		case "find":
-			return (
-				theme.fg("dim", theme.bold("Find")) +
-				theme.fg("dim", ` ${textValue(args?.pattern)}`) +
-				theme.fg("dim", ` in ${pathName}`)
-			);
+			return theme.fg("dim", ` ${textValue(args?.pattern)}`) + theme.fg("dim", ` in ${pathName}`);
 		case "ls":
-			return theme.fg("dim", theme.bold("List")) + theme.fg("dim", ` ${pathName}`);
+			return theme.fg("dim", ` ${pathName}`);
 		case "bash": {
 			const cmd = textValue(args?.command);
 			const grepInfo = bashGrepInfo(cmd);
 			if (grepInfo) {
-				return (
-					theme.fg("dim", theme.bold("Search")) +
-					theme.fg("dim", ` ${grepInfo.pattern}`) +
-					theme.fg("dim", ` in ${grepInfo.path}`)
-				);
+				return theme.fg("dim", ` ${grepInfo.pattern}`) + theme.fg("dim", ` in ${grepInfo.path}`);
 			}
 			const stripped = inGroup ? cmd.replace(/^\s*cd\s+[^\s&]+\s*&&\s*/, "") || cmd : cmd;
-			if (inGroup) return theme.fg("dim", `$ ${stripped}`);
+			if (inGroup) return theme.fg("dim", ` $ ${stripped}`);
 			return theme.fg("dim", theme.bold("Bash")) + theme.fg("dim", ` $ ${stripped}`);
 		}
 		case "edit":
-			return inGroup
-				? theme.fg("dim", pathName)
-				: theme.fg("dim", theme.bold("Edit")) + theme.fg("dim", ` ${pathName}`);
+			return theme.fg("dim", ` ${pathName}`);
 		case "write":
-			return inGroup
-				? theme.fg("dim", pathName)
-				: theme.fg("dim", theme.bold("Write")) + theme.fg("dim", ` ${pathName}`);
+			return theme.fg("dim", ` ${pathName}`);
+		default:
+			return "";
+	}
+}
+
+export function formatCallBody(
+	name: string,
+	args: ToolArgs,
+	theme: ThemeLike,
+	inGroup = false,
+): string {
+	return (
+		formatCallBodyVerb(name, args, theme, inGroup) +
+		formatCallBodyDetails(name, args, theme, inGroup)
+	);
+}
+
+function formatCallBodyVerb(
+	name: string,
+	args: ToolArgs,
+	theme: ThemeLike,
+	inGroup = false,
+): string {
+	if (inGroup && (name === "edit" || name === "write")) return "";
+	if (inGroup && name === "bash") {
+		const cmd = textValue(args?.command);
+		if (!bashGrepInfo(cmd)) return "";
+	}
+	switch (name) {
+		case "read":
+			return theme.fg("dim", theme.bold("Read"));
+		case "grep":
+			return theme.fg("dim", theme.bold("Search"));
+		case "find":
+			return theme.fg("dim", theme.bold("Find"));
+		case "ls":
+			return theme.fg("dim", theme.bold("List"));
+		case "bash":
+			return theme.fg("dim", theme.bold("Bash"));
+		case "edit":
+			return theme.fg("dim", theme.bold("Edit"));
+		case "write":
+			return theme.fg("dim", theme.bold("Write"));
 		default:
 			return theme.fg("dim", theme.bold(name));
 	}
@@ -565,70 +636,85 @@ function groupBulletColor(group: DiscoveryGroup, theme: ThemeLike): string {
 	return groupBulletColorFromFlags(hasError, allCompleted, theme);
 }
 
-function groupHeaderLabel(group: DiscoveryGroup): string {
-	const allDone =
-		group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
-	const labels =
-		group.type === "editing"
-			? { present: "Editing", past: "Edited", noun: "file" }
-			: group.type === "writing"
-				? { present: "Writing", past: "Written", noun: "file" }
-				: group.type === "bashing"
-					? { present: "Bashing", past: "Ran", noun: "command" }
-					: { present: "Exploring", past: "Explored", noun: "file" };
-	if (!allDone) return labels.present;
-	const count =
-		group.type === "bashing"
-			? group.records.length
-			: new Set(group.records.map(targetPathForRecord)).size;
-	return `${labels.past} ${count} ${count === 1 ? labels.noun : `${labels.noun}s`}`;
+function completedRecords(group: DiscoveryGroup): CompactCall[] {
+	return group.records.filter((r) => r._completed);
 }
 
-function formatGroupCallBody(record: CompactCall, theme: ThemeLike): string {
-	const body = formatCallBody(record.name, record.args, theme, true);
-	// Live edit/write stats while streaming, authoritative diff once edit completes.
-	// Write has no post-run diff, so its final stats come from args.content line count.
-	if (record.name !== "edit" && record.name !== "write") return body;
-	if (!record._completed) {
-		const live = record.name === "edit" ? streamingEditStats(record.args) : streamingWriteStats(record.args);
-		if (live) return body + theme.fg("dim", "  ") + formatEditStatsFromCounts(live, theme);
-		return body;
+function groupHeaderLabel(group: DiscoveryGroup): string {
+	const completed = completedRecords(group);
+	const { label, noun } = pastTenseNoun(group.type ?? "discovery");
+	const count =
+		group.type === "bashing" ? completed.length : new Set(completed.map(targetPathForRecord)).size;
+	const parts: string[] = [`${label} ${count} ${count === 1 ? noun : `${noun}s`}`];
+	if (group.type === "editing") {
+		let additions = 0;
+		let removals = 0;
+		for (const r of completed) {
+			const stats = diffStats(r.result);
+			additions += stats.additions;
+			removals += stats.removals;
+		}
+		const stats = formatEditStatsFromCounts({ additions, removals }, {
+			fg: (_tag, text) => text,
+			bold: (text) => text,
+		} as ThemeLike);
+		if (stats) parts.push(stats);
 	}
-	if (record.name === "edit") {
-		return body + theme.fg("dim", "  ") + formatEditStats(record.result, theme);
+	if (group.type === "writing") {
+		let additions = 0;
+		for (const r of completed) {
+			const stats = streamingWriteStats(r.args);
+			additions += stats?.additions ?? 0;
+		}
+		const stats = formatEditStatsFromCounts({ additions, removals: 0 }, {
+			fg: (_tag, text) => text,
+			bold: (text) => text,
+		} as ThemeLike);
+		if (stats) parts.push(stats);
 	}
-	const final = streamingWriteStats(record.args);
-	if (final) return body + theme.fg("dim", "  ") + formatEditStatsFromCounts(final, theme);
-	return body;
+	if (group.type === "discovery") {
+		const totalMatches = completed.reduce((sum, r) => sum + (matchCount(r.result) ?? 0), 0);
+		if (totalMatches > 0) {
+			parts.push(`${totalMatches} ${totalMatches === 1 ? "match" : "matches"}`);
+		}
+	}
+	return parts.join(" ");
+}
+
+function renderRunningGradient(text: string): string {
+	return render_gradient(text, MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase());
 }
 
 function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
-	const allCompleted =
-		group.records.length > 0 && group.records.every((r) => r._completed) && group.settled === true;
 	const headerLabel = groupHeaderLabel(group);
-	const headerText = allCompleted
-		? theme.fg("muted", theme.bold(headerLabel))
-		: renderLiveGradient(headerLabel, MUTED_GROUP_GRADIENT_PRESET);
+	const headerText = theme.fg("muted", theme.bold(headerLabel));
 	const lines = [groupBulletColor(group, theme) + headerText];
-	// Settled groups collapse to header-only when thinking blocks are hidden
-	// (compact mode). The shared isThinkingBlocksHidden() flag in
-	// pi-ember-ui/mode-colors.ts is the SSOT, mirrored from Pi's Ctrl+T toggle.
-	// Ctrl+T (show thinking) triggers rebuildChatFromMessages(), which re-runs
-	// renderCall on every owner and reveals the child rows again. Never
-	// duplicate this collapse condition in other plugins.
-	const collapse_children = allCompleted && isThinkingBlocksHidden();
-	if (!collapse_children) {
-		for (const [index, record] of group.records.entries()) {
-			const prefix =
-				index === group.records.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE;
-			const suffix =
-				record._completed && (record.name === "grep" || record.name === "find")
-					? matchLabel(record.result, theme)
-					: "";
-			lines.push(theme.fg("dim", prefix) + formatGroupCallBody(record, theme) + suffix);
+	// Show only running tool calls below the past-tense summary header.
+	// Completed members are "absorbed" into the header count/stats and do
+	// not render as child rows. The running rows animate with a gradient on
+	// the present-tense verb while the rest of the row stays dim.
+	const running = group.records.filter((r) => !r._completed);
+	if (running.length > 1) {
+		for (const [index, record] of running.entries()) {
+			const prefix = index === running.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
+			lines.push(theme.fg("dim", prefix) + formatRunningCallRow(record, theme));
 		}
+	} else if (running.length === 1) {
+		lines.push(theme.fg("dim", TREE_BRANCH_LAST) + formatRunningCallRow(running[0], theme));
 	}
 	return lines.join("\n");
+}
+
+function formatRunningCallRow(record: CompactCall, theme: ThemeLike): string {
+	const verb = presentTenseVerb(record.name, record.args);
+	const details = formatCallBodyDetails(record.name, record.args, theme, true);
+	let row = renderRunningGradient(verb) + details;
+	if (record.name === "edit" || record.name === "write") {
+		const live =
+			record.name === "edit" ? streamingEditStats(record.args) : streamingWriteStats(record.args);
+		if (live) row += theme.fg("dim", "  ") + formatEditStatsFromCounts(live, theme);
+	}
+	return row;
 }
 
 export class CompactRenderer {
@@ -893,8 +979,8 @@ export class CompactRenderer {
 			record.group.callText = callText;
 			callText.setText(formatGroup(record.group, theme));
 			// While the group is not settled (agent hasn't moved on), subscribe
-			// the owner's invalidate to the thinking tick so the gradient
-			// header sweeps in lockstep with the Thinking widget.
+			// the owner's invalidate to the thinking tick so the gradient runs on
+			// the running-row verbs.
 			if (!record.group.settled) {
 				this.subscribeGroupTick(record.invalidate);
 			} else {

@@ -213,10 +213,10 @@ describe("CompactRenderer", () => {
 		// The owner (A, the first call) renders the full group
 		const groupCall = r.renderCall("read", { file_path: "a.ts" }, theme, readContext as any) as any;
 
-		expect(stripAnsi(groupCall.text)).toContain("Exploring");
-		expect(groupCall.text).toContain("Search");
-		expect(groupCall.text).toContain("Read");
-		expect(groupCall.text).toContain("│");
+		expect(stripAnsi(groupCall.text)).toContain("Explored 0 files");
+		expect(groupCall.text).toContain("Searching");
+		expect(groupCall.text).toContain("Reading");
+		expect(groupCall.text).toContain("├");
 		expect(groupCall.text).toContain("└");
 		expect(groupCall.text.match(/•/g)?.length).toBe(1);
 	});
@@ -470,9 +470,7 @@ describe("CompactRenderer", () => {
 		// Settle by simulating visible text output; the group is now complete and past-tense.
 		r.noteVisibleText();
 		const settled = r.renderCall("edit", args, theme, makeContext("a", stateA) as any) as any;
-		expect(stripAnsi(settled.text)).toContain("Edited 1 file");
-		expect(settled.text).toContain("[success:+1]");
-		expect(settled.text).toContain("[error:-1]");
+		expect(stripAnsi(settled.text)).toContain("Edited 1 file +2 -2");
 	});
 
 	test("Explored summaries count distinct target paths", () => {
@@ -613,7 +611,7 @@ describe("CompactRenderer", () => {
 		expect((compB2 as any).text).toBe("");
 		// Re-rendering the owner A renders the full group with both children
 		const compA2 = r.renderCall("read", { file_path: "a.ts" }, theme, ctx1 as any);
-		expect(stripAnsi((compA2 as any).text)).toContain("Exploring");
+		expect(stripAnsi((compA2 as any).text)).toContain("Explored 0 files");
 		expect((compA2 as any).text).toContain("a.ts");
 		expect((compA2 as any).text).toContain("b.ts");
 	});
@@ -1001,9 +999,8 @@ describe("CompactRenderer", () => {
 
 		// Owner re-renders the full group into a fresh Text
 		const ownerComp = r.renderCall("read", { file_path: "a.ts" }, theme, ctxA2 as any) as any;
-		expect(stripAnsi(ownerComp.text)).toContain("Explored");
-		expect(ownerComp.text).toContain("a.ts");
-		expect(ownerComp.text).toContain("foo");
+		expect(stripAnsi(ownerComp.text)).toContain("Explored 2 files 1 match");
+		// Completed members are absorbed into the header in the new design.
 		expect(ownerComp.text.match(/•/g)?.length).toBe(1);
 
 		// Non-owner renders empty (zero vertical space)
@@ -1031,9 +1028,8 @@ describe("CompactRenderer", () => {
 			{ ...ctxB2, isError: false } as any,
 		);
 
-		// The shared callText was updated directly (no owner invalidation)
-		expect(ownerComp.text).toContain("a.ts");
-		expect(ownerComp.text).toContain("foo");
+		// The shared callText was updated directly (no owner invalidation).
+		// Completed members are absorbed into the header in the new design.
 		// No synchronous invalidate recursion: the new owner invalidate was NOT
 		// called by setResult (members write callText directly).
 		expect(invA2).not.toHaveBeenCalled();
@@ -1073,7 +1069,7 @@ describe("CompactRenderer", () => {
 			);
 			r.settleAllGroups();
 
-			// Verbose (thinking visible): children render.
+			// Verbose (thinking visible): completed members are absorbed into the header.
 			setThinkingBlocksHidden(false);
 			const verboseOwner = r.renderCall(
 				"read",
@@ -1082,10 +1078,10 @@ describe("CompactRenderer", () => {
 				makeContext("a", stateA) as any,
 			) as any;
 			expect(stripAnsi(verboseOwner.text)).toContain("Explored 2 files");
-			expect(stripAnsi(verboseOwner.text)).toContain("a.ts");
-			expect(stripAnsi(verboseOwner.text)).toContain("foo");
+			expect(stripAnsi(verboseOwner.text)).not.toContain("a.ts");
+			expect(stripAnsi(verboseOwner.text)).not.toContain("foo");
 
-			// Compact (thinking hidden): settled group collapses to header-only.
+			// Compact (thinking hidden): same header-only view.
 			setThinkingBlocksHidden(true);
 			const collapsedOwner = r.renderCall(
 				"read",
@@ -1097,8 +1093,7 @@ describe("CompactRenderer", () => {
 			expect(stripAnsi(collapsedOwner.text)).not.toContain("a.ts");
 			expect(stripAnsi(collapsedOwner.text)).not.toContain("foo");
 
-			// Toggling back to verbose reveals children again (simulates the
-		// rebuildChatFromMessages() path triggered by Ctrl+T).
+			// Toggling back to verbose still shows the header because completed members stay absorbed.
 			setThinkingBlocksHidden(false);
 			const revealedOwner = r.renderCall(
 				"read",
@@ -1106,8 +1101,7 @@ describe("CompactRenderer", () => {
 				theme,
 				makeContext("a", stateA) as any,
 			) as any;
-			expect(stripAnsi(revealedOwner.text)).toContain("a.ts");
-			expect(stripAnsi(revealedOwner.text)).toContain("foo");
+			expect(stripAnsi(revealedOwner.text)).toContain("Explored 2 files");
 		} finally {
 			setThinkingBlocksHidden(prev_hidden);
 		}
