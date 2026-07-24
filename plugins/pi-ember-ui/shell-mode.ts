@@ -12,13 +12,23 @@ export type ShellModeEditor = {
 	getText?: () => string;
 	setText?: (text: string) => void;
 	isEditorEmpty?: () => boolean;
-	tui?: { requestRender?: (force?: boolean) => void };
+	tui?: { requestRender?: () => void };
 };
 
 export type ShellModeInputResult = {
 	consume?: boolean;
 	data?: string;
 } | undefined;
+
+/** Set when shell-mode Enter prefixes `!` for Pi bash submit (TUI or editor path). */
+let pending_shell_submit_enter = false;
+
+/** Consume and clear the shell-submit Enter flag (one-shot). */
+export function consume_pending_shell_submit_enter(): boolean {
+	const pending = pending_shell_submit_enter;
+	pending_shell_submit_enter = false;
+	return pending;
+}
 
 /** Optional callback installed from pi-ember-ui for render/footer refresh. */
 let on_shell_sync: (() => void) | undefined;
@@ -198,6 +208,7 @@ export function process_shell_input(
 		// Pi's onSubmit needs to identify a bash command.
 		with_suppressed_shell_history_sync(() => editor.setText?.(`!${text}`));
 		setShellMode(false);
+		pending_shell_submit_enter = true;
 		// Let the normal submit run; Pi's own render path repaints after setText.
 		return undefined;
 	}
@@ -213,7 +224,7 @@ export function process_shell_input(
 export function intercept_shell_input(data: string, editor: ShellModeEditor): boolean {
 	const result = process_shell_input(data, editor);
 	if (result?.consume) {
-		editor.tui?.requestRender?.(false);
+	editor.tui?.requestRender?.();
 		return true;
 	}
 	return false;

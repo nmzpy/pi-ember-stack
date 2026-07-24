@@ -3,27 +3,16 @@
 Cursor subscription provider for [Pi](https://pi.dev), bundled as part of
 `@nmzpy/pi-ember-stack`.
 
-The provider uses the official Cursor Agent CLI's browser-authenticated session.
-It does not require or accept a Cursor SDK API key. Pi continues to own the
-conversation, tool loop, tool permissions, rendering, and session persistence.
+The provider talks **cloud-direct** to `api2.cursor.sh` over Connect-RPC
+(`agent.v1.AgentService/Run`). Pi owns the full conversation context and tool
+loop; native `toolcall_*` stream events feed **pi-compact-tools** rendering.
+
+No `cursor-agent` subprocess is required for the default path.
 
 ## Requirements
 
-- Install the official Cursor Agent CLI.
-- Ensure `cursor-agent` is available, or set `CURSOR_AGENT_EXECUTABLE` to its
-  executable path.
-- Authenticate with `/login cursor` or `cursor-agent login`.
-
-The provider deliberately does not fall back to an executable named `agent`,
-because other products use that ambiguous command name. It also does not provide
-an API-key or `cursor/auto` fallback: the CLI must be installed, authenticated,
-and able to list models before Cursor models appear in `/model`.
-
-If `cursor-agent` is missing at startup, the rest of `pi-ember-stack` still
-loads; the Cursor provider registers with an empty catalog. On `/login cursor`,
-streaming, or `/cursor-refresh-models`, the plugin ensures the official CLI is
-installed (via Cursor.app's `cursor agent` helper on macOS when present, otherwise
-`https://cursor.com/install`) and then proceeds.
+- A Cursor subscription account.
+- Browser available for PKCE OAuth (`/login cursor`).
 
 ## Usage
 
@@ -33,8 +22,6 @@ installed (via Cursor.app's `cursor agent` helper on macOS when present, otherwi
 /model cursor/<model-id>
 ```
 
-Run `/cursor-refresh-models` to see the available model ids from your subscription. There is no `cursor/auto` fallback; the plugin fails loudly if the CLI is missing, unauthenticated, or returns no models.
-
 Diagnostics and logout:
 
 ```text
@@ -42,30 +29,56 @@ Diagnostics and logout:
 /cursor-logout
 ```
 
-`/login cursor` delegates browser authentication to Cursor Agent. Cursor owns
-and stores the subscription credential; Pi stores only a non-secret marker so
-its normal provider login UI recognizes the completed login.
+`/login cursor` opens Cursor's browser OAuth flow (PKCE). Pi stores OAuth
+`access` / `refresh` tokens in `auth.json` like other providers.
 
-## Transport
+## Architecture
 
-Each Pi provider turn starts Cursor Agent in `stream-json` print mode and sends
-a neutral serialization of Pi's existing system prompt, ordered messages, and
-active function schemas. The serialization does not add a Cursor/Composer
-persona or replace Pi's system prompt.
+```text
+Pi agent loop
+  → stream_cursor() (streamSimple)
+  → map_context_to_cursor() — full messages + tools
+  → cloud-direct AgentService/Run (HTTP/2 via Node h2-bridge)
+  → native text/thinking/toolcall events
+  → Pi executes tools (bash rules, DCP, compact rendering)
+```
 
-Cursor text and thinking events become native Pi stream events. A Cursor tool
-event is accepted only when it resolves to a tool in Pi's active tool list; Pi
-then executes the tool through its normal lifecycle. Cursor wraps Model Context
-Protocol server tool calls in an `mcpToolCall` envelope; the provider unwraps
-the envelope and resolves the inner tool name (`args.name`/`args.tool_name`)
-through Pi's registry before execution. Unknown tool events stop the request
-and surface an error.
+### Key behaviors
 
-Image input is advertised and passed through as base64 data URLs in the serialized request.
+- **Full Pi context** each turn (messages with assistant tool calls, tool results,
+  system prompt). Hidden `pi-agents-*` injections are filtered via the same SSOT
+  as `build_cursor_user_prompt()`.
+- **Pi executes tools** — Cursor native filesystem/shell tools are rejected;
+  Pi tools are exposed via Cursor's MCP exec path.
+- **History rebuild** — completed assistant tool calls are encoded as MCP
+  `ConversationStep` bytes (`cloud-direct/history.ts`); pending results carry
+  `tool_call_id` markers in outbound user text.
+- **Per-session checkpoints** — conversation state is keyed by Pi session id, not
+  `cwd`; `/resume` preserves checkpoint state for that session.
+- **Parallel tool batching** — multiple MCP tool requests in one `Run` stream
+  are collected and emitted as several `toolcall_*` blocks with a single
+  `toolUse` finish so Pi can execute them in one turn.
+- **Mode directives** prepend to the system prompt on the first turn and after
+  Pi mode changes (`plan`, `code`, `debug`, `orchestrate`).
+- **Reasoning models** are detected via `CURSOR_REASONING_MODEL_PATTERNS` and
+  forward `thinking_*` events natively.
+- **Windows HTTP/2** uses an isolated Node `h2-bridge.mjs` child process
+  (Bun's `node:http2` is unreliable against Cursor's API).
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/login cursor` | PKCE browser OAuth |
+| `/cursor-status` | Auth + model catalog probe |
+| `/cursor-refresh-models` | Re-fetch `GetUsableModels` |
+| `/cursor-logout` | Clear OAuth + cached checkpoints |
 
 ## Provenance
 
-The Cursor CLI executable resolution, model-output parsing, stream event shapes,
-and tool-event compatibility behavior were informed by
-[Nomadcxx/opencode-cursor](https://github.com/Nomadcxx/opencode-cursor), licensed
-under BSD-3-Clause. See `LICENSE`.
+Wire protocol, OAuth PKCE flow, h2-bridge, and protobuf schemas are adapted from
+[ephraimduncan/opencode-cursor](https://github.com/ephraimduncan/opencode-cursor)
+(BSD-3-Clause). See `LICENSE`.
+
+Pi integration shape follows `plugins/devin-auth/` (cloud-direct + context-map +
+native `streamSimple` events).

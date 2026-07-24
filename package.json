@@ -1,6 +1,6 @@
 {
   "name": "@nmzpy/pi-ember-stack",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Ember's configurable Pi stack with modes, compact tools, subagents, and Devin and Cursor providers",
   "type": "module",
   "license": "AGPL-3.0-or-later",
@@ -39,6 +39,7 @@
     ]
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.13.0",
     "@ff-labs/fff-node": "0.9.6",
     "@mozilla/readability": "^0.6.0",
     "@sinclair/typebox": "^0.34.0",

@@ -1,5 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "./agents.ts";
+import {
+	DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS,
+	model_provider_of,
+	with_provider_patch_tool,
+} from "../../edit-tools.ts";
 import { runSubAgent, type SubAgentResult } from "./runner.ts";
 import { resolveModel } from "./model.ts";
 
@@ -42,7 +47,12 @@ export async function runNamedAgent(options: {
 		cwd: options.cwd,
 		systemPrompt: contract ? `${options.agent.systemPrompt}\n\n## Task Contract\n${contract}` : options.agent.systemPrompt,
 		task: options.task,
-		tools: (options.agent.tools ?? ["read", "bash", "edit", "write", "grep", "find", "ls"]).filter((tool) => tool !== "subagent"),
+		tools: with_provider_patch_tool(
+			(options.agent.tools ?? [...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS]).filter(
+				(tool) => tool !== "subagent",
+			),
+			model_provider_of(model),
+		),
 		model,
 		modelRegistry,
 		parentSignal: options.signal,

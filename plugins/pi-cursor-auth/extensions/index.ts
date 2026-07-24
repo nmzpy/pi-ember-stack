@@ -2,29 +2,51 @@ import {
 	type ExtensionAPI,
 	ModelRuntime,
 	type ProviderModelConfig,
+	readStoredCredential,
 } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import {
 	CURSOR_API_IDENTIFIER,
-	CURSOR_AUTH_MARKER,
 	CURSOR_PLACEHOLDER_BASE_URL,
 	CURSOR_PROVIDER_ID,
 	CURSOR_PROVIDER_NAME,
 } from "../src/constants.js";
 import {
-	discover_cursor_models,
+	discover_cursor_models_with_token,
 	get_cursor_status,
 	login_cursor,
 	logout_cursor,
+	ensure_fresh_cursor_credentials,
 } from "../src/cli.js";
 import { build_cursor_models } from "../src/models.js";
 import {
-	set_cursor_cwd,
-	stream_cursor_subscription,
-	terminate_cursor_processes,
+	clear_all_conversation_states,
+	clear_cached_cursor_models,
+} from "../src/cloud-direct/index.js";
+import {
+	reset_cursor_session,
+	set_cursor_pi_mode,
+	set_cursor_session_key,
+	get_cursor_session_key,
+	set_cursor_workspace_path,
+	stream_cursor,
 } from "../src/stream.js";
+import { clear_conversation_state } from "../src/cloud-direct/session.js";
 
 let active_pi: ExtensionAPI | null = null;
+
+async function prime_catalog_from_stored_auth(): Promise<ProviderModelConfig[]> {
+	if (!active_pi) return [];
+	try {
+		const credential = readStoredCredential(CURSOR_PROVIDER_ID);
+		if (credential?.type !== "oauth" || !credential.access) return [];
+		const fresh = await ensure_fresh_cursor_credentials(credential);
+		const models = await discover_cursor_models_with_token(fresh.access);
+		return build_cursor_models(models);
+	} catch {
+		return [];
+	}
+}
 
 function register_cursor_provider(pi: ExtensionAPI, models: ProviderModelConfig[]): void {
 	pi.registerProvider(CURSOR_PROVIDER_ID, {
@@ -32,26 +54,25 @@ function register_cursor_provider(pi: ExtensionAPI, models: ProviderModelConfig[
 		baseUrl: CURSOR_PLACEHOLDER_BASE_URL,
 		api: CURSOR_API_IDENTIFIER,
 		models,
-		streamSimple: stream_cursor_subscription,
+		streamSimple: stream_cursor,
 		oauth: {
 			name: "Cursor subscription (browser login)",
 			async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-				await login_cursor(callbacks);
+				const credentials = await login_cursor(callbacks);
 				if (active_pi) {
-					const discovered = await discover_cursor_models();
+					clear_cached_cursor_models();
+					const discovered = await discover_cursor_models_with_token(credentials.access, {
+						force: true,
+					});
 					register_cursor_provider(active_pi, build_cursor_models(discovered));
 				}
-				return {
-					access: CURSOR_AUTH_MARKER,
-					refresh: "",
-					expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
-				};
+				return credentials;
 			},
 			async refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-				return { ...credentials, expires: Date.now() + 365 * 24 * 60 * 60 * 1000 };
+				return ensure_fresh_cursor_credentials(credentials);
 			},
-			getApiKey(): string {
-				return CURSOR_AUTH_MARKER;
+			getApiKey(credentials: OAuthCredentials): string {
+				return credentials.access;
 			},
 		},
 	});
@@ -60,33 +81,58 @@ function register_cursor_provider(pi: ExtensionAPI, models: ProviderModelConfig[
 export default async function pi_cursor_auth(pi: ExtensionAPI): Promise<void> {
 	active_pi = pi;
 
-	// Register with an empty catalog first so a missing/unauthenticated
-	// cursor-agent CLI cannot take down the whole pi-ember-stack load.
-	// Live discovery fills the list when the CLI is available; otherwise
-	// /login cursor and /cursor-refresh-models remain the recovery path.
-	register_cursor_provider(pi, []);
-	try {
-		// Do not auto-install during factory load — only probe an existing CLI.
-		const discovered = await discover_cursor_models({ ensure: false });
-		const models = build_cursor_models(discovered);
-		if (models.length > 0) {
-			register_cursor_provider(pi, models);
-		}
-	} catch {
-		// CLI missing, not logged in, or empty model list — keep empty catalog.
-	}
+	const abort_rejection_handler = (reason: unknown): void => {
+		const reason_name =
+			typeof reason === "object" && reason !== null
+				? (reason as { name?: unknown }).name
+				: undefined;
+		if (reason_name === "AbortError") return;
+		queueMicrotask(() => {
+			throw reason;
+		});
+	};
+	process.on("unhandledRejection", abort_rejection_handler);
 
-	pi.on("session_start", (_event, ctx) => {
-		set_cursor_cwd(ctx.cwd);
+	register_cursor_provider(pi, []);
+	const primed = await prime_catalog_from_stored_auth();
+	if (primed.length > 0) register_cursor_provider(pi, primed);
+
+	pi.on("session_start", async (event, ctx) => {
+		active_pi = pi;
+		const session_id = ctx.sessionManager.getSessionId?.() ?? ctx.cwd ?? "default";
+		set_cursor_session_key(session_id);
+		set_cursor_workspace_path(ctx.cwd);
+		if (event.reason === "fork" || event.reason === "new" || event.reason === "startup") {
+			reset_cursor_session();
+			clear_all_conversation_states();
+		} else if (event.reason === "resume") {
+			reset_cursor_session();
+		}
+
+		try {
+			const api_key = await ctx.modelRegistry.getApiKeyForProvider(CURSOR_PROVIDER_ID);
+			if (api_key && active_pi) {
+				const models = await discover_cursor_models_with_token(api_key);
+				register_cursor_provider(active_pi, build_cursor_models(models));
+			}
+		} catch {
+			// keep current catalog
+		}
+	});
+
+	pi.events.on("pi-ember-ui:mode-change", (event: unknown) => {
+		const mode_event = event as { mode?: string } | undefined;
+		set_cursor_pi_mode(typeof mode_event?.mode === "string" ? mode_event.mode : undefined);
 	});
 
 	pi.registerCommand("cursor-status", {
-		description: "Show Cursor CLI subscription authentication status",
+		description: "Show Cursor cloud-direct authentication status",
 		handler: async (_args, ctx) => {
 			try {
-				const status = await get_cursor_status();
+				const api_key = await ctx.modelRegistry.getApiKeyForProvider(CURSOR_PROVIDER_ID);
+				const status = await get_cursor_status(api_key);
 				ctx.ui.notify(
-					status.authenticated ? "Cursor: authenticated" : `Cursor: ${status.detail}`,
+					status.authenticated ? `Cursor: ${status.detail}` : `Cursor: ${status.detail}`,
 					status.authenticated ? "info" : "warning",
 				);
 			} catch (error) {
@@ -96,10 +142,18 @@ export default async function pi_cursor_auth(pi: ExtensionAPI): Promise<void> {
 	});
 
 	pi.registerCommand("cursor-refresh-models", {
-		description: "Refresh models available through the Cursor subscription",
+		description: "Refresh models available through Cursor cloud-direct",
 		handler: async (_args, ctx) => {
 			try {
-				const refreshed = build_cursor_models(await discover_cursor_models());
+				const api_key = await ctx.modelRegistry.getApiKeyForProvider(CURSOR_PROVIDER_ID);
+				if (!api_key) {
+					ctx.ui.notify("Cursor: not signed in. Run /login cursor", "warning");
+					return;
+				}
+				clear_cached_cursor_models();
+				const refreshed = build_cursor_models(
+					await discover_cursor_models_with_token(api_key, { force: true }),
+				);
 				register_cursor_provider(pi, refreshed);
 				ctx.ui.notify(`Cursor: refreshed ${refreshed.length} models.`, "info");
 			} catch (error) {
@@ -112,10 +166,11 @@ export default async function pi_cursor_auth(pi: ExtensionAPI): Promise<void> {
 	});
 
 	pi.registerCommand("cursor-logout", {
-		description: "Log out of Cursor CLI and remove Pi's Cursor auth marker",
+		description: "Log out of Cursor and clear cached cloud state",
 		handler: async (_args, ctx) => {
 			try {
 				await logout_cursor();
+				clear_all_conversation_states();
 				const model_runtime = await ModelRuntime.create();
 				await model_runtime.logout(CURSOR_PROVIDER_ID);
 				ctx.ui.notify("Cursor: logged out.", "info");
@@ -129,8 +184,10 @@ export default async function pi_cursor_auth(pi: ExtensionAPI): Promise<void> {
 	});
 
 	pi.on("session_shutdown", () => {
-		terminate_cursor_processes();
-		set_cursor_cwd(undefined);
+		reset_cursor_session();
+		clear_conversation_state(get_cursor_session_key());
+		clear_cached_cursor_models();
 		active_pi = null;
+		process.off("unhandledRejection", abort_rejection_handler);
 	});
 }

@@ -6,6 +6,7 @@ import devinAuthPlugin from "./devin-auth/extensions/index.ts";
 import piCompactToolsPlugin, { getSharedRenderer } from "./pi-compact-tools/index.ts";
 import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
+import piEmberApplypatchPlugin from "./pi-ember-applypatch/index.ts";
 import piEmberDcpPlugin from "./pi-ember-dcp/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberTodoPlugin from "./pi-ember-todo/index.ts";
@@ -17,6 +18,7 @@ export { getSharedRenderer };
 
 type PluginId =
 	| "pi-compact-tools"
+	| "pi-ember-applypatch"
 	| "pi-custom-agents"
 	| "pi-ember-dcp"
 	| "devin-auth"
@@ -35,6 +37,7 @@ type StackPlugin = {
 const CONFIG_FILENAME = "pi-ember-stack.json";
 const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-compact-tools",
+	"pi-ember-applypatch",
 	"devin-auth",
 	"pi-cursor-auth",
 	"pi-custom-agents",
@@ -51,6 +54,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-compact-tools",
 		description: "Collapsed native edit rendering",
 		extension: piCompactToolsPlugin,
+	},
+	{
+		id: "pi-ember-applypatch",
+		description: "Codex-style apply_patch tool for multi-file edits",
+		extension: piEmberApplypatchPlugin,
 	},
 	{
 		id: "devin-auth",

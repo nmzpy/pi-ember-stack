@@ -111,6 +111,7 @@ export const ALWAYS_PROTECTED_TOOLS = new Set([
 	"compress",
 	"write",
 	"edit",
+	"apply_patch",
 	"todo",
 	"task",
 	"skill",

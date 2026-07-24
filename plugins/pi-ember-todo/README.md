@@ -1,8 +1,8 @@
 # pi-ember-todo
 
-Ember-owned task list extension for Pi. Registers the `todo` tool, the
-`/todos` slash command, and a persistent `TodoOverlay` widget that renders
-above the editor.
+Ember-owned task list extension for Pi. Registers the `todo` tool and the
+`/todos` slash command. Task lists render in the chat transcript with neutral
+`text` / `dim` / `muted` theme tokens (no above-editor overlay).
 
 Adapted from `@xaccefy/pi-xtodo` (MIT License, Copyright (c) 2025 x4cc3) —
 see `./LICENSE` for upstream attribution. The adaptation is distributed

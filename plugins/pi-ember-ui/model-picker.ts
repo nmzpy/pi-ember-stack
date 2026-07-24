@@ -1,20 +1,37 @@
 import type { Model } from "@earendil-works/pi-ai";
 import {
 	CustomEditor,
-	ExtensionRunner,
-	SessionManager,
 	type ExtensionAPI,
+	ExtensionRunner,
 	type SessionInfo,
+	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import {
+	type AutocompleteItem,
+	type AutocompleteProvider,
 	Editor,
 	fuzzyFilter,
 	getKeybindings,
+	Key,
+	matchesKey,
 	SelectList,
-	type AutocompleteItem,
-	type AutocompleteProvider,
 } from "@earendil-works/pi-tui";
-import { finalize_editor_input_after, sync_slash_command_active } from "./layout.ts";
+import {
+	finalize_editor_input_after,
+	reset_slash_command_tracking,
+	sync_slash_command_active,
+} from "./layout.ts";
+import { refresh_footer, set_footer_thinking_level } from "./footer.ts";
+import { resolve_model_effort_level } from "./model-variants.ts";
+import {
+	close_model_picker,
+	handle_model_picker_input,
+	is_model_picker_active,
+	on_model_picker_filter_changed,
+	open_model_picker_in_editor,
+} from "./model-selector.ts";
+import type { EffortSliderPoint } from "./model-variants.ts";
+import { buildSelectListTheme, resolve_select_list_theme } from "./select-list-theme.ts";
 
 /** Same layout Pi uses for slash-command autocomplete rows. */
 const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
@@ -23,7 +40,7 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
 };
 
 /**
- * Max visible rows in editor entry pickers (slash commands, /model, /resume, etc.).
+ * Max visible rows in editor entry pickers (slash commands, /resume, etc.).
  * Pi defaults to 5 via `autocompleteMaxVisible`; 7 reads less cramped.
  * SSOT for all SelectLists created through the createAutocompleteList patch.
  */
@@ -34,7 +51,14 @@ const RESUME_PREFIX = "/resume";
 const SESSION_CACHE_TTL_MS = 5_000;
 const FIRST_MESSAGE_PREVIEW_LEN = 48;
 
-type ModelPickResult = { provider: string; id: string } | undefined;
+export type ModelPickResult =
+	| {
+			provider: string;
+			id: string;
+			thinkingLevel?: EffortSliderPoint;
+			syncThinkingLevelToPi?: boolean;
+	  }
+	| undefined;
 
 type PendingModelPick = {
 	resolve: (result: ModelPickResult) => void;
@@ -49,6 +73,8 @@ let model_picker_ctx: any;
 let model_picker_pi: ExtensionAPI | undefined;
 let live_editor: any;
 let pending_pick: PendingModelPick | null = null;
+/** True while the in-editor Switch Model list is open. */
+let model_selector_busy = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:model-picker-patched");
 /** Captured from ExtensionRunner.bindCommandContext — same role as pi.setModel for /model. */
 let switch_session_fn: SwitchSessionFn | undefined;
@@ -101,8 +127,8 @@ function editor_is_showing_autocomplete(editor: any): boolean {
 	return editor.isShowingAutocomplete?.() === true;
 }
 
-function request_editor_render(editor: any, force = false): void {
-	editor?.tui?.requestRender?.(force);
+function request_editor_render(editor: any): void {
+	editor?.tui?.requestRender?.();
 }
 
 /** Request slash-command argument completions (e.g. /model provider/id). */
@@ -125,15 +151,57 @@ function open_slash_autocomplete(editor: any, command: string, initialSearch = "
 	request_editor_render(editor);
 }
 
-/** Open Pi's built-in /model argument autocomplete inside the editor chat pill. */
-export function open_model_autocomplete(editor: any, initialSearch = ""): void {
-	open_slash_autocomplete(editor, MODEL_PREFIX, initialSearch);
-}
-
-/** Open /resume session argument autocomplete (chat-pill, same UX as /model). */
+/** Open /resume session argument autocomplete (chat-pill). */
 export function open_resume_autocomplete(editor: any, initialSearch = ""): void {
 	void refresh_session_cache({ force: true });
 	open_slash_autocomplete(editor, RESUME_PREFIX, initialSearch);
+}
+
+async function apply_model_selection(
+	pi: ExtensionAPI,
+	ctx: any,
+	selection: {
+		provider: string;
+		id: string;
+		thinkingLevel?: EffortSliderPoint;
+		syncThinkingLevelToPi?: boolean;
+	},
+): Promise<boolean> {
+	const models = ctx.modelRegistry.getAvailable();
+	const model = find_exact_model_reference(`${selection.provider}/${selection.id}`, models);
+	if (!model) {
+		ctx.ui.notify(`Model not found: ${selection.provider}/${selection.id}`, "error");
+		return false;
+	}
+	try {
+		await pi.setModel(model as Model<any>);
+		if (selection.thinkingLevel) {
+			set_footer_thinking_level(selection.thinkingLevel);
+			if (selection.syncThinkingLevelToPi) {
+				const setLevel = (pi as { setThinkingLevel?: (level: string) => Promise<void> | void })
+					.setThinkingLevel;
+				if (typeof setLevel === "function") {
+					await setLevel.call(pi, selection.thinkingLevel);
+				}
+			}
+		} else {
+			const level = resolve_model_effort_level(
+				model,
+				(pi as { getThinkingLevel?: () => string }).getThinkingLevel?.() ?? "off",
+			);
+			set_footer_thinking_level(level);
+		}
+		refresh_footer(ctx);
+		const effortHint = selection.thinkingLevel ? ` · ${selection.thinkingLevel}` : "";
+		ctx.ui.notify(`Model: ${model.id}${effortHint} • ${model.provider}`, "info");
+		return true;
+	} catch (err) {
+		ctx.ui.notify(
+			`Failed to set model: ${err instanceof Error ? err.message : String(err)}`,
+			"error",
+		);
+		return false;
+	}
 }
 
 async function apply_model_from_command(
@@ -144,15 +212,7 @@ async function apply_model_from_command(
 	const models = ctx.modelRegistry.getAvailable();
 	const model = find_exact_model_reference(searchTerm, models);
 	if (!model) return;
-	try {
-		await pi.setModel(model as Model<any>);
-		ctx.ui.notify(`Model: ${model.id} • ${model.provider}`, "info");
-	} catch (err) {
-		ctx.ui.notify(
-			`Failed to set model: ${err instanceof Error ? err.message : String(err)}`,
-			"error",
-		);
-	}
+	await apply_model_selection(pi, ctx, { provider: model.provider, id: model.id });
 }
 
 function resolve_pending_pick(searchTerm: string): ModelPickResult {
@@ -160,6 +220,67 @@ function resolve_pending_pick(searchTerm: string): ModelPickResult {
 	const models = model_picker_ctx.modelRegistry.getAvailable();
 	const model = find_exact_model_reference(searchTerm, models);
 	return model ? { provider: model.provider, id: model.id } : undefined;
+}
+
+/** Open the in-editor Switch Model list (chatbox stays; models grow below). */
+function open_model_selector_ui(editor: any, initialSearch = ""): void {
+	if (!model_picker_ctx || !model_picker_pi) return;
+	const ctx = model_picker_ctx;
+	const pi = model_picker_pi;
+	live_editor = editor;
+	model_selector_busy = true;
+
+	open_model_picker_in_editor(editor, ctx, pi, {
+		initialSearch,
+		onConfirm: async (selected) => {
+			model_selector_busy = false;
+			finalize_editor_input_after(live_editor);
+			if (pending_pick) {
+				const pick = pending_pick;
+				pending_pick = null;
+				pick.resolve({
+					provider: selected.provider,
+					id: selected.id,
+					thinkingLevel: selected.thinkingLevel,
+					syncThinkingLevelToPi: selected.syncThinkingLevelToPi,
+				});
+				return;
+			}
+			await apply_model_selection(pi, ctx, selected);
+		},
+		onCancel: () => {
+			model_selector_busy = false;
+			finalize_editor_input_after(live_editor);
+			if (pending_pick) {
+				pending_pick.resolve(undefined);
+				pending_pick = null;
+			}
+		},
+	});
+}
+
+/**
+ * Open the in-editor model picker on the next microtask so slash autocomplete
+ * can collapse first. Editor text is cleared so the user can type a filter freely.
+ */
+function prepare_and_schedule_model_selector(editor: any, initialSearch = ""): void {
+	if (model_selector_busy || is_model_picker_active()) return;
+	live_editor = editor;
+	editor?.cancelAutocomplete?.();
+	reset_slash_command_tracking();
+	if (!model_picker_ctx || !model_picker_pi) {
+		model_picker_ctx?.ui?.notify?.("Model picker is not ready yet.", "error");
+		return;
+	}
+	let seed = initialSearch;
+	const text = editor?.getText?.()?.trim() ?? "";
+	if (text.startsWith(`${MODEL_PREFIX} `)) {
+		seed = text.slice(MODEL_PREFIX.length).trim();
+	}
+	queueMicrotask(() => {
+		if (model_selector_busy || is_model_picker_active()) return;
+		open_model_selector_ui(editor, seed);
+	});
 }
 
 function clear_editor_without_submit(editor: any): void {
@@ -177,15 +298,20 @@ function is_resume_command_text(text: string): boolean {
 }
 
 /**
- * Shared /model routing: in-editor slash autocomplete instead of Pi's
- * ModelSelectorComponent overlay.
+ * Shared /model routing: Switch Model chatbox UI for bare `/model`; exact
+ * `provider/id` still applies immediately. Bypasses Pi's ModelSelectorComponent.
  */
 function handle_model_command_text(editor: any, text: string): boolean {
 	if (!is_model_command_text(text)) return false;
 
+	// Enter while the in-editor model list is open must not reopen it.
+	if (model_selector_busy || is_model_picker_active()) {
+		return true;
+	}
+
 	const searchTerm = text.slice(MODEL_PREFIX.length).trim();
 	if (text === MODEL_PREFIX || !searchTerm) {
-		open_model_autocomplete(editor);
+		prepare_and_schedule_model_selector(editor);
 		return true;
 	}
 
@@ -210,8 +336,7 @@ function handle_model_command_text(editor: any, text: string): boolean {
 	// Fall through to Pi's original submitValue → onSubmit → handleModelCommand.
 	// Pi's handler awaits modelRuntime.refresh() before searching, so it resolves
 	// models that aren't in the synchronous getAvailable() snapshot (newly
-	// refreshed catalogs, scoped models, OAuth providers). Reopening the
-	// autocomplete here would loop forever when the sync snapshot is stale.
+	// refreshed catalogs, scoped models, OAuth providers).
 	return false;
 }
 
@@ -301,8 +426,43 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 	live_editor = editor;
 	model_picker_ctx = ctx;
 	model_picker_pi = pi;
+
+	// Instance-level submitValue patch — jiti can load a second Editor copy so
+	// Editor.prototype patches from plugin load may miss this live instance.
+	const original_submit_value = editor.submitValue?.bind(editor);
+	if (typeof original_submit_value === "function") {
+		editor.submitValue = (): void => {
+			if (is_model_picker_active()) return;
+			if (model_selector_busy) return;
+			const trimmed = (editor.getText?.() ?? "").trim();
+			if (handle_slash_override_text(editor, trimmed)) return;
+			original_submit_value();
+		};
+	}
+
 	const original_handle_input = editor.handleInput.bind(editor);
 	editor.handleInput = (data: string): void => {
+		if (is_model_picker_active()) {
+			const filterBefore = editor.getText?.() ?? "";
+			if (handle_model_picker_input(data, editor)) {
+				finalize_editor_input_after(editor);
+				return;
+			}
+			const wasNav =
+				matchesKey(data, Key.up) ||
+				matchesKey(data, Key.down) ||
+				matchesKey(data, Key.left) ||
+				matchesKey(data, Key.right);
+			if (!wasNav) {
+				original_handle_input(data);
+				const filterAfter = editor.getText?.() ?? "";
+				if (filterAfter !== filterBefore) {
+					on_model_picker_filter_changed(editor);
+				}
+			}
+			finalize_editor_input_after(editor);
+			return;
+		}
 		if (intercept_slash_override_command(data, editor)) {
 			finalize_editor_input_after(editor);
 			return;
@@ -322,8 +482,13 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 		// routes /model and /resume through our patch.
 		if (was_showing && !editor_is_showing_autocomplete(editor)) {
 			const text = editor.getText?.()?.trim() ?? "";
-			// Tab-selecting /model or /resume should advance to the argument picker.
-			if (is_tab && (text === MODEL_PREFIX || text === RESUME_PREFIX)) {
+			// Enter/Tab on bare /model or /resume must open the picker / resume UI.
+			// should_auto_submit_slash_text requires an argument, so handle these
+			// explicitly (Pi may have already submitted — then text is empty).
+			if (
+				(is_tab || is_confirm || is_submit) &&
+				(text === MODEL_PREFIX || text === RESUME_PREFIX)
+			) {
 				editor.submitValue?.();
 				finalize_editor_input_after(editor);
 				return;
@@ -525,7 +690,7 @@ function install_model_picker_prototype_patches(): void {
 			return new SelectList(
 				items,
 				AUTOCOMPLETE_MAX_VISIBLE,
-				(this as any).theme.selectList,
+				buildSelectListTheme(resolve_select_list_theme()),
 				layout,
 			);
 		};
@@ -565,7 +730,7 @@ function install_model_picker_prototype_patches(): void {
 	): void {
 		const kb = getKeybindings();
 		if (kb.matches(data, "app.model.select")) {
-			open_model_autocomplete(this);
+			prepare_and_schedule_model_selector(this);
 			return;
 		}
 		if (kb.matches(data, "app.session.resume")) {
@@ -595,6 +760,8 @@ export function bind_model_picker_session(ctx: any, pi: ExtensionAPI): void {
 
 export function reset_model_picker_session(): void {
 	cancel_pending_model_pick();
+	close_model_picker(live_editor);
+	model_selector_busy = false;
 	model_picker_ctx = undefined;
 	model_picker_pi = undefined;
 	live_editor = undefined;
@@ -606,21 +773,23 @@ export function reset_model_picker_session(): void {
 }
 
 /**
- * Open the in-editor /model picker and wait for the user to confirm a model.
- * Uses the same slash-popup flow as typing /model in the chatbox.
+ * Open the Switch Model chatbox UI and wait for the user to confirm a model.
+ * Same editor-replacement UI as `/model` / `app.model.select`.
  */
-export function pick_model_in_editor(
+export async function pick_model_in_editor(
 	ctx: any,
 	pi: ExtensionAPI,
 	initialSearch = "",
 ): Promise<ModelPickResult> {
-	if (!ctx.hasUI || ctx.mode !== "tui") return Promise.resolve(undefined);
+	if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
 	if (!live_editor) {
-		ctx.ui.setEditorText?.(initialSearch ? `${MODEL_PREFIX} ${initialSearch}` : `${MODEL_PREFIX} `);
-		return Promise.resolve(undefined);
+		ctx.ui.notify("Model picker requires the editor.", "warning");
+		return undefined;
 	}
+	model_picker_ctx = ctx;
+	model_picker_pi = pi;
 	return new Promise((resolve) => {
 		pending_pick = { resolve };
-		open_model_autocomplete(live_editor, initialSearch);
+		open_model_selector_ui(live_editor, initialSearch);
 	});
 }

@@ -10,6 +10,7 @@ import {
 	DIM_COLOR,
 	getActiveModeColor,
 	hexToRgbTriplet,
+	isScrollReviewActive,
 	MUTED_COLOR,
 	TEXT_COLOR,
 } from "./mode-colors.ts";
@@ -109,20 +110,69 @@ function sample_palette(palette: GradientPalette, t: number): Rgb {
 // Palette definitions — derived from mode-colors SSOT, cached per generation
 // ---------------------------------------------------------------------------
 
+let cached_thinking_palette: GradientPalette | undefined;
+let cached_neutral_pulse_palette: GradientPalette | undefined;
 let cached_accent_palette: GradientPalette | undefined;
 let cached_muted_text_palette: GradientPalette | undefined;
 
 /** Clear cached palettes — call when the live theme/accent changes. */
 export function invalidate_gradient_cache(): void {
+	cached_thinking_palette = undefined;
+	cached_neutral_pulse_palette = undefined;
 	cached_accent_palette = undefined;
 	cached_muted_text_palette = undefined;
 }
 
 /**
- * Accent palette: 3-stop RGB-space blend.
- *   DIM_COLOR base (position 0) → 50% toward accent (position 0.5) → accent peak (position 1)
- * The sweep starts at dim text and brightens toward the live mode accent.
- * Used by: thinking, working, subagent.
+ * Thinking palette: 3-stop dim→text glow (no live accent).
+ *   DIM_COLOR base → 50% toward TEXT_COLOR → TEXT_COLOR peak
+ * Used by: Thinking / Summarizing status header.
+ */
+function get_thinking_palette(): GradientPalette {
+	if (!cached_thinking_palette) {
+		const text_rgb = hexToRgbTriplet(TEXT_COLOR);
+		const dim_rgb = hexToRgbTriplet(DIM_COLOR);
+		cached_thinking_palette = {
+			stops: [
+				{ rgb: dim_rgb, position: 0 },
+				{ rgb: clamp_lerp(dim_rgb, text_rgb, 0.5), position: 0.5 },
+				{ rgb: text_rgb, position: 1 },
+			],
+		};
+	}
+	return cached_thinking_palette;
+}
+
+/**
+ * Neutral pulse palette: dim → muted → text (no live accent).
+ * Used by the startup header bullet while the logo animates.
+ */
+function get_neutral_pulse_palette(): GradientPalette {
+	if (!cached_neutral_pulse_palette) {
+		cached_neutral_pulse_palette = {
+			stops: [
+				{ rgb: hexToRgbTriplet(DIM_COLOR), position: 0 },
+				{ rgb: hexToRgbTriplet(MUTED_COLOR), position: 0.5 },
+				{ rgb: hexToRgbTriplet(TEXT_COLOR), position: 1 },
+			],
+		};
+	}
+	return cached_neutral_pulse_palette;
+}
+
+function rgb_to_hex(rgb: Rgb): string {
+	return `#${rgb[0].toString(16).padStart(2, "0")}${rgb[1].toString(16).padStart(2, "0")}${rgb[2].toString(16).padStart(2, "0")}`;
+}
+
+/** Header-bullet pulse color at logo phase (dim→muted→text). */
+export function neutral_pulse_hex(phase: number): string {
+	return rgb_to_hex(sample_palette(get_neutral_pulse_palette(), phase));
+}
+
+/**
+ * Accent palette: 3-stop dim→accent glow.
+ *   DIM_COLOR base → 50% toward live accent → accent peak
+ * Used by: working, subagent.
  */
 function get_accent_palette(): GradientPalette {
 	if (!cached_accent_palette) {
@@ -160,6 +210,7 @@ function get_muted_text_palette(): GradientPalette {
 function get_preset_palette(preset: GradientPreset): GradientPalette {
 	switch (preset) {
 		case "thinking":
+			return get_thinking_palette();
 		case "working":
 		case "subagent":
 			return get_accent_palette();
@@ -221,13 +272,16 @@ export function render_gradient(text: string, preset: GradientPreset, phase: num
 const active_reasons = new Set<string>();
 const tick_subscribers = new Set<() => void>();
 let gradient_timer: ReturnType<typeof setInterval> | undefined;
-let clock_start = 0;
-let render_request_fn: (() => void) | undefined;
+let render_request: (() => void) | undefined;
 
-/** Set the render-request callback (called once per tick). */
-export function set_gradient_render_request(fn: (() => void) | undefined): void {
-	render_request_fn = fn;
+/**
+ * Bind the one public Pi render request used by animated component state.
+ * The gradient clock never writes to the terminal or touches TUI diff state.
+ */
+export function set_gradient_render_request(cb: (() => void) | undefined): void {
+	render_request = cb;
 }
+let clock_start = 0;
 
 /** Current sweep phase in [0, 1), computed from elapsed monotonic time. */
 export function get_gradient_phase(): number {
@@ -269,7 +323,6 @@ export function get_logo_phase(): number {
  * visited again indefinitely.
  */
 export function dispatch_gradient_tick(): void {
-	render_request_fn?.();
 	const snapshot = [...tick_subscribers];
 	for (const cb of snapshot) {
 		if (!tick_subscribers.has(cb)) continue;
@@ -278,6 +331,9 @@ export function dispatch_gradient_tick(): void {
 		} catch {
 			/* best effort — same contract as before */
 		}
+	}
+	if (!isScrollReviewActive() && (active_reasons.size > 0 || tick_subscribers.size > 0)) {
+		render_request?.();
 	}
 }
 
@@ -329,6 +385,6 @@ export function shutdown_gradient_clock(): void {
 		gradient_timer = undefined;
 	}
 	clock_start = 0;
-	render_request_fn = undefined;
+	render_request = undefined;
 	invalidate_gradient_cache();
 }

@@ -1,24 +1,21 @@
 /**
  * pi-ember-todo — Ember-owned task list extension for Pi.
  *
- * Registers the `todo` tool, `/todos` slash command, and a persistent
- * TodoOverlay widget. Adapted from `@xaccefy/pi-xtodo` (MIT, (c) 2025 x4cc3);
- * see ./LICENSE for upstream attribution. The adapter is distributed under
- * AGPL-3.0-or-later as part of pi-ember-stack.
- *
- * Behavior is preserved (status lifecycle, blockedBy DAG with cycle
- * rejection, replay-from-branch with disk fallback, compact overlay widget).
- * Naming and formatting are aligned to pi-ember-stack conventions
- * (snake_case locals, tabs, double quotes) and the widget key is namespaced
- * under the Ember stack.
+ * Registers the `todo` tool and `/todos` slash command. Task lists render in
+ * the chat transcript with neutral text/dim/muted tokens. Adapted from
+ * `@xaccefy/pi-xtodo` (MIT, (c) 2025 x4cc3); see ./LICENSE for upstream
+ * attribution. The adapter is distributed under AGPL-3.0-or-later as part of
+ * pi-ember-stack.
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext, ExtensionUIContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
-import { Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
+import { coerce_id, prepare_todo_arguments } from "./normalize.ts";
+import { getSharedTodoRenderer } from "./render.ts";
 
 /**
  * String enum as `{ type: "string", enum: [...] }` (provider-safe + TypeBox
@@ -43,10 +40,9 @@ function string_enum<T extends readonly string[]>(
 export const TOOL_NAME = "todo";
 export const TOOL_LABEL = "Todo";
 export const COMMAND_NAME = "todos";
-const WIDGET_KEY = "pi-ember-todo";
 
 export type TaskStatus = "pending" | "in_progress" | "completed" | "deleted";
-export type TaskAction = "create" | "update" | "list" | "get" | "delete" | "clear";
+export type TaskAction = "create" | "update" | "list" | "get" | "delete" | "clear" | "batch";
 
 export interface Task {
 	id: number;
@@ -76,8 +72,8 @@ export interface TaskDetails {
 // TypeBox Schema
 // ---------------------------------------------------------------------------
 export const TodoParamsSchema = Type.Object({
-	action: string_enum(["create", "update", "list", "get", "delete", "clear"] as const, {
-		description: "create | update | list | get | delete | clear",
+	action: string_enum(["create", "update", "list", "get", "delete", "clear", "batch"] as const, {
+		description: "create | update | list | get | delete | clear | batch",
 	}),
 	subject: Type.Optional(Type.String({ description: "Task subject line (required for create)" })),
 	description: Type.Optional(Type.String({ description: "Long-form task description" })),
@@ -107,6 +103,23 @@ export const TodoParamsSchema = Type.Object({
 	id: Type.Optional(Type.Number({ description: "Task id (required for update, get, delete)" })),
 	includeDeleted: Type.Optional(
 		Type.Boolean({ description: "If true, list returns deleted tasks too" }),
+	),
+	batch: Type.Optional(
+		Type.Array(
+			Type.Object({
+				id: Type.Optional(Type.Number()),
+				subject: Type.Optional(Type.String()),
+				description: Type.Optional(Type.String()),
+				activeForm: Type.Optional(Type.String()),
+				status: Type.Optional(
+					string_enum(["pending", "in_progress", "completed", "deleted"] as const),
+				),
+				addBlockedBy: Type.Optional(Type.Array(Type.Number())),
+				removeBlockedBy: Type.Optional(Type.Array(Type.Number())),
+				owner: Type.Optional(Type.String()),
+			}),
+			{ description: "Batch status/subject updates (provider-native todo arrays)" },
+		),
 	),
 });
 
@@ -174,6 +187,48 @@ function restore_session_state(id: string): TaskState | undefined {
 
 const session_id = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId() ?? "";
 const fresh_state = (): TaskState => ({ tasks: [], nextId: 1 });
+
+// ---------------------------------------------------------------------------
+// Dotted tool-name rewrite (todo.<action> -> todo + action)
+// ---------------------------------------------------------------------------
+const DOTTED_TODO_ACTIONS = new Set<string>([
+	"create",
+	"update",
+	"list",
+	"get",
+	"delete",
+	"clear",
+	"batch",
+]);
+const DOTTED_TODO_RE = /^todo\.([a-zA-Z]+)$/;
+
+export function rewrite_dotted_todo_calls(message: AgentMessage): AgentMessage | null {
+	if (typeof (message as { role?: unknown }).role !== "string") return null;
+	const content = (message as { content?: unknown }).content;
+	if (!Array.isArray(content)) return null;
+
+	let changed = false;
+	const new_content = content.map((part: unknown) => {
+		if (!part || typeof part !== "object") return part;
+		const p = part as { type?: unknown; name?: unknown; arguments?: unknown };
+		if (p.type !== "toolCall" || typeof p.name !== "string") return part;
+		const match = DOTTED_TODO_RE.exec(p.name);
+		if (!match) return part;
+		const suffix = match[1];
+		if (!DOTTED_TODO_ACTIONS.has(suffix)) return part;
+
+		changed = true;
+		const old_args = (p.arguments ?? {}) as Record<string, unknown>;
+		return {
+			...p,
+			name: TOOL_NAME,
+			arguments: { ...old_args, action: suffix },
+		};
+	});
+
+	if (!changed) return null;
+	return { ...message, content: new_content } as AgentMessage;
+}
 const get_session_state = (id: string): TaskState => sessions.get(id) ?? fresh_state();
 
 // Reconstruct tasks state from session messages history.
@@ -236,17 +291,6 @@ function has_cycle(tasks: Task[], task_id: number, new_blocked_by: number[]): bo
 
 	// Only task_id's outbound edges changed; any new cycle must be reachable from it.
 	return dfs(task_id);
-}
-
-/** Coerce tool-call ids (models often send numeric strings) to positive integers. */
-function coerce_id(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
-	if (typeof value === "string" && value.trim() !== "") {
-		const n = Number(value);
-		// Reject "2.7", "1e2", NaN — only plain positive integers.
-		if (Number.isInteger(n) && n > 0 && String(n) === value.trim()) return n;
-	}
-	return undefined;
 }
 
 /** Drop a deleted task id from every other task's blockedBy list. */
@@ -494,234 +538,49 @@ function apply_mutation(state: TaskState, action: TaskAction, params: TodoParams
 				text: `Cleared ${tasks.length} tasks`,
 			};
 		}
-	}
-}
 
-// ---------------------------------------------------------------------------
-// TUI Rendering & Format Helpers
-// ---------------------------------------------------------------------------
-const STATUS_GLYPH: Record<TaskStatus, string> = {
-	pending: "○",
-	in_progress: "◐",
-	completed: "●",
-	deleted: "⊘",
-};
-const STATUS_COLOR: Record<TaskStatus, "dim" | "warning" | "success" | "muted"> = {
-	pending: "dim",
-	in_progress: "warning",
-	completed: "success",
-	deleted: "muted",
-};
-const ACTION_GLYPH: Record<TaskAction, string> = {
-	create: "+",
-	update: "→",
-	delete: "×",
-	get: "›",
-	list: "☰",
-	clear: "∅",
-};
-
-function format_overlay_task_line(t: Task, theme: Theme, show_id: boolean): string {
-	const glyph =
-		t.status === "pending"
-			? theme.fg("dim", "○")
-			: t.status === "in_progress"
-				? theme.fg("warning", "◐")
-				: t.status === "completed"
-					? theme.fg("success", "✓")
-					: theme.fg("error", "✗");
-	const sc = t.status === "completed" || t.status === "deleted" ? "dim" : "text";
-	let subject = theme.fg(sc, t.subject);
-	if (t.status === "completed" || t.status === "deleted") subject = theme.strikethrough(subject);
-	let line = `${glyph}`;
-	if (show_id) line += ` ${theme.fg("accent", `#${t.id}`)}`;
-	line += ` ${subject}`;
-	if (t.status === "in_progress" && t.activeForm)
-		line += ` ${theme.fg("dim", `(${t.activeForm})`)}`;
-	if (t.blockedBy?.length)
-		line += ` ${theme.fg("dim", `⛓ ${t.blockedBy.map((id) => `#${id}`).join(",")}`)}`;
-	return line;
-}
-
-// ---------------------------------------------------------------------------
-// Todo Overlay Widget
-// ---------------------------------------------------------------------------
-export class TodoOverlay {
-	private ui_ctx: ExtensionUIContext | undefined;
-	private widget_registered = false;
-	private tui: TUI | undefined;
-	private completed_task_ids_pending_hide = new Set<number>();
-	private hidden_completed_task_ids = new Set<number>();
-	private last_next_id: number | undefined;
-
-	set_ui_ctx(ctx: ExtensionUIContext): void {
-		if (ctx !== this.ui_ctx) {
-			this.ui_ctx = ctx;
-			this.widget_registered = false;
-			this.tui = undefined;
-		}
-	}
-
-	dispose(): void {
-		if (this.ui_ctx) this.ui_ctx.setWidget(WIDGET_KEY, undefined);
-		this.widget_registered = false;
-		this.tui = undefined;
-		this.ui_ctx = undefined;
-		this.reset_completed_display_state();
-	}
-
-	update(): void {
-		if (!this.ui_ctx) return;
-		const snapshot = get_session_state(active_render_session);
-		const visible = snapshot.tasks.filter(
-			(t) =>
-				t.status !== "deleted" &&
-				!(t.status === "completed" && this.hidden_completed_task_ids.has(t.id)),
-		);
-
-		if (visible.length === 0) {
-			if (this.widget_registered) {
-				this.ui_ctx.setWidget(WIDGET_KEY, undefined);
-				this.widget_registered = false;
-				this.tui = undefined;
+		case "batch": {
+			const items = params.batch;
+			if (!Array.isArray(items) || items.length === 0) {
+				return err("batch requires at least one update");
 			}
-			return;
-		}
-
-		if (!this.widget_registered) {
-			this.ui_ctx.setWidget(
-				WIDGET_KEY,
-				(tui, theme) => {
-					this.tui = tui;
-					return {
-						render: (width: number) => this.render_widget(theme, width),
-						invalidate: () => {
-							this.widget_registered = false;
-							this.tui = undefined;
-						},
-					};
-				},
-				{ placement: "aboveEditor" },
-			);
-			this.widget_registered = true;
-		} else {
-			this.tui?.requestRender();
-		}
-	}
-
-	reset_completed_display_state(): void {
-		this.completed_task_ids_pending_hide.clear();
-		this.hidden_completed_task_ids.clear();
-		this.last_next_id = undefined;
-	}
-
-	hide_completed_tasks_from_previous_turn(): void {
-		if (this.completed_task_ids_pending_hide.size === 0) return;
-		for (const id of this.completed_task_ids_pending_hide) {
-			this.hidden_completed_task_ids.add(id);
-		}
-		this.completed_task_ids_pending_hide.clear();
-		this.tui?.requestRender();
-	}
-
-	private render_widget(theme: Theme, width: number): string[] {
-		const state = get_session_state(active_render_session);
-		if (this.last_next_id !== undefined && state.nextId < this.last_next_id) {
-			this.reset_completed_display_state();
-		}
-		this.last_next_id = state.nextId;
-
-		const completed_set = new Set(
-			state.tasks.filter((t) => t.status === "completed").map((t) => t.id),
-		);
-		for (const id of this.completed_task_ids_pending_hide)
-			if (!completed_set.has(id)) this.completed_task_ids_pending_hide.delete(id);
-		for (const id of this.hidden_completed_task_ids)
-			if (!completed_set.has(id)) this.hidden_completed_task_ids.delete(id);
-
-		const overlay_tasks = state.tasks.filter(
-			(t) =>
-				t.status !== "deleted" &&
-				!(t.status === "completed" && this.hidden_completed_task_ids.has(t.id)),
-		);
-		if (overlay_tasks.length === 0) return [];
-
-		const truncate = (line: string): string => truncateToWidth(line, width, "…");
-		const total = overlay_tasks.filter((t) => t.status !== "deleted").length;
-		const completed = overlay_tasks.filter((t) => t.status === "completed").length;
-		const has_active = overlay_tasks.some(
-			(t) => t.status === "in_progress" || t.status === "pending",
-		);
-		const show_ids = overlay_tasks.some((t) => t.blockedBy && t.blockedBy.length > 0);
-
-		const heading_color = has_active ? "accent" : "dim";
-		const heading_icon = has_active ? "●" : "○";
-		const heading = truncate(
-			`${theme.fg(heading_color, heading_icon)} ${theme.fg(heading_color, `Todos (${completed}/${total})`)}`,
-		);
-
-		const lines = [heading];
-		const budget = 11; // getMaxWidgetLines() - 1, simplified to 11
-		const non_completed = overlay_tasks.filter((t) => t.status !== "completed");
-		const total_completed = overlay_tasks.length - non_completed.length;
-
-		let visible: Task[] = [];
-		let hidden_completed = 0;
-		let truncated_tail = 0;
-
-		if (overlay_tasks.length <= budget) {
-			visible = overlay_tasks;
-		} else if (non_completed.length <= budget) {
-			const kept = new Set<Task>(non_completed);
-			for (const t of overlay_tasks) {
-				if (kept.size >= budget) break;
-				if (t.status === "completed") kept.add(t);
+			let batch_state = state;
+			let last_text = "";
+			for (const item of items) {
+				if (!item || typeof item !== "object") return err("batch item must be an object");
+				const update_params = {
+					action: "update",
+					...item,
+				} as TodoParams;
+				const step = apply_mutation(batch_state, "update", update_params);
+				if (step.error) return step;
+				batch_state = step.state;
+				last_text = step.text;
 			}
-			visible = overlay_tasks.filter((t) => kept.has(t));
-			hidden_completed = total_completed - visible.filter((t) => t.status === "completed").length;
-		} else {
-			visible = non_completed.slice(0, budget);
-			truncated_tail = non_completed.length - budget;
-			hidden_completed = total_completed;
+			return { state: batch_state, text: last_text };
 		}
-
-		for (const task of visible) {
-			lines.push(
-				truncate(`${theme.fg("dim", "├─")} ${format_overlay_task_line(task, theme, show_ids)}`),
-			);
-		}
-
-		for (const t of overlay_tasks) {
-			if (
-				t.status === "completed" &&
-				!this.completed_task_ids_pending_hide.has(t.id) &&
-				!this.hidden_completed_task_ids.has(t.id)
-			) {
-				this.completed_task_ids_pending_hide.add(t.id);
-			}
-		}
-
-		if (hidden_completed === 0 && truncated_tail === 0) {
-			lines[lines.length - 1] = lines[lines.length - 1].replace("├─", "└─");
-		} else {
-			const overflow: string[] = [];
-			if (hidden_completed > 0) overflow.push(`${hidden_completed} completed`);
-			if (truncated_tail > 0) overflow.push(`${truncated_tail} pending`);
-			const summary = `+${hidden_completed + truncated_tail} more (${overflow.join(", ")})`;
-			lines.push(truncate(`${theme.fg("dim", "└─")} ${theme.fg("dim", summary)}`));
-		}
-
-		lines.push("");
-		return lines;
 	}
 }
 
 // ---------------------------------------------------------------------------
 // Extension Entry Point & Setup
 // ---------------------------------------------------------------------------
-export default function piEmberTodo(pi: ExtensionAPI) {
-	let todo_overlay: TodoOverlay | undefined;
+type ToolRenderContext = {
+	args: unknown;
+	toolCallId: string;
+	invalidate: () => void;
+	state: Record<string, unknown>;
+	expanded?: boolean;
+	isError?: boolean;
+};
 
+type ToolRenderResultOptions = {
+	isPartial: boolean;
+	expanded?: boolean;
+};
+
+export default function piEmberTodo(pi: ExtensionAPI) {
+	const todo_renderer = getSharedTodoRenderer();
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: TOOL_LABEL,
@@ -729,31 +588,15 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		promptSnippet: "Manage a task list to track multi-step progress",
 		promptGuidelines: [
 			"Use `todo` for complex work with 3+ steps.",
+			"Call `todo.<action>` (dotted form) when preferred: `todo.create`, `todo.update`, `todo.list`, `todo.get`, `todo.delete`, `todo.clear`, `todo.batch`. The `action` field is auto-derived from the dotted name.",
 			"Batch `todo` updates with other tool calls — do not make `todo` the only tool in a turn unless the user asked about task status.",
 			"Mark a task `in_progress` before beginning, and `completed` immediately when done.",
 			"Task status: pending → in_progress → completed, plus deleted as a tombstone.",
 		],
 		parameters: TodoParamsSchema,
+		renderShell: "self",
 
-		// Coerce common LLM shapes before schema validation (string ids, etc.).
-		// Uses the same strict rules as the reducer's coerce_id, so an input is
-		// either accepted or rejected identically on both paths (no "1e2" → 100).
-		prepareArguments: (args: unknown) => {
-			const a = { ...((args ?? {}) as Record<string, unknown>) };
-			if (a.id !== undefined && a.id !== null && typeof a.id !== "number") {
-				const n = coerce_id(a.id);
-				if (n !== undefined) a.id = n;
-			}
-			for (const key of ["blockedBy", "addBlockedBy", "removeBlockedBy"] as const) {
-				if (!Array.isArray(a[key])) continue;
-				a[key] = (a[key] as unknown[]).map((v) => {
-					if (typeof v === "number") return v;
-					const n = coerce_id(v);
-					return n !== undefined ? n : v;
-				});
-			}
-			return a as TodoParams;
-		},
+		prepareArguments: (args: unknown) => prepare_todo_arguments(args) as TodoParams,
 
 		async execute(_tool_call_id, params, _signal, _on_update, ctx) {
 			const action = params.action as TaskAction;
@@ -785,59 +628,19 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			};
 		},
 
-		renderCall(args: TodoParams, theme: Theme, _context: unknown) {
-			const state = get_session_state(active_render_session);
-			const glyph = ACTION_GLYPH[args.action as TaskAction] ?? args.action;
-			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", glyph);
-			if (args.action === "create" && args.subject) {
-				text += ` ${theme.fg("dim", args.subject)}`;
-			} else if (
-				(args.action === "update" || args.action === "get" || args.action === "delete") &&
-				args.id !== undefined
-			) {
-				const call_id = coerce_id(args.id);
-				const subj =
-					call_id !== undefined ? state.tasks.find((t) => t.id === call_id)?.subject : undefined;
-				text += ` ${theme.fg("accent", subj ?? `#${args.id}`)}`;
-			} else if (args.action === "list" && args.status) {
-				const statusStr = args.status as string;
-				text += ` ${theme.fg("muted", statusStr === "in_progress" ? "in progress" : statusStr)}`;
-			}
-			return new Text(text, 0, 0);
+		renderCall(_args: TodoParams, theme: Theme, context: ToolRenderContext) {
+			return todo_renderer.renderCall([], theme, context);
 		},
 
-		renderResult(result, _opts, theme, _context) {
+		renderResult(
+			result,
+			_opts: ToolRenderResultOptions,
+			theme: Theme,
+			context: ToolRenderContext,
+		) {
 			const details = result.details as TaskDetails | undefined;
-			if (details?.error) {
-				return new Text(theme.fg("error", "✗"), 0, 0);
-			}
-			let status: TaskStatus | undefined;
-			if (details) {
-				const p = details.params as Record<string, unknown>;
-				if (details.action === "create") status = details.tasks[details.tasks.length - 1]?.status;
-				else if (details.action === "update") {
-					const call_id = coerce_id(p.id);
-					status =
-						(p.status as TaskStatus) ??
-						(call_id !== undefined
-							? details.tasks.find((t) => t.id === call_id)?.status
-							: undefined);
-				} else if (details.action === "delete") {
-					const call_id = coerce_id(p.id);
-					status =
-						call_id !== undefined ? details.tasks.find((t) => t.id === call_id)?.status : undefined;
-				}
-			}
-			if (status)
-				return new Text(
-					theme.fg(
-						STATUS_COLOR[status],
-						`${STATUS_GLYPH[status]} ${status === "in_progress" ? "in progress" : status}`,
-					),
-					0,
-					0,
-				);
-			return new Text(theme.fg("success", "✓"), 0, 0);
+			const tasks = details?.tasks ?? [];
+			return todo_renderer.renderResult(tasks, theme, context, details?.error);
 		},
 	});
 
@@ -912,7 +715,6 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 	};
 
 	const replay_and_refresh = (ctx: ExtensionContext): void => {
-		let is_foreground = false;
 		try {
 			const id = session_id(ctx);
 			const state = resolve_state_for_refresh(ctx);
@@ -920,20 +722,30 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			// Keep disk converged with the replayed/live state — otherwise a restart
 			// restores an older disk copy while the branch shows something newer.
 			save_session_state(id, state);
-			is_foreground = id === active_render_session;
 		} catch (e) {
 			if (!/stale after session replacement/.test(String(e))) throw e;
 		}
-		if (is_foreground) {
-			todo_overlay?.reset_completed_display_state();
-			todo_overlay?.update();
-		}
 	};
 
+	pi.on("message_end", (event) => {
+		if (event.message.role !== "assistant") return;
+		const rewritten = rewrite_dotted_todo_calls(event.message);
+		if (rewritten) return { message: rewritten };
+	});
+
+	pi.on("tool_call", (event) => {
+		if (event.toolName !== TOOL_NAME) todo_renderer.settleGroup();
+	});
+
+	pi.on("message_start", (event) => {
+		if (event?.message?.role === "user") todo_renderer.settleGroup();
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
-		let id: string;
+		todo_renderer.resetForSession();
 		try {
-			id = session_id(ctx);
+			const id = session_id(ctx);
+			active_render_session = id;
 			const branch = ctx.sessionManager.getBranch() ?? [];
 			if (branch_has_todo_history(ctx)) {
 				sessions.set(id, replay_from_branch(ctx));
@@ -950,23 +762,14 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			}
 		} catch (e) {
 			if (!/stale after session replacement/.test(String(e))) throw e;
-			return;
 		}
-		if (!ctx.hasUI) return;
-		if (todo_overlay === undefined) {
-			todo_overlay = new TodoOverlay();
-			active_render_session = id;
-		}
-		if (id !== active_render_session) return;
-		todo_overlay.set_ui_ctx(ctx.ui);
-		todo_overlay.reset_completed_display_state();
-		todo_overlay.update();
 	});
 
 	pi.on("session_compact", async (_event, ctx) => replay_and_refresh(ctx));
 	pi.on("session_tree", async (_event, ctx) => replay_and_refresh(ctx));
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		todo_renderer.resetForSession();
 		let id = "";
 		try {
 			id = session_id(ctx);
@@ -976,23 +779,8 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		sessions.delete(id);
 		replay_cache.delete(id);
 		if (id === "" || id === active_render_session) {
-			try {
-				todo_overlay?.dispose();
-			} finally {
-				todo_overlay = undefined;
-				active_render_session = "";
-			}
+			active_render_session = "";
 		}
-	});
-
-	pi.on("tool_execution_end", async (event) => {
-		if (event.toolName === TOOL_NAME && !event.isError) {
-			todo_overlay?.update();
-		}
-	});
-
-	pi.on("agent_start", async () => {
-		todo_overlay?.hide_completed_tasks_from_previous_turn();
 	});
 }
 

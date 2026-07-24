@@ -6,89 +6,100 @@ import {
 	BashExecutionComponent,
 	CompactionSummaryMessageComponent,
 	DynamicBorder,
+	type ExtensionAPI,
 	InteractiveMode,
 	Theme,
 	UserMessageComponent,
-	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
+	type Component,
 	Container,
+	type DefaultTextStyle,
 	Editor,
+	getKeybindings,
+	Key,
 	Markdown,
+	type MarkdownTheme,
+	isKeyRelease,
+	matchesKey,
 	Spacer,
 	Text,
-	type DefaultTextStyle,
-	type MarkdownTheme,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import {
-	DIM_COLOR,
-	MUTED_MESSAGE_BG,
-	buildThemeBgColors,
-	buildThemeExportColors,
-	buildThemeFgColors,
-	getActiveModeColor,
-	isQuizActive,
-	isShellMode,
-	isLatestSubagentRunning,
-	MUTED_COLOR,
-	PAGE_BG,
-	setLatestSubagentRunning,
-	setPlanAutoContinuing,
-	setShellMode,
-	setThinkingBlocksHidden,
-	setToolGroupActive,
-	TEXT_COLOR,
-} from "./mode-colors.ts";
 import {
 	activate_gradient,
 	clamp_lerp,
 	deactivate_gradient,
 	EDGE_PADDING,
+	GRADIENT_SIGMA,
+	type GradientPreset,
 	gaussian_intensity,
 	get_gradient_phase,
 	get_gradient_phase_with_offset,
 	get_logo_phase,
-	GRADIENT_SIGMA,
-	type GradientPreset,
-	MUTED_GROUP_GRADIENT_PRESET,
+	neutral_pulse_hex,
 	invalidate_gradient_cache,
+	MUTED_GROUP_GRADIENT_PRESET,
 	render_gradient,
 	set_gradient_render_request,
 	shutdown_gradient_clock,
 } from "./gradient.ts";
 import {
 	bind_slash_command_exit_render,
-	disable_tui_clear_on_shrink,
-	ensure_chatbox_leading_spacer,
+	reset_scroll_review_state,
+	resume_scroll_follow_from_editor,
 	reset_slash_command_tracking,
-	snap_tui_to_bottom,
 } from "./layout.ts";
+import {
+	buildThemeBgColors,
+	buildThemeExportColors,
+	buildThemeFgColors,
+	DIM_COLOR,
+	getActiveModeColor,
+	isLatestSubagentRunning,
+	isQuizActive,
+	isScrollReviewActive,
+	isShellMode,
+	isGroupReopenableActive,
+	isGroupThinkingChildActive,
+	isSubagentActivityActive,
+	isToolGroupActive,
+	MUTED_COLOR,
+	MUTED_MESSAGE_BG,
+	PAGE_BG,
+	markSubagentActivityEnded,
+	markSubagentActivityStarted,
+	resetSubagentActivity,
+	setLatestSubagentRunning,
+	setPlanAutoContinuing,
+	setScrollReviewActive,
+	setShellMode,
+	isThinkingBlocksHidden,
+	setThinkingBlocksHidden,
+	setGroupReopenableActive,
+	setToolGroupActive,
+	setGroupThinkingChildActive,
+	setTurnToolTranscriptActive,
+	TEXT_COLOR,
+	isTurnToolTranscriptActive,
+} from "./mode-colors.ts";
 import {
 	bind_model_picker_session,
 	install_model_picker_patches,
 	reset_model_picker_session,
 } from "./model-picker.ts";
+import {
+	is_model_picker_active,
+	is_model_picker_editor,
+	render_model_picker_rows,
+} from "./model-selector.ts";
+import {
+	bind_select_list_theme_resolver,
+	install_select_list_theme_patches,
+} from "./select-list-theme.ts";
 
-export { pick_model_in_editor as pickModelInEditor } from "./model-picker.ts";
-export { cancel_pending_model_pick as cancelPendingModelPick } from "./model-picker.ts";
-export { wrap_model_picker_editor as wrapModelPickerEditor } from "./model-picker.ts";
-export {
-	finalize_editor_input_after as finalizeEditorInputAfter,
-	reset_slash_command_tracking as resetSlashCommandTracking,
-	snap_tui_to_bottom as snapTuiToBottom,
-	sync_slash_command_active as syncSlashCommandActive,
-} from "./layout.ts";
-export {
-	intercept_shell_input as interceptShellInput,
-	process_shell_input as processShellInput,
-	sync_shell_mode_from_editor_text as syncShellModeFromEditorText,
-	set_shell_sync_callback as setShellSyncCallback,
-	install_shell_history_sync_patch as installShellHistorySyncPatch,
-	type ShellModeEditor,
-} from "./shell-mode.ts";
 export {
 	cancel_footer_stats_schedule as cancelFooterStatsSchedule,
 	get_baked_thinking_variant as getBakedThinkingVariant,
@@ -102,9 +113,29 @@ export {
 	set_footer_thinking_level as setFooterThinkingLevel,
 	set_mode_label_resolver as setModeLabelResolver,
 } from "./footer.ts";
-import { notify_theme_refresh } from "./theme-refresh.ts";
+export {
+	finalize_editor_input_after as finalizeEditorInputAfter,
+	reset_scroll_review_state as resetScrollReviewState,
+	resume_scroll_follow_from_editor as resumeScrollFollowFromEditor,
+	reset_slash_command_tracking as resetSlashCommandTracking,
+	sync_slash_command_active as syncSlashCommandActive,
+} from "./layout.ts";
+export {
+	cancel_pending_model_pick as cancelPendingModelPick,
+	pick_model_in_editor as pickModelInEditor,
+	wrap_model_picker_editor as wrapModelPickerEditor,
+} from "./model-picker.ts";
+export {
+	consume_pending_shell_submit_enter as consumePendingShellSubmitEnter,
+	install_shell_history_sync_patch as installShellHistorySyncPatch,
+	intercept_shell_input as interceptShellInput,
+	process_shell_input as processShellInput,
+	type ShellModeEditor,
+	set_shell_sync_callback as setShellSyncCallback,
+	sync_shell_mode_from_editor_text as syncShellModeFromEditorText,
+} from "./shell-mode.ts";
+
 import {
-	cancel_footer_stats_schedule,
 	init_footer_thinking_level,
 	installEmberFooter,
 	recompute_footer_stats,
@@ -114,18 +145,17 @@ import {
 	set_footer_thinking_level,
 } from "./footer.ts";
 import {
-	process_shell_input as processShellInput,
-	sync_shell_mode_from_editor_text as syncShellModeFromEditorText,
-	set_shell_sync_callback as setShellSyncCallback,
 	install_shell_history_sync_patch as installShellHistorySyncPatch,
+	process_shell_input as processShellInput,
 	type ShellModeEditor,
+	set_shell_sync_callback as setShellSyncCallback,
 } from "./shell-mode.ts";
+import { notify_theme_refresh } from "./theme-refresh.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const THEME_JSON = path.join(SOURCE_ROOT, "ember.json");
 const THEME_NAME = "ember";
 
-const MIN_RENDER_INTERVAL_MS = 50;
 const LOGO = [
 	"  ██████   ██",
 	"  ██   ██  ██",
@@ -221,28 +251,37 @@ function placeBoxShadow(
 }
 
 let thinkingActive = false;
-let workingActive = false;
-/** Whether the agent loop is still running across retries/compactions/
+/** Whether the agent loop is still running across retries/compaction/
  *  queued follow-ups. `agent_end` fires between each low-level run, but
  *  Pi may auto-retry, auto-compact and retry, or continue with queued
  *  follow-ups afterwards — only `agent_settled` means Pi will not run
- *  again automatically. This flag keeps the Thinking/Working widget
- *  visible during those inter-run gaps so the header state is never
+ *  again automatically. This flag keeps the `Thinking` label
+ *  visible during inter-run gaps so the header state is never
  *  lost while the agent is still working on the user's task. Cleared on
  *  `agent_settled` and `session_shutdown` (the safety floor). */
 let agentRunPending = false;
 /** Whether context compaction (manual, threshold, or overflow recovery)
  *  is in progress. When true the Thinking widget displays `Summarizing`
- *  with the Thinking accent gradient and hides Thinking/Working labels.
+ *  with the Thinking accent gradient and hides the Thinking label.
  *  Cleared on compaction_end and `session_shutdown`. */
 let summarizingActive = false;
 let logoAnimating = false;
-let logoStatic = false;
+let logoStatic = true;
+/** Cleared on session_start; set when the user sends their first visible message. */
+let logo_settled_by_user_message = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
 
-let userPromptAt = 0;
+/** Monotonic start of the visible user turn — used only for the final elapsed notify. */
+let turnStartedAt = 0;
+let latestAssistantMessageTimestamp: number | undefined;
+/** Latest assistant message has mounted an in-transcript Thinking host. */
+let assistantThinkingHostReady = false;
+/** Hide the gradient Thinking header while the model emits visible text or tools. */
+let thinkingHeaderSuppressed = false;
+/** Tracks whether the Thinking/Summarizing status line was painted last
+ *  frame so a hide can snap instead of leaving ghost rows. */
 
-function formatElapsed(ms: number): string {
+export function formatElapsed(ms: number): string {
 	const totalSeconds = Math.floor(ms / 1000);
 	if (totalSeconds < 60) {
 		return `${totalSeconds}s`;
@@ -252,34 +291,94 @@ function formatElapsed(ms: number): string {
 	return `${minutes}m ${seconds}s`;
 }
 
-const CURSOR_BLINK_INTERVAL_MS = 500;
-let cursorVisible = true;
-let cursorBlinkTimer: ReturnType<typeof setInterval> | undefined;
-
-function startCursorBlink(): void {
-	if (cursorBlinkTimer !== undefined) return;
-	cursorVisible = true;
-	cursorBlinkTimer = setInterval(() => {
-		cursorVisible = !cursorVisible;
-		requestRender?.();
-	}, CURSOR_BLINK_INTERVAL_MS);
+/** Whether the in-transcript assistant bubble should host Thinking (only the
+ *  pre-tool wait right below the user message). After any tool rows appear,
+ *  the above-editor widget owns Thinking so it stays near the live tail. */
+function thinking_uses_in_message_host(): boolean {
+	return assistantThinkingHostReady && !isTurnToolTranscriptActive();
 }
 
-function stopCursorBlink(): void {
-	if (cursorBlinkTimer !== undefined) {
-		clearInterval(cursorBlinkTimer);
-		cursorBlinkTimer = undefined;
+/** Whether any Thinking/Summarizing host should paint a status line. */
+function thinking_status_should_show(): boolean {
+	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return false;
+	if (summarizingActive) return true;
+	if (!agentRunPending && !thinkingActive) return false;
+	if (thinkingHeaderSuppressed || isToolGroupActive()) return false;
+	// In-group Thinking owns the status row for settled/reopenable compact groups.
+	if (isThinkingBlocksHidden() && (isGroupThinkingChildActive() || isGroupReopenableActive())) {
+		return false;
 	}
-	cursorVisible = true;
+	return true;
 }
-let requestRender: ((force?: boolean) => void) | undefined;
-let renderCallback: ((force?: boolean) => void) | undefined;
-let renderTimer: ReturnType<typeof setTimeout> | undefined;
-let renderGeneration = 0;
-let lastRenderAt = 0;
-let forceRenderPending = false;
+
+/** Keep the thinking gradient clock aligned with visible Thinking/Summarizing UI. */
+export function sync_thinking_gradient_clock(): void {
+	if (summarizingActive) return;
+	// In-group Thinking rows under settled compact groups use the same
+	// "thinking" preset even though the external widget is suppressed.
+	if (thinking_status_should_show() || isGroupThinkingChildActive()) {
+		activate_gradient("thinking");
+	} else {
+		deactivate_gradient("thinking");
+	}
+}
+
+/** Shared Thinking / Summarizing status row used by the above-editor widget
+ *  (pre-assistant) and the in-message ThinkingStatusComponent. */
+function render_thinking_status_lines(): string[] {
+	if (!thinking_status_should_show()) return [];
+	const WIDGET_INSET = 1;
+	const widgetPad = " ".repeat(WIDGET_INSET);
+	const label = summarizingActive ? "Summarizing" : "Thinking";
+	const labelGradient = renderLiveGradient(label, "thinking");
+	const row = `${widgetPad}${labelGradient}${widgetPad}`;
+	const in_compact_group =
+		isThinkingBlocksHidden() && (isGroupThinkingChildActive() || isGroupReopenableActive());
+	if (in_compact_group) return [row];
+	// One blank row above and below the in-message Thinking host.
+	if (thinking_uses_in_message_host()) return ["", row, ""];
+	return [row, ""];
+}
+
+/** Update status state and let Pi perform the normal component-tree render. */
+function refresh_thinking_status(): void {
+	sync_thinking_gradient_clock();
+	requestRender?.();
+}
+
+/** Hide the gradient Thinking header while tools or visible assistant text run. */
+export function suppress_thinking_header_for_work(): void {
+	if (!thinkingHeaderSuppressed) {
+		thinkingHeaderSuppressed = true;
+		refresh_thinking_status();
+	}
+}
+
+/** Re-show the gradient Thinking header when a thinking stream resumes. */
+export function resume_thinking_header_for_think_stream(): void {
+	if (thinkingHeaderSuppressed) {
+		thinkingHeaderSuppressed = false;
+		refresh_thinking_status();
+	}
+}
+
+class ThinkingStatusComponent implements Component {
+	messageTimestamp: number | undefined;
+	render(_width: number): string[] {
+		if (latestAssistantMessageTimestamp === undefined) return [];
+		if (this.messageTimestamp !== latestAssistantMessageTimestamp) return [];
+		if (!thinking_uses_in_message_host()) return [];
+		return render_thinking_status_lines();
+	}
+	invalidate(): void {
+		/* Lifecycle handlers request the normal native render. */
+	}
+}
+
+let requestRender: (() => void) | undefined;
 let sessionCtx: any;
 let shellInputUnsubscribe: (() => void) | undefined;
+let scrollReviewInputUnsubscribe: (() => void) | undefined;
 let getShellEditor: (() => ShellModeEditor | undefined) | undefined;
 
 type EditorWithBorder = Editor & {
@@ -329,65 +428,20 @@ function recompute_latest_subagent_running(): boolean {
 	return running;
 }
 
-function resetRenderScheduler(): void {
-	renderGeneration += 1;
-	if (renderTimer !== undefined) clearTimeout(renderTimer);
-	renderTimer = undefined;
-	renderCallback = undefined;
-	lastRenderAt = 0;
-	forceRenderPending = false;
-}
-
-function scheduleRender(force = false): void {
-	if (force) {
-		forceRenderPending = true;
-		if (renderCallback === undefined) return;
-		// Match Pi's requestRender(true): run immediately so a normal
-		// post-handleInput differential render cannot win with stale rows.
-		if (renderTimer !== undefined) {
-			clearTimeout(renderTimer);
-			renderTimer = undefined;
-		}
-		const generation = renderGeneration;
-		const shouldForce = forceRenderPending;
-		forceRenderPending = false;
-		if (generation !== renderGeneration || renderCallback === undefined) return;
-		renderCallback(shouldForce);
-		lastRenderAt = Date.now();
-		return;
-	}
-
-	if (renderCallback === undefined || renderTimer !== undefined) return;
-
-	const generation = renderGeneration;
-	const elapsed = Date.now() - lastRenderAt;
-	const delay = Math.max(0, MIN_RENDER_INTERVAL_MS - elapsed);
-	renderTimer = setTimeout(() => {
-		renderTimer = undefined;
-		if (generation !== renderGeneration || renderCallback === undefined) return;
-		const shouldForce = forceRenderPending;
-		forceRenderPending = false;
-		renderCallback(shouldForce);
-		lastRenderAt = Date.now();
-	}, delay);
-}
-
 /** Live-gradient tick subscribers are managed by gradient.ts.
  *  Re-export subscribe/unsubscribe so existing consumers
  *  (pi-compact-tools, subagent renderer) keep working without import changes. */
-export { subscribe_gradient_tick as subscribeGradientTick } from "./gradient.ts";
-export { unsubscribe_gradient_tick as unsubscribeGradientTick } from "./gradient.ts";
-export { MUTED_GROUP_GRADIENT_PRESET } from "./gradient.ts";
+export {
+	MUTED_GROUP_GRADIENT_PRESET,
+	subscribe_gradient_tick as subscribeGradientTick,
+	unsubscribe_gradient_tick as unsubscribeGradientTick,
+} from "./gradient.ts";
 
-/**
- * Request a TUI re-render from outside this plugin. Normal requests are
- * throttled (MIN_RENDER_INTERVAL_MS); forced requests run immediately and
- * clear Pi's differential-render buffer. Safe to call from editor handleInput —
- * it never
- * iterates session entries or does synchronous fs.
- */
-export function requestTuiRender(force = false): void {
-	requestRender?.(force);
+export { sync_thinking_gradient_clock as syncThinkingGradientClock };
+
+/** Request a normal render through Pi's public UI API. */
+export function requestTuiRender(_force = false): void {
+	requestRender?.();
 }
 
 /**
@@ -397,14 +451,13 @@ export function requestTuiRender(force = false): void {
  * the module-level scheduler if the editor has no live TUI.
  */
 export function requestTuiRenderFromEditor(
-	editor: { tui?: { requestRender?: (force?: boolean) => void } },
-	force = false,
+	editor: { tui?: { requestRender?: () => void } },
 ): void {
 	if (editor?.tui?.requestRender) {
-		editor.tui.requestRender(force);
+		editor.tui.requestRender();
 		return;
 	}
-	requestRender?.(force);
+	requestRender?.();
 }
 
 /** Request a non-forced render of the live editor and refresh the footer so
@@ -412,10 +465,10 @@ export function requestTuiRenderFromEditor(
  *  update together. Use the captured session ctx when available.
  */
 export function requestShellModeVisualRefresh(
-	editor: { tui?: { requestRender?: (force?: boolean) => void } },
+	editor: { tui?: { requestRender?: () => void } },
 	ctx?: any,
 ): void {
-	requestTuiRenderFromEditor(editor, false);
+	requestTuiRenderFromEditor(editor);
 	if (ctx?.mode === "tui") {
 		refresh_footer(ctx);
 	}
@@ -435,27 +488,6 @@ export function wrapEditorRenderForShell(editor: EditorWithBorder): void {
 	editor.render = function shellAwareRender(width: number): string[] {
 		return render_shell_aware_editor(editor, originalRender, width);
 	};
-}
-
-/**
- * Pin the chatbox to the bottom of the viewport while preserving terminal
- * scrollback. This is the scrollback-safe replacement for
- * `requestTuiRender(true)`: it clears only the visible screen (`2J`, never
- * `3J`), resets Pi's differential bookkeeping, and requests a normal render
- * whose first-render path re-anchors `previousViewportTop` to the bottom.
- *
- * Use this for any snap that must re-pin the viewport after a line-count
- * shrink (compact-group collapse, thinking-toggle rebuild). Never call
- * `requestTuiRender(true)` from render/lifecycle paths — it emits `3J` and
- * destroys scrollback.
- *
- * Returns true when the snap was applied. Returns false when no live TUI is
- * bound (e.g. pre-`session_start` or post-`session_shutdown`); callers MUST
- * NOT fall back to `requestTuiRender(true)` on a false return — a missing
- * TUI means we are outside a live TUI session where a snap is meaningless.
- */
-export function requestTuiRenderSnapToBottom(): boolean {
-	return snap_tui_to_bottom(tuiRef);
 }
 
 /** Install a TUI-level input listener that intercepts shell-mode `!` before
@@ -503,40 +535,93 @@ function installShellModeInputListener(ctx: any): void {
 	});
 }
 
+/** Pause live TUI updates while the user reads terminal scrollback. */
+function installScrollReviewInputListener(ctx: any): void {
+	const tui = tuiRef ?? ctx?.ui;
+	if (!tui?.addInputListener) return;
+	if (scrollReviewInputUnsubscribe) {
+		scrollReviewInputUnsubscribe();
+		scrollReviewInputUnsubscribe = undefined;
+	}
+
+	scrollReviewInputUnsubscribe = tui.addInputListener((data: string) => {
+		if (isKeyRelease(data)) return undefined;
+		if (matchesKey(data, "shift+ctrl+s")) {
+			if (isScrollReviewActive()) {
+				resume_scroll_follow_from_editor({ tui });
+			} else {
+				setScrollReviewActive(true);
+				ctx.ui?.notify?.(
+					"Scroll review: live updates paused. Type or Ctrl+Shift+S to resume.",
+					"info",
+				);
+			}
+			return { consume: true };
+		}
+		if (
+			!isScrollReviewActive() &&
+			!agentRunPending &&
+			(matchesKey(data, Key.pageUp) || matchesKey(data, Key.home))
+		) {
+			setScrollReviewActive(true);
+		}
+		return undefined;
+	});
+}
+
 function stopThinkingAnimation(): void {
 	thinkingActive = false;
-	deactivate_gradient("thinking");
-	requestRender?.();
+	refresh_thinking_status();
+}
+
+/** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
+export function arm_pre_token_thinking_status(): void {
+	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return;
+	agentRunPending = true;
+	// In-group linger or real in-group Thinking owns the status row.
+	if (
+		isThinkingBlocksHidden() &&
+		(isToolGroupActive() || isGroupThinkingChildActive() || isGroupReopenableActive())
+	) {
+		refresh_thinking_status();
+		return;
+	}
+	thinkingHeaderSuppressed = false;
+	activate_gradient("thinking");
+	refresh_thinking_status();
 }
 
 function startThinkingAnimation(): void {
 	thinkingActive = true;
 	activate_gradient("thinking");
-	if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
-}
-
-function startWorkingAnimation(): void {
-	workingActive = true;
-	activate_gradient("working");
-	if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
-}
-
-function stopWorkingAnimation(): void {
-	workingActive = false;
-	deactivate_gradient("working");
-	requestRender?.();
+	refresh_thinking_status();
 }
 
 function startSummarizingAnimation(): void {
 	summarizingActive = true;
 	activate_gradient("summarizing");
-	if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
+	refresh_thinking_status();
 }
 
 function stopSummarizingAnimation(): void {
 	summarizingActive = false;
 	deactivate_gradient("summarizing");
-	requestRender?.();
+	refresh_thinking_status();
+}
+
+/** Above-editor Thinking host: pre-tool wait (before transcript tools) and
+ *  every later agent-work gap with no live tool children on screen. */
+function installThinkingWidget(ctx: any): void {
+	if (ctx.mode !== "tui") return;
+	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
+		render(_width: number): string[] {
+			if (thinking_uses_in_message_host()) return [];
+			return render_thinking_status_lines();
+		},
+		invalidate() {
+			/* gradient ticks repaint in-place */
+		},
+	}));
 }
 
 function wrapThemeWithCodeBg(base: Theme): Theme {
@@ -793,7 +878,7 @@ function updateLiveThemeColors(
 
 /**
  * Render a live animated gradient using the shared clock phase and the
- * canonical gradient engine. Thinking/Working use the accent palette;
+ * canonical gradient engine. Thinking/Summarizing use the accent palette;
  * MUTED_GROUP_GRADIENT_PRESET (compact group headers, running subagents)
  * uses the muted→text palette.
  */
@@ -823,21 +908,6 @@ export function renderGradientLabel(text: string, _accent?: string, _phaseOffset
 	return render_gradient(text, "thinking", get_gradient_phase());
 }
 
-function installThinkingBorderOverride(): void {
-	const proto = Editor.prototype as any;
-	if (proto[EMBER_PATCH_MARKER]) return;
-	proto[EMBER_PATCH_MARKER] = true;
-	const originalRender = proto.render;
-	const wrapMarker = Symbol.for("pi-ember-ui:shell-render-wrapped");
-	proto.render = function renderThinkingBorder(this: EditorWithBorder, width: number): string[] {
-		// If the instance was already wrapped by wrapEditorRenderForShell(),
-		// do not re-apply the shell-aware border/prompt transformation or the
-		// prompt glyph and gutter will render twice.
-		if ((this as any)[wrapMarker]) return originalRender.call(this, width);
-		return render_shell_aware_editor(this, originalRender, width);
-	};
-}
-
 /**
  * Render an Editor instance with shell-mode prompt/border styling.
  * Extracted from `installThinkingBorderOverride` so it can also be applied
@@ -850,9 +920,7 @@ function render_shell_aware_editor(
 	width: number,
 ): string[] {
 	const borderColor =
-		isShellMode() || workingActive || agentRunPending || summarizingActive
-			? MUTED_COLOR
-			: TEXT_COLOR;
+		isShellMode() || agentRunPending || summarizingActive ? MUTED_COLOR : TEXT_COLOR;
 	const border = (text: string): string => colorize(text, borderColor);
 	const dimBorder = (text: string): string => colorize(text, DIM_COLOR);
 	const INSET = 0;
@@ -863,12 +931,6 @@ function render_shell_aware_editor(
 	instance.borderColor = border;
 	const lines = originalRender.call(instance, innerWidth);
 	instance.borderColor = originalBorderColor;
-
-	if (!cursorVisible) {
-		for (let i = 0; i < lines.length; i++) {
-			lines[i] = lines[i].replace(/\x1b\[7m([^\x1b]*)\x1b\[0m/g, (_m: string, p1: string) => p1);
-		}
-	}
 
 	const stripped = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 	const isBorderLine = (s: string): boolean => {
@@ -886,6 +948,7 @@ function render_shell_aware_editor(
 	const topIdx = borderIndices[0] ?? 0;
 	const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
 	const isSlashMode = instance.getText?.().trimStart().startsWith("/") === true;
+	const modelPickerActive = is_model_picker_active() && is_model_picker_editor(instance);
 	const hasAutocompleteRows = bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
 	// Slash autocomplete menu expands downward from the chatbox. The
 	// autocomplete rows stay after the editor body, so the menu grows below.
@@ -896,17 +959,23 @@ function render_shell_aware_editor(
 	const promptGlyph = isShellMode() ? "!" : ">";
 	const promptStr = border(`${promptGlyph} `);
 	const gutter = "  ";
+	const fit = (s: string): string =>
+		visibleWidth(s) > width ? truncateToWidth(s, width) : s;
 	const padRight = (s: string): string => {
-		const visLen = visibleWidth(s);
-		return s + " ".repeat(Math.max(0, width - visLen));
+		const fitted = fit(s);
+		return fitted + " ".repeat(Math.max(0, width - visibleWidth(fitted)));
 	};
 	const bottomRule = " " + chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2))) + " ";
 	const topRule = bottomRule;
 	const slashMiddleSep =
 		" ".repeat(SLASH_MIDDLE_INSET) +
-		dimBorder("\u2500".repeat(Math.max(1, width - SLASH_MIDDLE_INSET * 2)));
+		colorWithOpacity(
+			"\u2500".repeat(Math.max(1, width - SLASH_MIDDLE_INSET * 2)),
+			TEXT_COLOR,
+			0.5,
+		);
 	const middleSep = padRight(
-		isSlashMode
+		isSlashMode || modelPickerActive
 			? slashMiddleSep
 			: `${pad}${innerPad}${gutter}${border("\u2500".repeat(innerWidth))}`,
 	);
@@ -942,10 +1011,17 @@ function render_shell_aware_editor(
 		const bottomRuleIdx = lines.length - 1;
 		const autocompleteLines = lines.slice(bottomBorderIdx + 1, bottomRuleIdx);
 		const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
-		return [topRule, ...editorLines, middleSep, ...autocompleteLines, bottomRule];
+		return [topRule, ...editorLines, middleSep, ...autocompleteLines, bottomRule].map(fit);
+	}
+	if (modelPickerActive && bottomBorderIdx >= 0) {
+		const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
+		const pickerLines = render_model_picker_rows(innerWidth).map((line) =>
+			padRight(`${pad}${innerPad}${gutter}${line}`),
+		);
+		return [topRule, ...editorLines, middleSep, ...pickerLines, bottomRule].map(fit);
 	}
 	if (lines.length === 0) return lines;
-	return lines;
+	return lines.map(fit);
 }
 
 function installAssistantMessagePatch(): void {
@@ -957,12 +1033,36 @@ function installAssistantMessagePatch(): void {
 	const originalSetHideThinkingBlock = assistantPrototype.setHideThinkingBlock;
 	if (typeof originalSetHideThinkingBlock === "function") {
 		assistantPrototype.setHideThinkingBlock = function (this: any, hide: boolean): void {
-			setThinkingBlocksHidden(hide === true);
+			const next_hidden = hide === true;
+			const prev_hidden = isThinkingBlocksHidden();
+			setThinkingBlocksHidden(next_hidden);
 			originalSetHideThinkingBlock.call(this, hide);
+			if (prev_hidden !== next_hidden) {
+				refresh_thinking_status();
+			}
 		};
 	}
 
 	assistantPrototype.updateContent = function (this: any, message: any): void {
+		const msgTimestamp = typeof message?.timestamp === "number" ? message.timestamp : undefined;
+		if (
+			msgTimestamp !== undefined &&
+			msgTimestamp >= (latestAssistantMessageTimestamp ?? Number.NEGATIVE_INFINITY)
+		) {
+			latestAssistantMessageTimestamp = msgTimestamp;
+		}
+
+		if (!this._emberThinkingStatus) {
+			this._emberThinkingStatus = new ThinkingStatusComponent();
+		}
+		this._emberThinkingStatus.messageTimestamp = msgTimestamp;
+		if (
+			msgTimestamp !== undefined &&
+			msgTimestamp === latestAssistantMessageTimestamp
+		) {
+			assistantThinkingHostReady = true;
+		}
+
 		const hide = this.hideThinkingBlock;
 		setThinkingBlocksHidden(hide === true);
 		const outputPad = this.outputPad;
@@ -1097,7 +1197,20 @@ function installAssistantMessagePatch(): void {
 		if (hasVisibleContent && !hasToolCalls) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
+
 	};
+
+	const originalRender = assistantPrototype.render;
+	if (typeof originalRender === "function") {
+		assistantPrototype.render = function (this: any, width: number): string[] {
+			const lines = originalRender.call(this, width) as string[];
+			const status = this._emberThinkingStatus as ThinkingStatusComponent | undefined;
+			if (!status) return lines;
+			const statusLines = status.render(width);
+			if (statusLines.length === 0) return lines;
+			return [...lines, ...statusLines];
+		};
+	}
 }
 
 /** Patch Text.prototype.invalidate so that ExpandableText instances (used
@@ -1596,20 +1709,32 @@ function radialColorForCell(x: number, y: number, points: RadialPoint[]): [numbe
 }
 
 function startLogoAnimation(): void {
-	if (logoAnimating) return;
+	logo_settled_by_user_message = false;
 	logoAnimating = true;
 	logoStatic = false;
 	activate_gradient("logo");
+	requestRender?.();
 }
 
 function stopLogoAnimation(): void {
+	if (!logoAnimating && logoStatic) return;
 	logoAnimating = false;
 	logoStatic = true;
 	deactivate_gradient("logo");
 	requestRender?.();
 }
 
-function renderLogoWithGradient(accent: string): string[] {
+/** Stop the startup logo when the user commits their first visible message. */
+function stopLogoOnFirstUserMessage(): void {
+	if (logo_settled_by_user_message) return;
+	logo_settled_by_user_message = true;
+	stopLogoAnimation();
+}
+
+/** @deprecated Logo no longer stops on editor keystrokes — only on first send. */
+export function stopLogoOnEditorInput(): void {}
+
+function renderLogoWithGradient(): string[] {
 	const logoRows = LOGO.length;
 	const logoCols = LOGO[0].length;
 	const gridCols = logoCols + SHADOW_OFFSET_X + 1;
@@ -1640,17 +1765,15 @@ function renderLogoWithGradient(accent: string): string[] {
 		return gridToLines(grid);
 	}
 
-	const [ar, ag, ab] = hexToRgbTriplet(accent);
-	const accent70 = blendToHex(accent, PAGE_BG, 0.7);
-	const [s7r, s7g, s7b] = hexToRgbTriplet(accent70);
-	const accent40 = blendToHex(accent, PAGE_BG, 0.4);
-	const [s4r, s4g, s4b] = hexToRgbTriplet(accent40);
+	const dimRgb = hexToRgbTriplet(DIM_COLOR);
+	const mutedRgb = hexToRgbTriplet(MUTED_COLOR);
+	const textRgb = hexToRgbTriplet(TEXT_COLOR);
 	const points: RadialPoint[] = [
-		{ x: 2, y: 0, r: 255, g: 255, b: 255, falloff: 3 },
-		{ x: 10, y: 1, r: ar, g: ag, b: ab, falloff: 4 },
-		{ x: 5, y: 3, r: s7r, g: s7g, b: s7b, falloff: 3.5 },
-		{ x: 11, y: 5, r: s4r, g: s4g, b: s4b, falloff: 2.5 },
-		{ x: 0, y: 4, r: 200, g: 180, b: 140, falloff: 2 },
+		{ x: 2, y: 0, r: dimRgb[0], g: dimRgb[1], b: dimRgb[2], falloff: 3 },
+		{ x: 10, y: 1, r: mutedRgb[0], g: mutedRgb[1], b: mutedRgb[2], falloff: 4 },
+		{ x: 5, y: 3, r: textRgb[0], g: textRgb[1], b: textRgb[2], falloff: 3.5 },
+		{ x: 11, y: 5, r: mutedRgb[0], g: mutedRgb[1], b: mutedRgb[2], falloff: 2.5 },
+		{ x: 0, y: 4, r: dimRgb[0], g: dimRgb[1], b: dimRgb[2], falloff: 2 },
 	];
 
 	const grid: Grid = [];
@@ -1671,9 +1794,9 @@ function renderLogoWithGradient(accent: string): string[] {
 				if (logoAnimating) {
 					const dist = col - sweep_center;
 					const intensity = gaussian_intensity(dist, GRADIENT_SIGMA);
-					r = Math.round(r + (255 - r) * intensity);
-					g = Math.round(g + (255 - g) * intensity);
-					b = Math.round(b + (255 - b) * intensity);
+					r = Math.round(r + (textRgb[0] - r) * intensity);
+					g = Math.round(g + (textRgb[1] - g) * intensity);
+					b = Math.round(b + (textRgb[2] - b) * intensity);
 				}
 				grid[row][col] = { ch: "\u2588", rgb: [r, g, b] };
 			}
@@ -1771,38 +1894,38 @@ function installStartupHeader(ctx: any): void {
 
 	ctx.ui.setHeader((tui: any, theme: any) => {
 		tuiRef = tui;
-		disable_tui_clear_on_shrink(tui);
-		ensure_chatbox_leading_spacer(tui);
+		const render_header = (width: number): string[] => {
+			// Re-read every render so model/dir/mode changes are reflected.
+			const dir = folderNameFromCwd(ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd());
+			const model = ctx.model;
+			const modelName = model?.name ?? model?.id ?? "no model";
+
+			// The animated startup logo and header bullet pulse through a
+			// dim→muted→text gradient. After the user sends their first message
+			// the logo goes static gray and the bullet goes dim.
+			// mdListBullet is muted (list "1." / "-" markers); do not reuse it here.
+			const logoLines = renderLogoWithGradient();
+			const logoWidth = visibleWidth(logoLines[0] ?? "");
+			const leftPad = Math.max(0, Math.floor((width - logoWidth) / 2));
+			const padStr = " ".repeat(leftPad);
+			// Once the logo turns static/gray (after the first user message
+			// or at shutdown), the header bullet goes dim to match the model/dir.
+			const headerBullet = logoStatic
+				? theme.fg("dim", "\u2022")
+				: colorize("\u2022", neutral_pulse_hex(get_logo_phase()));
+
+			const infoLine = `${theme.fg("text", modelName)} ${headerBullet} ${theme.fg("dim", dir)}`;
+			const infoPad = Math.max(0, Math.floor((width - visibleWidth(infoLine)) / 2));
+			const infoPadStr = " ".repeat(infoPad);
+
+			const lines = [...logoLines.map((line) => padStr + line), infoPadStr + infoLine];
+			return lines.map((line) =>
+				visibleWidth(line) > width ? truncateToWidth(line, width) : line,
+			);
+		};
 		return {
 			render(width: number): string[] {
-				// Re-read every render so model/dir/mode changes are reflected.
-				const dir = folderNameFromCwd(ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd());
-				const model = ctx.model;
-				const modelName = model?.name ?? model?.id ?? "no model";
-
-				// The animated startup logo and header bullet follow the live mode
-				// accent (plan/code/orchestrate/debug). After the first assistant
-				// token the logo goes static gray and the bullet goes dim.
-				// mdListBullet is muted (list "1." / "-" markers); do not reuse it here.
-				const accent = getActiveModeColor();
-				const logoLines = renderLogoWithGradient(accent);
-				const logoWidth = visibleWidth(logoLines[0] ?? "");
-				const leftPad = Math.max(0, Math.floor((width - logoWidth) / 2));
-				const padStr = " ".repeat(leftPad);
-				// Once the logo turns static/gray (after the first assistant token
-				// or at shutdown), the header bullet goes dim to match the model/dir.
-				const headerBullet = logoStatic
-					? theme.fg("dim", "\u2022")
-					: `${fgAnsi(accent)}\u2022\x1b[39m`;
-
-				const infoLine = `${theme.fg("text", modelName)} ${headerBullet} ${theme.fg("dim", dir)}`;
-				const infoPad = Math.max(0, Math.floor((width - visibleWidth(infoLine)) / 2));
-				const infoPadStr = " ".repeat(infoPad);
-
-				const lines = [...logoLines.map((line) => padStr + line), infoPadStr + infoLine];
-				return lines.map((line) =>
-					visibleWidth(line) > width ? truncateToWidth(line, width) : line,
-				);
+				return render_header(width);
 			},
 			invalidate() {},
 		};
@@ -1870,48 +1993,27 @@ function updateInstalledThemeExport(exportColors: {
 	}
 }
 
-/**
- * Install the Thinking/Working widget flush above the editor. Leading padding
- * above the chatbox (or above this label when visible) comes from
- * ensure_chatbox_leading_spacer() in layout.ts (CHATBOX_LEADING_ROWS).
- * The live animated gradient label remains visible while compact tool groups
- * render their own transcript headers, so the chatbox state is never hidden.
- */
-function installThinkingWidget(ctx: any): void {
-	if (ctx.mode !== "tui") return;
-	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
-		render(_width: number): string[] {
-			if (isQuizActive() || isLatestSubagentRunning()) return [];
-			const elapsedMs = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
-			const elapsedText =
-				elapsedMs >= 1000 && !summarizingActive ? ` ${formatElapsed(elapsedMs)}` : "";
-			const WIDGET_INSET = 1;
-			const widgetPad = " ".repeat(WIDGET_INSET);
-			const theme = resolve_live_theme();
-			const elapsedColored = elapsedText ? theme.fg("dim", elapsedText) : "";
-			if (summarizingActive) {
-				const labelGradient = renderLiveGradient("Summarizing", "thinking");
-				return [`${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`];
-			}
-			if (!thinkingActive && !workingActive && !agentRunPending) return [];
-			const isThinking = thinkingActive || (!workingActive && agentRunPending);
-			const preset: GradientPreset = isThinking ? "thinking" : "working";
-			const labelText = isThinking ? "Thinking" : "Working";
-			const labelGradient = renderLiveGradient(labelText, preset);
-			return [`${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`];
-		},
-		invalidate() {},
-	}));
-}
-
 export default function piEmberUiPlugin(pi: ExtensionAPI): void {
-	bind_slash_command_exit_render((force) => requestTuiRender(force));
+	bind_slash_command_exit_render(() => requestTuiRender());
 	// /model + /resume: prototype intercepts only (no registerCommand — that
 	// conflicts with built-ins and shows in Extension issues).
 	install_model_picker_patches();
+	bind_select_list_theme_resolver(() => {
+		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		if (!theme) {
+			throw new Error("Theme not initialized");
+		}
+		return theme;
+	});
+	install_select_list_theme_patches(() => {
+		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		if (!theme) {
+			throw new Error("Theme not initialized");
+		}
+		return theme;
+	});
 	installShellHistorySyncPatch();
 	ensureThemeInstalled();
-	installThinkingBorderOverride();
 	install_markdown_theme_patch();
 	installAssistantMessagePatch();
 	installExpandableTextPatch();
@@ -1922,27 +2024,19 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	installUpdateNotificationPatch();
 	applyDynamicTheme();
 
-	pi.on("session_start", (event, ctx) => {
-		resetRenderScheduler();
+	pi.on("session_start", (_event, ctx) => {
 		sessionCtx = ctx;
 		tuiRef = undefined;
 		requestRender = undefined;
 		liveTheme = undefined;
 		if (ctx.mode === "tui") {
 			bind_model_picker_session(ctx, pi);
-			renderCallback = (force = false) => {
-				if (tuiRef?.requestRender) {
-					tuiRef.requestRender(force);
-					return;
-				}
-				ctx.ui.setStatus("pi-ember-ui-thinking-tick", undefined);
+			requestRender = () => {
+				(tuiRef as { requestRender?: () => void } | undefined)?.requestRender?.();
 			};
-			requestRender = scheduleRender;
-			set_gradient_render_request(scheduleRender);
+			set_gradient_render_request(requestRender);
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHiddenThinkingLabel("");
-			installThinkingWidget(ctx);
-			startCursorBlink();
 			setShellSyncCallback(() => {
 				const focused = tuiRef?.focusedComponent as any;
 				if (focused) requestShellModeVisualRefresh(focused, ctx);
@@ -1950,25 +2044,24 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 		applyDynamicTheme();
 		if (ctx.mode === "tui") {
+			startLogoAnimation();
 			installStartupHeader(ctx);
-			if (tuiRef) ensure_chatbox_leading_spacer(tuiRef);
-			// Only animate the logo on genuinely fresh sessions where the
-			// header is visible. On /resume, /fork, and /reload the header
-			// is scrolled off-screen (or it is a hot reload); even the
-			// bounded logo timer would otherwise add needless full renders.
-			if (event.reason === "startup" || event.reason === "new") {
-				startLogoAnimation();
-			}
+			installThinkingWidget(ctx);
 			installEmberFooter(ctx);
-			init_footer_thinking_level(pi);
+			init_footer_thinking_level(pi, ctx);
 			recompute_footer_stats(ctx);
 			installShellModeInputListener(ctx);
+			installScrollReviewInputListener(ctx);
 		}
 	});
 
-	// Re-render header when model changes so the name updates live.
+	// Re-render header/footer when the model changes.
 	pi.on("model_select", (_event, ctx) => {
-		if (ctx.mode === "tui") requestRender?.();
+		if (ctx.mode === "tui") {
+			init_footer_thinking_level(pi, ctx);
+			refresh_footer(ctx);
+			requestRender?.();
+		}
 	});
 
 	// Re-render header/footer when the active agent mode changes. Emitted by
@@ -1989,26 +2082,73 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		applyDynamicTheme();
 	});
 
+	pi.on("before_agent_start", (event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		if (typeof event.prompt === "string" && event.prompt.trim()) {
+			arm_pre_token_thinking_status();
+		}
+	});
+
 	pi.on("message_update", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		const ev = event.assistantMessageEvent;
-		if (ev?.type === "thinking_delta" || ev?.type === "text_delta") {
-			stopLogoAnimation();
-		}
-		if (ev && (ev.type === "thinking_start" || ev.type === "thinking_delta")) {
+		const isText = ev?.type === "text_start" || ev?.type === "text_delta";
+		const isThinking = ev?.type === "thinking_start" || ev?.type === "thinking_delta";
+		if (ev && isThinking) {
+			resume_thinking_header_for_think_stream();
 			if (!thinkingActive) startThinkingAnimation();
+		}
+		if (ev && isText) {
+			suppress_thinking_header_for_work();
+		}
+		if (isText || isThinking) {
+			refresh_thinking_status();
+		}
+		const assistantMsg = event.message;
+		if (assistantMsg?.role === "assistant" && typeof assistantMsg.timestamp === "number") {
+			if (assistantMsg.timestamp >= (latestAssistantMessageTimestamp ?? Number.NEGATIVE_INFINITY)) {
+				latestAssistantMessageTimestamp = assistantMsg.timestamp;
+			}
 		}
 	});
 
 	pi.on("message_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		if (event.message?.role === "user") {
-			userPromptAt = performance.now();
+			const display = (event.message as { display?: boolean }).display;
+			if (display !== false) {
+				stopLogoOnFirstUserMessage();
+			}
+			turnStartedAt = performance.now();
+			setTurnToolTranscriptActive(false);
+			thinkingHeaderSuppressed = false;
+			// Show Thinking immediately after send — agent_start may arrive later.
+			if (display !== false) {
+				agentRunPending = true;
+				activate_gradient("thinking");
+				refresh_thinking_status();
+			}
+		} else if (event.message?.role === "assistant" && typeof event.message.timestamp === "number") {
+			if (
+				event.message.timestamp >= (latestAssistantMessageTimestamp ?? Number.NEGATIVE_INFINITY)
+			) {
+				latestAssistantMessageTimestamp = event.message.timestamp;
+			}
+			refresh_thinking_status();
 		}
 	});
 
-	pi.on("message_end", (_event, ctx) => {
-		stopThinkingAnimation();
+	pi.on("message_end", (event, ctx) => {
+		if (event.message?.role === "assistant") {
+			if (typeof event.message.timestamp === "number") {
+				if (
+					event.message.timestamp >= (latestAssistantMessageTimestamp ?? Number.NEGATIVE_INFINITY)
+				) {
+					latestAssistantMessageTimestamp = event.message.timestamp;
+				}
+				stopThinkingAnimation();
+			}
+		}
 		schedule_footer_stats(ctx);
 	});
 
@@ -2029,19 +2169,17 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		agentRunPending = true;
-		startWorkingAnimation();
+		arm_pre_token_thinking_status();
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
 		stopThinkingAnimation();
-		stopWorkingAnimation();
 		// When the agent loop ends (including after abort/cancel/error), no
 		// subagent can still be running. Reset the flag so the editor border
 		// reverts from the dim inset to the full-opacity accent line.
 		setLatestSubagentRunning(false);
-		const duration = userPromptAt > 0 ? performance.now() - userPromptAt : 0;
-		userPromptAt = 0;
+		const duration = turnStartedAt > 0 ? performance.now() - turnStartedAt : 0;
+		turnStartedAt = 0;
 		try {
 			if (ctx.mode === "tui" && duration >= 1000) {
 				const model = ctx.model;
@@ -2051,7 +2189,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		} catch {
 			/* stale ctx after replacement/dispose; skip notify */
 		}
-		requestRender?.();
+		refresh_thinking_status();
 	});
 
 	// `agent_settled` is the only event that means Pi will not auto-retry,
@@ -2061,19 +2199,36 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// followed by another `agent_start` after compaction/retry/follow-ups.
 	pi.on("agent_settled", (_event, ctx) => {
 		agentRunPending = false;
+		thinkingHeaderSuppressed = false;
+		setTurnToolTranscriptActive(false);
+		resetSubagentActivity();
+		stopLogoAnimation();
 		stopThinkingAnimation();
-		stopWorkingAnimation();
 		try {
-			if (ctx.mode === "tui") requestRender?.();
+			if (ctx.mode === "tui") refresh_thinking_status();
 		} catch {
 			/* stale ctx after replacement/dispose; no render */
 		}
 	});
 
+	pi.on("tool_call", (event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		suppress_thinking_header_for_work();
+		setTurnToolTranscriptActive(true);
+		if (event.toolName === "subagent") {
+			markSubagentActivityStarted();
+			refresh_thinking_status();
+		}
+	});
+
 	pi.on("tool_execution_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		if (event.toolName === "subagent") recompute_latest_subagent_running();
-		if (!thinkingActive) startWorkingAnimation();
+		suppress_thinking_header_for_work();
+		setTurnToolTranscriptActive(true);
+		if (event.toolName === "subagent") {
+			recompute_latest_subagent_running();
+		}
+		refresh_thinking_status();
 	});
 
 	pi.on("tool_execution_end", (event, ctx) => {
@@ -2084,18 +2239,11 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 		schedule_footer_stats(ctx);
 		if (event.toolName === "subagent") {
-			// The subagent tool has finished executing. Recompute would race the
-			// toolResult being appended to the session branch and could keep the
-			// flag true until agent_end, leaving the cap line visible for the
-			// rest of the task. Set it false directly; a subsequent
-			// tool_execution_start for a new subagent will recompute as needed.
-			setLatestSubagentRunning(false);
-			// Always request a render after a subagent finishes so the editor
-			// border updates from dim-inset back to the accent line.
+			markSubagentActivityEnded();
 			requestRender?.();
 			return;
 		}
-		if (workingActive && !thinkingActive) requestRender?.();
+		arm_pre_token_thinking_status();
 	});
 
 	pi.registerCommand("welcome", {
@@ -2124,9 +2272,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => {
 		reset_model_picker_session();
 		reset_slash_command_tracking();
-		resetRenderScheduler();
 		sessionCtx = undefined;
 		requestRender = undefined;
+		set_gradient_render_request(undefined);
 		tuiRef = undefined;
 		liveTheme = undefined;
 		liveCodeBgAnsi = "";
@@ -2136,28 +2284,43 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 		markdownThemeGeneration = 0;
 		clearMarkdownRenderCache();
+		logo_settled_by_user_message = false;
 		stopLogoAnimation();
 		shutdown_gradient_clock();
-		stopCursorBlink();
 		thinkingActive = false;
-		workingActive = false;
 		agentRunPending = false;
+		thinkingHeaderSuppressed = false;
 		summarizingActive = false;
-		userPromptAt = 0;
+		assistantThinkingHostReady = false;
+		turnStartedAt = 0;
 		setShellMode(false);
+		reset_scroll_review_state();
 		setLatestSubagentRunning(false);
+		resetSubagentActivity();
 		setThinkingBlocksHidden(false);
 		setToolGroupActive(false);
+		setGroupThinkingChildActive(false);
+		setGroupReopenableActive(false);
+		setTurnToolTranscriptActive(false);
 		setPlanAutoContinuing(false);
 		setShellSyncCallback(undefined);
 		reset_footer_state();
 		if (ctx.hasUI) {
-			ctx.ui.setWidget("ember-thinking", undefined);
 			ctx.ui.setHeader(undefined);
+			try {
+				ctx.ui.setWidget("ember-thinking", undefined);
+			} catch {
+				/* widget API may be unavailable outside TUI */
+			}
 		}
+		latestAssistantMessageTimestamp = undefined;
 		if (shellInputUnsubscribe) {
 			shellInputUnsubscribe();
 			shellInputUnsubscribe = undefined;
+		}
+		if (scrollReviewInputUnsubscribe) {
+			scrollReviewInputUnsubscribe();
+			scrollReviewInputUnsubscribe = undefined;
 		}
 		getShellEditor = undefined;
 	});

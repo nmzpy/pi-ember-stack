@@ -11,10 +11,11 @@ import {
 	gaussian_intensity,
 	get_gradient_phase,
 	invalidate_gradient_cache,
+	neutral_pulse_hex,
 	render_gradient,
 	reset_gradient_colorizer,
-	set_gradient_colorizer,
 	set_gradient_render_request,
+	set_gradient_colorizer,
 	shutdown_gradient_clock,
 	activate_gradient,
 	deactivate_gradient,
@@ -150,13 +151,28 @@ describe("gradient engine", () => {
 		expect(EDGE_PADDING).toBe(Math.ceil(3 * GRADIENT_SIGMA));
 	});
 
-	test("accent presets (thinking/working) produce identical output", () => {
+	test("accent presets (working/subagent) produce identical output", () => {
 		set_gradient_colorizer(forcedColorizer);
 		const text = "Test";
-		const r1 = render_gradient(text, "thinking", 0.3);
-		const r2 = render_gradient(text, "working", 0.3);
+		const r1 = render_gradient(text, "working", 0.3);
+		const r2 = render_gradient(text, "subagent", 0.3);
 		expect(r1).toBe(r2);
 		reset_gradient_colorizer();
+	});
+
+	test("thinking preset uses TEXT_COLOR glow, not accent palette", () => {
+		set_gradient_colorizer(forcedColorizer);
+		const text = "Test";
+		const thinking = render_gradient(text, "thinking", 0.3);
+		const working = render_gradient(text, "working", 0.3);
+		expect(thinking).not.toBe(working);
+		reset_gradient_colorizer();
+	});
+
+	test("neutral_pulse_hex sweeps dim→muted→text", () => {
+		expect(neutral_pulse_hex(0).toLowerCase()).toBe("#666666");
+		expect(neutral_pulse_hex(0.5).toLowerCase()).toBe("#808080");
+		expect(neutral_pulse_hex(1).toLowerCase()).toBe("#d4d4d4");
 	});
 
 	test("muted-text presets (exploringGroup/actionGroup) produce identical output", () => {
@@ -171,7 +187,7 @@ describe("gradient engine", () => {
 	test("accent and muted-text presets produce different output", () => {
 		set_gradient_colorizer(forcedColorizer);
 		const text = "Test";
-		const accentResult = render_gradient(text, "thinking", 0.5);
+		const accentResult = render_gradient(text, "working", 0.5);
 		const mutedResult = render_gradient(text, "exploringGroup", 0.5);
 		expect(accentResult).not.toBe(mutedResult);
 		reset_gradient_colorizer();
@@ -328,19 +344,6 @@ describe("gradient engine", () => {
 		shutdown_gradient_clock();
 	});
 
-	test("dispatch: render_request_fn is called once per tick", () => {
-		shutdown_gradient_clock();
-		let render_count = 0;
-		set_gradient_render_request(() => {
-			render_count++;
-		});
-		dispatch_gradient_tick();
-		dispatch_gradient_tick();
-		expect(render_count).toBe(2);
-		set_gradient_render_request(undefined);
-		shutdown_gradient_clock();
-	});
-
 	test("dispatch: errors in one callback do not prevent subsequent callbacks", () => {
 		shutdown_gradient_clock();
 		let called_after_error = false;
@@ -354,6 +357,19 @@ describe("gradient engine", () => {
 		subscribe_gradient_tick(safe_cb);
 		expect(() => dispatch_gradient_tick()).not.toThrow();
 		expect(called_after_error).toBe(true);
+		shutdown_gradient_clock();
+	});
+
+	test("dispatch: requests one native render after subscriber state updates", () => {
+		shutdown_gradient_clock();
+		let render_calls = 0;
+		set_gradient_render_request(() => {
+			render_calls++;
+		});
+		activate_gradient("thinking");
+		dispatch_gradient_tick();
+		expect(render_calls).toBe(1);
+		deactivate_gradient("thinking");
 		shutdown_gradient_clock();
 	});
 });

@@ -1,88 +1,8 @@
 import type { Context, Message, Tool } from "@earendil-works/pi-ai";
+import { prepare_todo_arguments } from "../../pi-ember-todo/normalize.ts";
 
 function is_record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export interface SerializedContent {
-	type: "text" | "image" | "thinking" | "toolCall";
-	text?: string;
-	image_url?: string;
-	thinking?: string;
-	id?: string;
-	name?: string;
-	arguments?: Record<string, unknown>;
-}
-
-interface SerializedMessage {
-	role: Message["role"];
-	content: SerializedContent[];
-	toolCallId?: string;
-	toolName?: string;
-	isError?: boolean;
-}
-
-const REQUEST_PREAMBLE = [
-	"This is a serialized model API request.",
-	"Treat systemPrompt as the system message, messages as ordered conversation history, and tools as callable function schemas.",
-	"When calling a tool, use its exact listed name and arguments. Never call a tool that is absent from tools.",
-	"Respond only to the final conversation state.",
-].join(" ");
-
-function text_from_user_content(message: Extract<Message, { role: "user" }>): SerializedContent[] {
-	if (typeof message.content === "string") return [{ type: "text", text: message.content }];
-	return message.content.map((content) => {
-		if (content.type === "image") {
-			return { type: "image", image_url: `data:${content.mimeType};base64,${content.data}` };
-		}
-		return { type: "text", text: content.text };
-	});
-}
-
-function serialize_message(message: Message): SerializedMessage {
-	if (message.role === "user") {
-		return { role: message.role, content: text_from_user_content(message) };
-	}
-
-	if (message.role === "toolResult") {
-		const content = message.content.map((part): SerializedContent => {
-			if (part.type === "image") {
-				return { type: "image", image_url: `data:${part.mimeType};base64,${part.data}` };
-			}
-			return { type: "text", text: part.text };
-		});
-		return {
-			role: message.role,
-			content,
-			toolCallId: message.toolCallId,
-			toolName: message.toolName,
-			isError: message.isError,
-		};
-	}
-
-	return {
-		role: message.role,
-		content: message.content.map((part): SerializedContent => {
-			if (part.type === "text") return { type: "text", text: part.text };
-			if (part.type === "thinking") return { type: "thinking", thinking: part.thinking };
-			return {
-				type: "toolCall",
-				id: part.id,
-				name: part.name,
-				arguments: part.arguments,
-			};
-		}),
-	};
-}
-
-function serialize_tool(tool: Tool): Record<string, unknown> {
-	const cursor_name = PI_TO_CURSOR_TOOL_NAME.get(tool.name) ?? tool.name;
-	const cursor_params = remap_tool_schema(tool.name, tool.parameters);
-	return {
-		name: cursor_name,
-		description: tool.description,
-		parameters: cursor_params,
-	};
 }
 
 const PI_TO_CURSOR_TOOL_NAME = new Map<string, string>([
@@ -93,6 +13,15 @@ const PI_TO_CURSOR_TOOL_NAME = new Map<string, string>([
 	["ls", "LS"],
 	["grep", "Grep"],
 	["find", "Glob"],
+	["todo", "todo"],
+	["apply_patch", "apply_patch"],
+	["subagent", "subagent"],
+	["quiz", "quiz"],
+	["task", "task"],
+	["web_search", "web_search"],
+	["fetch_content", "fetch_content"],
+	["get_search_content", "get_search_content"],
+	["compress", "compress"],
 ]);
 
 const PI_TO_CURSOR_ARG_NAMES: Record<string, Record<string, string>> = {
@@ -102,6 +31,16 @@ const PI_TO_CURSOR_ARG_NAMES: Record<string, Record<string, string>> = {
 	ls: { path: "path" },
 	grep: { pattern: "pattern", path: "include" },
 	find: { pattern: "glob", path: "path" },
+	web_search: { query: "search_term" },
+	fetch_content: { url: "url" },
+	get_search_content: { responseId: "response_id" },
+};
+
+const MODE_DIRECTIVES: Record<string, string> = {
+	plan: "You are in plan mode. Design your approach before coding. Reply in labeled lines: Task:, Investigation:, Module N:, Acceptance Criteria:. Do not write code until the plan is approved.",
+	code: "You are in code mode. Implement the task directly. Prefer parallel read and edit calls for independent files. Explain briefly after changes.",
+	debug: "You are in debug mode. Investigate the root cause, then fix it. Use read and bash to gather evidence. Prefer parallel independent reads.",
+	orchestrate: "You are in orchestrate mode. Break the task into independent subtasks, delegate where possible, and synthesize results. Prefer parallel tool calls.",
 };
 
 function remap_property_names(schema: unknown, pi_tool_name: string): unknown {
@@ -128,13 +67,114 @@ function remap_tool_schema(pi_tool_name: string, parameters: unknown): unknown {
 	return remap_property_names(parameters, pi_tool_name);
 }
 
-export function build_cursor_prompt(context: Context): string {
-	const request = {
-		systemPrompt: context.systemPrompt || "",
-		messages: context.messages.map(serialize_message),
-		tools: (context.tools || []).map(serialize_tool),
+export function cursor_tool_name_for_pi_tool(pi_tool_name: string): string {
+	return PI_TO_CURSOR_TOOL_NAME.get(pi_tool_name) ?? pi_tool_name;
+}
+
+export function cursor_serialize_tool(tool: Tool): Record<string, unknown> {
+	const cursor_name = cursor_tool_name_for_pi_tool(tool.name);
+	const cursor_params = remap_tool_schema(tool.name, tool.parameters);
+	return {
+		name: cursor_name,
+		description: tool.description,
+		parameters: cursor_params,
 	};
-	return `${REQUEST_PREAMBLE}\n<pi_model_request>\n${JSON.stringify(request)}\n</pi_model_request>`;
+}
+
+function user_message_is_visible(message: Message): boolean {
+	return (message as { display?: boolean }).display !== false;
+}
+
+/** Hidden Pi injections that must never be forwarded as the user's ask. */
+export function is_non_ask_user_message(message: Message): boolean {
+	const custom_type = (message as { customType?: string }).customType;
+	if (custom_type?.startsWith("pi-agents-enter-")) return true;
+	if (custom_type === "pi-agents-exit") return true;
+	if (custom_type === "pi-agents-tool-access") return true;
+	if (custom_type === "pi-agents-auto-continue") return true;
+	if (custom_type === "pi-agents-loop-retry") return true;
+	if (custom_type === "pi-agents-loop-guidance") return true;
+	if (custom_type === "pi-agents-plan-implement") return true;
+
+	const text = extract_user_message_text(message)?.trim();
+	if (!text) return false;
+	if (/^Entered .+ mode\.$/.test(text)) return true;
+	if (/^Exited .+ mode\.$/.test(text)) return true;
+	return false;
+}
+
+export function is_forwardable_user_ask(text: string): boolean {
+	const trimmed = text.trim();
+	if (!trimmed) return false;
+	if (/^Entered .+ mode\.$/.test(trimmed)) return false;
+	if (/^Exited .+ mode\.$/.test(trimmed)) return false;
+	return true;
+}
+
+export function extract_user_message_text(message: Message): string | undefined {
+	if (message.role !== "user") return undefined;
+	if (typeof message.content === "string") {
+		const text = message.content.trim();
+		return text ? message.content : undefined;
+	}
+	const parts = message.content
+		.map((part) => {
+			if (part.type === "text") return part.text;
+			if (part.type === "image") return `[image/${part.mimeType || "unknown"}]`;
+			return "";
+		})
+		.join("");
+	return parts.trim() ? parts : undefined;
+}
+
+/** Walk history for the latest real user ask; visible rows win over hidden injections. */
+function last_user_text(messages: readonly Message[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (!user_message_is_visible(message) || is_non_ask_user_message(message)) continue;
+		const text = extract_user_message_text(message);
+		if (text) return text;
+	}
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (is_non_ask_user_message(message)) continue;
+		const text = extract_user_message_text(message);
+		if (text) return text;
+	}
+	return "";
+}
+
+function build_mode_directive(pi_mode: string | undefined): string {
+	const mode = pi_mode ?? "code";
+	return MODE_DIRECTIVES[mode] ?? MODE_DIRECTIVES.code;
+}
+
+/** True when the Pi context tip has a non-empty user message. */
+export function cursor_context_has_user_text(
+	context: Context,
+	explicit_user_text?: string,
+): boolean {
+	return resolve_cursor_user_text(context, explicit_user_text).length > 0;
+}
+
+/** Latest user ask: explicit before_agent_start prompt, then visible context rows. */
+export function resolve_cursor_user_text(context: Context, explicit_user_text?: string): string {
+	const explicit = explicit_user_text?.trim();
+	if (explicit && is_forwardable_user_ask(explicit)) return explicit;
+	return last_user_text(context.messages).trim();
+}
+
+export function build_cursor_user_prompt(
+	context: Context,
+	pi_mode: string | undefined,
+	include_mode_directive = true,
+	explicit_user_text?: string,
+): string {
+	const user_text = resolve_cursor_user_text(context, explicit_user_text);
+	if (!include_mode_directive) return user_text;
+	const directive = build_mode_directive(pi_mode);
+	if (!user_text) return directive;
+	return `${directive}\n\n${user_text}`;
 }
 
 function normalized_tool_name(value: string): string {
@@ -151,14 +191,45 @@ const TOOL_ALIASES = new Map<string, string>([
 	["readfile", "read"],
 	["writefile", "write"],
 	["strreplace", "edit"],
+	["searchreplace", "edit"],
 	["listdirectory", "ls"],
 	["listfiles", "ls"],
+	["listdir", "ls"],
 	["searchfiles", "grep"],
+	["filepathsearch", "grep"],
+	["grep", "grep"],
 	["findfiles", "find"],
 	["glob", "find"],
+	["globfilesearch", "find"],
+	["applypatch", "apply_patch"],
+	["edittoreplace", "edit"],
+	["updatetodos", "todo"],
+	["readtodos", "todo"],
+	["websearch", "web_search"],
+	["websearchtoolcall", "web_search"],
+	["fetchtoolcall", "fetch_content"],
+	["exafetchtoolcall", "fetch_content"],
+	["askquestion", "quiz"],
+	["askquestiontoolcall", "quiz"],
+	["tasktoolcall", "subagent"],
 ]);
 
-export function resolve_pi_tool_name(raw_name: string, tools: readonly Tool[]): string | undefined {
+/** Canonical Pi tool ids Cursor can map to without a live Pi tool registry. */
+const CANONICAL_PI_TOOLS = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"bash",
+	"edit",
+	"write",
+	"apply_patch",
+	"task",
+	"subagent",
+	"todo",
+]);
+
+export function resolve_pi_tool_name(raw_name: string, tools: readonly Tool[] = []): string | undefined {
 	const exact = tools.find((tool) => tool.name === raw_name);
 	if (exact) return exact.name;
 
@@ -166,9 +237,17 @@ export function resolve_pi_tool_name(raw_name: string, tools: readonly Tool[]): 
 	const normalized_match = tools.find((tool) => normalized_tool_name(tool.name) === normalized);
 	if (normalized_match) return normalized_match.name;
 
-	const alias = TOOL_ALIASES.get(normalized) || normalized;
-	return tools.find((tool) => normalized_tool_name(tool.name) === normalized_tool_name(alias))
-		?.name;
+	const aliased = TOOL_ALIASES.get(normalized) ?? normalized;
+	const alias_match = tools.find(
+		(tool) => normalized_tool_name(tool.name) === normalized_tool_name(aliased),
+	);
+	if (alias_match) return alias_match.name;
+
+	// Cursor owns its tool loop — Pi's context.tools is often empty. Still map
+	// known Cursor names onto Pi compact-tool ids so grouping/labels stay SSOT.
+	if (TOOL_ALIASES.has(normalized)) return TOOL_ALIASES.get(normalized);
+	if (CANONICAL_PI_TOOLS.has(aliased)) return aliased;
+	return undefined;
 }
 
 function first_defined(input: Record<string, unknown>, names: readonly string[]): unknown {
@@ -281,7 +360,19 @@ export function normalize_tool_arguments(
 		if (input.limit !== undefined) output.limit = input.limit;
 		return output;
 	}
+	if (tool_name === "todo") {
+		// Provider-native batch shapes (Cursor UpdateTodos, etc.) must be flattened
+		// before Pi's schema validation strips unknown keys like `todos`.
+		return prepare_todo_arguments(input) as Record<string, unknown>;
+	}
 	return input;
 }
 
-export const __test_only = { REQUEST_PREAMBLE };
+export const __test_only = {
+	build_mode_directive,
+	extract_user_message_text,
+	is_forwardable_user_ask,
+	is_non_ask_user_message,
+	last_user_text,
+	user_message_is_visible,
+};

@@ -8,7 +8,7 @@
 
 import * as os from "node:os";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { MUTED_GROUP_GRADIENT_PRESET, renderLiveGradient } from "../../../pi-ember-ui/index.ts";
+import { renderLiveGradient, formatElapsed } from "../../../pi-ember-ui/index.ts";
 import {
 	BULLET,
 	formatCallBody,
@@ -23,17 +23,16 @@ import {
 import { Container, type Component, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Message } from "@earendil-works/pi-ai";
 import { type SubAgentResult, isFailedResult, getResultOutput } from "./runner.ts";
+import {
+	type SubagentArgs,
+	isSingleModeSubagentArgs,
+} from "./subagent-group.ts";
+
+export type { SubagentArgs };
 
 interface ThemeLike {
 	fg(tag: string, text: string): string;
 	bold(text: string): string;
-}
-
-interface SubagentArgs {
-	agent?: string;
-	task?: string;
-	tasks?: Array<{ agent: string; task: string }>;
-	chain?: Array<{ agent: string; task: string }>;
 }
 
 /**
@@ -266,7 +265,7 @@ export function renderSingleResult(
 	if (expanded) {
 		const mdTheme = getMarkdownTheme();
 		const container = new Container();
-		let header = `${icon} ${theme.fg("text", theme.bold(result.agent))}`;
+		let header = `${icon} ${theme.fg("dim", theme.bold(result.agent))}`;
 		if (isError && result.stopReason) {
 			const reasonColor = result.stopReason === "timeout" ? "warning" : "error";
 			header += ` ${theme.fg(reasonColor, `[${result.stopReason}]`)}`;
@@ -374,14 +373,16 @@ function renderAgentLabel(
 	result?: SubAgentResult,
 	phaseOffsetMs: number = 0,
 	isSingle = false,
+	elapsedMs?: number,
 ): string {
+	const elapsedSuffix = isSingle ? formatSubagentElapsedSuffix(theme, elapsedMs) : "";
 	const prefix = isSingle
 		? status === "running"
 			? statusBulletColor(false, false, theme)
 			: theme.fg("muted", BULLET)
 		: "";
 	if (status === "running") {
-		return prefix + renderLiveGradient(agentName, MUTED_GROUP_GRADIENT_PRESET, phaseOffsetMs);
+		return prefix + theme.fg("text", agentName) + elapsedSuffix;
 	}
 	let suffix = "";
 	if (status === "failed" && result) {
@@ -391,9 +392,7 @@ function renderAgentLabel(
 			suffix = ` ${theme.fg("error", clipped)}`;
 		}
 	}
-	// Completed/failed agent names render in plain text color (not the live
-	// mode accent) so finished subagents don't flash the active mode color.
-	return prefix + theme.fg("text", agentName) + suffix + agentStatusSuffix(status, theme);
+	return prefix + theme.fg("dim", agentName) + suffix + agentStatusSuffix(status, theme) + elapsedSuffix;
 }
 
 /**
@@ -409,8 +408,9 @@ function renderAgentRow(
 	prefix = "",
 	phaseOffsetMs: number = 0,
 	isSingle = false,
+	elapsedMs?: number,
 ): string {
-	return prefix + renderAgentLabel(status, agentName, theme, result, phaseOffsetMs, isSingle);
+	return prefix + renderAgentLabel(status, agentName, theme, result, phaseOffsetMs, isSingle, elapsedMs);
 }
 
 type FlatEntry =
@@ -461,22 +461,31 @@ function renderLatestToolRow(
 		row.result.latestToolCall.args,
 		theme,
 		true,
+		false,
 	)}`;
 }
 
 const DELEGATING_LABEL = "Delegating";
 
-/** Parent tool is running but no subagent has emitted a tool call or message yet. */
+/** Same 1 s threshold as the Thinking status row. */
+const SUBAGENT_ELAPSED_MIN_MS = 1000;
+
+/** Dim elapsed suffix for subagent labels — SSOT with Thinking. */
+export function formatSubagentElapsedSuffix(theme: ThemeLike, elapsedMs: number | undefined): string {
+	if (elapsedMs === undefined || elapsedMs < SUBAGENT_ELAPSED_MIN_MS) return "";
+	return theme.fg("dim", ` ${formatElapsed(elapsedMs)}`);
+}
+
+/** Parent tool is running but child session placeholders are not published yet. */
 export function isSubagentDelegating(results: SubAgentResult[]): boolean {
-	if (results.length === 0) return true;
-	return results.every((r) => r.exitCode === -1 && !r.latestToolCall && r.messages.length === 0);
+	return results.length === 0;
 }
 
 /** Compact single-row state while the parent invokes the subagent tool. */
-export function renderDelegatingRow(theme: ThemeLike): string {
+export function renderDelegatingRow(theme: ThemeLike, elapsedMs?: number): string {
 	const bullet = groupBulletColorFromFlags(false, false, theme);
-	const label = renderLiveGradient(DELEGATING_LABEL, MUTED_GROUP_GRADIENT_PRESET);
-	return bullet + label;
+	const label = renderLiveGradient(DELEGATING_LABEL, "subagent");
+	return bullet + label + formatSubagentElapsedSuffix(theme, elapsedMs);
 }
 
 function renderGroupLabel(
@@ -484,10 +493,15 @@ function renderGroupLabel(
 	_hasError: boolean,
 	_allDone: boolean,
 	theme: ThemeLike,
+	elapsedMs?: number,
 ): string {
 	// Header is plain dim/bold with the same bullet spacing as a compact
 	// group header (e.g. "• Exploring") so the group columns align.
-	return theme.fg("dim", BULLET) + theme.fg("dim", theme.bold(label));
+	return (
+		theme.fg("dim", BULLET) +
+		theme.fg("dim", theme.bold(label)) +
+		formatSubagentElapsedSuffix(theme, elapsedMs)
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +521,74 @@ interface AgentRowDescriptor {
 	isSingle: boolean;
 }
 
+export interface SubagentLayoutMember {
+	args: SubagentArgs;
+	results: SubAgentResult[];
+}
+
+/** Rows for consecutive single-mode subagent tool calls grouped under Subagents. */
+export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDescriptor[] {
+	return members.map((member) => {
+		if (
+			isSingleModeSubagentArgs(member.args) &&
+			(member.results.length === 0 || isSubagentDelegating(member.results))
+		) {
+			return {
+				status: "running" as const,
+				name: asString(member.args.agent, "subagent"),
+				result: member.results[0],
+				isSingle: false,
+			};
+		}
+		return {
+			status: agentStatus(member.results[0]),
+			name: member.results[0]?.agent ?? asString(member.args.agent, "subagent"),
+			result: member.results[0],
+			isSingle: false,
+		};
+	});
+}
+
+function fillSubagentLayoutContainer(
+	container: Container,
+	headerLabel: string | undefined,
+	rows: AgentRowDescriptor[],
+	theme: ThemeLike,
+	elapsedMs?: number,
+): void {
+	const fg = theme.fg.bind(theme);
+	const hasHeader = headerLabel !== undefined;
+	if (headerLabel) {
+		const hasError = rows.some((r) => r.status === "failed");
+		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
+		container.addChild(new Text(renderGroupLabel(headerLabel, hasError, allDone, theme, elapsedMs), 0, 0));
+	}
+	const flatEntries = buildFlatEntries(rows);
+	for (const entry of flatEntries) {
+		const row = entry.descriptor;
+		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
+		if (entry.type === "agent") {
+			const rowText = renderAgentRow(
+				row.status,
+				row.name,
+				theme,
+				row.result,
+				hasHeader ? fg("dim", treePrefix) : "",
+				entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
+				row.isSingle,
+				row.isSingle ? elapsedMs : undefined,
+			);
+			container.addChild(new Text(rowText, 0, 0));
+		} else {
+			const toolRow = renderLatestToolRow(row, theme, treePrefix);
+			if (toolRow) container.addChild(new SubagentToolText(toolRow));
+		}
+	}
+	if (container.children.length === 0) {
+		container.addChild(new Text(fg("dim", "subagent"), 0, 0));
+	}
+}
+
 /**
  * Derive the ordered list of visible agent rows from args + results.
  * Single mode: one row. Parallel: all tasks. Chain: only started steps
@@ -520,7 +602,7 @@ function deriveAgentRows(
 	headerLabel: string | undefined;
 	rows: AgentRowDescriptor[];
 } {
-	if (args.agent && args.task && !((args.tasks?.length ?? 0) > 0) && !((args.chain?.length ?? 0) > 0)) {
+	if (isSingleModeSubagentArgs(args)) {
 		return {
 			headerLabel: undefined,
 			rows: [
@@ -576,9 +658,48 @@ function deriveAgentRows(
  *
  * No `⏳`, no `[scope]`, no `parallel (N tasks)` — just bullets and names.
  */
-export function renderSubagentLayout(args: SubagentArgs, results: SubAgentResult[], theme: ThemeLike): string {
+export function renderSubagentLayout(
+	args: SubagentArgs,
+	results: SubAgentResult[],
+	theme: ThemeLike,
+	elapsedMs?: number,
+	groupedMembers?: SubagentLayoutMember[],
+): string {
+	if (groupedMembers && groupedMembers.length > 1) {
+		const rows = memberRecordsToRows(groupedMembers);
+		const lines: string[] = [];
+		const fg = theme.fg.bind(theme);
+		const hasHeader = true;
+		const hasError = rows.some((r) => r.status === "failed");
+		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
+		lines.push(renderGroupLabel("Subagents", hasError, allDone, theme, elapsedMs));
+		const flatEntries = buildFlatEntries(rows);
+		for (const entry of flatEntries) {
+			const row = entry.descriptor;
+			const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
+			if (entry.type === "agent") {
+				lines.push(
+					renderAgentRow(
+						row.status,
+						row.name,
+						theme,
+						row.result,
+						fg("dim", treePrefix),
+						entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
+						false,
+					),
+				);
+			} else {
+				const toolRow = renderLatestToolRow(row, theme, treePrefix);
+				if (toolRow) lines.push(toolRow);
+			}
+		}
+		return lines.join("\n");
+	}
 	if (isSubagentDelegating(results)) {
-		return renderDelegatingRow(theme);
+		if (isSingleModeSubagentArgs(args)) {
+			return renderDelegatingRow(theme, elapsedMs);
+		}
 	}
 	const { headerLabel, rows } = deriveAgentRows(args, results);
 	const fg = theme.fg.bind(theme);
@@ -587,7 +708,7 @@ export function renderSubagentLayout(args: SubagentArgs, results: SubAgentResult
 	if (headerLabel) {
 		const hasError = rows.some((r) => r.status === "failed");
 		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
-		lines.push(renderGroupLabel(headerLabel, hasError, allDone, theme));
+		lines.push(renderGroupLabel(headerLabel, hasError, allDone, theme, elapsedMs));
 	}
 	const flatEntries = buildFlatEntries(rows);
 	for (const entry of flatEntries) {
@@ -603,6 +724,7 @@ export function renderSubagentLayout(args: SubagentArgs, results: SubAgentResult
 					hasHeader ? fg("dim", treePrefix) : "",
 					entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 					row.isSingle,
+					row.isSingle ? elapsedMs : undefined,
 				),
 			);
 		} else {
@@ -628,51 +750,21 @@ export function buildSubagentLayoutComponent(
 	args: SubagentArgs,
 	results: SubAgentResult[],
 	theme: ThemeLike,
+	elapsedMs?: number,
+	groupedMembers?: SubagentLayoutMember[],
 ): Container {
 	const container = new Container();
-	if (isSubagentDelegating(results)) {
-		container.addChild(new Text(renderDelegatingRow(theme), 0, 0));
+	if (groupedMembers && groupedMembers.length > 1) {
+		const rows = memberRecordsToRows(groupedMembers);
+		fillSubagentLayoutContainer(container, "Subagents", rows, theme, elapsedMs);
+		return container;
+	}
+	if (isSubagentDelegating(results) && isSingleModeSubagentArgs(args)) {
+		container.addChild(new Text(renderDelegatingRow(theme, elapsedMs), 0, 0));
 		return container;
 	}
 	const { headerLabel, rows } = deriveAgentRows(args, results);
-	const fg = theme.fg.bind(theme);
-
-	if (headerLabel) {
-		const hasError = rows.some((r) => r.status === "failed");
-		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
-		// Header is always transparent — no subagentBg.
-		container.addChild(new Text(renderGroupLabel(headerLabel, hasError, allDone, theme), 0, 0));
-	}
-
-	const hasHeader = headerLabel !== undefined;
-	const flatEntries = buildFlatEntries(rows);
-	for (let i = 0; i < flatEntries.length; i++) {
-		const entry = flatEntries[i];
-		const row = entry.descriptor;
-		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
-		if (entry.type === "agent") {
-			const agentIndex = entry.agentIndex;
-			const rowText = renderAgentRow(
-				row.status,
-				row.name,
-				theme,
-				row.result,
-				hasHeader ? fg("dim", treePrefix) : "",
-				agentIndex * SUBAGENT_PHASE_OFFSET_MS,
-				row.isSingle,
-			);
-			// All agent rows (running, completed, failed) are transparent — no
-			// subagentBg background. Completed rows render in plain text color.
-			container.addChild(new Text(rowText, 0, 0));
-		} else {
-			const toolRow = renderLatestToolRow(row, theme, treePrefix);
-			if (toolRow) container.addChild(new SubagentToolText(toolRow));
-		}
-	}
-
-	if (container.children.length === 0) {
-		container.addChild(new Text(fg("dim", "subagent"), 0, 0));
-	}
+	fillSubagentLayoutContainer(container, headerLabel, rows, theme, elapsedMs);
 	return container;
 }
 
@@ -680,7 +772,7 @@ export function buildSubagentLayoutComponent(
  * Whether any agent in the layout is still running (flashing).
  */
 export function anySubagentRunning(args: SubagentArgs, results: SubAgentResult[]): boolean {
-	if (args.agent && args.task && !((args.tasks?.length ?? 0) > 0) && !((args.chain?.length ?? 0) > 0)) {
+	if (isSingleModeSubagentArgs(args)) {
 		return agentStatus(results[0]) === "running";
 	}
 	if (args.tasks && args.tasks.length > 0) {
@@ -718,7 +810,7 @@ export function renderSubagentExpanded(
 	for (const r of details.results) {
 		const rowContent = new Container();
 		const stepIcon = isFailedResult(r) ? fg("error", "✗") : fg("success", "✓");
-		rowContent.addChild(new Text(`${stepIcon} ${fg("text", r.agent)}`, 0, 0));
+		rowContent.addChild(new Text(`${stepIcon} ${fg("dim", r.agent)}`, 0, 0));
 		if (r.errorMessage) {
 			rowContent.addChild(new Text(fg("error", `Error: ${r.errorMessage}`), 0, 0));
 		}

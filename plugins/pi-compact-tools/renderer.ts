@@ -1,14 +1,17 @@
 import { Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { parseStreamingJson } from "@earendil-works/pi-ai/compat";
 import * as Diff from "diff";
+import { patch_files_from_input, format_patch_error_row, patch_file_errors_by_path, patch_has_file_errors, type ApplyPatchDetails, type PatchFileRow } from "../pi-ember-applypatch/display.ts";
+import { BULLET, CompactGroupText } from "./compact-text.ts";
 import {
 	MUTED_GROUP_GRADIENT_PRESET,
-	requestTuiRenderSnapToBottom,
+	requestTuiRender,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
 import { get_gradient_phase, render_gradient } from "../pi-ember-ui/gradient.ts";
 import { isThinkingBlocksHidden } from "../pi-ember-ui/mode-colors.ts";
+
 
 /** Minimal theme shape used by compact rendering: fg(tag, text) and bold(text). */
 interface ThemeLike {
@@ -26,6 +29,7 @@ interface ToolArgs {
 	oldText?: string;
 	newText?: string;
 	edits?: unknown;
+	input?: string;
 	offset?: number;
 	limit?: number;
 	[key: string]: unknown;
@@ -47,7 +51,8 @@ interface ToolResult {
 	[key: string]: unknown;
 }
 
-const BULLET = "• ";
+const DISCOVERY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const GROUPABLE_TOOLS = new Set([...DISCOVERY_TOOLS, "edit", "write", "bash", "apply_patch"]);
 
 /** Exploring-style child tree gutter — SSOT for compact groups and subagents. */
 export const TREE_BRANCH_PIPE = "  │ ";
@@ -60,8 +65,21 @@ export const TREE_NESTED_PIPE = "  │ └";
 export const TREE_NESTED_LAST = "    └";
 /** Single subagent tool row — └ on the agent-name column after `• `. */
 export const TREE_SINGLE_TOOL = "  └";
-const DISCOVERY_TOOLS = new Set(["read", "grep", "find", "ls"]);
-const GROUPABLE_TOOLS = new Set([...DISCOVERY_TOOLS, "edit", "write", "bash"]);
+
+export { BULLET, CompactGroupText } from "./compact-text.ts";
+
+/** SSOT fg token for compact tool call labels/details — running text, completed muted. */
+export function compact_tool_fg_token(completed: boolean): "muted" | "text" {
+	return completed ? "muted" : "text";
+}
+
+function paint_compact_tool(theme: ThemeLike, text: string, completed: boolean): string {
+	return theme.fg(compact_tool_fg_token(completed), text);
+}
+
+function paint_compact_tool_label(theme: ThemeLike, label: string, completed: boolean): string {
+	return theme.fg(compact_tool_fg_token(completed), theme.bold(label));
+}
 
 export type ToolRenderContext = {
 	args: unknown;
@@ -88,12 +106,16 @@ export type CompactCall = {
 	result?: ToolResult;
 	/** Standalone (non-group-owner) call row visual — repainted on theme change. */
 	callText?: CompactGroupText;
+	/** Last rendered terminal row count for shrink snap detection. */
+	lastRenderedLineCount?: number;
+	/** Set when the next invalidation should snap after line-count shrink. */
+	pendingShrink?: boolean;
 };
 
 export type DiscoveryGroup = {
 	records: CompactCall[];
 	/** Group type and its matching present/past-tense label pair. */
-	type?: "discovery" | "editing" | "writing" | "bashing";
+	type?: "discovery" | "editing" | "writing" | "bashing" | "patching";
 	/** The groupKey value that created this group. */
 	key?: string;
 	/**
@@ -106,9 +128,19 @@ export type DiscoveryGroup = {
 	 * Whether the agent has demonstrably moved on from this group (emitted
 	 * visible user-facing text, started a non-group tool, or started a tool
 	 * in a different group). New same-key calls cannot join a settled group;
-	 * completed members are absorbed into the past-tense header summary.
+	 * completed members are absorbed into the past-tense header summary,
+	 * except the latest completed child which lingers until the next baby
+	 * arrives or the group settles.
 	 */
 	settled?: boolean;
+	/** Set when a hard boundary splits the group — never reopen across this row. */
+	hardExited?: boolean;
+	/**
+	 * When hidden thinking interrupts a settled group, render the gradient
+	 * Thinking label in the single child row slot (replacing any lingering
+	 * Searching/Reading child) instead of a separate status row.
+	 */
+	thinkingChild?: boolean;
 	/**
 	 * Shared visual handle for the group block. The owner re-binds this
 	 * to its live `Text` on every `renderCall`; members write into it
@@ -117,28 +149,25 @@ export type DiscoveryGroup = {
 	 * without relying on owner invalidation.
 	 */
 	callText?: CompactGroupText;
+	/** Last rendered terminal row count for shrink snap detection. */
+	lastRenderedLineCount?: number;
+	/** Set when the next invalidation should snap after line-count shrink. */
+	pendingShrink?: boolean;
 };
 
-/**
- * Compact call rows must never wrap: wrapping long bash commands or file
- * paths produces visually noisy multi-row blocks. The TUI supplies the
- * authoritative available width on every render, so truncate each
- * independently styled line at that boundary. Used for both group rows
- * and standalone (non-group) call rows.
- */
-export class CompactGroupText implements Component {
-	text = "";
+type LineCountTarget = {
+	lastRenderedLineCount?: number;
+	pendingShrink?: boolean;
+};
 
-	setText(text: string): void {
-		this.text = text;
+function set_compact_call_text(target: LineCountTarget, callText: CompactGroupText, text: string): void {
+	const prev = target.lastRenderedLineCount ?? 0;
+	const line_count = text.length === 0 ? 0 : text.split("\n").length;
+	target.lastRenderedLineCount = line_count;
+	if (prev > 0 && line_count < prev) {
+		target.pendingShrink = true;
 	}
-
-	invalidate(): void {}
-
-	render(width: number): string[] {
-		const availableWidth = Math.max(1, width);
-		return this.text.split("\n").map((line) => truncateToWidth(line, availableWidth));
-	}
+	callText.setText(text);
 }
 
 function textValue(value: unknown, fallback = ""): string {
@@ -176,6 +205,15 @@ function bashCdDir(command: string): string | undefined {
 	return match?.[1];
 }
 
+/** Bash call preview — drop grouped `cd … &&` prefixes and a redundant leading `bash `. */
+export function strip_bash_command_preview(command: string, inGroup = false): string {
+	let stripped = command;
+	if (inGroup) {
+		stripped = stripped.replace(/^\s*cd\s+[^\s&]+\s*&&\s*/, "") || stripped;
+	}
+	return stripped.replace(/^\s*bash\s+/, "") || stripped;
+}
+
 /**
  * Detect bash commands that are grep invocations (optionally preceded by
  * `cd <dir> &&`). Returns the extracted pattern and path so the call
@@ -202,15 +240,47 @@ function bashGrepInfo(command: string): { pattern: string; path: string } | unde
 }
 
 function groupKey(name: string, args: ToolArgs): string | undefined {
-	if (DISCOVERY_TOOLS.has(name)) return "__discovery__";
-	if (name === "edit") return "__editing__";
-	if (name === "write") return "__writing__";
+	const type = resolve_compact_group_type(name, args);
+	if (!type) return undefined;
+	return `__${type}__`;
+}
+
+/** Compact group bucket for a tool name + args — SSOT for compact + cursor. */
+export type CompactGroupType = NonNullable<DiscoveryGroup["type"]>;
+
+export function resolve_compact_group_type(
+	name: string,
+	args: ToolArgs = {},
+): CompactGroupType | undefined {
+	if (DISCOVERY_TOOLS.has(name)) return "discovery";
+	if (name === "edit") return "editing";
+	if (name === "write") return "writing";
 	if (name === "bash") {
 		const command = textValue(args?.command);
-		if (bashGrepInfo(command)) return "__discovery__";
-		return "__bashing__";
+		if (bashGrepInfo(command)) return "discovery";
+		return "bashing";
 	}
+	if (name === "apply_patch") return "patching";
 	return undefined;
+}
+
+function patch_input(args: ToolArgs): string {
+	const raw = args?.input;
+	if (raw === undefined || raw === null) return "";
+	return String(raw);
+}
+
+function patch_files_for_record(record: CompactCall): PatchFileRow[] {
+	if (record.name !== "apply_patch") return [];
+	return patch_files_from_input(patch_input(record.args));
+}
+
+function patch_files_in_group(group: DiscoveryGroup): PatchFileRow[] {
+	const rows: PatchFileRow[] = [];
+	for (const record of group.records) {
+		rows.push(...patch_files_for_record(record));
+	}
+	return rows;
 }
 
 function errorText(result: ToolResult | undefined, isError: boolean): string | undefined {
@@ -265,7 +335,7 @@ function formatBashResultLine(
 	if (isError) return "";
 	const lastLine = bashLastLine(result);
 	if (lastLine === undefined) return "";
-	return `\n${theme.fg("dim", "  ")}${theme.fg("text", lastLine)}`;
+	return `\n${paint_compact_tool(theme, "  ", true)}${theme.fg("text", lastLine)}`;
 }
 
 function diffStats(result: ToolResult | undefined): { additions: number; removals: number } {
@@ -387,15 +457,15 @@ function matchLabel(result: ToolResult | undefined, theme: ThemeLike): string {
 	if (total === undefined) return "";
 	const label = total === 1 ? "1 match" : `${total} matches`;
 	// Match counts stay muted/normal — never the live mode accent.
-	return theme.fg("dim", "  ") + theme.fg("muted", label);
+	return paint_compact_tool(theme, "  ", true) + theme.fg("muted", label);
 }
 
 export const PULSE_INTERVAL_MS = 600;
 
 /**
- * Canonical status-bullet color: error→red, completed→green, else a
- * flashing muted/dim bullet driven by PULSE_INTERVAL_MS. Shared by the
- * compact and subagent renderers; only subagent rows own a pulse timer.
+ * Canonical status-bullet color: error→red, completed→green, else static
+ * muted. Running state is shown by gradient child verbs (Searching, Reading,
+ * Bashing, …) — bullets do not pulse.
  */
 export function statusBulletColor(
 	isError: boolean,
@@ -404,13 +474,12 @@ export function statusBulletColor(
 ): string {
 	if (isError) return theme.fg("error", BULLET);
 	if (isCompleted) return theme.fg("success", BULLET);
-	const pulse = Math.floor(Date.now() / PULSE_INTERVAL_MS) % 2 === 0;
-	return pulse ? theme.fg("muted", BULLET) : theme.fg("dim", BULLET);
+	return theme.fg("muted", BULLET);
 }
 
 /**
  * Canonical group-bullet color: any error→red, all completed→green,
- * else flashing. Derived from statusBulletColor's pulse logic.
+ * else static muted.
  */
 export function groupBulletColorFromFlags(
 	hasError: boolean,
@@ -468,25 +537,39 @@ function bulletColor(record: CompactCall, theme: ThemeLike): string {
 
 function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string {
 	const { name, args, result } = record;
-	const prefix = bulletColor(record, theme) + formatCallBody(name, args, theme);
+	const completed = record._completed === true;
+	if (name === "apply_patch") {
+		const details = result?.details as { parseError?: string } | undefined;
+		if (details?.parseError) {
+			return format_patch_error_row(
+				result?.details as Parameters<typeof format_patch_error_row>[0],
+				theme,
+				record.isError,
+			);
+		}
+		return format_apply_patch_block(record, theme);
+	}
+	const prefix = bulletColor(record, theme) + formatCallBody(name, args, theme, false, completed);
 	// Live edit/write stats: while the model streams args (before the tool
 	// runs), show a running +N -N count that updates on each token. Once the
 	// edit completes, the authoritative diff stats take over; write has no
 	// diff, so it keeps the args-based content line count as final.
-	if ((name === "edit" || name === "write") && !record._completed) {
+	// write is a full rewrite/new file, so it only shows +N, never -N.
+	if ((name === "edit" || name === "write") && !completed) {
 		const live = name === "edit" ? streamingEditStats(args) : streamingWriteStats(args);
+		const showRemovals = name === "edit";
 		if (live) {
-			return prefix + theme.fg("dim", "  ") + formatEditStatsFromCounts(live, theme);
+			return prefix + paint_compact_tool(theme, "  ", false) + formatEditStatsFromCounts(live, theme, showRemovals);
 		}
 		return prefix;
 	}
-	if (!record._completed || result === undefined) return prefix;
+	if (!completed || result === undefined) return prefix;
 	if (name === "edit") {
-		return prefix + theme.fg("dim", "  ") + formatEditStats(result, theme);
+		return prefix + paint_compact_tool(theme, "  ", true) + formatEditStats(result, theme);
 	}
 	if (name === "write") {
 		const final = streamingWriteStats(args);
-		if (final) return prefix + theme.fg("dim", "  ") + formatEditStatsFromCounts(final, theme);
+		if (final) return prefix + paint_compact_tool(theme, "  ", true) + formatEditStatsFromCounts(final, theme, false);
 		return prefix;
 	}
 	if (name === "grep" || name === "find") {
@@ -506,11 +589,14 @@ function formatEditStats(result: ToolResult | undefined, theme: ThemeLike): stri
 function formatEditStatsFromCounts(
 	counts: { additions: number; removals: number },
 	theme: ThemeLike,
+	showRemovals = true,
 ): string {
 	// Avoid noisy +0 -0 placeholders when there is nothing to diff.
 	if (counts.additions === 0 && counts.removals === 0) return "";
+	const plus = theme.fg("success", `+${counts.additions}`);
+	if (!showRemovals) return plus;
 	return (
-		theme.fg("success", `+${counts.additions}`) +
+		plus +
 		theme.fg("dim", " ") +
 		theme.fg("error", `-${counts.removals}`)
 	);
@@ -534,9 +620,30 @@ function presentTenseVerb(name: string, args: ToolArgs): string {
 			return "Editing";
 		case "write":
 			return "Writing";
+		case "apply_patch":
+			return "Patching";
 		default:
 			return name;
 	}
+}
+
+function renderRunningGradient(text: string): string {
+	return render_gradient(text, MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase());
+}
+
+/** Gradient Thinking child row under a settled group header — SSOT with the status label. */
+function formatGroupThinkingChildRow(): string {
+	return render_gradient("Thinking", "thinking", get_gradient_phase());
+}
+
+/** Present-tense child verb for absorb+linger rows (SSOT for compact + cursor). */
+export function groupChildPresentVerb(name: string, args: ToolArgs = {}): string {
+	return presentTenseVerb(name, args);
+}
+
+/** Gradient present-tense verb used under Exploring-style group headers. */
+export function formatGroupChildGradientVerb(name: string, args: ToolArgs = {}): string {
+	return renderRunningGradient(presentTenseVerb(name, args));
 }
 
 function pastTenseNoun(type: NonNullable<DiscoveryGroup["type"]>): { label: string; noun: string } {
@@ -547,9 +654,22 @@ function pastTenseNoun(type: NonNullable<DiscoveryGroup["type"]>): { label: stri
 			return { label: "Written", noun: "file" };
 		case "bashing":
 			return { label: "Ran", noun: "command" };
+		case "patching":
+			return { label: "Patched", noun: "file" };
 		default:
 			return { label: "Explored", noun: "file" };
 	}
+}
+
+/** Past-tense group header base (`Explored N files`) — SSOT for compact + cursor. */
+export function formatPastTenseGroupHeader(
+	theme: ThemeLike,
+	type: NonNullable<DiscoveryGroup["type"]>,
+	count: number,
+): string {
+	const { label, noun } = pastTenseNoun(type);
+	const base = `${label} ${count} ${count === 1 ? noun : `${noun}s`}`;
+	return theme.fg("muted", theme.bold(base));
 }
 
 function formatCallBodyDetails(
@@ -557,34 +677,53 @@ function formatCallBodyDetails(
 	args: ToolArgs,
 	theme: ThemeLike,
 	inGroup = false,
+	completed = true,
 ): string {
 	const pathName = toolPath(args);
 	switch (name) {
 		case "read":
-			return theme.fg("dim", ` ${pathName}${readRangeLabel(args)}`);
+			return paint_compact_tool(theme, ` ${pathName}${readRangeLabel(args)}`, completed);
 		case "grep":
-			return theme.fg("dim", ` ${textValue(args?.pattern)}`) + theme.fg("dim", ` in ${pathName}`);
+			return (
+				paint_compact_tool(theme, ` ${textValue(args?.pattern)}`, completed) +
+				paint_compact_tool(theme, ` in ${pathName}`, completed)
+			);
 		case "find":
-			return theme.fg("dim", ` ${textValue(args?.pattern)}`) + theme.fg("dim", ` in ${pathName}`);
+			return (
+				paint_compact_tool(theme, ` ${textValue(args?.pattern)}`, completed) +
+				paint_compact_tool(theme, ` in ${pathName}`, completed)
+			);
 		case "ls":
-			return theme.fg("dim", ` ${pathName}`);
+			return paint_compact_tool(theme, ` ${pathName}`, completed);
 		case "bash": {
 			const cmd = textValue(args?.command);
 			const grepInfo = bashGrepInfo(cmd);
 			if (grepInfo) {
-				return theme.fg("dim", ` ${grepInfo.pattern}`) + theme.fg("dim", ` in ${grepInfo.path}`);
+				return (
+					paint_compact_tool(theme, ` ${grepInfo.pattern}`, completed) +
+					paint_compact_tool(theme, ` in ${grepInfo.path}`, completed)
+				);
 			}
-			const stripped = inGroup ? cmd.replace(/^\s*cd\s+[^\s&]+\s*&&\s*/, "") || cmd : cmd;
-			if (inGroup) return theme.fg("dim", ` $ ${stripped}`);
-			return theme.fg("dim", theme.bold("Bash")) + theme.fg("dim", ` $ ${stripped}`);
+			const stripped = strip_bash_command_preview(cmd, inGroup);
+			return paint_compact_tool(theme, ` $ ${stripped}`, completed);
 		}
 		case "edit":
-			return theme.fg("dim", ` ${pathName}`);
+			return paint_compact_tool(theme, ` ${pathName}`, completed);
 		case "write":
-			return theme.fg("dim", ` ${pathName}`);
+			return paint_compact_tool(theme, ` ${pathName}`, completed);
 		default:
 			return "";
 	}
+}
+
+/** Exported for cursor absorb+linger child rows (same details as compact groups). */
+export function formatGroupedCallDetails(
+	name: string,
+	args: ToolArgs,
+	theme: ThemeLike,
+	completed = true,
+): string {
+	return formatCallBodyDetails(name, args, theme, true, completed);
 }
 
 export function formatCallBody(
@@ -592,10 +731,11 @@ export function formatCallBody(
 	args: ToolArgs,
 	theme: ThemeLike,
 	inGroup = false,
+	completed = true,
 ): string {
 	return (
-		formatCallBodyVerb(name, args, theme, inGroup) +
-		formatCallBodyDetails(name, args, theme, inGroup)
+		formatCallBodyVerb(name, args, theme, inGroup, completed) +
+		formatCallBodyDetails(name, args, theme, inGroup, completed)
 	);
 }
 
@@ -604,6 +744,7 @@ function formatCallBodyVerb(
 	args: ToolArgs,
 	theme: ThemeLike,
 	inGroup = false,
+	completed = true,
 ): string {
 	if (inGroup && (name === "edit" || name === "write")) return "";
 	if (inGroup && name === "bash") {
@@ -612,21 +753,21 @@ function formatCallBodyVerb(
 	}
 	switch (name) {
 		case "read":
-			return theme.fg("dim", theme.bold("Read"));
+			return paint_compact_tool_label(theme, "Read", completed);
 		case "grep":
-			return theme.fg("dim", theme.bold("Search"));
+			return paint_compact_tool_label(theme, "Search", completed);
 		case "find":
-			return theme.fg("dim", theme.bold("Find"));
+			return paint_compact_tool_label(theme, "Find", completed);
 		case "ls":
-			return theme.fg("dim", theme.bold("List"));
+			return paint_compact_tool_label(theme, "List", completed);
 		case "bash":
-			return theme.fg("dim", theme.bold("Bash"));
+			return paint_compact_tool_label(theme, "Bash", completed);
 		case "edit":
-			return theme.fg("dim", theme.bold("Edit"));
+			return paint_compact_tool_label(theme, "Edit", completed);
 		case "write":
-			return theme.fg("dim", theme.bold("Write"));
+			return paint_compact_tool_label(theme, "Write", completed);
 		default:
-			return theme.fg("dim", theme.bold(name));
+			return paint_compact_tool_label(theme, name, completed);
 	}
 }
 
@@ -640,12 +781,16 @@ function completedRecords(group: DiscoveryGroup): CompactCall[] {
 	return group.records.filter((r) => r._completed);
 }
 
-function groupHeaderLabel(group: DiscoveryGroup): string {
+function groupHeaderLabel(group: DiscoveryGroup, theme: ThemeLike): string {
 	const completed = completedRecords(group);
-	const { label, noun } = pastTenseNoun(group.type ?? "discovery");
 	const count =
-		group.type === "bashing" ? completed.length : new Set(completed.map(targetPathForRecord)).size;
-	const parts: string[] = [`${label} ${count} ${count === 1 ? noun : `${noun}s`}`];
+		group.type === "patching"
+			? patch_files_in_group(group).length
+			: group.type === "bashing"
+				? completed.length
+				: new Set(completed.map(targetPathForRecord)).size;
+	const base = formatPastTenseGroupHeader(theme, group.type ?? "discovery", count);
+	const suffixes: string[] = [];
 	if (group.type === "editing") {
 		let additions = 0;
 		let removals = 0;
@@ -654,11 +799,8 @@ function groupHeaderLabel(group: DiscoveryGroup): string {
 			additions += stats.additions;
 			removals += stats.removals;
 		}
-		const stats = formatEditStatsFromCounts({ additions, removals }, {
-			fg: (_tag, text) => text,
-			bold: (text) => text,
-		} as ThemeLike);
-		if (stats) parts.push(stats);
+		const stats = formatEditStatsFromCounts({ additions, removals }, theme);
+		if (stats) suffixes.push(stats);
 	}
 	if (group.type === "writing") {
 		let additions = 0;
@@ -666,74 +808,245 @@ function groupHeaderLabel(group: DiscoveryGroup): string {
 			const stats = streamingWriteStats(r.args);
 			additions += stats?.additions ?? 0;
 		}
-		const stats = formatEditStatsFromCounts({ additions, removals: 0 }, {
-			fg: (_tag, text) => text,
-			bold: (text) => text,
-		} as ThemeLike);
-		if (stats) parts.push(stats);
+		const stats = formatEditStatsFromCounts({ additions, removals: 0 }, theme, false);
+		if (stats) suffixes.push(stats);
 	}
 	if (group.type === "discovery") {
 		const totalMatches = completed.reduce((sum, r) => sum + (matchCount(r.result) ?? 0), 0);
 		if (totalMatches > 0) {
-			parts.push(`${totalMatches} ${totalMatches === 1 ? "match" : "matches"}`);
+			suffixes.push(theme.fg("muted", `${totalMatches} ${totalMatches === 1 ? "match" : "matches"}`));
 		}
 	}
-	return parts.join(" ");
-}
-
-function renderRunningGradient(text: string): string {
-	return render_gradient(text, MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase());
-}
-
-function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
-	const headerLabel = groupHeaderLabel(group);
-	const headerText = theme.fg("muted", theme.bold(headerLabel));
-	const lines = [groupBulletColor(group, theme) + headerText];
-	// Show only running tool calls below the past-tense summary header.
-	// Completed members are "absorbed" into the header count/stats and do
-	// not render as child rows. The running rows animate with a gradient on
-	// the present-tense verb while the rest of the row stays dim.
-	const running = group.records.filter((r) => !r._completed);
-	if (running.length > 1) {
-		for (const [index, record] of running.entries()) {
-			const prefix = index === running.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
-			lines.push(theme.fg("dim", prefix) + formatRunningCallRow(record, theme));
+	if (group.type === "patching") {
+		let additions = 0;
+		let removals = 0;
+		for (const r of completed) {
+			for (const file of patch_files_for_record(r)) {
+				additions += file.additions;
+				removals += file.removals;
+			}
 		}
-	} else if (running.length === 1) {
-		lines.push(theme.fg("dim", TREE_BRANCH_LAST) + formatRunningCallRow(running[0], theme));
+		const stats = formatEditStatsFromCounts({ additions, removals }, theme);
+		if (stats) suffixes.push(stats);
 	}
-	return lines.join("\n");
+	if (suffixes.length === 0) return base;
+	return base + " " + suffixes.join(" ");
 }
 
-function formatRunningCallRow(record: CompactCall, theme: ThemeLike): string {
-	const verb = presentTenseVerb(record.name, record.args);
-	const details = formatCallBodyDetails(record.name, record.args, theme, true);
-	let row = renderRunningGradient(verb) + details;
-	if (record.name === "edit" || record.name === "write") {
-		const live =
-			record.name === "edit" ? streamingEditStats(record.args) : streamingWriteStats(record.args);
-		if (live) row += theme.fg("dim", "  ") + formatEditStatsFromCounts(live, theme);
+function apply_patch_header_verb(record: CompactCall, group?: DiscoveryGroup): string {
+	const running = group
+		? group.records.some((r) => !r._completed)
+		: !record._completed;
+	return running ? "Patching" : "Patched";
+}
+
+function apply_patch_record_has_errors(record: CompactCall): boolean {
+	if (record.isError) return true;
+	return patch_has_file_errors(record.result?.details as ApplyPatchDetails | undefined);
+}
+
+function patch_errors_for_group(group: DiscoveryGroup): Map<string, string> {
+	const map = new Map<string, string>();
+	for (const record of group.records) {
+		for (const [path, error] of patch_file_errors_by_path(
+			record.result?.details as ApplyPatchDetails | undefined,
+		)) {
+			map.set(path, error);
+		}
+	}
+	return map;
+}
+
+function apply_patch_bullet(record: CompactCall, group: DiscoveryGroup | undefined, theme: ThemeLike): string {
+	if (apply_patch_record_has_errors(record)) return theme.fg("error", BULLET);
+	if (group) return groupBulletColor(group, theme);
+	return bulletColor(record, theme);
+}
+
+function format_apply_patch_file_row(
+	file: PatchFileRow,
+	theme: ThemeLike,
+	file_error?: string,
+	completed = true,
+): string {
+	const verb = completed
+		? paint_compact_tool_label(theme, "Patched", true)
+		: renderRunningGradient("Patching");
+	let row = verb + paint_compact_tool(theme, ` ${file.path}`, completed);
+	if (!file_error) {
+		const stats = formatEditStatsFromCounts(file, theme, file.removals > 0);
+		if (stats) row += paint_compact_tool(theme, "  ", completed) + stats;
+	} else {
+		row += paint_compact_tool(theme, "  ", completed) + theme.fg("error", file_error);
 	}
 	return row;
 }
 
+function normalize_patch_display_path(file_path: string): string {
+	return file_path.replace(/\\/g, "/").replace(/\/+$/, "") || ".";
+}
+
+function format_apply_patch_block(record: CompactCall, theme: ThemeLike): string {
+	const files = patch_files_for_record(record);
+	const group = record.group;
+	const n = files.length;
+	const bullet = apply_patch_bullet(record, group, theme);
+	const file_errors = patch_file_errors_by_path(record.result?.details as ApplyPatchDetails | undefined);
+	const headerVerb = apply_patch_header_verb(record, group);
+	const header =
+		n > 0
+			? `${headerVerb} ${n} file${n === 1 ? "" : "s"}`
+			: headerVerb;
+	const lines = [`${bullet}${theme.fg("muted", theme.bold(header))}`];
+	const children = files.length > 0 ? files : [{ path: ".", additions: 0, removals: 0 }];
+	for (const [index, file] of children.entries()) {
+		const prefix = index === children.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
+		const file_error = file_errors.get(normalize_patch_display_path(file.path));
+		lines.push(
+			theme.fg("dim", prefix) +
+				format_apply_patch_file_row(file, theme, file_error, record._completed === true),
+		);
+	}
+	return lines.join("\n");
+}
+
+function format_patch_group(group: DiscoveryGroup, theme: ThemeLike): string {
+	const files = patch_files_in_group(group);
+	const n = files.length;
+	const any_running = group.records.some((r) => !r._completed);
+	const headerVerb = any_running ? "Patching" : "Patched";
+	const header =
+		n > 0
+			? `${headerVerb} ${n} file${n === 1 ? "" : "s"}`
+			: headerVerb;
+	const has_errors = patch_errors_for_group(group).size > 0;
+	const bullet = has_errors
+		? theme.fg("error", BULLET)
+		: groupBulletColor(group, theme);
+	const lines = [`${bullet}${theme.fg("muted", theme.bold(header))}`];
+	if (group.settled) return lines.join("\n");
+	const file_errors = patch_errors_for_group(group);
+	const children = files.length > 0 ? files : [{ path: ".", additions: 0, removals: 0 }];
+	for (const [index, file] of children.entries()) {
+		const prefix = index === children.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
+		const file_error = file_errors.get(normalize_patch_display_path(file.path));
+		lines.push(
+			theme.fg("dim", prefix) +
+				format_apply_patch_file_row(file, theme, file_error, !any_running),
+		);
+	}
+	return lines.join("\n");
+}
+
+/** Child rows shown under a group header: all runners, or the latest
+ *  completed member while the group is unsettled (linger). Settled groups
+ *  are header-only — thinking streams and visible text collapse here. */
+export function selectGroupVisibleChildren<T>(
+	items: readonly T[],
+	settled: boolean,
+	is_completed: (item: T) => boolean,
+): T[] {
+	if (settled) return [];
+	const running = items.filter((item) => !is_completed(item));
+	if (running.length > 0) return running;
+	if (items.length > 0) {
+		return [items[items.length - 1] as T];
+	}
+	return [];
+}
+
+function groupVisibleChildren(group: DiscoveryGroup): CompactCall[] {
+	if (group.thinkingChild) return [];
+	return selectGroupVisibleChildren(
+		group.records,
+		group.settled === true,
+		(record) => record._completed === true,
+	);
+}
+
+function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
+	if (group.type === "patching" && group.records.length > 1) {
+		return format_patch_group(group, theme);
+	}
+	const headerText = groupHeaderLabel(group, theme);
+	const lines = [groupBulletColor(group, theme) + headerText];
+	if (group.thinkingChild) {
+		lines.push(theme.fg("dim", TREE_BRANCH_LAST) + formatGroupThinkingChildRow());
+		return lines.join("\n");
+	}
+	const children = groupVisibleChildren(group);
+	for (const [index, record] of children.entries()) {
+		const prefix = index === children.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
+		lines.push(theme.fg("dim", prefix) + formatGroupChildRow(record, theme));
+	}
+	return lines.join("\n");
+}
+
+/** Edit/write +N -N suffix for grouped child rows — SSOT for compact + cursor. */
+export function formatGroupChildEditWriteStats(
+	name: string,
+	args: ToolArgs,
+	completed: boolean,
+	result: ToolResult | undefined,
+	theme: ThemeLike,
+): string {
+	if (name !== "edit" && name !== "write") return "";
+	let stats = "";
+	if (completed) {
+		if (name === "edit") {
+			const from_diff = diffStats(result);
+			const counts =
+				from_diff.additions > 0 || from_diff.removals > 0 ? from_diff : streamingEditStats(args);
+			if (counts) stats = formatEditStatsFromCounts(counts, theme);
+		} else {
+			stats = formatEditStatsFromCounts(
+				streamingWriteStats(args) ?? { additions: 0, removals: 0 },
+				theme,
+				false,
+			);
+		}
+	} else {
+		const live = name === "edit" ? streamingEditStats(args) : streamingWriteStats(args);
+		const show_removals = name === "edit";
+		if (live) stats = formatEditStatsFromCounts(live, theme, show_removals);
+	}
+	return stats ? paint_compact_tool(theme, "  ", completed) + stats : "";
+}
+
+function formatGroupChildRow(record: CompactCall, theme: ThemeLike): string {
+	const completed = record._completed === true;
+	const verb = completed
+		? formatCallBodyVerb(record.name, record.args, theme, true, true)
+		: formatGroupChildGradientVerb(record.name, record.args);
+	const details = formatCallBodyDetails(record.name, record.args, theme, true, completed);
+	return (
+		verb +
+		details +
+		formatGroupChildEditWriteStats(
+			record.name,
+			record.args,
+			record._completed === true,
+			record.result,
+			theme,
+		)
+	);
+}
+
 export class CompactRenderer {
 	private readonly calls = new Map<string, CompactCall>();
-	/** The single live group. Settled groups are dropped so a later
-	 *  same-type call starts a fresh group at its own transcript position
-	 *  instead of reopening the old one. */
+	/** The single live group. Soft settles (thinking-hidden / agent_end) keep
+	 *  this pointer so a later same-key call can reopen via appendToGroup.
+	 *  Hard settles (visible text, visible thinking, user message) clear it
+	 *  so the next group starts at its own transcript position. */
 	private currentGroup: DiscoveryGroup | undefined;
 	private readonly pendingGroupInvalidations = new Set<DiscoveryGroup>();
 
-	/** Tick callback that re-renders the active group owner so the group
-	 *  header gradient sweeps in lockstep with the Thinking
-	 *  widget. Subscribed while any group is unsettled (active); removed
-	 *  on settle or session reset. The callback identity is stable for
-	 *  the subscription lifecycle; the invalidate target is rebound on
-	 *  each renderCall so Pi rebuilds (which provide a fresh invalidate
-	 *  closure) rebind without churning the subscriber Set. */
+	/** Stable tick callback — updates component state before Pi's native render. */
 	private groupTickCb: (() => void) | undefined;
-	private groupTickTarget: (() => void) | undefined;
+	private groupTickGroup: DiscoveryGroup | undefined;
+	private lastTheme: ThemeLike | undefined;
+	/** Last same-key group type kept for reopen after soft settle. */
+	private reopenGroupKey: string | undefined;
 
 	beginTurn(): void {
 		// Intentionally no-op: discovery/action groups persist across turns so
@@ -747,24 +1060,89 @@ export class CompactRenderer {
 		// tools, different group keys, or agent end.
 	}
 
-	/** Called by the plugin when the current turn produces visible text
-	 *  output (text_start/text_delta). Break the old group immediately so
-	 *  an intervening non-group tool cannot update it. */
-	noteVisibleText(): void {
-		this.settleGroups();
+	/**
+	 * Compact group lifecycle (thinking blocks hidden):
+	 *
+	 * - Tool lane: running/lingering children (Searching, Reading, …).
+	 * - Thinking lane: one gradient Thinking row replaces the linger child.
+	 *
+	 * Enter thinking lane: thinking stream → `noteThinking()` (real reasoning only).
+	 * Leave thinking lane:
+	 *   - same-key `tool_call` → `appendToGroup` (reopen tool lane);
+	 *   - visible assistant text, user message, different group key, or
+	 *     non-groupable tool → `hardExitGroup()` (header-only, drop reopen);
+	 *   - `agent_settled` → `clearGroupThinkingChild()` (header-only, keep
+	 *     `currentGroup` so a later same-key batch can still reopen).
+	 */
+
+	/** Collapse a group to its past-tense header row only. */
+	private freezeGroup(group: DiscoveryGroup | undefined): void {
+		if (!group || group.records.length === 0) return;
+		group.thinkingChild = false;
+		if (!group.settled) group.settled = true;
+		this.refreshGroupVisual(group);
+		this.scheduleGroupInvalidation(group);
+	}
+
+	/** Hard boundary — freeze the live group and stop reopening it. */
+	private hardExitGroup(): void {
+		const group = this.currentGroup;
+		if (group) group.hardExited = true;
+		this.freezeGroup(group);
+		this.unsubscribeGroupTick();
+		this.reopenGroupKey = undefined;
 		this.resetGroupingState();
+	}
+
+	/** Resolve the live group pointer — only the chronologically latest group. */
+	private resolveLiveGroup(): DiscoveryGroup | undefined {
+		if (this.currentGroup && !this.currentGroup.hardExited) return this.currentGroup;
+		return undefined;
+	}
+
+	/** Soft settle for hidden thinking: flip the header to past tense and
+	 *  paint Thinking in the single child row slot (replacing any lingering
+	 *  Searching/Reading child). Keep currentGroup so the next same-key
+	 *  discovery/action call reopens the same header instead of spawning
+	 *  another Explored/Edited/… row. */
+	noteThinking(): void {
+		let group = this.resolveLiveGroup();
+		this.settleGroups();
+		if (!group || group.records.length < 2) return;
+		this.currentGroup = group;
+		group.thinkingChild = true;
+		this.reopenGroupKey = group.key;
+		this.refreshGroupVisual(group);
+		this.scheduleGroupInvalidation(group);
+		this.syncGroupTick(group);
+	}
+
+	/** Hard boundary: visible assistant text (or visible thinking). Freeze
+	 *  to header-only and clear so a later same-type call starts fresh below
+	 *  the intervening transcript block. */
+	noteVisibleText(): void {
+		this.hardExitGroup();
 	}
 
 	noteUserMessage(): void {
-		this.settleGroups();
-		this.resetGroupingState();
+		this.hardExitGroup();
 	}
 
-	/** Settle the active group and clear it. Called at agent end so completed
-	 *  groups flip to past tense once the run finishes. */
+	/** Leave the thinking lane when the agent fully settles — header-only,
+	 *  keep currentGroup for a later same-key reopen. */
+	clearGroupThinkingChild(): void {
+		const group = this.currentGroup;
+		if (!group?.thinkingChild) return;
+		this.freezeGroup(group);
+		this.syncGroupTick(group);
+	}
+
+	/** Soft settle at agent end. Does not clear
+	 *  currentGroup — Pi fires agent_end between low-level runs (tool batch →
+	 *  think → tool batch), and same-key calls must reopen rather than spawn
+	 *  another Explored/Edited/… header. */
 	settleAllGroups(): void {
 		this.settleGroups();
-		this.resetGroupingState();
 	}
 
 	/** Clear all accumulated call state. Called on session replacement
@@ -774,7 +1152,9 @@ export class CompactRenderer {
 		this.unsubscribeGroupTick();
 		this.calls.clear();
 		this.currentGroup = undefined;
+		this.reopenGroupKey = undefined;
 		this.pendingGroupInvalidations.clear();
+		this.lastTheme = undefined;
 	}
 
 	/** Re-paint compact rows after a live accent/theme rebuild. */
@@ -801,8 +1181,34 @@ export class CompactRenderer {
 	hasActiveGroups(): boolean {
 		const group = this.currentGroup;
 		if (!group || group.records.length === 0) return false;
+		if (group.thinkingChild) return true;
 		if (group.records.some((r) => !r._completed)) return true;
+		// Standalone single-member rows do not keep the group-active flag after completion.
+		if (group.records.length <= 1) return false;
 		return group.records.every((r) => r._completed) && !group.settled;
+	}
+
+	/** Whether the live group can host in-group Thinking (settled / thinking lane). */
+	hasReopenableGroup(): boolean {
+		const group = this.resolveLiveGroup();
+		if (!group || group.hardExited || group.records.length < 2) return false;
+		return group.thinkingChild === true || group.settled === true;
+	}
+
+	/** Whether the live group is painting an in-group Thinking child row. */
+	hasGroupThinkingChild(): boolean {
+		return this.currentGroup?.thinkingChild === true;
+	}
+
+	/** Re-paint the group's shared callText when group state changes without a
+	 *  fresh tool renderCall (e.g. noteThinking on agent_end). */
+	private refreshGroupVisual(group: DiscoveryGroup | undefined): void {
+		if (!group || !this.lastTheme) return;
+		const callText = group.callText ?? group.renderOwner?.callText;
+		if (!callText) return;
+		group.callText = callText;
+		set_compact_call_text(group, callText, formatGroup(group, this.lastTheme));
+		requestTuiRender();
 	}
 
 	/** Settle a single group so its label flips to past tense. No-op if
@@ -810,6 +1216,9 @@ export class CompactRenderer {
 	private settleGroup(group: DiscoveryGroup | undefined): void {
 		if (!group || group.records.length === 0 || group.settled) return;
 		group.settled = true;
+		if (group.key) this.reopenGroupKey = group.key;
+		this.refreshGroupVisual(group);
+		this.syncGroupTick(group);
 		this.scheduleGroupInvalidation(group);
 	}
 
@@ -822,20 +1231,39 @@ export class CompactRenderer {
 		this.unsubscribeGroupTick();
 	}
 
-	/** Subscribe the group owner to the thinking tick so the group header
-	 *  gradient animates at the same cadence as the Thinking
-	 *  widget. The callback identity is stable for the subscription
-	 *  lifecycle; only the invalidate target is rebound. This prevents
-	 *  Set live-iteration hazards when renderCall provides a fresh
-	 *  invalidate closure on Pi rebuilds. */
-	private subscribeGroupTick(ownerInvalidate: (() => void) | undefined): void {
-		if (!ownerInvalidate) return;
-		this.groupTickTarget = ownerInvalidate;
+	/** Subscribe the group tick so Pi re-renders the live child verb normally. */
+	private subscribeGroupTick(group: DiscoveryGroup): void {
+		this.groupTickGroup = group;
 		if (this.groupTickCb) return;
 		this.groupTickCb = (): void => {
-			this.groupTickTarget?.();
+			this.refreshActiveGroupText();
 		};
 		subscribeGradientTick(this.groupTickCb);
+	}
+
+	private refreshActiveGroupText(): void {
+		const group = this.groupTickGroup;
+		const theme = this.lastTheme;
+		if (!group?.callText || !theme) return;
+		set_compact_call_text(group, group.callText, formatGroup(group, theme));
+	}
+
+	/** Keep the gradient tick subscribed while visible child rows render
+	 *  (runners and lingering completed children). Settled groups are
+	 *  header-only and static. */
+	private syncGroupTick(group: DiscoveryGroup): void {
+		const has_patch_children =
+			group.type === "patching" && !group.settled && patch_files_in_group(group).length > 0;
+		const visible_children = groupVisibleChildren(group);
+		if (
+			visible_children.length > 0 ||
+			group.thinkingChild === true ||
+			has_patch_children
+		) {
+			this.subscribeGroupTick(group);
+			return;
+		}
+		this.unsubscribeGroupTick();
 	}
 
 	/** Unsubscribe the group tick callback if one is active. */
@@ -843,7 +1271,7 @@ export class CompactRenderer {
 		if (!this.groupTickCb) return;
 		unsubscribeGradientTick(this.groupTickCb);
 		this.groupTickCb = undefined;
-		this.groupTickTarget = undefined;
+		this.groupTickGroup = undefined;
 	}
 
 	private resetGroupingState(): void {
@@ -853,36 +1281,28 @@ export class CompactRenderer {
 	private scheduleGroupInvalidation(group: DiscoveryGroup): void {
 		if (this.pendingGroupInvalidations.has(group)) return;
 		this.pendingGroupInvalidations.add(group);
-		// When the group is about to collapse (settled + all completed + thinking
-		// hidden), the re-render shrinks the line count. Pi's differential
-		// clearOnShrink path then fires a fullRender with a stale
-		// previousViewportTop, leaving the chatbox not pinned to the bottom
-		// (the "janked up" state). Snap the viewport to the bottom via the
-		// scrollback-preserving helper: it clears only the visible screen (`2J`,
-		// never `3J`), resets previousViewportTop/maxLinesRendered, and requests
-		// a normal render whose first-render path re-anchors the chatbox to the
-		// bottom without destroying terminal scrollback. Never use
-		// requestTuiRender(true) here — it emits `3J` and nukes scrollback.
-		// Only when collapsing — non-collapse invalidations (live gradient
-		// tick, mid-run bullet pulse) stay differential.
-		const will_collapse =
-			group.settled === true &&
-			group.records.length > 0 &&
-			group.records.every((r) => r._completed) &&
-			isThinkingBlocksHidden();
 		queueMicrotask(() => {
 			if (!this.pendingGroupInvalidations.delete(group)) return;
 			group.renderOwner?.invalidate?.();
-			if (will_collapse) requestTuiRenderSnapToBottom();
+			if (group.pendingShrink) group.pendingShrink = false;
+			requestTuiRender();
 		});
+	}
+
+	private scheduleRecordShrinkSnap(record: CompactCall): void {
+		if (!record.pendingShrink) return;
+		record.pendingShrink = false;
+		queueMicrotask(() => requestTuiRender());
 	}
 
 	private appendToGroup(group: DiscoveryGroup, record: CompactCall): void {
 		for (const member of group.records) member.group = group;
+		group.thinkingChild = false;
 		group.settled = false;
 		group.records.push(record);
 		record.group = group;
 		this.currentGroup = group;
+		if (group.key) this.reopenGroupKey = group.key;
 		this.scheduleGroupInvalidation(group);
 	}
 
@@ -894,7 +1314,9 @@ export class CompactRenderer {
 					? "writing"
 					: key === "__bashing__"
 						? "bashing"
-						: "discovery";
+						: key === "__patching__"
+							? "patching"
+							: "discovery";
 		const group: DiscoveryGroup = {
 			records: [record],
 			renderOwner: record,
@@ -902,6 +1324,7 @@ export class CompactRenderer {
 			key,
 		};
 		this.currentGroup = group;
+		if (group.key) this.reopenGroupKey = group.key;
 		return group;
 	}
 
@@ -909,7 +1332,17 @@ export class CompactRenderer {
 		const typed_args = args as ToolArgs;
 		const existing = this.calls.get(id);
 		if (existing) {
-			existing.args = typed_args;
+			const incoming = args as ToolArgs;
+			const existing_input = existing.args?.input;
+			const preserve_apply_patch_args =
+				name === "apply_patch" &&
+				typeof incoming?.input === "string" &&
+				incoming.input.length === 0 &&
+				typeof existing_input === "string" &&
+				existing_input.length > 0;
+			if (!preserve_apply_patch_args) {
+				existing.args = typed_args;
+			}
 			if (invalidate) {
 				existing.invalidate = invalidate;
 			}
@@ -921,11 +1354,15 @@ export class CompactRenderer {
 		const key = groupKey(name, typed_args);
 
 		if (key === undefined) {
-			this.settleGroups();
-		} else if (this.currentGroup && !this.currentGroup.settled && this.currentGroup.key === key) {
+			this.hardExitGroup();
+		} else if (this.currentGroup?.key === key && !this.currentGroup.hardExited) {
 			this.appendToGroup(this.currentGroup, record);
 		} else {
-			this.settleGroups();
+			if (this.currentGroup && !this.currentGroup.hardExited) {
+				this.currentGroup.hardExited = true;
+			}
+			this.freezeGroup(this.currentGroup);
+			this.unsubscribeGroupTick();
 			this.startGroup(key, record);
 		}
 		record.invalidate = invalidate;
@@ -937,6 +1374,9 @@ export class CompactRenderer {
 		record.isError = isError;
 		record._completed = true;
 		record.result = result;
+		if (record.name === "apply_patch") {
+			this.unsubscribeGroupTick();
+		}
 		// Do NOT invalidate the owner here. The group visual is updated
 		// directly via group.callText.setText() in renderResultInner so the
 		// owner's next render picks up the change. Invalidating the owner
@@ -953,7 +1393,7 @@ export class CompactRenderer {
 			// compact call row instead. Use CompactGroupText (truncating) so
 			// even the fallback never wraps to multiple rows.
 			const fallback = new CompactGroupText();
-			fallback.setText(theme.fg("muted", BULLET) + formatCallBody(name, args as ToolArgs, theme));
+			fallback.setText(theme.fg("muted", BULLET) + formatCallBody(name, args as ToolArgs, theme, false, true));
 			return fallback;
 		}
 	}
@@ -964,6 +1404,7 @@ export class CompactRenderer {
 		theme: ThemeLike,
 		context: ToolRenderContext,
 	): Component {
+		this.lastTheme = theme;
 		const record = this.registerCall(name, context.toolCallId, args, context.invalidate);
 		if (record.group && record.group.records.length > 1) {
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
@@ -977,15 +1418,9 @@ export class CompactRenderer {
 			// compaction, settings) context.state is fresh, so a new component is
 			// created and the group handle is repointed to the live owner.
 			record.group.callText = callText;
-			callText.setText(formatGroup(record.group, theme));
-			// While the group is not settled (agent hasn't moved on), subscribe
-			// the owner's invalidate to the thinking tick so the gradient runs on
-			// the running-row verbs.
-			if (!record.group.settled) {
-				this.subscribeGroupTick(record.invalidate);
-			} else {
-				this.unsubscribeGroupTick();
-			}
+			set_compact_call_text(record.group, callText, formatGroup(record.group, theme));
+			if (record.group.pendingShrink) this.scheduleGroupInvalidation(record.group);
+			this.syncGroupTick(record.group);
 			return callText;
 		}
 		const callText =
@@ -994,8 +1429,31 @@ export class CompactRenderer {
 				: new CompactGroupText();
 		context.state.callText = callText;
 		record.callText = callText;
-		callText.setText(formatStandaloneCallRow(record, theme));
+		set_compact_call_text(record, callText, formatStandaloneCallRow(record, theme));
+		if (name === "apply_patch") {
+			this.syncApplyPatchTick(record);
+			this.scheduleRecordShrinkSnap(record);
+		}
 		return callText;
+	}
+
+	private syncApplyPatchTick(record: CompactCall): void {
+		if (record._completed) {
+			this.unsubscribeGroupTick();
+			return;
+		}
+		const group = record.group;
+		const files = patch_files_for_record(record);
+		if (files.length === 0) return;
+		const show_children = !group?.settled;
+		if (show_children) {
+			const group = record.group ?? this.currentGroup;
+			if (group) this.subscribeGroupTick(group);
+			return;
+		}
+		if (!group || group.records.length <= 1) {
+			this.unsubscribeGroupTick();
+		}
 	}
 
 	renderResult(
@@ -1024,6 +1482,7 @@ export class CompactRenderer {
 		theme: ThemeLike,
 		context: ToolRenderContext & { isError: boolean },
 	): Component {
+		this.lastTheme = theme;
 		const record = this.registerCall(name, context.toolCallId, args, context.invalidate);
 		this.setResult(record, result, context.isError);
 		const expanded = options.expanded === true;
@@ -1033,7 +1492,12 @@ export class CompactRenderer {
 			// reflects this member's completion (bullet color, match count,
 			// final label) without invalidating the owner. Pi's next requestRender
 			// renders the owner's selfRenderContainer with the updated component.
-			record.group.callText?.setText(formatGroup(record.group, theme));
+			const group_text = formatGroup(record.group, theme);
+			if (record.group.callText) {
+				set_compact_call_text(record.group, record.group.callText, group_text);
+				if (record.group.pendingShrink) this.scheduleGroupInvalidation(record.group);
+			}
+			this.syncGroupTick(record.group);
 			if (record.group.renderOwner !== record) return new Text("", 0, 0);
 			// When the group is collapsed (settled + thinking hidden), hide the
 			// per-member error row too — the header bullet already turns red to
@@ -1044,7 +1508,7 @@ export class CompactRenderer {
 				record.group.records.every((r) => r._completed) &&
 				isThinkingBlocksHidden();
 			const error = errorText(result, context.isError);
-			if (error && !group_collapsed) return compactErrorComponent(error, theme);
+			if (error && name !== "apply_patch" && !group_collapsed) return compactErrorComponent(error, theme);
 			if (expanded && !options.isPartial && !group_collapsed) {
 				const output = formatExpandedOutput(result, theme);
 				if (output) return new Text(output, 0, 0);
@@ -1055,11 +1519,15 @@ export class CompactRenderer {
 
 		const error = errorText(result, context.isError);
 		const callText = context.state.callText;
-		if (callText instanceof CompactGroupText) {
-			record.callText = callText;
-			callText.setText(formatStandaloneCallRow(record, theme));
+		if (callText && typeof (callText as { setText?: unknown }).setText === "function") {
+			record.callText = callText as CompactGroupText;
+			set_compact_call_text(record, callText as CompactGroupText, formatStandaloneCallRow(record, theme));
 		}
-		if (error) return compactErrorComponent(error, theme);
+		if (name === "apply_patch") {
+			this.syncApplyPatchTick(record);
+			this.scheduleRecordShrinkSnap(record);
+		}
+		if (error && name !== "apply_patch") return compactErrorComponent(error, theme);
 		if (expanded) {
 			const output = formatExpandedOutput(result, theme);
 			if (output) return new Text(output, 0, 0);
@@ -1068,4 +1536,18 @@ export class CompactRenderer {
 	}
 }
 
-export { BULLET, DISCOVERY_TOOLS, GROUPABLE_TOOLS, bashGrepInfo };
+/** Classify assistant stream events that affect compact group boundaries. */
+export function resolve_assistant_group_boundary_event(ev: {
+	type: string;
+	delta?: unknown;
+}): "visible_text" | "thinking" | null {
+	if (ev.type === "text_delta") {
+		const delta = ev.delta;
+		return typeof delta === "string" && delta.trim().length > 0 ? "visible_text" : null;
+	}
+	if (ev.type === "thinking_start" || ev.type === "thinking_delta") return "thinking";
+	return null;
+}
+
+export { DISCOVERY_TOOLS, GROUPABLE_TOOLS, bashGrepInfo };
+export const __test_only = { set_compact_call_text };

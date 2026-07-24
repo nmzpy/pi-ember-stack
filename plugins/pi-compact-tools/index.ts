@@ -15,16 +15,28 @@ import {
 	CompactRenderer,
 	GROUPABLE_TOOLS,
 	bashGrepInfo,
+	resolve_assistant_group_boundary_event,
 	type ToolRenderContext,
 	type ToolRenderResultOptions,
 } from "./renderer.ts";
 import {
 	isThinkingBlocksHidden,
+	setGroupReopenableActive,
+	setGroupThinkingChildActive,
 	setToolGroupActive,
+	setTurnToolTranscriptActive,
 } from "../pi-ember-ui/mode-colors.ts";
+import { syncThinkingGradientClock } from "../pi-ember-ui/index.ts";
 import { subscribe_theme_refresh } from "../pi-ember-ui/theme-refresh.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
+
+function update_tool_group_active(renderer: CompactRenderer): void {
+	setToolGroupActive(renderer.hasActiveGroups());
+	setGroupThinkingChildActive(renderer.hasGroupThinkingChild());
+	setGroupReopenableActive(isThinkingBlocksHidden() && renderer.hasReopenableGroup());
+	syncThinkingGradientClock();
+}
 
 type ToolFactory = (cwd: string) => any;
 
@@ -98,46 +110,51 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	pi.on("turn_start", () => renderer.beginTurn());
 	pi.on("turn_end", () => {
 		renderer.endTurn();
-		setToolGroupActive(renderer.hasActiveGroups());
+		update_tool_group_active(renderer);
 	});
 	pi.on("agent_end", () => {
 		renderer.settleAllGroups();
-		setToolGroupActive(false);
+		update_tool_group_active(renderer);
+	});
+	pi.on("agent_start", () => {
+		update_tool_group_active(renderer);
+	});
+	pi.on("agent_settled", () => {
+		renderer.clearGroupThinkingChild();
+		update_tool_group_active(renderer);
 	});
 	pi.on("message_start", (event: any) => {
 		if (event?.message?.role === "user") renderer.noteUserMessage();
 	});
 	pi.on("message_update", (event: any) => {
-		// Visible text always marks a boundary: settle the active group so the
-		// next groupable tool starts a fresh one.
-		// Thinking blocks are trickier:
-		// - When thinking blocks are HIDDEN, a thinking_delta produces no visible
-		//   transcript break, so the active group can keep updating.
-		// - When thinking blocks are SHOWN, the thinking stream appears as its own
-		//   visible block below the group, so we must settle the group first so it
-		//   flips from "Exploring" to "Explored" instead of continuing to mutate
-		//   under the thinking text.
+		// Group contract (thinking blocks hidden):
+		// - visible text → hard exit (header-only, drop reopen pointer);
+		// - thinking stream → thinking lane inside the live group;
+		// - visible thinking blocks → hard exit like visible text.
 		const ev = event?.assistantMessageEvent;
 		if (!ev) return;
-		const isText = ev.type === "text_start" || ev.type === "text_delta";
-		const isVisibleThinking =
-			(ev.type === "thinking_start" || ev.type === "thinking_delta") &&
-			!isThinkingBlocksHidden();
-		if (isText || isVisibleThinking) {
+		const boundary = resolve_assistant_group_boundary_event(ev);
+		if (boundary === "visible_text") {
 			renderer.noteVisibleText();
+			update_tool_group_active(renderer);
+		} else if (boundary === "thinking") {
+			if (isThinkingBlocksHidden()) renderer.noteThinking();
+			else renderer.noteVisibleText();
+			update_tool_group_active(renderer);
 		}
 	});
 	pi.on("tool_call", (event: any) => {
 		if (GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName]) {
+			setTurnToolTranscriptActive(true);
 			renderer.registerCall(event.toolName, event.toolCallId, event.input);
-			setToolGroupActive(renderer.hasActiveGroups());
+			update_tool_group_active(renderer);
 		}
 	});
 	// A completed group member may flip the group-active flag to false
 	// (all members done) — update the shared flag so group state and the
 	// group header gradient stay synchronized.
 	pi.on("tool_execution_end", () => {
-		setToolGroupActive(renderer.hasActiveGroups());
+		update_tool_group_active(renderer);
 	});
 	// Reset the shared renderer on session replacement so stale call rows
 	// from the previous session do not leak into the new one. The renderer
@@ -146,6 +163,9 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	pi.on("session_start", () => {
 		renderer.resetForSession();
 		setToolGroupActive(false);
+		setGroupThinkingChildActive(false);
+		setGroupReopenableActive(false);
+		syncThinkingGradientClock();
 	});
 	for (const [name, factory] of Object.entries(TOOL_FACTORIES)) {
 		registerCompactTool(pi, name, factory, renderer);

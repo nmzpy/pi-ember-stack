@@ -1,11 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isExaAvailable, searchWithExa } from "./exa.ts";
-import { isOpenAISearchAvailable, searchWithOpenAI } from "./openai-search.ts";
 import type { SearchOptions, SearchResponse } from "./search-types.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 
-export type SearchProvider = "auto" | "openai" | "exa";
+export type SearchProvider = "auto" | "exa";
 export type ResolvedSearchProvider = Exclude<SearchProvider, "auto">;
 
 export interface AttributedSearchResponse extends SearchResponse {
@@ -15,6 +14,7 @@ export interface AttributedSearchResponse extends SearchResponse {
 export interface FullSearchOptions extends SearchOptions {
 	provider?: SearchProvider;
 	includeContent?: boolean;
+	/** Retained for caller compatibility; Exa does not require an extension context. */
 	extensionContext?: ExtensionContext;
 }
 
@@ -52,7 +52,7 @@ function get_search_config(): { searchProvider: SearchProvider } {
 
 function normalize_search_provider(value: unknown): SearchProvider {
 	const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
-	const valid: SearchProvider[] = ["auto", "openai", "exa"];
+	const valid: SearchProvider[] = ["auto", "exa"];
 	return valid.includes(normalized as SearchProvider) ? (normalized as SearchProvider) : "auto";
 }
 
@@ -62,18 +62,6 @@ function error_message(err: unknown): string {
 
 function is_abort_error(err: unknown): boolean {
 	return error_message(err).toLowerCase().includes("abort");
-}
-
-function should_try_openai_in_auto(options: SearchOptions): boolean {
-	if (options.recencyFilter) return false;
-	if (
-		typeof options.numResults === "number" &&
-		Number.isFinite(options.numResults) &&
-		Math.floor(options.numResults) !== 5
-	) {
-		return false;
-	}
-	return true;
 }
 
 export async function search(
@@ -92,32 +80,14 @@ export async function search(
 		return { ...result, provider: "exa" };
 	}
 
-	async function try_openai(): Promise<AttributedSearchResponse> {
-		const result = await searchWithOpenAI(query, options, options.extensionContext);
-		return { ...result, provider: "openai" };
-	}
-
-	if (provider === "exa") {
-		return try_exa();
-	}
-
-	if (provider === "openai" || should_try_openai_in_auto(options)) {
-		try {
-			if (provider === "openai" || (await isOpenAISearchAvailable(options.extensionContext))) {
-				return await try_openai();
+	if (provider === "exa" || provider === "auto") {
+		if (isExaAvailable()) {
+			try {
+				return await try_exa();
+			} catch (err) {
+				if (is_abort_error(err)) throw err;
+				fallback_errors.push(`Exa: ${error_message(err)}`);
 			}
-		} catch (err) {
-			if (is_abort_error(err)) throw err;
-			fallback_errors.push(`OpenAI: ${error_message(err)}`);
-		}
-	}
-
-	if (isExaAvailable()) {
-		try {
-			return await try_exa();
-		} catch (err) {
-			if (is_abort_error(err)) throw err;
-			fallback_errors.push(`Exa: ${error_message(err)}`);
 		}
 	}
 
@@ -127,8 +97,7 @@ export async function search(
 
 	throw new Error(
 		"No search provider available. Either:\n" +
-			"  1. Use /login to sign in with a Codex subscription for OpenAI web search\n" +
-			`  2. Set openaiApiKey or exaApiKey in ${CONFIG_PATH}\n` +
-			"  3. Set OPENAI_API_KEY or EXA_API_KEY environment variables",
+			`  1. Set exaApiKey in ${CONFIG_PATH}\n` +
+			"  2. Set EXA_API_KEY environment variable",
 	);
 }

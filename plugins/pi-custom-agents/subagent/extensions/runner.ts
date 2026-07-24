@@ -210,10 +210,16 @@ export async function runSubAgent(options: {
 		onToolCall,
 	} = options;
 
+	let lastOutputTime = Date.now();
 	const timeoutController = timeoutMs && timeoutMs > 0 ? new AbortController() : undefined;
-	const timeoutId = timeoutController
-		? setTimeout(() => timeoutController.abort(), timeoutMs)
-		: undefined;
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	function resetOutputTimeout(): void {
+		if (!timeoutController || !timeoutMs || timeoutMs <= 0) return;
+		if (timeoutId) clearTimeout(timeoutId);
+		lastOutputTime = Date.now();
+		timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+	}
+	resetOutputTimeout();
 	const signals = [parentSignal, timeoutController?.signal].filter((value): value is AbortSignal =>
 		Boolean(value),
 	);
@@ -342,6 +348,7 @@ export async function runSubAgent(options: {
 		};
 
 		unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+			resetOutputTimeout();
 			// Pi agent sessions emit tool_execution_start; extension hooks use tool_call.
 			if (
 				event.type === "tool_execution_start" ||
@@ -350,6 +357,7 @@ export async function runSubAgent(options: {
 				capture_latest_tool_call(event as Parameters<typeof capture_latest_tool_call>[0]);
 			}
 			if (event.type === "message_end") {
+				resetOutputTimeout();
 				const msg = event.message as Message | undefined;
 				if (msg && msg.role === "assistant") {
 					result.usage.turns++;
@@ -417,9 +425,13 @@ export async function runSubAgent(options: {
 	// when the run actually failed — a successful stop with no errorMessage
 	// must not be force-marked failed.
 	if (timeoutController?.signal.aborted && !parentSignal?.aborted) {
+		const elapsed = Date.now() - lastOutputTime;
 		result.exitCode = 1;
 		result.stopReason = "timeout";
-		result.errorMessage = `Timeout after ${timeoutMs}ms`;
+		result.errorMessage = `Timeout after ${elapsed}ms with no output`;
+		// Preserve the original 300s default in the public summary when the
+		// deadline has never been reset; otherwise report the idle gap so users
+		// see the timer started from the last subagent output, not the run start.
 	} else if (parentSignal?.aborted) {
 		result.exitCode = 1;
 		result.stopReason = result.stopReason === "timeout" ? "timeout" : "aborted";

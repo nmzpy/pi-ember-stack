@@ -25,8 +25,9 @@ import {
 	type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { install_bash_rules } from "./bash-rules.ts";
+import { install_bash_timeout } from "./bash-timeout.ts";
 import {
-	MODE_COLORS,
 	mutedBullet,
 	setActiveMode,
 	setPlanAutoContinuing,
@@ -34,6 +35,7 @@ import {
 } from "../pi-ember-ui/mode-colors.ts";
 import {
 	cancelPendingModelPick,
+	consumePendingShellSubmitEnter,
 	finalizeEditorInputAfter,
 	interceptShellInput,
 	modelNameHasThinkingVariant,
@@ -41,14 +43,15 @@ import {
 	processShellInput,
 	requestShellModeVisualRefresh,
 	syncShellModeFromEditorText,
-	requestTuiRenderFromEditor,
-	requestTuiRenderSnapToBottom,
+	requestTuiRender,
 	resetSlashCommandTracking,
+	resumeScrollFollowFromEditor,
 	scheduleFooterStats,
 	setModeLabelResolver,
 	wrapEditorRenderForShell,
 	wrapModelPickerEditor,
 } from "../pi-ember-ui/index.ts";
+import { with_suppressed_shell_history_sync as withSuppressedShellHistorySync } from "../pi-ember-ui/shell-mode.ts";
 import { askQuiz, type QuizQuestion, registerQuizTool } from "./quiz-tool.ts";
 import {
 	build_auto_continue_content,
@@ -56,6 +59,12 @@ import {
 	is_benign_compact_error,
 	should_skip_compact,
 } from "./auto-continue.ts";
+import {
+	build_full_tools,
+	model_provider_of,
+	resolve_patch_tool_name,
+} from "./edit-tools.ts";
+import { arm_plan_turn, build_plan_review_questions, resolve_plan_review_answer, should_show_plan_review } from "./plan-review.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
 
@@ -265,27 +274,13 @@ function writePersistedState(state: {
 // get_search_content) registered by the pi-ember-webtools plugin. They belong in
 // every mode so the agent can do web research regardless of mode.
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
-const READONLY_TOOLS = ["read", "bash", "grep", "find", "ls", "quiz", ...WEB_ACCESS_TOOLS];
-const READONLY_DELEGATING_TOOLS = [
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"quiz",
-	"subagent",
-	...WEB_ACCESS_TOOLS,
-];
-const FULL_TOOLS = [
-	"read",
-	"bash",
-	"edit",
-	"write",
-	"grep",
-	"find",
-	"ls",
-	"quiz",
-	...WEB_ACCESS_TOOLS,
-];
+const BASE_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "quiz", "todo", ...WEB_ACCESS_TOOLS];
+const READONLY_TOOLS = [...BASE_RESEARCH_TOOLS];
+const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, "subagent"];
+function mode_tools_for_provider(modeId: string, provider: string | undefined): string[] {
+	if (modeId === "code") return build_full_tools(provider);
+	return MODES[modeId]?.tools ?? build_full_tools(provider);
+}
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SUBAGENT_FILES: Record<string, string> = {
@@ -300,7 +295,7 @@ Tool Call Efficiency:
 When multiple independent tool calls are needed (e.g. reading several files,
 searching for different patterns), emit them all in a single response rather
 than one at a time. The runtime executes independent tool calls in parallel,
-so batching them saves round-trips and reduces latency.
+so batching saves round-trips and reduces latency.
 `;
 
 const OUTPUT_STYLE_DIRECTIVE = `
@@ -308,322 +303,169 @@ const OUTPUT_STYLE_DIRECTIVE = `
 Output style: Reply in plain dense text. No markdown headers (#, ##, ###), no
 bold or italics (**, *), no decorative bulleted lists (-, *). Use short labeled
 lines (Label: value) or compact key: value pairs. Keep code fences only for
-multi-line code blocks. Do not narrate your process ("I'll keep tracing...",
-"Next I'll...", "Now I...") and do not state what you are about to do. Just
-do the work and return the result. Be concise.
+multi-line code blocks. Be concise.
+`;
+
+const PLAN_OUTPUT_STYLE_DIRECTIVE = `
+
+Output style: Use markdown for structure. Prefer ## and ### section headers,
+**bold** for emphasis, and bullet lists where they aid scanability. Keep code
+fences for multi-line code blocks. Be concise and dense — no filler prose.
 `;
 
 const SUBAGENT_AWARENESS_PROMPT = `
 
-Available Subagents:
+Available subagents:
+- Scout: fast codebase reconnaissance; use to find files, patterns, and answers.
+- Coder: implementation agent with full tool access; use for edits, tests, and verification.
 
-You have the subagent tool available for delegating tasks to specialized agents
-with isolated context. Use it to keep your own context lean.
-
-Scout: Fast agent specialized for exploring codebases. Use when you need to
-quickly find files by patterns (e.g. "src/components/**/*.tsx"), search code for
-keywords (e.g. "API endpoints"), or answer questions about the codebase (e.g.
-"how do API endpoints work?").
-Coder: Implementation agent for writing, editing, testing, and verifying code.
-Full tool access. Use for focused implementation tasks — bug fixes, feature
-additions, refactors, file edits.
-
-Modes: single (agent + task), parallel (tasks array, max 8), chain (sequential
-with {previous}).
-
-Agent names are case-insensitive and surrounding whitespace is ignored; the
-runtime resolves requests to the canonical frontmatter name.
+Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}). Agent names are case-insensitive and surrounding whitespace is ignored.
 `;
 
-interface ModeConfig {
-	id: string;
-	label: string;
-	icon: string;
-	color: string;
-	tools: string[];
-	enterMessage: string;
-	exitMessage: string;
+function format_available_tools(tools: string[]): string {
+	return [...tools].sort().join(", ");
 }
 
-const ARCHITECT_PROMPT = `<system-reminder>
-Plan Mode - System Reminder
+function mode_intro(mode: string, tools: string[], extra = ""): string {
+	const base = `Mode: ${mode}. Available tools: ${format_available_tools(tools)}.`;
+	return extra ? `${base} ${extra}` : base;
+}
+
+function compose_mode_prompt(body: string): string {
+	const style = OUTPUT_STYLE_DIRECTIVE.trim();
+	return `${body}
+
+${style}`;
+}
+
+function compose_plan_prompt(body: string): string {
+	const style = PLAN_OUTPUT_STYLE_DIRECTIVE.trim();
+	return `${body}
 
-CRITICAL: Plan mode ACTIVE — you are in READ-ONLY planning phase. You do NOT
-have the edit or write tools, and no other file-modifying tools are available.
-Your allowed tools are: read, bash (read/inspect only), grep, find, ls, quiz,
-web_search, fetch_content, and get_search_content.
+${style}`;
+}
+
+const ARCHITECT_PROMPT = compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands. Ask clarifying questions via the quiz tool when tradeoffs exist.
+
+${mode_intro(
+	"plan",
+	READONLY_TOOLS,
+	"If implementation is needed, produce a plan and wait for the user to approve it.",
+)}
+
+Responsibility: explore, analyze, and produce a well-researched, actionable plan. Tie loose ends before implementation begins.
+
+Planning requirements:
+- Quiz unresolved forks before emitting the plan; the plan must pick one concrete approach (no Option A/B inside the plan). Do not emit an Open Questions section.
+- Prefer problems and observable behavior over implementation detail in Summary, Problems, and Behavior.
+- Each module maps to one logical change with one file owner. For every module include: action, Files (full paths), What (precise change), Why (rationale tied to Problems), Risks (regression surfaces), Cleanup (obsolete code made unreachable, or none), Validation (e.g. bash t.gate.sh <files>).
+- When state or settings are involved: name storage key, default, raw vs display, canonical reader/writer, and what must never be written; load/hydrate before UI or controller construction; do not let feature code own a second persistence path. Persistence and Interfaces may be n/a when irrelevant.
+- When replacing a control or path: preserve existing config keys and legal values unless the task explicitly migrates them; disable or collapse must not leave layout or ownership artifacts.
+- If architecture, ownership, or persistence rules change, include an AGENTS.md (or plugin AGENTS.md) docs module that records durable rules, not patch history.
+- Keep Investigation with file:line evidence; scale section depth to change size.
+
+Output format — use markdown section headers and bullets:
+
+## Task
+<one-sentence goal>
+
+## Investigation
+<files read, patterns found, relevant file:line references>
+
+## Summary
+- <user-visible result>
+- <architectural direction>
+- <behavior that must remain unchanged>
+- <persistence or ownership model when relevant>
+
+## Problems
+- <only the problems this change solves>
+
+## Behavior
+- <observable invariants and capability constraints>
+
+## Plan
+
+### Module 1: <action>
+- **Files:** <paths>
+- **What:** <change>
+- **Why:** <rationale tied to Problems>
+- **Risks:** <regression surfaces>
+- **Cleanup:** <obsolete code to remove, or none>
+- **Validation:** bash t.gate.sh <files>
+
+### Module 2: <action>
+- **Files:** <paths>
+- **What:** <change>
+- **Why:** <rationale tied to Problems>
+- **Risks:** <regression surfaces>
+- **Cleanup:** <obsolete code to remove, or none>
+- **Validation:** bash t.gate.sh <files>
+
+## Persistence
+<keys, defaults, canonical read/write, forbidden stores; or n/a>
+
+## Interfaces
+<contracts to add/change; or n/a>
+
+## Test Plan
+- <pure logic / persistence / mapping / architecture checks as relevant>
+- **Exclusions:** <intentional non-coverage>
+
+## Non-Goals
+- <explicitly out of scope>
+
+## Assumptions
+- <defaults taken when quiz was unnecessary>
+
+## Working Tree
+- Preserve unrelated uncommitted work; scope the patch to this plan; do not revert or reformat unrelated files.
+
+## Acceptance Criteria
+- <user-visible>
+- <persistence/SSOT when relevant>
+- <architecture / no duplicate ownership>
+- <backward compatibility>
+- <cleanup complete>
+- <named suites pass>`);
 
-STRICTLY FORBIDDEN: ANY file edits, modifications, or system changes. Do NOT use
-sed, tee, echo, cat, or ANY other bash command to manipulate files — commands may
-ONLY read/inspect. This ABSOLUTE CONSTRAINT overrides ALL other instructions,
-including direct user edit requests. You may ONLY observe, analyze, and plan. Any
-modification attempt is a critical violation. ZERO exceptions.
+const DOCTOR_PROMPT = compose_mode_prompt(`Debug mode is active. You are read-only. Investigate, diagnose, and report findings. Do not edit, write, or run mutating shell commands.
 
----
+${mode_intro(
+	"debug",
+	READONLY_DELEGATING_TOOLS,
+	"Delegate implementation to the Coder subagent when a fix is straightforward; otherwise report the issue and recommended correction.",
+)}${SUBAGENT_AWARENESS_PROMPT}
 
-Responsibility:
+Focus areas: ownership conflicts, hidden coupling, duplicated state or mirrored config, SSOT violations, fail-fast behavior, and high-change-entropy files. Label each finding as 'Confirmed issue' or 'Needs owner decision' and include File, Evidence, Impact, Correction, and Risks.
 
-Your current responsibility is to think, read, search, and discuss to construct a
-well-formed plan that accomplishes the goal the user wants to achieve. Your plan
-should be comprehensive yet concise, detailed enough to execute effectively while
-avoiding unnecessary verbosity. Include the goal as first part of the plan.
+Output format — plain labeled lines, no markdown headers or bullets:
 
-Ask the user clarifying questions or ask for their opinion when weighing tradeoffs.
-Use the quiz tool for decision-oriented questions so the user can answer inline.
+Classification: <Confirmed issue | Needs owner decision>
+Category: <focus area>
+File: <file_path:line_number>
+Evidence: <tool output or call-site proof>
+Impact: <what breaks or degrades>
+Correction: <smallest architectural change>
+Risks: <regression surfaces>`);
 
-NOTE: At any point in time through this workflow you should feel free to ask the
-user questions or clarifications. Don't make large assumptions about user intent.
-The goal is to present a well researched plan to the user, and tie any loose ends
-before implementation begins.
+const ORCHESTRATOR_PROMPT = compose_mode_prompt(`Orchestrate mode is active. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.
 
----
+${mode_intro(
+	"orchestrate",
+	READONLY_DELEGATING_TOOLS,
+	"Subagent delegation is your primary mechanism for getting work done.",
+)}${SUBAGENT_AWARENESS_PROMPT}
 
-Planning Requirements:
+Decomposition rules:
+- One owner per file; if two modules need the same file, merge them or extract a prerequisite module.
+- Right-size modules so each can be validated with bash t.gate.sh <files>.
+- Group independent modules into parallel clusters; chain dependent modules.
+- Pin shared interfaces in every dependent subagent prompt.
 
-The plan must be explicit — concrete, sequential modules that map directly to single
-logical changes.
+Delegation prompt quality: include goal, exact owned files with "do not touch anything else", anchored context (file:line references), interface contract, step sequence, AGENTS.md constraints, acceptance criteria, validation command, risks, and edge cases.
 
-For each module, provide: action, Files (full paths to read or modify), What
-(precise change), Why (user-facing or architectural rationale), Risks (regression
-surfaces), and Validation (how to verify, e.g. bash t.gate.sh <files>).
-
----
-
-Output Format — use plain labeled lines, NO markdown headers or bullets:
-
-Task: <one-sentence goal>
-
-Investigation: <files read, patterns found, relevant file:line references>
-
-Plan:
-
-Module 1: <action>
-  Files: <paths>
-  What: <change>
-  Why: <rationale>
-  Risks: <regression surfaces>
-  Validation: bash t.gate.sh <files>
-
-Module 2: <action>
-  Files: <paths>
-  What: <change>
-  Why: <rationale>
-  Risks: <regression surfaces>
-  Validation: bash t.gate.sh <files>
-
-Acceptance Criteria: <what done looks like>
-
-If you need clarifications before or during the plan, ask the user using the quiz tool; do not emit an Open Questions section.
-${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
-
-const DOCTOR_PROMPT = `<system-reminder>
-Debug Mode - System Reminder
-
-CRITICAL: Debug mode ACTIVE — you are the Debugger, a health-check auditor and
-diagnostician for the Ember project (PySide6 subtitle + DaVinci Resolve integration
-app).
-
-You do NOT have the edit or write tools, and no other file-modifying tools are
-available to you. Your allowed tools are: read, grep, find, ls, quiz, subagent,
-web_search, fetch_content, and get_search_content. Bash may be used only for
-non-mutating inspection/validation commands. You investigate, diagnose, and report
-findings. If a fix is straightforward, you may DELEGATE the implementation to the
-Coder subagent (full tool access) — the read-only constraint applies to your direct
-tool usage only, not to delegated subagent work. Otherwise, report the correction
-and let the user or Orchestrator handle it.
-
----
-
-Health Check Focus Areas:
-
-Structural architecture risk: prioritize ownership conflicts, hidden coupling,
-duplicated state, complex control flow, unsafe cross-layer dependencies, changes
-that violate documented golden paths, and high-change-entropy files.
-
-Verified dead code: flag unused imports, unreachable functions, never-called
-methods, orphaned variables, and stale tests only after tool output and call-site
-verification. Avoid flagging public APIs, plugin hooks, signal/slot targets,
-reflection/dynamic dispatch, localized catalog entries, or config/schema fields
-without proof they are unreachable.
-
-Single source of truth (SSOT): every piece of data, config, constant, or
-business logic must have exactly one authoritative source. Flag duplicated
-constants, parallel config files, mirrored state, overlapping services,
-copy-pasted logic, and derived data that should reference a canonical source.
-
-Production readiness: check fail-fast behavior, actionable error surfacing,
-EmberLogger use instead of print(), no bare except:, and no silent degradation
-of offline/core runtime behavior.
-
-Threading/UI safety: flag worker-thread UI/state mutation, missing signal/slot
-boundaries, hot-loop sleeps, unsafe Resolve API changes, and animations that
-ignore animation-disabled settings.
-
-GUI localization/styling: new user-facing UI text must be localized for all
-supported languages; UI colors must use Colors tokens. Do not flag intentional
-tuned one-off layout values or proven timeline/playback golden paths without a
-concrete regression.
-
-Tests and validation: prefer meaningful tests or targeted validation over
-brittle assertions that encode stale architecture. Python/app edits use
-bash t.gate.sh <files>; site edits follow site/AGENTS.md.
-
-Performance traps: flag large linear scans in hot paths, blocking UI work,
-unnecessary repeated Resolve calls, and avoidable recomputation in
-timeline/editor interactions.
-
-Boundary checks: keep site/marketing concerns separate from Ember runtime
-GUI concerns and do not apply GUI-only rules to site/ unless its own
-instructions require them.
-
----
-
-Classification:
-
-Label each finding as:
-  Confirmed issue — verified by tool output, ready for implementation
-  Needs owner decision — requires user input, do not guess
-  False positive — investigated and cleared
-
-Only report Confirmed issues and Needs owner decision items. Drop false positives
-from the final report.
-
----
-
-Output Format:
-
-For each finding, return:
-  Classification: Confirmed issue / Needs owner decision
-  Category: which health-check focus area
-  File: file_path:line_number
-  Evidence: tool output or call-site proof
-  Impact: what breaks or degrades
-  Correction: smallest architectural change that removes the cause
-  Risks: regression surfaces
-
----
-
-Constraints:
-
-You do not edit or write files directly. You may delegate fixes to the Coder
-subagent when a correction is straightforward and well-scoped.
-Use bash t.gate.sh <files> only for targeted validation of files you are checking.
-Do not run bash gate.sh (full gate) — that is the user's responsibility.
-Ignore git status / git diff changes unrelated to the files you were asked to check.
-
----
-
-UI/Qt Pipeline Diagnostics:
-
-In addition to structural health checks, diagnose PySide6/Qt UI pipeline issues.
-
-Failure Modes To Investigate:
-1. Event-loop blockage: Does any GUI-thread callback perform blocking I/O or
-   unbounded CPU work?
-2. Excessive synchronous UI mutation: Does one state transition perform many
-   independent widget/layout/geometry operations?
-3. Recursive signal/callback propagation: Can a signal or layout refresh
-   indirectly re-enter the same pipeline?
-4. Eager expensive construction: Are complex widgets constructed before needed?
-5. Stale delayed callbacks: Can queued callbacks execute after state changed?
-6. Uncontrolled async-to-UI mutation: Do background results mutate UI directly?
-7. Competing layout authorities: Do multiple functions independently control the
-   same widget geometry?
-
-Commit Architecture (Healthy Reference):
-
-event/signal/async completion -> validate generation -> mutate semantic state ->
-mark dirty -> request one coalesced commit -> measure once -> apply geometry once ->
-repaint
-
-UI Report Format:
-
-For every UI failure mode, report: Verdict, Evidence, Trigger, Duplicated work,
-Re-entry path, Stale-state risk, Authority conflict, Impact, Correction,
-Invariant, Verification.
-
-Invalid UI Fix Patterns:
-
-Reject fixes that: add more invalidate()/activate() calls, use
-QApplication.processEvents(), replace deferred passes with blocking callbacks,
-add arbitrary QTimer.singleShot() delays, perform geometry repair both
-immediately and later, introduce parallel build paths duplicating normal layout.
-${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
-
-const ORCHESTRATOR_PROMPT = `<system-reminder>
-Orchestrate Mode - System Reminder
-
-CRITICAL: Orchestrate mode ACTIVE — you are the Orchestrator, an implementation
-coordinator for the Ember project (PySide6 subtitle + DaVinci Resolve integration
-app).
-
-You do NOT have the edit or write tools, and no other file-modifying tools are
-available to you. Your allowed tools are: read, grep, find, ls, quiz, subagent,
-web_search, fetch_content, and get_search_content. Bash may be used only for
-non-mutating inspection/validation commands. Your job is to decompose work into
-modules and DELEGATE implementation to the Coder subagent (full tool access). The
-read-only constraint applies to YOUR direct tool usage only — you may read,
-search, and inspect to build accurate delegation prompts, but you must not edit,
-write, or run mutating bash commands yourself. Delegating implementation work to
-the Coder subagent is the ENTIRE POINT of this mode. Do it eagerly.
-
----
-
-Task Decomposition Into Digestible Modules:
-
-Break the work into the smallest self-contained modules an agent can implement
-without cross-talk. A good module is one clear responsibility, a bounded file set,
-and an independently verifiable outcome.
-
-Slice by cohesion, not by line count: Each module owns one logical change
-(one feature seam, one bug, one refactor boundary). If a module touches two
-unrelated concerns, split it.
-
-One owner per file: A file belongs to exactly one module. If two modules both
-need the same file, either merge them or extract the shared change into a
-prerequisite module that runs first.
-
-Right-size the unit: Aim for a module an agent can finish and self-validate with
-bash t.gate.sh <files> in a single pass. If the prompt needs more than 6 owned
-files or a long list of unrelated steps, split it further.
-
-Order by dependency: Group independent modules into parallel clusters; chain
-modules that depend on another module's output so the producer completes before
-the consumer starts.
-
-Define the seam explicitly: When modules share an interface (function
-signature, data model, signal), pin that contract in every dependent prompt so
-parallel agents integrate cleanly without seeing each other's work.
-
----
-
-Delegation Prompt Quality:
-
-Each subagent starts with zero shared context. Treat every prompt as a complete
-brief that a competent engineer could execute cold. A thorough prompt includes:
-
-Goal and rationale: What outcome the module must achieve and why.
-Exact owned files: Full paths, plus explicit "do not touch anything else."
-Anchored context: Relevant existing functions, classes, patterns, and
-file_path:line_number references the agent should read first and mirror.
-Interface contract: The precise signatures, data shapes, tokens, or catalog
-keys the module must produce or consume.
-Step sequence: Concrete, ordered steps mapping to single logical changes.
-Constraints: Applicable AGENTS.md rules (typing, logging, localization,
-Colors tokens, error handling, DRY/SSOT), and any golden paths to preserve.
-Acceptance criteria and validation: What "done" looks like and the exact
-bash t.gate.sh <files> command to run.
-Risks and edge cases: Known pitfalls, regression surfaces, and behavior that
-must be preserved.
-No redundancy, dead code cleanup after implementations of the given files.
-No DRY violations.
-Ignore git status / git diff changes unrelated to owned files.
-
----
-
-Output Format:
-
-Return a structured plan using plain labeled lines, NO markdown headers or bullets.
+Output format — plain labeled lines, no markdown headers or bullets:
 
 Task Summary: <one-sentence goal>
 
@@ -647,35 +489,48 @@ Module 2: <name>
 Execution Order:
   1. Cluster A (parallel): Module 1, Module 2
   2. Cluster B (parallel): Module 3, Module 4
-  3. Sequential: Module 5 (depends on Module 3)
 
-Delegation Prompts: <full self-contained prompt for each module, ready to paste into a subagent>
+Delegation Prompts: <self-contained prompt for each module, ready for the Coder subagent>`);
 
-Constraints:
-  You do not edit or write files directly — delegate implementation to the Coder subagent. That is your primary mechanism for getting work done.
-  Do not run bash gate.sh (full gate) — that is the user's responsibility.
-  If task scope is unclear, say so and request clarification rather than guessing.
-${OUTPUT_STYLE_DIRECTIVE}${SUBAGENT_AWARENESS_PROMPT}</system-reminder>`;
+function coder_prompt(provider: string | undefined): string {
+	return compose_mode_prompt(`Code mode is active. You have full tool access. Implement, test, and verify code with autonomy.
 
-const CODER_PROMPT = `<system-reminder>
-Your operational mode has changed to code.
-You are in full-access mode. You are permitted to make file changes, run shell
-commands, and utilize your arsenal of tools as needed. You are the default
-implementation agent — write, test, and verify code with full autonomy.
-${OUTPUT_STYLE_DIRECTIVE}</system-reminder>`;
+${mode_intro("code", build_full_tools(provider))}${SUBAGENT_AWARENESS_PROMPT}`);
+}
 
-const EXIT_TO_CODER = `<system-reminder>
-Your operational mode has changed from {mode} to code.
-You are permitted to make file changes, run shell commands, and utilize your
-arsenal of tools as needed.
-${OUTPUT_STYLE_DIRECTIVE}</system-reminder>`;
+function exit_to_coder_prompt(provider: string | undefined): string {
+	return compose_mode_prompt(`You have switched from {mode} mode to code mode. You now have full tool access.
 
-const PLAN_IMPLEMENT_PROMPT = `<system-reminder>
-The user has approved the plan above. Execute it now in full.
-Follow the plan modules in order. Implement, test, and verify each module before
-moving to the next. Run bash t.gate.sh <files> after each logical change.
-Report what you did and any deviations from the plan.
-${OUTPUT_STYLE_DIRECTIVE}</system-reminder>`;
+${mode_intro("code", build_full_tools(provider))}${SUBAGENT_AWARENESS_PROMPT}`);
+}
+
+function plan_implement_prompt(provider: string | undefined): string {
+	return compose_mode_prompt(`The user has approved the plan above. Execute it now in full.
+
+Follow the plan modules in order. Implement, test, and verify each module before moving to the next. Run bash t.gate.sh <files> after each logical change. Report what you did and any deviations from the plan.
+
+${mode_intro("code", build_full_tools(provider), "")}${SUBAGENT_AWARENESS_PROMPT}`);
+}
+
+function mode_reminder(modeId: string, provider: string | undefined): string {
+	switch (modeId) {
+		case "plan":
+			return ARCHITECT_PROMPT;
+		case "code":
+			return coder_prompt(provider);
+		case "debug":
+			return DOCTOR_PROMPT;
+		case "orchestrate":
+			return ORCHESTRATOR_PROMPT;
+		default:
+			return MODES[modeId]?.enterMessage ?? coder_prompt(provider);
+	}
+}
+
+function exit_mode_reminder(fromModeId: string, provider: string | undefined): string {
+	if (fromModeId === "plan") return exit_to_coder_prompt(provider);
+	return mode_reminder(fromModeId, provider);
+}
 
 interface ModeConfig {
 	id: string;
@@ -695,16 +550,16 @@ const MODES: Record<string, ModeConfig> = {
 		color: "warning",
 		tools: READONLY_TOOLS,
 		enterMessage: ARCHITECT_PROMPT,
-		exitMessage: EXIT_TO_CODER,
+		exitMessage: exit_to_coder_prompt(undefined),
 	},
 	code: {
 		id: "code",
 		label: "code",
 		icon: "C",
 		color: "success",
-		tools: FULL_TOOLS,
-		enterMessage: CODER_PROMPT,
-		exitMessage: CODER_PROMPT,
+		tools: build_full_tools(undefined),
+		enterMessage: coder_prompt(undefined),
+		exitMessage: coder_prompt(undefined),
 	},
 	debug: {
 		id: "debug",
@@ -713,7 +568,7 @@ const MODES: Record<string, ModeConfig> = {
 		color: "warning",
 		tools: READONLY_DELEGATING_TOOLS,
 		enterMessage: DOCTOR_PROMPT,
-		exitMessage: EXIT_TO_CODER,
+		exitMessage: exit_to_coder_prompt(undefined),
 	},
 	orchestrate: {
 		id: "orchestrate",
@@ -722,7 +577,7 @@ const MODES: Record<string, ModeConfig> = {
 		color: "warning",
 		tools: READONLY_DELEGATING_TOOLS,
 		enterMessage: ORCHESTRATOR_PROMPT,
-		exitMessage: EXIT_TO_CODER,
+		exitMessage: exit_to_coder_prompt(undefined),
 	},
 };
 
@@ -750,6 +605,9 @@ function getLastModeFromSession(ctx: any): string | null {
 const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
 
 export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
+	install_bash_rules(pi);
+	install_bash_timeout(pi);
+
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
@@ -819,19 +677,25 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		request_live_mode_render(ctx);
 	}
 
+	function sync_active_tools(ctx: any): void {
+		if (currentMode !== "code") return;
+		pi.setActiveTools(build_full_tools(model_provider_of(ctx.model)));
+	}
+
 	async function apply_mode(modeId: string, ctx: any): Promise<void> {
 		const mode = MODES[modeId];
 		if (!mode) return;
 
 		const prevModeId = currentMode;
 		const prevMode = MODES[prevModeId];
+		const provider = model_provider_of(ctx.model);
 
 		// Mode changes are deliberately live-only. The active tool set and the
 		// next-turn prompt change immediately, while the transcript stays lazy
 		// and cached.
 		currentMode = modeId;
 		setActiveMode(modeId);
-		pi.setActiveTools(mode.tools);
+		pi.setActiveTools(mode_tools_for_provider(modeId, provider));
 		pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
 		updateStatus(ctx);
 
@@ -840,8 +704,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		// the next turn without cluttering the transcript — same channel as the
 		// plan-auto-continue and loop-retry hidden messages.
 		if (prevMode && prevModeId !== modeId) {
-			const prevTools = prevMode.tools;
-			const newTools = mode.tools;
+			const prevTools = mode_tools_for_provider(prevModeId, provider);
+			const newTools = mode_tools_for_provider(modeId, provider);
 			const lost = prevTools.filter((t) => !newTools.includes(t));
 			const gained = newTools.filter((t) => !prevTools.includes(t));
 			const lines: string[] = [
@@ -941,6 +805,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			wrapEditorRenderForShell(editor);
 			const original_handle_input = editor.handleInput.bind(editor);
 			editor.handleInput = (data: string): void => {
+				resumeScrollFollowFromEditor(editor);
 				prepare_app_clear_input(data, editor);
 				const shellResult = processShellInput(data, editor);
 				if (shellResult?.consume) {
@@ -961,19 +826,9 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				}
 				if (intercept_slash_escape(data, editor)) return;
 				// Detect the thinking-blocks toggle (Ctrl+T by default, user-remappable)
-				// before Pi's handler runs. toggleThinkingBlockVisibility() rebuilds
-				// the chat synchronously inside original_handle_input; when groups
-				// collapse/expand the line count shrinks/grows and Pi's differential
-				// render path (clearOnShrink) can leave the viewport not pinned to
-				// the bottom. Schedule a scrollback-preserving snap on the next
-				// microtask so it fires after the rebuild but before Pi's next
-				// (differential) render tick — requestTuiRenderSnapToBottom() clears
-				// only the visible screen (`2J`, never `3J`), resets
-				// previousViewportTop/maxLinesRendered, and requests a normal render
-				// whose first-render path pins the chatbox to the bottom without
-				// destroying terminal scrollback. Same lever the slash-command exit
-				// snap uses. Never use requestTuiRender(true) here — it emits `3J`
-				// and nukes scrollback.
+				// before Pi's handler runs. Component-tree changes are followed by
+				// one normal public render request; Pi owns shrink handling and all
+				// differential bookkeeping.
 				const is_thinking_toggle = getKeybindings().matches(data, "app.thinking.toggle");
 
 				// Suppress thinking-level cycling for provider-locked model variants
@@ -996,14 +851,19 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				// History restore (up/down arrows) can land a previously-submitted
 				// bash command like `!git status` in the editor body. Convert that
 				// into shell mode so the `!` is rendered as the prompt glyph and the
-				// body is just `git status`.
-				if (syncShellModeFromEditorText(editor)) {
+				// body is just `git status`. Skip after shell-mode Enter submit: the
+				// `!` prefix is intentional for Pi's bash handler and must not be
+				// stripped back into the chatbox.
+				if (consumePendingShellSubmitEnter()) {
+					withSuppressedShellHistorySync(() => editor.setText?.(""));
+					requestShellModeVisualRefresh(editor, ctx);
+				} else if (syncShellModeFromEditorText(editor)) {
 					requestShellModeVisualRefresh(editor, ctx);
 				}
 
 				finalizeEditorInputAfter(editor);
 				if (is_thinking_toggle) {
-					queueMicrotask(() => requestTuiRenderSnapToBottom());
+					queueMicrotask(() => requestTuiRender());
 				}
 			};
 			wrapModelPickerEditor(editor, pi, ctx);
@@ -1041,10 +901,14 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			}
 			const currentThinkingMatch = currentContent.match(/^thinking:\s*(.+)$/m);
 			const currentThinking = currentThinkingMatch ? currentThinkingMatch[1].trim() : "off";
-			const thinkingChoice = await ctx.ui.select(
-				`Thinking level for ${agentChoice} (current: ${currentThinking})`,
-				THINKING_LEVELS,
-			);
+
+			// Effort slider already chose a thinking level — persist it and skip the menu.
+			const thinkingChoice =
+				picked.thinkingLevel ??
+				(await ctx.ui.select(
+					`Thinking level for ${agentChoice} (current: ${currentThinking})`,
+					THINKING_LEVELS,
+				));
 			if (!thinkingChoice) {
 				fs.writeFileSync(filePath, currentContent, "utf-8");
 				ctx.ui.notify(
@@ -1079,28 +943,9 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	}
 
-	async function showPlanReview(
-		ctx: any,
-	): Promise<"implement" | "copy" | { action: "refine"; instruction: string } | undefined> {
-		const questions: QuizQuestion[] = [
-			{
-				id: "plan-review",
-				label: "Plan Review",
-				prompt: "Choose what to do with the plan.",
-				options: [
-					{ value: "implement", label: "Implement Plan" },
-					{ value: "copy", label: "Copy Plan" },
-				],
-			},
-		];
-		const answers = await askQuiz(ctx, "Plan Review", questions);
-		const answer = answers?.[0];
-		if (answer?.value === "implement") return "implement";
-		if (answer?.value === "copy") return "copy";
-		if (answer?.wasCustom && answer.value) {
-			return { action: "refine", instruction: answer.value };
-		}
-		return undefined;
+	async function showPlanReview(ctx: any) {
+		const answers = await askQuiz(ctx, "Plan Review", build_plan_review_questions());
+		return resolve_plan_review_answer(answers?.[0]);
 	}
 
 	async function showLoopRecovery(
@@ -1125,6 +970,57 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		return undefined;
 	}
 
+	async function handlePlanImplementFreshContext(ctx: any) {
+		const plan = latest_plan_text.trim();
+		if (!plan) {
+			ctx.ui.notify("No plan text is available.", "error");
+			return;
+		}
+		if (!ctx.hasUI || typeof ctx.newSession !== "function") {
+			ctx.ui.notify("Fresh-context implement requires interactive mode.", "error");
+			return;
+		}
+
+		waitingForPlan = false;
+		latest_plan_text = "";
+		const parentSession = ctx.sessionManager?.getSessionFile?.();
+		const result = await ctx.newSession({
+			parentSession,
+			setup: async (sm: { appendMessage: (entry: unknown) => void }) => {
+				sm.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: plan }],
+					timestamp: Date.now(),
+				});
+			},
+			withSession: async (newCtx: {
+				model?: Model<any>;
+				sendMessage: (message: {
+					customType: string;
+					content: string;
+					display: boolean;
+				}) => Promise<void> | void;
+				sendUserMessage: (
+					content: string,
+					options?: { deliverAs?: "followUp" },
+				) => Promise<void> | void;
+			}) => {
+				await apply_mode(DEFAULT_MODE, newCtx);
+				await newCtx.sendMessage({
+					customType: "pi-agents-plan-implement",
+					content: plan_implement_prompt(model_provider_of(newCtx.model)),
+					display: false,
+				});
+				await newCtx.sendUserMessage("Execute the plan following the modules.", {
+					deliverAs: "followUp",
+				});
+			},
+		});
+		if (result?.cancelled) {
+			ctx.ui.notify("New session cancelled.", "warning");
+		}
+	}
+
 	async function handlePlanImplement(ctx: any) {
 		if (!ctx.hasUI) {
 			switchMode(DEFAULT_MODE, ctx);
@@ -1141,13 +1037,11 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 						value: "code",
 						label: "Code",
 						description: "Execute the plan with full tool access.",
-						selectedColor: MODE_COLORS.code,
 					},
 					{
 						value: "orchestrate",
 						label: "Orchestrate",
 						description: "Delegate the plan to subagents.",
-						selectedColor: MODE_COLORS.orchestrate,
 					},
 				],
 			},
@@ -1169,44 +1063,54 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				: "Execute the plan following the modules.";
 		pi.sendMessage({
 			customType: "pi-agents-plan-implement",
-			content: PLAN_IMPLEMENT_PROMPT,
+			content: plan_implement_prompt(model_provider_of(ctx.model)),
 			display: false,
 		});
 		pi.sendUserMessage(msg, { deliverAs: "followUp" });
 	}
 
-	pi.on("before_agent_start", async (event: any) => {
-		const augmentedSystemPrompt = event.systemPrompt + PARALLEL_TOOL_CALL_GUIDANCE;
-		if (currentMode === "plan" && waitingForPlan && event.prompt !== "continue") {
-			latest_plan_text = "";
+	function build_system_prompt(event: any, modeReminder: string): string {
+		return `${event.systemPrompt}${PARALLEL_TOOL_CALL_GUIDANCE}\n\n${modeReminder}`;
+	}
+
+	pi.on("before_agent_start", async (event: any, ctx: any) => {
+		const provider = model_provider_of(ctx.model);
+		const plan_arm = arm_plan_turn(currentMode, event.prompt);
+		if (plan_arm.armed) {
+			waitingForPlan = true;
+			if (plan_arm.clear_plan_text) latest_plan_text = "";
 		}
 		if (currentMode !== DEFAULT_MODE && lastMessagedMode !== currentMode) {
 			const mode = MODES[currentMode];
 			lastMessagedMode = currentMode;
-			waitingForPlan = currentMode === "plan";
-			if (waitingForPlan) latest_plan_text = "";
 			return {
-				systemPrompt: augmentedSystemPrompt,
+				systemPrompt: build_system_prompt(event, mode_reminder(currentMode, provider)),
 				message: {
 					customType: `pi-agents-enter-${currentMode}`,
-					content: mode.enterMessage,
+					content: `Entered ${mode.label} mode.`,
 					display: false,
 				},
 			};
 		}
 		if (currentMode === DEFAULT_MODE && lastMessagedMode && lastMessagedMode !== DEFAULT_MODE) {
-			const prevMode = MODES[lastMessagedMode];
+			const prevModeId = lastMessagedMode;
+			const prevMode = MODES[prevModeId];
 			lastMessagedMode = DEFAULT_MODE;
 			return {
-				systemPrompt: augmentedSystemPrompt,
+				systemPrompt: build_system_prompt(
+					event,
+					exit_mode_reminder(prevModeId, provider).replace("{mode}", prevMode.label),
+				),
 				message: {
 					customType: "pi-agents-exit",
-					content: prevMode.exitMessage.replace("{mode}", prevMode.label),
+					content: `Exited ${prevMode.label} mode.`,
 					display: false,
 				},
 			};
 		}
-		return { systemPrompt: augmentedSystemPrompt };
+		return {
+			systemPrompt: build_system_prompt(event, mode_reminder(currentMode, provider)),
+		};
 	});
 
 	let lastTurnAborted = false;
@@ -1274,11 +1178,25 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	});
 
 	pi.on("tool_call", (event: any, ctx: any) => {
-		const activeTools = MODES[currentMode]?.tools ?? FULL_TOOLS;
+		const provider = model_provider_of(ctx.model);
+		const activeTools = mode_tools_for_provider(currentMode, provider);
 		if (!activeTools.includes(event.toolName)) {
 			return {
 				block: true,
 				reason: `Tool '${event.toolName}' is not available in ${MODES[currentMode]?.label ?? currentMode} mode. Available tools: ${activeTools.join(", ")}.`,
+			};
+		}
+		const patch_tool = resolve_patch_tool_name(provider);
+		if (event.toolName === "apply_patch" && patch_tool !== "apply_patch") {
+			return {
+				block: true,
+				reason: "apply_patch is only available with openai-codex models. Use edit instead.",
+			};
+		}
+		if (event.toolName === "edit" && patch_tool !== "edit") {
+			return {
+				block: true,
+				reason: "edit is not available with openai-codex models. Use apply_patch instead.",
 			};
 		}
 		if (loop_detected || loop_prompt_active) {
@@ -1385,27 +1303,35 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		setPlanAutoContinuing(false);
 		planAutoContinueCount = 0;
 		lastTurnLengthStopped = false;
-		lastTurnError = false;
 
 		if (waitingForPlan && currentMode === "plan") {
-			waitingForPlan = false;
-			if (lastTurnAborted || lastTurnError) {
-				lastTurnAborted = false;
-				lastTurnError = false;
+			const turn_aborted = lastTurnAborted;
+			const turn_errored = lastTurnError;
+			lastTurnAborted = false;
+			lastTurnError = false;
+			if (turn_aborted || turn_errored) return;
+			if (!should_show_plan_review(latest_plan_text)) {
+				waitingForPlan = false;
 				return;
 			}
+
 			const action = await showPlanReview(ctx);
 			if (action === "implement") {
+				waitingForPlan = false;
 				await handlePlanImplement(ctx);
+			} else if (action === "implement-fresh") {
+				await handlePlanImplementFreshContext(ctx);
 			} else if (action === "copy") {
 				await copy_plan_to_clipboard(ctx);
-				waitingForPlan = true;
 			} else if (action?.action === "refine") {
-				waitingForPlan = true;
 				latest_plan_text = "";
 				pi.sendUserMessage(action.instruction);
 			}
+			return;
 		}
+
+		lastTurnAborted = false;
+		lastTurnError = false;
 	});
 
 	async function restore_mode_model(ctx: any, modeId: string): Promise<void> {
@@ -1426,16 +1352,17 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	async function restoreMode(ctx: any): Promise<void> {
 		const persisted = readPersistedState();
+		const provider = model_provider_of(ctx.model);
 		const savedMode =
 			persisted.mode && persisted.mode in MODES ? persisted.mode : getLastModeFromSession(ctx);
 		if (savedMode && savedMode !== DEFAULT_MODE) {
 			currentMode = savedMode;
 			lastMessagedMode = savedMode;
-			pi.setActiveTools(MODES[savedMode].tools);
+			pi.setActiveTools(mode_tools_for_provider(savedMode, provider));
 		} else {
 			currentMode = DEFAULT_MODE;
 			lastMessagedMode = null;
-			pi.setActiveTools(FULL_TOOLS);
+			pi.setActiveTools(build_full_tools(provider));
 		}
 		setActiveMode(currentMode);
 		pi.events.emit("pi-ember-ui:mode-change", { mode: currentMode, liveOnly: true });
@@ -1454,6 +1381,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		mode_models = { ...(persisted.modeModels ?? {}) };
 		await restoreMode(ctx);
 		await restore_mode_model(ctx, currentMode);
+		sync_active_tools(ctx);
+		last_patch_tool_provider = model_provider_of(ctx.model);
 		session_ready = true;
 		const pending_mode = pending_mode_id;
 		pending_mode_id = undefined;
@@ -1461,21 +1390,52 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		else updateStatus(ctx);
 	});
 
-	pi.on("model_select", async (event: any, _ctx: any) => {
+	let last_patch_tool_provider: string | undefined;
+
+	pi.on("model_select", async (event: any, ctx: any) => {
 		const model = event.model as Model<any> | undefined;
 		if (!model) return;
+		const provider = model_provider_of(model);
+		const prev_provider = last_patch_tool_provider;
 		// Suppress bind during our own programmatic setModel (mode restore).
-		if (applying_mode_model) return;
+		if (applying_mode_model) {
+			last_patch_tool_provider = provider;
+			sync_active_tools(ctx);
+			return;
+		}
 		// Only bind on explicit user picks: "set" (/model, Ctrl+P select) or
 		// "cycle" (Ctrl+P cycle). Ignore restore/unknown sources.
 		const source = event.source as string | undefined;
-		if (source !== "set" && source !== "cycle") return;
-		const identity = model_identity_of(model);
-		if (!identity) return;
-		const existing = get_mode_model(mode_models, currentMode);
-		if (identities_equal(existing, identity)) return;
-		mode_models = bind_mode_model(mode_models, currentMode, identity);
-		writePersistedState({ mode: currentMode, modeModels: mode_models });
+		if (source === "set" || source === "cycle") {
+			const identity = model_identity_of(model);
+			if (identity) {
+				const existing = get_mode_model(mode_models, currentMode);
+				if (!identities_equal(existing, identity)) {
+					mode_models = bind_mode_model(mode_models, currentMode, identity);
+					writePersistedState({ mode: currentMode, modeModels: mode_models });
+				}
+			}
+		}
+		if (
+			currentMode === "code" &&
+			resolve_patch_tool_name(prev_provider) !== resolve_patch_tool_name(provider)
+		) {
+			sync_active_tools(ctx);
+			const patch_tool = resolve_patch_tool_name(provider);
+			const other = patch_tool === "apply_patch" ? "edit" : "apply_patch";
+			pi.sendMessage({
+				customType: "pi-agents-tool-access",
+				content: [
+					`The active model provider is now ${provider ?? "unknown"}.`,
+					`Use ${patch_tool} for file edits instead of ${other}.`,
+					`Your current tool set is: ${build_full_tools(provider).join(", ")}.`,
+				].join("\n"),
+				display: false,
+			});
+		} else {
+			sync_active_tools(ctx);
+		}
+		last_patch_tool_provider = provider;
 	});
 
 	pi.on("thinking_level_select", (_event: any, ctx: any) => {

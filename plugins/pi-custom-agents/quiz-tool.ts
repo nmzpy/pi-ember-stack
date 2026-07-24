@@ -17,15 +17,21 @@ import type {
 	KeybindingsManager,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-import { chatboxBorderColor, requestTuiRender } from "../pi-ember-ui/index.ts";
-import { colorize, setQuizActive } from "../pi-ember-ui/mode-colors.ts";
+import {
+	chatboxBorderColor,
+	MUTED_GROUP_GRADIENT_PRESET,
+	renderLiveGradient,
+	requestTuiRender,
+	subscribeGradientTick,
+	unsubscribeGradientTick,
+} from "../pi-ember-ui/index.ts";
+import { setQuizActive } from "../pi-ember-ui/mode-colors.ts";
+import { BULLET, statusBulletColor } from "../pi-compact-tools/renderer.ts";
 
 export interface QuizOption {
 	value: string;
 	label: string;
 	description?: string;
-	/** Optional hex color applied to the option when selected. */
-	selectedColor?: string;
 }
 
 export interface QuizQuestion {
@@ -45,6 +51,129 @@ interface QuizAnswer {
 interface QuizResult {
 	answers: QuizAnswer[];
 	cancelled: boolean;
+}
+
+type QuizCallArgs = { questions?: QuizQuestion[] };
+
+type ToolRenderContext = {
+	args: unknown;
+	toolCallId: string;
+	invalidate: () => void;
+	state: Record<string, unknown>;
+	expanded?: boolean;
+	isError?: boolean;
+};
+
+type ToolRenderResultOptions = {
+	isPartial: boolean;
+	expanded?: boolean;
+};
+
+/** Quiz tool execute is awaiting askQuiz for this call — hide its transcript row. */
+let awaiting_quiz_tool_call_id: string | undefined;
+
+type QuizTickRecord = {
+	callback: () => void;
+	toolCallId: string;
+	invalidateTarget?: () => void;
+};
+
+const quiz_tick_records = new Map<string, QuizTickRecord>();
+
+function get_or_create_quiz_tick_record(
+	toolCallId: string,
+	invalidate?: () => void,
+): QuizTickRecord {
+	let record = quiz_tick_records.get(toolCallId);
+	if (!record) {
+		const rec: QuizTickRecord = {
+			callback: (): void => {
+				rec.invalidateTarget?.();
+			},
+			toolCallId,
+		};
+		record = rec;
+		quiz_tick_records.set(toolCallId, record);
+	}
+	if (invalidate) record.invalidateTarget = invalidate;
+	return record;
+}
+
+function subscribe_quiz_tick(toolCallId: string, invalidate?: () => void): void {
+	subscribeGradientTick(get_or_create_quiz_tick_record(toolCallId, invalidate).callback);
+}
+
+function unsubscribe_quiz_tick(toolCallId: string): void {
+	const record = quiz_tick_records.get(toolCallId);
+	if (!record) return;
+	unsubscribeGradientTick(record.callback);
+	quiz_tick_records.delete(toolCallId);
+}
+
+function clear_quiz_tick_records(): void {
+	for (const record of quiz_tick_records.values()) {
+		unsubscribeGradientTick(record.callback);
+	}
+	quiz_tick_records.clear();
+}
+
+function quiz_call_hidden(toolCallId: string, completed: boolean): boolean {
+	return should_hide_quiz_call_row(toolCallId, completed, awaiting_quiz_tool_call_id);
+}
+
+/** SSOT for hiding the compact quiz call row while the overlay owns the UI. */
+export function should_hide_quiz_call_row(
+	toolCallId: string,
+	completed: boolean,
+	awaiting_tool_call_id: string | undefined,
+): boolean {
+	if (completed) return false;
+	return awaiting_tool_call_id === toolCallId;
+}
+
+/** Compact quiz call row — gradient while streaming, static after completion. */
+export function format_quiz_call_row(
+	args: QuizCallArgs,
+	theme: Theme,
+	options: { completed: boolean; hidden: boolean },
+): string {
+	if (options.hidden) return "";
+	const count = args.questions?.length ?? 0;
+	const count_text = theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`);
+	if (options.completed) {
+		return (
+			statusBulletColor(false, true, theme) +
+			theme.fg("muted", theme.bold("Quiz ")) +
+			count_text
+		);
+	}
+	return (
+		theme.fg("muted", BULLET) +
+		renderLiveGradient("Quiz", MUTED_GROUP_GRADIENT_PRESET) +
+		theme.fg("dim", " ") +
+		count_text
+	);
+}
+
+class QuizCallComponent implements Component {
+	constructor(
+		private readonly args: QuizCallArgs,
+		private readonly theme: Theme,
+		private readonly toolCallId: string,
+		private readonly state: Record<string, unknown>,
+	) {}
+
+	render(width: number): string[] {
+		const completed = this.state.quizCompleted === true;
+		const line = format_quiz_call_row(this.args, this.theme, {
+			completed,
+			hidden: quiz_call_hidden(this.toolCallId, completed),
+		});
+		if (!line) return [];
+		return [truncateToWidth(line, Math.max(1, width), "…")];
+	}
+
+	invalidate(): void {}
 }
 
 /**
@@ -217,15 +346,21 @@ export async function askQuiz(
 			function render(width: number): string[] {
 				const renderWidth = Math.max(1, width);
 				if (cachedLines && cachedWidth === renderWidth) return cachedLines.slice();
+				const fitLines = (rows: string[]): string[] =>
+					rows.map((line) =>
+						visibleWidth(line) > renderWidth ? truncateToWidth(line, renderWidth) : line,
+					);
 				const question = currentQuestion();
 				const lines: string[] = [chatboxBorderColor("─".repeat(renderWidth))];
 				addWrappedWithPrefix(lines, " ", theme.fg("text", theme.bold(title)), renderWidth);
-				addWrappedWithPrefix(
-					lines,
-					" ",
-					theme.fg("muted", `${questionIndex + 1}/${questions.length} ${question.label ?? ""}`),
-					renderWidth,
-				);
+				if (questions.length > 1) {
+					addWrappedWithPrefix(
+						lines,
+						" ",
+						theme.fg("muted", `${questionIndex + 1}/${questions.length} ${question.label ?? ""}`),
+						renderWidth,
+					);
+				}
 				lines.push("");
 				addWrappedWithPrefix(lines, " ", theme.fg("text", question.prompt), renderWidth);
 				lines.push("");
@@ -254,9 +389,9 @@ export async function askQuiz(
 						lines.push(` ${line}`);
 					}
 					lines.push(chatboxBorderColor("─".repeat(renderWidth)));
-					cachedLines = lines;
+					cachedLines = fitLines(lines);
 					cachedWidth = renderWidth;
-					return lines.slice();
+					return cachedLines.slice();
 				}
 
 				const opts = displayOptions();
@@ -265,18 +400,8 @@ export async function askQuiz(
 					const selected = i === optionIndex;
 					const labelSuffix = isNone && inputMode ? " ✎" : "";
 					const label = `${i + 1}. ${option.label}${labelSuffix}`;
-					let prefix: string;
-					let painted: string;
-					if (selected && option.selectedColor) {
-						prefix = colorize(option.selectedColor, "> ");
-						painted = colorize(option.selectedColor, label);
-					} else if (selected) {
-						prefix = theme.fg("text", "> ");
-						painted = theme.fg("text", label);
-					} else {
-						prefix = "  ";
-						painted = theme.fg("dim", label);
-					}
+					const prefix = selected ? theme.fg("text", "> ") : "  ";
+					const painted = selected ? theme.fg("text", label) : theme.fg("dim", label);
 					addWrappedWithPrefix(
 						lines,
 						prefix,
@@ -294,9 +419,9 @@ export async function askQuiz(
 				}
 
 				lines.push(chatboxBorderColor("─".repeat(renderWidth)));
-				cachedLines = lines;
+				cachedLines = fitLines(lines);
 				cachedWidth = renderWidth;
-				return lines.slice();
+				return cachedLines.slice();
 			}
 
 			function handleInput(data: string): void {
@@ -378,7 +503,7 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 		executionMode: "sequential",
 		renderShell: "self",
 		async execute(
-			_toolCallId: string,
+			toolCallId: string,
 			params: { questions: QuizQuestion[] },
 			_signal: AbortSignal,
 			_onUpdate: unknown,
@@ -410,7 +535,15 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 				};
 			}
 
-			const answers = await askQuiz(ctx, "Quiz", params.questions);
+			awaiting_quiz_tool_call_id = toolCallId;
+			unsubscribe_quiz_tick(toolCallId);
+			requestTuiRender();
+			let answers: QuizAnswer[] | undefined;
+			try {
+				answers = await askQuiz(ctx, "Quiz", params.questions);
+			} finally {
+				requestTuiRender();
+			}
 			return {
 				content: [
 					{
@@ -424,24 +557,29 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 				details: { answers: answers ?? [], cancelled: answers === undefined },
 			};
 		},
-		renderCall(args: { questions?: QuizQuestion[] }, _theme: Theme): Component {
-			// Compact bullet row, consistent with every other tool. The
-			// interactive overlay (askQuiz) owns the two chatbox
-			// horizontal rules the user sees; wrapping the transcript tag in
-			// chatboxBorderContainer here added a third/fourth `─` line.
-			const count = args.questions?.length ?? 0;
-			return new Text(
-				`${_theme.fg("muted", "• ")}${_theme.fg("dim", _theme.bold("quiz "))}${_theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`)}`,
-				0,
-				0,
-			);
+		renderCall(args: QuizCallArgs, theme: Theme, context: ToolRenderContext): Component {
+			const completed = context.state.quizCompleted === true;
+			const hidden = quiz_call_hidden(context.toolCallId, completed);
+			if (!completed && !hidden) {
+				subscribe_quiz_tick(context.toolCallId, context.invalidate);
+			} else {
+				unsubscribe_quiz_tick(context.toolCallId);
+			}
+			return new QuizCallComponent(args, theme, context.toolCallId, context.state);
 		},
 		renderResult(
 			result: { details?: { answers?: QuizAnswer[]; cancelled?: boolean } },
-			_options: unknown,
+			_options: ToolRenderResultOptions,
 			theme: Theme,
-			context: { args?: { questions?: QuizQuestion[] } },
+			context: ToolRenderContext & { args?: QuizCallArgs },
 		): Component {
+			context.state.quizCompleted = true;
+			if (awaiting_quiz_tool_call_id === context.toolCallId) {
+				awaiting_quiz_tool_call_id = undefined;
+			}
+			unsubscribe_quiz_tick(context.toolCallId);
+			context.invalidate();
+			requestTuiRender();
 			const details = result.details;
 			if (details?.cancelled) {
 				return new Text(theme.fg("warning", "Cancelled"), 0, 0);
@@ -464,5 +602,10 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 				0,
 			);
 		},
+	});
+
+	pi.on("session_shutdown", () => {
+		awaiting_quiz_tool_call_id = undefined;
+		clear_quiz_tick_records();
 	});
 }

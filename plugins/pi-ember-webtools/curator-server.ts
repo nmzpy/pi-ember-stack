@@ -12,7 +12,7 @@ export interface CuratorServerOptions {
 	queries: string[];
 	sessionToken: string;
 	timeout: number;
-	availableProviders: { openai: boolean; exa: boolean };
+	availableProviders: { exa: boolean };
 	defaultProvider: string;
 	searchProvider: string;
 	summaryModels: Array<{ value: string; label: string }>;
@@ -266,7 +266,6 @@ export function startCuratorServer(
 	}
 
 	function isAvailableProvider(provider: string): boolean {
-		if (provider === "openai") return availableProviders.openai;
 		if (provider === "exa") return availableProviders.exa;
 		return false;
 	}

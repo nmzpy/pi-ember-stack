@@ -5,6 +5,8 @@ import {
 	anySubagentRunning,
 	isSubagentDelegating,
 	renderDelegatingRow,
+	formatSubagentElapsedSuffix,
+	memberRecordsToRows,
 	SubagentToolText,
 	renderSubagentExpanded,
 } from "../render.ts";
@@ -93,24 +95,23 @@ describe("subagent delegating state", () => {
 		expect(stripAnsi(renderDelegatingRow(theme))).toContain("Delegating");
 	});
 
-	test("running placeholders without activity stay on Delegating", () => {
+	test("running placeholders without activity show Subagents header rows", () => {
 		const theme = makeTheme() as any;
 		const placeholders = [makeResult("Scout A", -1), makeResult("Scout B", -1)];
-		expect(isSubagentDelegating(placeholders)).toBe(true);
+		expect(isSubagentDelegating(placeholders)).toBe(false);
 		const out = renderSubagentLayout(
 			{ tasks: [{ agent: "Scout", task: "a" }, { agent: "Scout", task: "b" }] },
 			placeholders,
 			theme,
 		);
-		expect(stripAnsi(out)).toContain("Delegating");
-		expect(stripAnsi(out)).toContain("\u2022");
-		expect(out).toContain("\u001b[38;2;");
+		expect(stripAnsi(out)).toContain("Subagents");
+		expect(stripAnsi(out)).toContain("Scout A");
+		expect(stripAnsi(out)).toContain("Scout B");
 	});
 
 	test("first subagent tool call leaves delegating for the agent tree", () => {
 		const theme = makeTheme() as any;
 		const active = makeResult("Scout A", -1);
-		active.latestToolCall = { name: "read", args: { path: "README.md" } };
 		expect(isSubagentDelegating([active])).toBe(false);
 		const out = renderSubagentLayout(
 			{ tasks: [{ agent: "Scout", task: "a" }] },
@@ -119,16 +120,84 @@ describe("subagent delegating state", () => {
 		);
 		expect(stripAnsi(out)).toContain("Subagents");
 		expect(stripAnsi(out)).toContain("Scout A");
-		expect(stripAnsi(out)).toContain("Read");
+	});
+
+	test("single placeholder shows agent row once worker is built", () => {
+		const theme = makeTheme() as any;
+		const placeholder = makeResult("Coder", -1);
+		expect(isSubagentDelegating([])).toBe(true);
+		expect(isSubagentDelegating([placeholder])).toBe(false);
+		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [placeholder], theme);
+		expect(stripAnsi(out)).not.toContain("Delegating");
+		expect(out).toContain("[text:Coder]");
+	});
+});
+
+describe("subagent elapsed time", () => {
+	test("formatSubagentElapsedSuffix hides under 1s and formats dim elapsed text", () => {
+		const theme = makeTheme() as any;
+		expect(formatSubagentElapsedSuffix(theme, 500)).toBe("");
+		expect(formatSubagentElapsedSuffix(theme, 2500)).toBe("[dim: 2s]");
+	});
+
+	test("single mode shows dim elapsed next to the agent label", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "do stuff" },
+			[makeRunning("Coder")],
+			theme,
+			12_500,
+		);
+		expect(stripAnsi(out)).toContain("Coder");
+		expect(out).toContain("[dim: 12s]");
+	});
+
+	test("parallel mode shows elapsed only on the Subagents header", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{ tasks: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] },
+			[makeRunning("Scout"), makeRunning("Coder")],
+			theme,
+			65_000,
+		);
+		const lines = out.split("\n");
+		expect(lines[0]).toContain("[dim: 1m 5s]");
+		expect(stripAnsi(lines[1] ?? "")).toContain("Scout");
+		expect(lines[1]).not.toContain("1m 5s");
+		expect(stripAnsi(lines[2] ?? "")).toContain("Coder");
+		expect(lines[2]).not.toContain("1m 5s");
+	});
+
+	test("single delegating row shows elapsed when provided", () => {
+		const theme = makeTheme() as any;
+		const out = renderDelegatingRow(theme, 3000);
+		expect(stripAnsi(out)).toContain("Delegating");
+		expect(out).toContain("[dim: 3s]");
+	});
+
+	test("grouped consecutive singles render one Subagents header", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{ args: { agent: "Coder", task: "a" }, results: [makeRunning("Coder")] },
+			{ args: { agent: "Coder", task: "b" }, results: [makeRunning("Coder")] },
+			{ args: { agent: "Coder", task: "c" }, results: [makeRunning("Coder")] },
+		];
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, members[0].results, theme, 5000, members);
+		const lines = out.split("\n");
+		expect(stripAnsi(lines[0])).toContain("Subagents");
+		expect(lines[0]).toContain("[dim: 5s]");
+		expect(lines.length).toBeGreaterThanOrEqual(4);
+		expect(memberRecordsToRows(members).length).toBe(3);
 	});
 });
 
 describe("renderSubagentLayout (string)", () => {
-	test("running single mode uses compact bullet plus muted group gradient", () => {
+	test("running single mode uses text color for the agent label", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [makeRunning("Coder")], theme);
 		expect(stripAnsi(out)).toContain("Coder");
-		expect(out).toContain("\u001b[38;2;");
+		expect(out).toContain("[text:Coder]");
+		expect(out).not.toContain("\u001b[38;2;");
 		expect(stripAnsi(out)).toContain("\u2022");
 		expect(out).not.toContain("\u2713");
 		expect(out).not.toContain("\u2717");
@@ -151,11 +220,12 @@ describe("renderSubagentLayout (string)", () => {
 		expect(stripAnsi(lines[1])).toContain("plugins/render.ts");
 	});
 
-	test("completed single mode uses muted bullet and trailing checkmark", () => {
+	test("completed single mode uses muted bullet and dim agent name", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [makeResult("Coder", 0)], theme);
 		const line = stripAnsi(out);
 		expect(line).toContain("Coder");
+		expect(out).toContain("[dim:Coder]");
 		expect(line).toContain("\u2022");
 		expect(line.indexOf("Coder")).toBeLessThan(line.indexOf("\u2713"));
 		expect(line.trimStart().startsWith("\u2713")).toBe(false);
@@ -300,7 +370,7 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		expect(out).not.toContain("[bg:subagentBg:");
 	});
 
-	test("completed single mode has no subagentBg Box (plain text color)", () => {
+	test("completed single mode has no subagentBg Box (dim agent name)", () => {
 		const theme = makeTheme() as any;
 		const component = buildSubagentLayoutComponent(
 			{ agent: "Coder", task: "do stuff" },
@@ -310,8 +380,8 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		const out = renderComponent(component);
 		expect(stripAnsi(out)).toContain("Coder");
 		expect(out).not.toContain("[bg:subagentBg:");
-		// Completed agent name renders in plain text color, not the live accent.
-		expect(out).toContain("[text:Coder]");
+		expect(out).toContain("[dim:Coder]");
+		expect(out).not.toContain("[text:Coder]");
 		expect(out).not.toContain("[accent:Coder]");
 	});
 
@@ -353,15 +423,15 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		const out = renderComponent(component);
 		const lines = out.split("\n");
 		// Line 0: header (transparent)
-		// Line 1: Coder A running (transparent, gradient)
-		// Line 2+: Scout A completed (transparent, plain text color)
+		// Line 1: Coder A running (transparent, text color)
+		// Line 2+: Scout A completed (transparent, dim)
 		expect(stripAnsi(lines[1])).toContain("Coder A");
 		expect(lines[1]).not.toContain("[bg:subagentBg:");
-		expect(lines[1]).toContain("\u001b[38;2;");
+		expect(lines[1]).toContain("[text:Coder A]");
 		const scoutLine = lines.find((l) => stripAnsi(l).includes("Scout A"));
 		expect(scoutLine).toBeDefined();
 		expect(scoutLine).not.toContain("[bg:subagentBg:");
-		expect(scoutLine).toContain("[text:Scout A]");
+		expect(scoutLine).toContain("[dim:Scout A]");
 		// Tree-prefix column alignment: the completed row's prefix must start at
 		// the same column as the running row's prefix. Both rows should start
 		// with the same tree glyph (`├ ` / `└ `) at column 0.
@@ -379,11 +449,11 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		);
 		const out = renderComponent(component);
 		expect(out).not.toContain("[bg:subagentBg:");
-		// Verify both agent names are present, rendered in plain text color.
+		// Verify both agent names are present; finished rows use dim.
 		expect(stripAnsi(out)).toContain("Coder A");
 		expect(stripAnsi(out)).toContain("Scout A");
-		expect(out).toContain("[text:Coder A]");
-		expect(out).toContain("[text:Scout A]");
+		expect(out).toContain("[dim:Coder A]");
+		expect(out).toContain("[dim:Scout A]");
 	});
 
 	test("failed parallel row does not get subagentBg", () => {
@@ -473,8 +543,8 @@ describe("renderSubagentExpanded", () => {
 		const out = renderComponent(component!);
 		expect(stripAnsi(out)).toContain("Coder");
 		expect(out).not.toContain("[bg:subagentBg:");
-		// Agent name renders in plain text color, not the live accent.
-		expect(out).toContain("[text:");
+		// Agent name renders dim when finished.
+		expect(out).toContain("[dim:");
 		expect(out).not.toContain("[accent:Coder]");
 	});
 
@@ -510,9 +580,9 @@ describe("renderSubagentExpanded", () => {
 		// Verify both agents' content is present
 		expect(stripAnsi(out)).toContain("result1");
 		expect(stripAnsi(out)).toContain("result2");
-		// Agent names render in plain text color.
-		expect(out).toContain("[text:Coder A]");
-		expect(out).toContain("[text:Scout A]");
+		// Agent names render dim when finished.
+		expect(out).toContain("[dim:Coder A]");
+		expect(out).toContain("[dim:Scout A]");
 	});
 
 	test("parallel mode failed sections do not get subagentBg Box", () => {

@@ -19,47 +19,29 @@
  */
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	getActiveModeId,
 	isShellMode,
 	liveAccentFg,
 } from "./mode-colors.ts";
-import { getLiveTps } from "../pi-ember-tps/index.ts";
+import {
+	format_effort_display_label,
+	is_effort_slider_point,
+	model_name_has_thinking_variant,
+	resolve_model_effort_level,
+	strip_for_family_grouping,
+} from "./model-variants.ts";
+
+export {
+	get_baked_thinking_variant,
+	model_name_has_thinking_variant,
+} from "./model-variants.ts";
 
 /** Footer inset (columns) on each side. SSOT for the bottom footer inset. */
 const FOOTER_INSET = 1;
 
 const FOOTER_STATUS_KEY = "pi-ember-ui-footer";
-
-/** Thinking-level tokens that may be baked into a model display name. */
-const THINKING_VARIANT_TOKENS = [
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-];
-
-/** Determine whether `modelName` already contains a standalone thinking variant. */
-export function model_name_has_thinking_variant(modelName: string): boolean {
-	const normalized = modelName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
-	const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
-	for (const token of THINKING_VARIANT_TOKENS) {
-		if (tokens.has(token)) return true;
-	}
-	return false;
-}
-
-/** Describe the variant baked into a model display name, or undefined. */
-export function get_baked_thinking_variant(modelName: string): string | undefined {
-	const normalized = modelName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
-	const tokens = new Set(normalized.split(/\s+/).filter(Boolean));
-	for (const token of THINKING_VARIANT_TOKENS) {
-		if (tokens.has(token)) return token;
-	}
-	return undefined;
-}
 
 /**
  * Cached footer stats. The footer render closure fires on every TUI render.
@@ -172,10 +154,12 @@ function recompute_footer_stats_impl(ctx: any): void {
 	};
 }
 
-/** Seed the thinking level from Pi at session start. */
+/** Seed footer effort from Pi thinking level and/or the active catalog model. */
 // biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
-export function init_footer_thinking_level(pi: any): void {
-	footerThinkingLevel = pi.getThinkingLevel() ?? "off";
+export function init_footer_thinking_level(pi: any, ctx?: any): void {
+	const model = ctx?.model as { id?: string; name?: string } | undefined;
+	const piLevel = pi?.getThinkingLevel?.() ?? "off";
+	footerThinkingLevel = resolve_model_effort_level(model, piLevel);
 }
 
 /** Update the thinking level shown in the footer (thinking_level_select). */
@@ -248,10 +232,14 @@ export function installEmberFooter(ctx: any): void {
 				const modelName = model?.name ?? model?.id ?? "no model";
 				const provider = model?.provider ?? "unknown";
 				const level = footerThinkingLevel;
-				const variant =
-					level !== "off" && !model_name_has_thinking_variant(modelName)
-						? ` ${level}`
-						: "";
+				let displayName = modelName;
+				let variant = "";
+				if (level !== "off" && is_effort_slider_point(level)) {
+					displayName = strip_for_family_grouping(modelName);
+					variant = ` ${format_effort_display_label(level)}`;
+				} else if (level !== "off" && !model_name_has_thinking_variant(modelName)) {
+					variant = ` ${level}`;
+				}
 				const tps = getLiveTps();
 				let tpsSegment = "";
 				if (tps > 0) {
@@ -268,7 +256,7 @@ export function installEmberFooter(ctx: any): void {
 				const rightSide =
 					liveAccentFg(modeLabel) +
 					` ${theme.fg("dim", "\u2022")} ` +
-					theme.fg("text", `${modelName}${variant}`) +
+					theme.fg("text", `${displayName}${variant}`) +
 					theme.fg("dim", ` ${provider}`) +
 					tpsSegment;
 				const availableForRight = innerWidth - visibleWidth(statsLeft) - 2;

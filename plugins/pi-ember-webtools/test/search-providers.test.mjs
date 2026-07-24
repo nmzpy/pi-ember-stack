@@ -7,7 +7,6 @@ import { test } from "node:test";
 
 const braveModuleUrl = new URL("../brave.ts", import.meta.url).href;
 const exaModuleUrl = new URL("../exa.ts", import.meta.url).href;
-const openaiModuleUrl = new URL("../openai-search.ts", import.meta.url).href;
 const tavilyModuleUrl = new URL("../tavily.ts", import.meta.url).href;
 const searchModuleUrl = new URL("../gemini-search.ts", import.meta.url).href;
 
@@ -16,7 +15,6 @@ function runChild(script, env) {
 	for (const key of [
 		"PI_CODING_AGENT_DIR",
 		"XDG_CONFIG_HOME",
-		"OPENAI_API_KEY",
 		"BRAVE_API_KEY",
 		"PARALLEL_API_KEY",
 		"TAVILY_API_KEY",
@@ -213,73 +211,4 @@ test("Exa direct API key ignores full legacy usage counter", async () => {
 	assert.equal(output.result.answer, "Paid Exa answer");
 	assert.deepEqual(output.result.results, [{ title: "Exa Docs", url: "https://exa.ai/docs", snippet: "" }]);
 	assert.equal(output.usage.count, 1000);
-});
-
-test("OpenAI search requires web_search and maps domain filters", async () => {
-	const home = await mkdtemp(join(tmpdir(), "pi-web-access-openai-"));
-	const child = runChild(`
-		let capturedUrl = "";
-		let capturedHeaders = null;
-		let capturedBody = null;
-		globalThis.fetch = async (url, init) => {
-			capturedUrl = String(url);
-			capturedHeaders = init.headers;
-			capturedBody = JSON.parse(init.body);
-			return new Response(JSON.stringify({
-				output: [
-					{
-						type: "web_search_call",
-						action: { sources: [{ title: "OpenAI Blog", url: "https://openai.com/blog?utm_source=openai" }] },
-					},
-					{
-						type: "message",
-						content: [{
-							type: "output_text",
-							text: "Answer from the web",
-							annotations: [{
-								type: "url_citation",
-								start_index: 0,
-								end_index: 6,
-								url: "https://openai.com/docs?utm_source=openai",
-								title: "OpenAI Docs",
-							}],
-						}],
-					},
-				],
-			}), { status: 200, headers: { "content-type": "application/json" } });
-		};
-
-		const { searchWithOpenAI } = await import(${JSON.stringify(openaiModuleUrl)});
-		const result = await searchWithOpenAI("latest docs", {
-			domainFilter: ["https://openai.com/docs", "-reddit.com"],
-			numResults: 3,
-		});
-		console.log(JSON.stringify({
-			url: capturedUrl,
-			authorization: capturedHeaders.Authorization,
-			body: capturedBody,
-			results: result.results,
-			answer: result.answer,
-		}));
-	`, {
-		HOME: home,
-		USERPROFILE: home,
-		OPENAI_API_KEY: "sk-test-key",
-	});
-
-	assert.equal(child.status, 0, child.stderr);
-	const output = JSON.parse(child.stdout.trim());
-	assert.equal(output.url, "https://api.openai.com/v1/responses");
-	assert.equal(output.authorization, "Bearer sk-test-key");
-	assert.equal(output.body.tool_choice, "required");
-	assert.deepEqual(output.body.include, ["web_search_call.action.sources"]);
-	assert.deepEqual(output.body.tools[0].filters, {
-		allowed_domains: ["openai.com"],
-		blocked_domains: ["reddit.com"],
-	});
-	assert.equal(output.answer, "Answer from the web");
-	assert.deepEqual(output.results.map((result) => result.url), [
-		"https://openai.com/docs",
-		"https://openai.com/blog",
-	]);
 });

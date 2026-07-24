@@ -9,6 +9,7 @@ import piEmberTodo from "../index.ts";
 
 type ToolHandler = {
 	execute: (id: string, params: any, signal: unknown, on_update: unknown, ctx: any) => Promise<any>;
+	prepareArguments?: (args: unknown) => unknown;
 };
 
 function make_api(): {
@@ -22,7 +23,7 @@ function make_api(): {
 	const events = new Map<string, ((event: any, ctx: any) => Promise<void>)[]>();
 	const pi = {
 		registerTool: (def: any) => {
-			tools.set(def.name, { execute: def.execute });
+			tools.set(def.name, { execute: def.execute, prepareArguments: def.prepareArguments });
 		},
 		registerCommand: (name: string, def: any) => {
 			commands.set(name, def);
@@ -51,7 +52,8 @@ async function run(
 	params: any,
 ): Promise<{ text: string; details: any; isError?: boolean }> {
 	const tool = tools.get("todo")!;
-	const res = await tool.execute("call-1", params, undefined, undefined, ctx);
+	const prepared = tool.prepareArguments ? tool.prepareArguments(params) : params;
+	const res = await tool.execute("call-1", prepared, undefined, undefined, ctx);
 	return {
 		text: res.content[0].text,
 		details: res.details,
@@ -133,6 +135,18 @@ describe("pi-ember-todo reducer", () => {
 		const bad = await run(tools, ctx, { action: "update", id: 1 });
 		expect(bad.isError).toBe(true);
 		expect(bad.text).toContain("at least one mutable field");
+	});
+
+	test("Cursor-style todos array updates status", async () => {
+		const { pi, tools } = make_api();
+		piEmberTodo(pi);
+		const ctx = make_ctx("s8");
+		await run(tools, ctx, { action: "create", subject: "Module 1" });
+		const ok = await run(tools, ctx, {
+			todos: [{ id: 1, content: "Module 1", status: "in_progress" }],
+		});
+		expect(ok.isError).toBeFalsy();
+		expect(ok.details.tasks[0].status).toBe("in_progress");
 	});
 
 	test("clear wipes all tasks", async () => {

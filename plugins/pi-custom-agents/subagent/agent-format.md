@@ -32,7 +32,7 @@ The body after frontmatter becomes the agent's **entire system prompt**. No pi d
 
 ## Available Tools
 
-Built-in pi tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
+Built-in pi tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `apply_patch`
 
 The `subagent` tool is never available to sub-agents (prevents accidental recursion). Sub-agents run at one level of delegation only; they cannot spawn further sub-agents.
 

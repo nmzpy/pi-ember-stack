@@ -1,447 +1,375 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import type {
-	Api,
-	AssistantMessage,
-	AssistantMessageEventStream,
-	Context,
-	Model,
-	SimpleStreamOptions,
-	Tool,
-	ToolCall,
-} from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { CURSOR_MODEL_ID_PATTERN } from "./constants.js";
+/**
+ * Pi streamSimple implementation for the Cursor cloud-direct provider.
+ * Modeled on plugins/devin-auth/src/stream.ts.
+ */
 import {
-	cursor_agent_spawn_error,
-	ensure_cursor_agent_executable,
-	spawn_cursor_agent,
-	strip_ansi,
-	terminate_cursor_process,
-} from "./cli.js";
-import { build_cursor_prompt, normalize_tool_arguments, resolve_pi_tool_name } from "./context.js";
+	type Api,
+	type AssistantMessage,
+	type AssistantMessageEventStream,
+	type Context,
+	type Model,
+	type SimpleStreamOptions,
+	calculateCost,
+	createAssistantMessageEventStream,
+	parseStreamingJson,
+} from "@earendil-works/pi-ai";
+import { CURSOR_MODEL_ID_PATTERN } from "./constants.js";
+import { map_context_to_cursor, cursor_context_has_content } from "./context-map.js";
+import { resolve_pi_tool_name, normalize_tool_arguments } from "./context.js";
+import {
+	stream_agent_events,
+	type CursorChatEvent,
+	CursorChatError,
+} from "./cloud-direct/chat.js";
 
-type CursorEvent = Record<string, unknown>;
-type ActiveBlock = { type: "text" | "thinking"; index: number } | null;
+let active_session_key = "default";
+let active_workspace_path = "";
+let active_pi_mode: string | undefined;
+let last_directive_mode: string | undefined;
+let directive_pending = true;
 
-const active_processes = new Set<ChildProcessWithoutNullStreams>();
-const MAX_STDERR_CHARS = 64 * 1024;
-let active_cwd: string | undefined;
+const MODE_DIRECTIVES: Record<string, string> = {
+	plan: "You are in plan mode. Design your approach before coding. Reply in labeled lines: Task:, Investigation:, Module N:, Acceptance Criteria:. Do not write code until the plan is approved.",
+	code: "You are in code mode. Implement the task directly. Prefer parallel read and edit calls for independent files. Explain briefly after changes.",
+	debug: "You are in debug mode. Investigate the root cause, then fix it. Use read and bash to gather evidence. Prefer parallel independent reads.",
+	orchestrate:
+		"You are in orchestrate mode. Break the task into independent subtasks, delegate where possible, and synthesize results. Prefer parallel tool calls.",
+};
 
-// Tool calls that cursor-agent executes internally and that have no Pi equivalent.
-// We skip them and let the stream continue rather than failing closed.
-const CURSOR_NATIVE_TOOL_CALLS = new Set([
-	"getMcpToolsToolCall",
-	"listMcpResourcesToolCall",
-	"readMcpResourceToolCall",
-]);
-
-const CURSOR_TOOL_CALL_KEY = /ToolCall$/;
-
-function find_tool_call_key(tool_call: Record<string, unknown>): string | undefined {
-	const candidates = Object.keys(tool_call).filter(
-		(key) => CURSOR_TOOL_CALL_KEY.test(key) && is_record(tool_call[key]),
-	);
-	return candidates[0];
+function build_mode_directive(pi_mode: string | undefined): string {
+	const mode = pi_mode ?? "code";
+	return MODE_DIRECTIVES[mode] ?? MODE_DIRECTIVES.code;
 }
 
-function make_initial_message(model: Model<Api>): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
+function should_include_mode_directive(): boolean {
+	return directive_pending || last_directive_mode !== active_pi_mode;
 }
 
-function is_record(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+function mark_mode_directive_sent(): void {
+	directive_pending = false;
+	last_directive_mode = active_pi_mode;
 }
 
-function number_or_zero(value: unknown): number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+function build_system_prompt(base_prompt: string | undefined): string {
+	const directive = should_include_mode_directive() ? build_mode_directive(active_pi_mode) : "";
+	const parts = [base_prompt?.trim(), directive.trim()].filter(Boolean);
+	return parts.join("\n\n") || "You are a helpful assistant.";
 }
 
-function safe_tool_call_id(value: unknown): string {
-	if (typeof value !== "string" || !value) return `cursor-${Date.now()}`;
-	const safe = value.replace(/[^A-Za-z0-9._:-]+/g, "-").replace(/^-+|-+$/g, "");
-	return safe.slice(0, 200) || `cursor-${Date.now()}`;
+function map_cursor_tool_name(raw_name: string, tools: Context["tools"]): string {
+	const pi_name = resolve_pi_tool_name(raw_name, tools ?? []);
+	return pi_name ?? raw_name;
 }
 
-function apply_usage(output: AssistantMessage, value: unknown): void {
-	if (!is_record(value)) return;
-	const input = number_or_zero(value.inputTokens ?? value.input_tokens ?? value.prompt_tokens);
-	const raw_output = number_or_zero(
-		value.outputTokens ?? value.output_tokens ?? value.completion_tokens,
-	);
-	const reasoning = number_or_zero(value.reasoningTokens ?? value.reasoning_tokens);
-	const cache_read = number_or_zero(value.cacheReadTokens ?? value.cache_read_tokens);
-	const cache_write = number_or_zero(value.cacheWriteTokens ?? value.cache_write_tokens);
-	const completion = raw_output + reasoning;
-
-	output.usage.input = input;
-	output.usage.output = completion;
-	output.usage.reasoning = reasoning;
-	output.usage.cacheRead = cache_read;
-	output.usage.cacheWrite = cache_write;
-	output.usage.totalTokens = input + completion + cache_read + cache_write;
+function normalize_cursor_tool_args(
+	tool_name: string,
+	args: Record<string, unknown>,
+	tools: Context["tools"],
+): Record<string, unknown> {
+	const pi_name = resolve_pi_tool_name(tool_name, tools ?? []) ?? tool_name;
+	return normalize_tool_arguments(pi_name, args);
 }
 
-function cursor_content(event: CursorEvent, type: "text" | "thinking"): string {
-	if (event.type === "thinking" && type === "thinking") {
-		return typeof event.text === "string" ? event.text : "";
-	}
-	if (event.type !== "assistant" || !is_record(event.message)) return "";
-	const content = Array.isArray(event.message.content) ? event.message.content : [];
-	return content
-		.filter(is_record)
-		.map((part) => {
-			if (part.type !== type) return "";
-			if (type === "text") return typeof part.text === "string" ? part.text : "";
-			return typeof part.thinking === "string" ? part.thinking : "";
-		})
-		.join("");
+function finalize_cursor_tool_arguments(
+	tool_name: string,
+	partial_json: string,
+	tools: Context["tools"],
+): Record<string, unknown> {
+	const parsed = parseStreamingJson(partial_json) as Record<string, unknown>;
+	return normalize_cursor_tool_args(tool_name, parsed, tools);
 }
 
-function is_partial_delta(event: CursorEvent): boolean {
-	return typeof event.timestamp_ms === "number" && typeof event.model_call_id !== "string";
-}
-
-class CursorEventConsumer {
-	private active_block: ActiveBlock = null;
-	private emitted_text = "";
-	private emitted_thinking = "";
-	private terminal_error: string | undefined;
-	private tool_call: ToolCall | undefined;
-
-	constructor(
-		private readonly output: AssistantMessage,
-		private readonly stream: AssistantMessageEventStream,
-		private readonly tools: readonly Tool[],
-	) {}
-
-	consume(event: CursorEvent): "continue" | "terminate" {
-		if (event.type === "assistant") {
-			const thinking = cursor_content(event, "thinking");
-			if (thinking) this.emit_content("thinking", thinking, is_partial_delta(event));
-			const text = cursor_content(event, "text");
-			if (text) this.emit_content("text", text, is_partial_delta(event));
-			return "continue";
-		}
-
-		if (event.type === "thinking") {
-			const thinking = cursor_content(event, "thinking");
-			if (thinking) this.emit_content("thinking", thinking, is_partial_delta(event));
-			return "continue";
-		}
-
-		if (
-			event.type === "tool_call" &&
-			(event.subtype === undefined || event.subtype === "started")
-		) {
-			this.close_active_block();
-			const parsed = this.parse_tool_call(event);
-			if (parsed === null) return "continue";
-			if (typeof parsed === "string") {
-				this.terminal_error = parsed;
-				return "terminate";
-			}
-			this.tool_call = parsed;
-			this.emit_tool_call(parsed);
-			return "terminate";
-		}
-
-		if (event.type === "result") {
-			apply_usage(this.output, event.usage);
-			if (event.is_error === true || event.subtype === "error") {
-				const error = is_record(event.error) ? event.error : undefined;
-				this.terminal_error =
-					(typeof error?.message === "string" && error.message) ||
-					(typeof event.result === "string" && event.result) ||
-					"Cursor request failed.";
-			}
-		}
-
-		if (event.type === "error") {
-			this.terminal_error =
-				(typeof event.message === "string" && event.message) || "Cursor request failed.";
-		}
-		return "continue";
-	}
-
-	finish(): { toolCall?: ToolCall; error?: string } {
-		this.close_active_block();
-		return { toolCall: this.tool_call, error: this.terminal_error };
-	}
-
-	private emit_content(type: "text" | "thinking", value: string, delta: boolean): void {
-		if (this.active_block?.type !== type) {
-			this.close_active_block();
-			const index = this.output.content.length;
-			if (type === "text") this.output.content.push({ type: "text", text: "" });
-			else this.output.content.push({ type: "thinking", thinking: "" });
-			this.active_block = { type, index };
-			this.stream.push({
-				type: type === "text" ? "text_start" : "thinking_start",
-				contentIndex: index,
-				partial: this.output,
-			});
-		}
-
-		const previous = type === "text" ? this.emitted_text : this.emitted_thinking;
-		const next_delta = delta
-			? value
-			: value.startsWith(previous)
-				? value.slice(previous.length)
-				: previous.startsWith(value)
-					? ""
-					: value;
-		if (!next_delta) return;
-		if (type === "text") this.emitted_text += next_delta;
-		else this.emitted_thinking += next_delta;
-
-		const block = this.output.content[this.active_block.index];
-		if (type === "text" && block.type === "text") block.text += next_delta;
-		if (type === "thinking" && block.type === "thinking") block.thinking += next_delta;
-		this.stream.push({
-			type: type === "text" ? "text_delta" : "thinking_delta",
-			contentIndex: this.active_block.index,
-			delta: next_delta,
-			partial: this.output,
-		});
-	}
-
-	private close_active_block(): void {
-		if (!this.active_block) return;
-		const { type, index } = this.active_block;
-		const block = this.output.content[index];
-		if (type === "text" && block.type === "text") {
-			this.stream.push({
-				type: "text_end",
-				contentIndex: index,
-				content: block.text,
-				partial: this.output,
-			});
-		}
-		if (type === "thinking" && block.type === "thinking") {
-			this.stream.push({
-				type: "thinking_end",
-				contentIndex: index,
-				content: block.thinking,
-				partial: this.output,
-			});
-		}
-		this.active_block = null;
-	}
-
-	private parse_tool_call(event: CursorEvent): ToolCall | string | null {
-		if (!is_record(event.tool_call)) return "Cursor emitted a malformed tool call.";
-		const raw_name = find_tool_call_key(event.tool_call);
-		const payload = raw_name ? event.tool_call[raw_name] : undefined;
-		if (!raw_name || !is_record(payload)) return "Cursor emitted a malformed tool call.";
-
-		// Several tool calls are Cursor-native MCP introspection calls (e.g.
-		// getMcpToolsToolCall, listMcpResourcesToolCall, readMcpResourceToolCall).
-		// They are handled entirely by cursor-agent; Pi has no equivalent tool, so
-		// skip them and let the stream continue.
-		if (CURSOR_NATIVE_TOOL_CALLS.has(raw_name)) return null;
-
-		// Cursor wraps Model Context Protocol server tool calls in an `mcpToolCall`
-		// envelope. The real tool name lives at `args.name` (or `args.tool_name`)
-		// and the real arguments live at `args.args`. Unwrap it so Pi resolves the
-		// underlying tool through its normal registry instead of failing on the
-		// `mcpToolCall` wrapper name.
-		let resolved_raw_name = raw_name;
-		let raw_input: unknown;
-		if (raw_name === "mcpToolCall") {
-			const mcp_args = is_record(payload.args) ? payload.args : {};
-			const inner_name =
-				(typeof mcp_args.name === "string" && mcp_args.name) ||
-				(typeof mcp_args.tool_name === "string" && mcp_args.tool_name);
-			if (!inner_name) return "Cursor emitted an mcpToolCall without a tool name.";
-			resolved_raw_name = inner_name;
-			raw_input = mcp_args.args;
-		} else {
-			raw_input = payload.args ?? payload.input;
-		}
-
-		const tool_name = resolve_pi_tool_name(resolved_raw_name, this.tools);
-		if (!tool_name) {
-			const active = this.tools.map((tool) => tool.name).join(", ") || "none";
-			const mapped = resolve_pi_tool_name(resolved_raw_name, []) ?? resolved_raw_name;
-			// One maintainer-only breadcrumb. Never sent to the model or UI stream.
-			process.stderr.write(
-				`[pi-cursor-auth] unavailable tool raw=${resolved_raw_name} mapped=${mapped} active=[${active}]\n`,
-			);
-			return `Cursor attempted unavailable tool ${resolved_raw_name} (active tools: ${active}).`;
-		}
-		const input = is_record(raw_input) ? raw_input : {};
-		return {
-			type: "toolCall",
-			id: safe_tool_call_id(event.call_id),
-			name: tool_name,
-			arguments: normalize_tool_arguments(tool_name, input),
-		};
-	}
-
-	private emit_tool_call(tool_call: ToolCall): void {
-		const index = this.output.content.length;
-		this.output.content.push(tool_call);
-		this.stream.push({ type: "toolcall_start", contentIndex: index, partial: this.output });
-		this.stream.push({
-			type: "toolcall_delta",
-			contentIndex: index,
-			delta: JSON.stringify(tool_call.arguments),
-			partial: this.output,
-		});
-		this.stream.push({
-			type: "toolcall_end",
-			contentIndex: index,
-			toolCall: tool_call,
-			partial: this.output,
-		});
-	}
-}
-
-function error_message(
-	output: AssistantMessage,
-	message: string,
-	aborted: boolean,
-): AssistantMessage {
-	output.stopReason = aborted ? "aborted" : "error";
-	output.errorMessage = strip_ansi(message).trim();
-	return output;
-}
-
-export function stream_cursor_subscription(
+export function stream_cursor(
 	model: Model<Api>,
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
-	const output = make_initial_message(model);
 
 	void (async () => {
-		let child: ChildProcessWithoutNullStreams | undefined;
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+
+		let text_block_open = false;
+		let thinking_block_open = false;
+		let current_tool_call_index = -1;
+		let partial_json = "";
+		let current_tool_call_id = "";
+		let current_tool_call_name = "";
+
+		const close_text_block = (): void => {
+			if (!text_block_open) return;
+			const idx = output.content.length - 1;
+			const block = output.content[idx];
+			if (block.type === "text") {
+				stream.push({
+					type: "text_end",
+					contentIndex: idx,
+					content: block.text,
+					partial: output,
+				});
+			}
+			text_block_open = false;
+		};
+
+		const close_thinking_block = (): void => {
+			if (!thinking_block_open) return;
+			const idx = output.content.length - 1;
+			const block = output.content[idx];
+			if (block.type === "thinking") {
+				stream.push({
+					type: "thinking_end",
+					contentIndex: idx,
+					content: block.thinking,
+					partial: output,
+				});
+			}
+			thinking_block_open = false;
+		};
+
+		const close_tool_call = (): void => {
+			if (current_tool_call_index < 0) return;
+			const block = output.content[current_tool_call_index];
+			if (block.type !== "toolCall") return;
+			block.arguments = finalize_cursor_tool_arguments(
+				current_tool_call_name,
+				partial_json,
+				context.tools,
+			);
+			stream.push({
+				type: "toolcall_end",
+				contentIndex: current_tool_call_index,
+				toolCall: {
+					type: "toolCall",
+					id: current_tool_call_id,
+					name: current_tool_call_name,
+					arguments: block.arguments,
+				},
+				partial: output,
+			});
+			current_tool_call_index = -1;
+			partial_json = "";
+		};
+
 		try {
-			stream.push({ type: "start", partial: output });
 			if (!CURSOR_MODEL_ID_PATTERN.test(model.id)) {
 				throw new Error(`Invalid Cursor model id: ${model.id}`);
 			}
-			const prompt = build_cursor_prompt(context);
-			const executable = await ensure_cursor_agent_executable();
-			child = spawn_cursor_agent(
-				[
-					"--print",
-					"--output-format",
-					"stream-json",
-					"--stream-partial-output",
-					"--model",
-					model.id,
-					"--force",
-					"--trust",
-				],
-				{ cwd: active_cwd || process.cwd(), executable },
-			);
-			active_processes.add(child);
 
-			let stderr = "";
-			child.stderr.on("data", (chunk: Buffer) => {
-				stderr = (stderr + chunk.toString("utf8")).slice(-MAX_STDERR_CHARS);
+			const access_token = options?.apiKey;
+			if (!access_token) {
+				throw new Error("No Cursor access token. Run /login cursor");
+			}
+
+			const mapped = map_context_to_cursor(context, build_system_prompt(context.systemPrompt));
+			if (!cursor_context_has_content(mapped)) {
+				throw new Error("Cursor provider: no user message or tool results to send");
+			}
+
+			stream.push({ type: "start", partial: output });
+			mark_mode_directive_sent();
+
+			for await (const ev of stream_agent_events({
+				access_token,
+				model_id: model.id,
+				mapped,
+				session_key: active_session_key,
+				workspace_path: active_workspace_path,
+				signal: options?.signal,
+			})) {
+				handle_event(ev);
+			}
+
+			close_text_block();
+			close_thinking_block();
+			close_tool_call();
+
+			stream.push({
+				type: "done",
+				reason: output.stopReason as "stop" | "length" | "toolUse",
+				message: output,
 			});
-			const close = new Promise<number>((resolve, reject) => {
-				child?.once("error", (error: NodeJS.ErrnoException) => {
-					reject(cursor_agent_spawn_error(error));
-				});
-				child?.once("close", (code) => resolve(code ?? 1));
-			});
-			const abort = (): void => {
-				if (child) terminate_cursor_process(child);
-			};
-			options?.signal?.addEventListener("abort", abort, { once: true });
-
-			child.stdin.end(prompt);
-			const consumer = new CursorEventConsumer(output, stream, context.tools || []);
-			let buffer = "";
-			let terminated_for_tool = false;
-			for await (const chunk of child.stdout) {
-				buffer += chunk.toString("utf8");
-				const lines = buffer.split(/\r?\n/);
-				buffer = lines.pop() || "";
-				for (const line of lines) {
-					if (!line.trim()) continue;
-					let event: CursorEvent;
-					try {
-						event = JSON.parse(line) as CursorEvent;
-					} catch {
-						continue;
-					}
-					if (consumer.consume(event) === "terminate") {
-						terminated_for_tool = true;
-						terminate_cursor_process(child);
-						break;
-					}
-				}
-				if (terminated_for_tool) break;
-			}
-
-			const exit_code = await close;
-			options?.signal?.removeEventListener("abort", abort);
-			const result = consumer.finish();
-			if (result.toolCall) {
-				output.stopReason = "toolUse";
-				stream.push({ type: "done", reason: "toolUse", message: output });
-			} else if (options?.signal?.aborted) {
-				const error = error_message(output, "Cursor request aborted.", true);
-				stream.push({ type: "error", reason: "aborted", error });
-			} else if (result.error || exit_code !== 0) {
-				const detail = result.error || stderr || `cursor-agent exited with code ${exit_code}.`;
-				const error = error_message(output, detail, false);
-				stream.push({ type: "error", reason: "error", error });
-			} else {
-				output.stopReason = "stop";
-				stream.push({ type: "done", reason: "stop", message: output });
-			}
-		} catch (cause) {
-			if (child?.exitCode === null) terminate_cursor_process(child);
-			const aborted = options?.signal?.aborted === true;
-			const detail = cause instanceof Error ? cause.message : String(cause);
-			const error = error_message(output, detail, aborted);
-			stream.push({ type: "error", reason: aborted ? "aborted" : "error", error });
-		} finally {
-			if (child) {
-				if (child.exitCode === null) terminate_cursor_process(child);
-				active_processes.delete(child);
-			}
 			stream.end();
+		} catch (error) {
+			const aborted = options?.signal?.aborted === true;
+			output.stopReason = aborted ? "aborted" : "error";
+			output.errorMessage =
+				error instanceof CursorChatError || error instanceof Error
+					? error.message
+					: String(error);
+			stream.push({
+				type: "error",
+				reason: aborted ? "aborted" : "error",
+				error: output,
+			});
+			stream.end();
+		}
+
+		function handle_event(ev: CursorChatEvent): void {
+			switch (ev.kind) {
+				case "text": {
+					close_thinking_block();
+					if (!text_block_open) {
+						output.content.push({ type: "text", text: "" });
+						stream.push({
+							type: "text_start",
+							contentIndex: output.content.length - 1,
+							partial: output,
+						});
+						text_block_open = true;
+					}
+					const idx = output.content.length - 1;
+					const block = output.content[idx];
+					if (block.type === "text") {
+						block.text += ev.text;
+						stream.push({
+							type: "text_delta",
+							contentIndex: idx,
+							delta: ev.text,
+							partial: output,
+						});
+					}
+					break;
+				}
+				case "reasoning": {
+					close_text_block();
+					if (!thinking_block_open) {
+						output.content.push({ type: "thinking", thinking: "" });
+						stream.push({
+							type: "thinking_start",
+							contentIndex: output.content.length - 1,
+							partial: output,
+						});
+						thinking_block_open = true;
+					}
+					const idx = output.content.length - 1;
+					const block = output.content[idx];
+					if (block.type === "thinking") {
+						block.thinking += ev.text;
+						stream.push({
+							type: "thinking_delta",
+							contentIndex: idx,
+							delta: ev.text,
+							partial: output,
+						});
+					}
+					break;
+				}
+				case "tool_call_start": {
+					close_text_block();
+					close_thinking_block();
+					close_tool_call();
+					current_tool_call_id = ev.id;
+					current_tool_call_name = map_cursor_tool_name(ev.name, context.tools);
+					partial_json = "";
+					output.content.push({
+						type: "toolCall",
+						id: current_tool_call_id,
+						name: current_tool_call_name,
+						arguments: {},
+					});
+					current_tool_call_index = output.content.length - 1;
+					stream.push({
+						type: "toolcall_start",
+						contentIndex: current_tool_call_index,
+						partial: output,
+					});
+					break;
+				}
+				case "tool_call_args": {
+					if (current_tool_call_index < 0) break;
+					partial_json += ev.args_delta;
+					const block = output.content[current_tool_call_index];
+					if (block.type === "toolCall") {
+						block.arguments = finalize_cursor_tool_arguments(
+							current_tool_call_name,
+							partial_json,
+							context.tools,
+						);
+					}
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: current_tool_call_index,
+						delta: ev.args_delta,
+						partial: output,
+					});
+					break;
+				}
+				case "finish": {
+					close_text_block();
+					close_thinking_block();
+					close_tool_call();
+					output.stopReason =
+						ev.reason === "tool_calls"
+							? "toolUse"
+							: ev.reason === "length"
+								? "length"
+								: "stop";
+					break;
+				}
+				case "usage": {
+					output.usage.input = ev.prompt_tokens ?? 0;
+					output.usage.output = ev.completion_tokens ?? 0;
+					output.usage.totalTokens =
+						ev.total_tokens ?? output.usage.input + output.usage.output;
+					calculateCost(model, output.usage);
+					break;
+				}
+			}
 		}
 	})();
 
 	return stream;
 }
 
-export function terminate_cursor_processes(): void {
-	for (const child of active_processes) terminate_cursor_process(child);
-	active_processes.clear();
+/** @deprecated Use stream_cursor — kept for extensions import compatibility during transition. */
+export const stream_cursor_subscription = stream_cursor;
+
+export function set_cursor_session_key(session_key: string): void {
+	active_session_key = session_key || "default";
 }
 
-export function set_cursor_cwd(cwd: string | undefined): void {
-	active_cwd = cwd;
+export function get_cursor_session_key(): string {
+	return active_session_key;
+}
+
+export function set_cursor_workspace_path(workspace_path: string | undefined): void {
+	active_workspace_path = workspace_path?.trim() ?? "";
+}
+
+export function set_cursor_pi_mode(mode: string | undefined): void {
+	if (mode !== active_pi_mode) directive_pending = true;
+	active_pi_mode = mode;
+}
+
+export function reset_cursor_session(): void {
+	active_pi_mode = undefined;
+	last_directive_mode = undefined;
+	directive_pending = true;
 }
 
 export const __test_only = {
-	CursorEventConsumer,
-	apply_usage,
-	make_initial_message,
-	safe_tool_call_id,
+	should_include_mode_directive,
+	mark_mode_directive_sent,
+	build_system_prompt,
+	finalize_cursor_tool_arguments,
+	get_active_pi_mode: () => active_pi_mode,
+	get_last_directive_mode: () => last_directive_mode,
+	get_directive_pending: () => directive_pending,
+	reset_cursor_session,
 };

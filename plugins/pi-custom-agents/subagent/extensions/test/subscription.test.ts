@@ -4,22 +4,14 @@ import { describe, expect, mock, test } from "bun:test";
  * Regression test for the stable per-tool-call gradient subscription.
  *
  * The subagent extension stores one SubagentTickRecord per toolCallId.
- * The callback identity never changes — only the invalidate target is
- * rebound. This prevents the JavaScript Set live-iteration hazard where
- * a rebind during dispatch causes recursive/infinite invalidation.
- *
- * This test simulates the subscription lifecycle without loading the
- * full extension (which requires a Pi ExtensionAPI). It verifies:
- *   - Callback identity is stable across rebinds.
- *   - The newest invalidate target is called on tick.
- *   - Unsubscribe is idempotent.
- *   - A simulated tick dispatch remains bounded even if the callback
- *     rebinds its own target mid-dispatch.
+ * The callback identity never changes — tick data (args/results/theme) is
+ * updated in place. This prevents the JavaScript Set live-iteration hazard.
  */
 
 interface SubagentTickRecord {
 	readonly callback: () => void;
-	invalidateTarget: (() => void) | undefined;
+	readonly toolCallId: string;
+	repaint: () => void;
 }
 
 const tickRecords = new Map<string, SubagentTickRecord>();
@@ -30,9 +22,10 @@ function getOrCreateTickRecord(toolCallId: string): SubagentTickRecord {
 	if (!record) {
 		const rec: SubagentTickRecord = {
 			callback: (): void => {
-				rec.invalidateTarget?.();
+				rec.repaint();
 			},
-			invalidateTarget: undefined,
+			toolCallId,
+			repaint: mock(() => {}),
 		};
 		record = rec;
 		tickRecords.set(toolCallId, record);
@@ -40,14 +33,15 @@ function getOrCreateTickRecord(toolCallId: string): SubagentTickRecord {
 	return record;
 }
 
-function rebindTickTarget(toolCallId: string, invalidate: (() => void) | undefined): void {
+function updateTickRecord(toolCallId: string, repaint: () => void): SubagentTickRecord {
 	const record = getOrCreateTickRecord(toolCallId);
-	record.invalidateTarget = invalidate;
+	record.repaint = repaint;
+	return record;
 }
 
-function subscribeTick(toolCallId: string, invalidate: (() => void) | undefined): void {
+function subscribeTick(toolCallId: string, repaint: () => void): void {
+	updateTickRecord(toolCallId, repaint);
 	const record = getOrCreateTickRecord(toolCallId);
-	record.invalidateTarget = invalidate;
 	subscribers.add(record.callback);
 }
 
@@ -74,43 +68,42 @@ function dispatchTick(): void {
 }
 
 describe("stable subagent tick subscription", () => {
-	test("callback identity is stable across rebinds", () => {
+	test("callback identity is stable across data updates", () => {
 		clearAllTickRecords();
 		const id = "test-call-1";
-		const invalidate1 = mock(() => {});
-		const invalidate2 = mock(() => {});
+		const repaint1 = mock(() => {});
+		const repaint2 = mock(() => {});
 
-		subscribeTick(id, invalidate1);
+		subscribeTick(id, repaint1);
 		const record = tickRecords.get(id)!;
 		const originalCallback = record.callback;
 
-		rebindTickTarget(id, invalidate2);
+		updateTickRecord(id, repaint2);
 		expect(record.callback).toBe(originalCallback);
 		expect(subscribers.has(originalCallback)).toBe(true);
-		expect(record.invalidateTarget).toBe(invalidate2);
 
 		dispatchTick();
-		expect(invalidate1).not.toHaveBeenCalled();
-		expect(invalidate2).toHaveBeenCalledTimes(1);
+		expect(repaint1).not.toHaveBeenCalled();
+		expect(repaint2).toHaveBeenCalledTimes(1);
 
 		clearAllTickRecords();
 	});
 
-	test("newest invalidate target is called on tick", () => {
+	test("newest repaint target is called on tick", () => {
 		clearAllTickRecords();
 		const id = "test-call-2";
-		const inv1 = mock(() => {});
-		const inv2 = mock(() => {});
-		const inv3 = mock(() => {});
+		const rep1 = mock(() => {});
+		const rep2 = mock(() => {});
+		const rep3 = mock(() => {});
 
-		subscribeTick(id, inv1);
-		rebindTickTarget(id, inv2);
-		rebindTickTarget(id, inv3);
+		subscribeTick(id, rep1);
+		updateTickRecord(id, rep2);
+		updateTickRecord(id, rep3);
 
 		dispatchTick();
-		expect(inv1).not.toHaveBeenCalled();
-		expect(inv2).not.toHaveBeenCalled();
-		expect(inv3).toHaveBeenCalledTimes(1);
+		expect(rep1).not.toHaveBeenCalled();
+		expect(rep2).not.toHaveBeenCalled();
+		expect(rep3).toHaveBeenCalledTimes(1);
 
 		clearAllTickRecords();
 	});
@@ -121,40 +114,34 @@ describe("stable subagent tick subscription", () => {
 		subscribeTick(id, mock(() => {}));
 
 		unsubscribeTick(id);
-		unsubscribeTick(id); // second call is a no-op
+		unsubscribeTick(id);
 		expect(tickRecords.has(id)).toBe(false);
 		expect(subscribers.size).toBe(0);
 
 		clearAllTickRecords();
 	});
 
-	test("simulated tick with mid-dispatch rebind remains bounded", () => {
+	test("simulated tick with mid-dispatch update remains bounded", () => {
 		clearAllTickRecords();
 		const id = "test-call-4";
 		let callCount = 0;
-		const inv1 = mock(() => {
+		const rep1 = mock(() => {
 			callCount++;
-			// Simulate a rebind during dispatch (as renderCall might do)
-			rebindTickTarget(id, inv2);
+			updateTickRecord(id, rep2);
 		});
-		const inv2 = mock(() => {
+		const rep2 = mock(() => {
 			callCount++;
 		});
 
-		subscribeTick(id, inv1);
+		subscribeTick(id, rep1);
 		dispatchTick();
 
-		// inv1 called once, inv2 not called in this dispatch (snapshot)
 		expect(callCount).toBe(1);
-		expect(inv1).toHaveBeenCalledTimes(1);
-		expect(inv2).not.toHaveBeenCalled();
+		expect(rep1).toHaveBeenCalledTimes(1);
+		expect(rep2).not.toHaveBeenCalled();
 
-		// Next tick calls inv2 (the rebound target)
 		dispatchTick();
-		expect(inv2).toHaveBeenCalledTimes(1);
-		expect(callCount).toBe(2);
-
-		// Total calls = 2, not infinite
+		expect(rep2).toHaveBeenCalledTimes(1);
 		expect(callCount).toBe(2);
 
 		clearAllTickRecords();
@@ -174,20 +161,20 @@ describe("stable subagent tick subscription", () => {
 
 	test("multiple tool call ids have independent subscriptions", () => {
 		clearAllTickRecords();
-		const invA = mock(() => {});
-		const invB = mock(() => {});
+		const repA = mock(() => {});
+		const repB = mock(() => {});
 
-		subscribeTick("call-a", invA);
-		subscribeTick("call-b", invB);
+		subscribeTick("call-a", repA);
+		subscribeTick("call-b", repB);
 
 		dispatchTick();
-		expect(invA).toHaveBeenCalledTimes(1);
-		expect(invB).toHaveBeenCalledTimes(1);
+		expect(repA).toHaveBeenCalledTimes(1);
+		expect(repB).toHaveBeenCalledTimes(1);
 
 		unsubscribeTick("call-a");
 		dispatchTick();
-		expect(invA).toHaveBeenCalledTimes(1); // not called again
-		expect(invB).toHaveBeenCalledTimes(2); // called again
+		expect(repA).toHaveBeenCalledTimes(1);
+		expect(repB).toHaveBeenCalledTimes(2);
 
 		clearAllTickRecords();
 	});

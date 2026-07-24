@@ -8,12 +8,11 @@ function safeInlineJSON(data: unknown): string {
 }
 
 function buildProviderButtons(
-	available: { openai: boolean; exa: boolean },
+	available: { exa: boolean },
 	selected: string,
 	hasInitialQueries: boolean,
 ): string {
 	const providers = [
-		{ value: "openai", label: "OpenAI", available: available.openai },
 		{ value: "exa", label: "Exa", available: available.exa },
 	];
 
@@ -80,7 +79,7 @@ export function generateCuratorPage(
 	queries: string[],
 	sessionToken: string,
 	timeout: number,
-	availableProviders: { openai: boolean; exa: boolean },
+	availableProviders: { exa: boolean },
 	defaultProvider: string,
 	searchProvider: string,
 	summaryModels: Array<{ value: string; label: string }>,
@@ -696,11 +695,6 @@ main {
   color: #8dd3ff;
   background: rgba(141, 211, 255, 0.14);
   border-color: rgba(141, 211, 255, 0.3);
-}
-.provider-tag.provider-openai {
-  color: #a6e3a1;
-  background: rgba(166, 227, 161, 0.14);
-  border-color: rgba(166, 227, 161, 0.3);
 }
 .provider-tag.provider-unknown {
   color: var(--fg-muted);
@@ -1425,7 +1419,7 @@ const SCRIPT = `(function() {
   var token = DATA.sessionToken;
   var timeoutSec = DATA.timeout;
   var queries = Array.isArray(DATA.queries) ? DATA.queries : [];
-  var providers = ["openai", "exa"];
+  var providers = ["exa"];
   var availProviders = DATA.availableProviders && typeof DATA.availableProviders === "object" ? DATA.availableProviders : {};
   var workflow = "summary-review";
   var initialDefaultProvider = typeof DATA.defaultProvider === "string" ? DATA.defaultProvider : "exa";
@@ -1625,7 +1619,6 @@ const SCRIPT = `(function() {
   }
 
   function providerLabel(provider) {
-    if (provider === "openai") return "OpenAI";
     if (provider === "exa") return "Exa";
     return "Unknown";
   }
@@ -1659,7 +1652,6 @@ const SCRIPT = `(function() {
 
   function summaryProviderLabel(provider) {
     if (!provider) return "";
-    if (provider === "openai") return "OpenAI";
     if (provider === "google") return "Google";
     if (provider === "anthropic") return "Anthropic";
     return provider.charAt(0).toUpperCase() + provider.slice(1);

@@ -30,7 +30,7 @@ describe("plan-store", () => {
 
 	test("write_plan_file returns a path and persists text", () => {
 		const meta = write_plan_file("Module 1: test");
-		expect(meta.path).toContain("/plans/plan-");
+		expect(meta.path).toContain(`${path.sep}plans${path.sep}plan-`);
 		expect(fs.existsSync(meta.path)).toBe(true);
 		expect(read_plan_file(meta.path)).toContain("Module 1: test");
 	});

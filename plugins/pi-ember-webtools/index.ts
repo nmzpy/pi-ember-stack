@@ -12,14 +12,13 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Box, type KeyId, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { getActiveModeColor, PAGE_BG } from "../pi-ember-ui/mode-colors.ts";
+import { MUTED_COLOR, PAGE_BG } from "../pi-ember-ui/mode-colors.ts";
 import { type ActivityEntry, activityMonitor } from "./activity.ts";
 import { type CuratorServerHandle, startCuratorServer } from "./curator-server.ts";
 import { isExaAvailable } from "./exa.ts";
 import { type ExtractedContent, fetchAllContent } from "./extract.ts";
 import { normalizeFetchContentParams } from "./fetch-params.ts";
 import { clearCloneCache } from "./github-extract.ts";
-import { isOpenAISearchAvailable } from "./openai-search.ts";
 import {
 	buildSearchErrorPlan,
 	type SearchErrorDetails,
@@ -97,7 +96,6 @@ interface WebSearchConfig {
 }
 
 interface ProviderAvailability {
-	openai: boolean;
 	exa: boolean;
 }
 
@@ -158,7 +156,7 @@ function normalizeProviderInput(value: unknown): SearchProvider | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "string") return "auto";
 	const normalized = value.trim().toLowerCase();
-	const valid: SearchProvider[] = ["auto", "openai", "exa"];
+	const valid: SearchProvider[] = ["auto", "exa"];
 	return valid.includes(normalized as SearchProvider) ? (normalized as SearchProvider) : "auto";
 }
 
@@ -193,68 +191,43 @@ function getCuratorTimeoutSeconds(): number {
 	);
 }
 
-async function getProviderAvailability(ctx: ExtensionContext): Promise<ProviderAvailability> {
+async function getProviderAvailability(_ctx: ExtensionContext): Promise<ProviderAvailability> {
 	return {
-		openai: await isOpenAISearchAvailable(ctx),
 		exa: isExaAvailable(),
 	};
-}
-
-function shouldPreferOpenAI(
-	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
-): boolean {
-	if (!options) return true;
-	if (options.recencyFilter) return false;
-	if (
-		typeof options.numResults === "number" &&
-		Number.isFinite(options.numResults) &&
-		Math.floor(options.numResults) !== 5
-	) {
-		return false;
-	}
-	return true;
 }
 
 async function loadCuratorBootstrap(
 	requestedProvider: unknown,
 	ctx: ExtensionContext,
-	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
 ): Promise<CuratorBootstrap> {
 	const availableProviders = await getProviderAvailability(ctx);
 	return {
 		availableProviders,
-		defaultProvider: resolveProvider(requestedProvider, availableProviders, options),
+		defaultProvider: resolveProvider(requestedProvider, availableProviders),
 		timeoutSeconds: getCuratorTimeoutSeconds(),
 	};
 }
 
 function firstAvailableProvider(
 	available: ProviderAvailability,
-	preferOpenAI: boolean,
 	fallback: ResolvedSearchProvider,
 ): ResolvedSearchProvider {
-	if (preferOpenAI && available.openai) return "openai";
 	if (available.exa) return "exa";
-	if (available.openai) return "openai";
 	return fallback;
 }
 
 function resolveProvider(
 	requested: unknown,
 	available: ProviderAvailability,
-	options?: Pick<PendingCurate, "numResults" | "recencyFilter">,
 ): ResolvedSearchProvider {
 	const provider = normalizeProviderInput(requested ?? loadConfig().provider ?? "auto") ?? "auto";
-	const preferOpenAI = shouldPreferOpenAI(options);
 
 	if (provider === "auto") {
-		return firstAvailableProvider(available, preferOpenAI, "exa");
-	}
-	if (provider === "openai" && !available.openai) {
-		return firstAvailableProvider(available, false, "openai");
+		return firstAvailableProvider(available, "exa");
 	}
 	if (provider === "exa" && !available.exa) {
-		return firstAvailableProvider(available, preferOpenAI, "exa");
+		return firstAvailableProvider(available, "exa");
 	}
 	return provider;
 }
@@ -750,7 +723,6 @@ export default function (pi: ExtensionAPI) {
 		const { model, apiKey, headers } = await resolveFirstAvailableModel(ctx, [
 			{ provider: "anthropic", id: "claude-haiku-4-5" },
 			{ provider: "google", id: "gemini-2.5-flash" },
-			{ provider: "openai", id: "gpt-4.1-mini" },
 		]);
 		const response = await complete(
 			model,
@@ -871,7 +843,7 @@ export default function (pi: ExtensionAPI) {
 		const config = loadConfig();
 		const configuredSummaryModel =
 			typeof config.summaryModel === "string" ? config.summaryModel.trim() : "";
-		const preferredDefaults = ["anthropic/claude-haiku-4-5", "openai-codex/gpt-5.3-codex-spark"];
+		const preferredDefaults = ["anthropic/claude-haiku-4-5"];
 
 		let defaultSummaryModel: string | null = null;
 		if (configuredSummaryModel.length > 0 && availableValues.has(configuredSummaryModel)) {
@@ -1072,7 +1044,7 @@ export default function (pi: ExtensionAPI) {
 					searchProvider: pc.searchProvider,
 					summaryModels: pc.summaryModels,
 					defaultSummaryModel: pc.defaultSummaryModel,
-					accentColor: getActiveModeColor(),
+					accentColor: MUTED_COLOR,
 					pageBg: PAGE_BG,
 				},
 				{
@@ -1385,7 +1357,7 @@ export default function (pi: ExtensionAPI) {
 			name: "web_search",
 			label: "Web Search",
 			renderShell: "self",
-			description: `Search the web using OpenAI or Exa. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched in the background. Searches default to returning raw results without opening a curator; set workflow to "summary-review" to open the interactive browser curator, or "auto-summary" for a model-generated summary without the browser curator. Provider auto-selects: OpenAI when suitable and available, then Exa.`,
+			description: `Search the web using Exa. Returns an AI-synthesized answer with source citations. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched in the background. Searches default to returning raw results without opening a curator; set workflow to "summary-review" to open the interactive browser curator, or "auto-summary" for a model-generated summary without the browser curator.`,
 			promptSnippet:
 				"Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage.",
 			parameters: Type.Object({
@@ -1414,7 +1386,7 @@ export default function (pi: ExtensionAPI) {
 					Type.Array(Type.String(), { description: "Limit to domains (prefix with - to exclude)" }),
 				),
 				provider: Type.Optional(
-					StringEnum(["auto", "openai", "exa"], { description: "Search provider (default: auto)" }),
+					StringEnum(["auto", "exa"], { description: "Search provider (default: auto)" }),
 				),
 				workflow: Type.Optional(
 					StringEnum(["none", "summary-review", "auto-summary"], {
@@ -1475,10 +1447,7 @@ export default function (pi: ExtensionAPI) {
 						: searchAbort.signal;
 					let cancelled = false;
 
-					const bootstrap = await loadCuratorBootstrap(params.provider, ctx, {
-						numResults: params.numResults,
-						recencyFilter: params.recencyFilter as PendingCurate["recencyFilter"],
-					});
+					const bootstrap = await loadCuratorBootstrap(params.provider, ctx);
 					const availableProviders = bootstrap.availableProviders;
 					const defaultProvider = bootstrap.defaultProvider;
 					const rawSearchProvider =
@@ -2672,7 +2641,7 @@ export default function (pi: ExtensionAPI) {
 						searchProvider: currentSearchProvider,
 						summaryModels: summaryModelChoices.summaryModels,
 						defaultSummaryModel: summaryModelChoices.defaultSummaryModel,
-						accentColor: getActiveModeColor(),
+						accentColor: MUTED_COLOR,
 						pageBg: PAGE_BG,
 					},
 					{

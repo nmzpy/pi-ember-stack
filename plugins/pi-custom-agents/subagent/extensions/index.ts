@@ -22,8 +22,13 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text } from "@earendil-works/pi-tui";
+import { Container, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+	DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS,
+	model_provider_of,
+	with_provider_patch_tool,
+} from "../../edit-tools.ts";
 
 type AbortSignalStatic = typeof AbortSignal & {
 	any?(signals: AbortSignal[]): AbortSignal;
@@ -64,7 +69,15 @@ interface CustomUi {
 	): Promise<T>;
 }
 
+import { getSharedRenderer } from "../../../pi-compact-tools/index.ts";
 import { subscribeGradientTick, unsubscribeGradientTick } from "../../../pi-ember-ui/index.ts";
+import {
+	isThinkingBlocksHidden,
+	setGroupReopenableActive,
+	setGroupThinkingChildActive,
+	setToolGroupActive,
+} from "../../../pi-ember-ui/mode-colors.ts";
+import { syncThinkingGradientClock } from "../../../pi-ember-ui/index.ts";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -79,6 +92,7 @@ import {
 	isSubagentDelegating,
 	renderSubagentExpanded,
 } from "./render.ts";
+import { getSubagentGroupRenderer } from "./subagent-group.ts";
 import {
 	DEFAULT_SUBAGENT_TIMEOUT_MS,
 	getFinalOutput,
@@ -122,8 +136,10 @@ import { resolveModel } from "./model.ts";
 interface SubagentTickRecord {
 	/** Stable callback identity — never replaced. */
 	readonly callback: () => void;
-	/** Mutable invalidate target — rebound on each renderCall. */
-	invalidateTarget: (() => void) | undefined;
+	readonly toolCallId: string;
+	args: unknown;
+	results: SubAgentResult[];
+	theme: CustomFactoryTheme | undefined;
 }
 
 const subagentTickRecords = new Map<string, SubagentTickRecord>();
@@ -133,9 +149,12 @@ function getOrCreateTickRecord(toolCallId: string): SubagentTickRecord {
 	if (!record) {
 		const rec: SubagentTickRecord = {
 			callback: (): void => {
-				rec.invalidateTarget?.();
+				/* The shared gradient clock requests one normal Pi render per tick. */
 			},
-			invalidateTarget: undefined,
+			toolCallId,
+			args: {},
+			results: [],
+			theme: undefined,
 		};
 		record = rec;
 		subagentTickRecords.set(toolCallId, record);
@@ -143,20 +162,33 @@ function getOrCreateTickRecord(toolCallId: string): SubagentTickRecord {
 	return record;
 }
 
-function rebindTickTarget(toolCallId: string, invalidate: (() => void) | undefined): void {
+function updateTickRecord(
+	toolCallId: string,
+	args: unknown,
+	results: SubAgentResult[],
+	theme: CustomFactoryTheme,
+): SubagentTickRecord {
 	const record = getOrCreateTickRecord(toolCallId);
-	record.invalidateTarget = invalidate;
+	record.args = args;
+	record.results = results;
+	record.theme = theme;
+	return record;
 }
 
-function subscribeTick(toolCallId: string, invalidate: (() => void) | undefined): void {
-	const record = getOrCreateTickRecord(toolCallId);
-	record.invalidateTarget = invalidate;
+function subscribeTick(
+	toolCallId: string,
+	args: unknown,
+	results: SubAgentResult[],
+	theme: CustomFactoryTheme,
+): void {
+	const record = updateTickRecord(toolCallId, args, results, theme);
 	subscribeGradientTick(record.callback);
 }
 
 function unsubscribeTick(toolCallId: string): void {
 	const record = subagentTickRecords.get(toolCallId);
 	if (!record) return;
+	markSubagentTerminal(toolCallId);
 	unsubscribeGradientTick(record.callback);
 	subagentTickRecords.delete(toolCallId);
 }
@@ -166,6 +198,45 @@ function clearAllTickRecords(): void {
 		unsubscribeGradientTick(record.callback);
 	}
 	subagentTickRecords.clear();
+}
+
+/** Elapsed-time tracking per subagent tool call — SSOT with Thinking's formatElapsed. */
+const subagentStartedAt = new Map<string, number>();
+const subagentFinalElapsedMs = new Map<string, number>();
+
+function markSubagentRunning(toolCallId: string): void {
+	if (!subagentStartedAt.has(toolCallId)) {
+		subagentStartedAt.set(toolCallId, performance.now());
+	}
+}
+
+function markSubagentTerminal(toolCallId: string): void {
+	if (subagentFinalElapsedMs.has(toolCallId)) return;
+	const start = subagentStartedAt.get(toolCallId);
+	if (start !== undefined) {
+		subagentFinalElapsedMs.set(toolCallId, performance.now() - start);
+	}
+}
+
+function getSubagentElapsedMs(toolCallId: string): number {
+	const final = subagentFinalElapsedMs.get(toolCallId);
+	if (final !== undefined) return final;
+	const start = subagentStartedAt.get(toolCallId);
+	if (start === undefined) return 0;
+	return performance.now() - start;
+}
+
+function getGroupElapsedMs(batch: Array<{ toolCallId: string }>): number {
+	let max = 0;
+	for (const member of batch) {
+		max = Math.max(max, getSubagentElapsedMs(member.toolCallId));
+	}
+	return max;
+}
+
+function clearSubagentTiming(): void {
+	subagentStartedAt.clear();
+	subagentFinalElapsedMs.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +368,8 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason === "reload") invalidateAgentCache();
 		threadStore.clear();
 		clearAllTickRecords();
+		clearSubagentTiming();
+		getSubagentGroupRenderer().resetForSession();
 		agentLetterCounters.clear();
 	});
 
@@ -304,7 +377,28 @@ export default function (pi: ExtensionAPI) {
 		currentCtx = undefined;
 		threadStore.clear();
 		clearAllTickRecords();
+		clearSubagentTiming();
+		getSubagentGroupRenderer().resetForSession();
 		agentLetterCounters.clear();
+	});
+
+	pi.on("tool_call", (event: { toolName?: string }) => {
+		const compact = getSharedRenderer();
+		if (event.toolName === "subagent") {
+			compact.clearGroupThinkingChild();
+			setGroupThinkingChildActive(compact.hasGroupThinkingChild());
+			setGroupReopenableActive(isThinkingBlocksHidden() && compact.hasReopenableGroup());
+			setToolGroupActive(compact.hasActiveGroups());
+			syncThinkingGradientClock();
+			return;
+		}
+		getSubagentGroupRenderer().hardExit();
+	});
+
+	pi.on("message_start", (event: { message?: { role?: string } }) => {
+		if (event.message?.role === "user") {
+			getSubagentGroupRenderer().hardExit();
+		}
 	});
 
 	// Proactively steer agents toward sub-agent delegation when users mention it
@@ -630,8 +724,11 @@ export default function (pi: ExtensionAPI) {
 
 				// Resolve tools; strip "subagent" to prevent accidental recursion.
 				// Sub-agents cannot spawn further sub-agents (one level of delegation only).
-				const defaultTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-				let tools = agent.tools ?? defaultTools;
+				const defaultTools = [...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS];
+				let tools = with_provider_patch_tool(
+					agent.tools ?? defaultTools,
+					model_provider_of(resolved.model),
+				);
 				tools = tools.filter((t) => t !== "subagent");
 
 				return runSubAgent({
@@ -1064,8 +1161,14 @@ export default function (pi: ExtensionAPI) {
 		// ------------------------------------------------------------------
 
 		renderCall(args, theme, context) {
-			// The cap is a full-width sibling above the padded subagent box.
-			// Its render(width) reads the live viewport width and visibility state.
+			const group_renderer = getSubagentGroupRenderer();
+			const results = context.state.results ?? [];
+			group_renderer.register(context.toolCallId, args, results, context.invalidate);
+
+			if (!group_renderer.isOwner(context.toolCallId)) {
+				return new Text("", 0, 0);
+			}
+
 			let shell = context.state.shell;
 			if (!(shell instanceof Container)) {
 				shell = new Container();
@@ -1073,34 +1176,56 @@ export default function (pi: ExtensionAPI) {
 			}
 			shell.clear();
 
-			// The layout Container holds per-row components: transparent Text
-			// for running rows/header and per-terminal-row subagentBg Boxes.
-			// Rebuild on every renderCall so statuses are always current.
-			const results = context.state.results ?? [];
-			const layout = buildSubagentLayoutComponent(args, results, theme);
+			const batch = group_renderer.getBatch(context.toolCallId);
+			const grouped_members =
+				group_renderer.shouldUseGroupLayout(context.toolCallId)
+					? batch.map((member) => ({ args: member.args, results: member.results }))
+					: undefined;
+			markSubagentRunning(context.toolCallId);
+			const elapsedMs = grouped_members
+				? getGroupElapsedMs(batch)
+				: getSubagentElapsedMs(context.toolCallId);
+			const layout = buildSubagentLayoutComponent(args, results, theme, elapsedMs, grouped_members);
 			context.state.layout = layout;
 			shell.addChild(layout);
 
-			// Stable subscription: rebind the invalidate target (Pi rebuilds
-			// provide a fresh closure) without churning the subscriber Set.
-			// Subscribe only while any agent is running; unsubscribe on
-			// terminal so the clock can stop.
 			const running = isSubagentDelegating(results) || anySubagentRunning(args, results);
 			if (running) {
-				subscribeTick(context.toolCallId, context.invalidate);
+				subscribeTick(context.toolCallId, args, results, theme);
 			} else {
-				rebindTickTarget(context.toolCallId, context.invalidate);
+				updateTickRecord(context.toolCallId, args, results, theme);
 			}
 			return shell;
 		},
 
 		renderResult(result, { expanded }, theme, context) {
+			const group_renderer = getSubagentGroupRenderer();
 			const details = result.details as SubagentDetails | undefined;
 			const results = details?.results ?? [];
 			context.state.results = results;
+			group_renderer.register(context.toolCallId, context.args, results, context.invalidate);
+
+			if (!group_renderer.isOwner(context.toolCallId)) {
+				const owner = group_renderer.getBatch(context.toolCallId)[0];
+				owner?.invalidate?.();
+				return new Text("", 0, 0);
+			}
+
 			const isRunning = details
 				? isSubagentDelegating(results) || anySubagentRunning(context.args, results)
 				: false;
+			markSubagentRunning(context.toolCallId);
+			if (!isRunning) {
+				markSubagentTerminal(context.toolCallId);
+			}
+			const batch = group_renderer.getBatch(context.toolCallId);
+			const grouped_members =
+				group_renderer.shouldUseGroupLayout(context.toolCallId)
+					? batch.map((member) => ({ args: member.args, results: member.results }))
+					: undefined;
+			const elapsedMs = grouped_members
+				? getGroupElapsedMs(batch)
+				: getSubagentElapsedMs(context.toolCallId);
 			// Unsubscribe the stable tick callback when the tool call is
 			// terminal (no agents running). This is idempotent — if the
 			// record was already removed (e.g. a second renderResult), the
@@ -1108,7 +1233,7 @@ export default function (pi: ExtensionAPI) {
 			if (!isRunning) {
 				unsubscribeTick(context.toolCallId);
 			} else {
-				rebindTickTarget(context.toolCallId, context.invalidate);
+				subscribeTick(context.toolCallId, context.args, results, theme);
 			}
 			if (!details) {
 				const outputBlock = result.content.find(
@@ -1125,7 +1250,13 @@ export default function (pi: ExtensionAPI) {
 			const shell = context.state.shell;
 			if (shell instanceof Container) {
 				shell.clear();
-				const layout = buildSubagentLayoutComponent(context.args, results, theme);
+				const layout = buildSubagentLayoutComponent(
+					context.args,
+					results,
+					theme,
+					elapsedMs,
+					grouped_members,
+				);
 				context.state.layout = layout;
 				shell.addChild(layout);
 			}

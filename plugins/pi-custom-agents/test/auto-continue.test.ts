@@ -70,24 +70,18 @@ describe("is_benign_compact_error", () => {
 
 describe("COMPACT_FOCUS_INSTRUCTIONS", () => {
 	test("contains all four required labels", () => {
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("goal:");
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("done:");
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("left:");
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("files:");
+		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Goal:");
+		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Done:");
+		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Left:");
+		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Files:");
 	});
 
-	test("forbids markdown headers", () => {
-		expect(COMPACT_FOCUS_INSTRUCTIONS.toLowerCase()).toContain("no markdown headers");
+	test("demands no extra sections", () => {
+		expect(COMPACT_FOCUS_INSTRUCTIONS.toLowerCase()).toContain("nothing else");
 	});
 
-	test("mentions output token limit context", () => {
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("output token limit");
-	});
-
-	test("forbids bold and italics", () => {
-		const lower = COMPACT_FOCUS_INSTRUCTIONS.toLowerCase();
-		expect(lower).toContain("bold");
-		expect(lower).toContain("italics");
+	test("mentions the output token limit context", () => {
+		expect(COMPACT_FOCUS_INSTRUCTIONS.toLowerCase()).toContain("output only");
 	});
 });
 
@@ -96,14 +90,13 @@ describe("COMPACT_FOCUS_INSTRUCTIONS", () => {
 // ---------------------------------------------------------------------------
 
 describe("build_auto_continue_content", () => {
-	test("without plan text still has resume directive and is not just 'continue'", () => {
+	test("returns a non-empty resume directive", () => {
 		const out = build_auto_continue_content({});
 		expect(out.length).toBeGreaterThan(0);
 		expect(out).not.toBe("continue");
 		expect(out).toContain("cut off by the maximum output token limit");
-		expect(out).toContain("goal:/files:/done:/left:");
-		expect(out).toContain("left");
-		expect(out).toContain("continue the interrupted task now");
+		expect(out).toContain("Continue the interrupted task from Left:");
+		expect(out).toContain("Do not redo work listed in Done:");
 	});
 
 	test("does not include Checkpoint: or raw summary dump", () => {
@@ -113,44 +106,20 @@ describe("build_auto_continue_content", () => {
 		expect(out).not.toContain("## Progress");
 	});
 
-	test("does not accept compaction_summary (removed from input)", () => {
-		// compaction_summary is no longer in AutoContinueContentInput;
-		// passing it via any-cast should be ignored (not pasted).
+	test("does not duplicate plan text (removed from input)", () => {
 		const out = build_auto_continue_content({
 			latest_plan_text: "Module 1: Create helpers.",
 		} as Record<string, unknown>);
-		expect(out).not.toContain("Checkpoint:");
-		expect(out).not.toContain("## Goal");
+		expect(out).not.toContain("Plan draft so far:");
+		expect(out).not.toContain("Module 1");
 	});
 
-	test("respects max_chars for plan excerpt", () => {
-		const long_plan = "Module 1: " + "x".repeat(10_000);
-		const out = build_auto_continue_content({
-			latest_plan_text: long_plan,
-			max_chars: 500,
-		});
-		expect(out.length).toBeLessThanOrEqual(500);
-		expect(out).toContain("cut off by the maximum output token limit");
-		expect(out).toContain("[…truncated");
+	test("respects max_chars for the resume directive", () => {
+		const out = build_auto_continue_content({ max_chars: 30 });
+		expect(out.length).toBeLessThanOrEqual(30);
 	});
 
 	test("default max_chars is 6000", () => {
 		expect(DEFAULT_AUTO_CONTINUE_MAX_CHARS).toBe(6000);
-	});
-
-	test("plan text is included when provided", () => {
-		const out = build_auto_continue_content({
-			latest_plan_text: "Module 1: Create helpers. Module 2: Wire index.ts.",
-		});
-		expect(out).toContain("Plan draft so far:");
-		expect(out).toContain("Module 1");
-	});
-
-	test("resume text mentions goal/files/done/left labels to follow", () => {
-		const out = build_auto_continue_content({});
-		expect(out).toContain("goal:");
-		expect(out).toContain("done:");
-		expect(out).toContain("left:");
-		expect(out).toContain("files:");
 	});
 });

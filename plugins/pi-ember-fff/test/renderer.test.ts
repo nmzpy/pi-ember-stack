@@ -15,6 +15,13 @@ function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+function stripMarkup(s: string): string {
+	return stripAnsi(s)
+		.replace(/\[[a-z]+:/g, "")
+		.replace(/\]/g, "")
+		.replace(/\*/g, "");
+}
+
 function makeTheme() {
 	const fg = mock((tag: string, text: string) => `[${tag}:${text}]`);
 	return {
@@ -308,6 +315,36 @@ describe("CompactRenderer", () => {
 		expect(callText.text).toContain("[muted:2 matches]");
 	});
 
+	test("grouped discovery match count uses muted foreground", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const stateA: Record<string, any> = {};
+		const stateB: Record<string, any> = {};
+		r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any);
+		r.renderCall("grep", { pattern: "foo", path: "src/" }, theme, makeContext("b", stateB) as any);
+		r.renderResult(
+			"read",
+			{ file_path: "a.ts" },
+			{ content: [{ type: "text", text: "ok" }] },
+			{ isPartial: false },
+			theme,
+			{ ...makeContext("a", stateA), isError: false } as any,
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "foo", path: "src/" },
+			{ content: [{ type: "text", text: "match" }], details: { totalMatched: 3 } },
+			{ isPartial: false },
+			theme,
+			{ ...makeContext("b", stateB), isError: false } as any,
+		);
+		r.settleAllGroups();
+		const owner = r.renderCall("read", { file_path: "a.ts" }, theme, makeContext("a", stateA) as any) as any;
+		expect((owner as any).text).toContain("[muted:3 matches]");
+		expect((owner as any).text).not.toContain("[text:3 matches]");
+		expect((owner as any).text).not.toContain("[accent:3 matches]");
+	});
+
 	test("grep match count uses muted foreground, not accent or success", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -432,6 +469,15 @@ describe("CompactRenderer", () => {
 		expect((comp as any).text).not.toContain("line1");
 	});
 
+	test("standalone bash row renders a single Bash verb", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const call = r.renderCall("bash", { command: "cd src && ls" }, theme, makeContext("a") as any) as any;
+		const text = stripAnsi(call.text);
+		expect((text.match(/Bash/g) ?? []).length).toBe(1);
+		expect(text).toContain("$ cd src && ls");
+	});
+
 	test("non-grep bash calls group regardless of cd directory", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -470,7 +516,7 @@ describe("CompactRenderer", () => {
 		// Settle by simulating visible text output; the group is now complete and past-tense.
 		r.noteVisibleText();
 		const settled = r.renderCall("edit", args, theme, makeContext("a", stateA) as any) as any;
-		expect(stripAnsi(settled.text)).toContain("Edited 1 file +2 -2");
+		expect(stripMarkup(settled.text)).toContain("Edited 1 file +2 -2");
 	});
 
 	test("Explored summaries count distinct target paths", () => {
@@ -999,7 +1045,7 @@ describe("CompactRenderer", () => {
 
 		// Owner re-renders the full group into a fresh Text
 		const ownerComp = r.renderCall("read", { file_path: "a.ts" }, theme, ctxA2 as any) as any;
-		expect(stripAnsi(ownerComp.text)).toContain("Explored 2 files 1 match");
+		expect(stripMarkup(ownerComp.text)).toContain("Explored 2 files 1 match");
 		// Completed members are absorbed into the header in the new design.
 		expect(ownerComp.text.match(/•/g)?.length).toBe(1);
 

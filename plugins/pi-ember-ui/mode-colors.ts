@@ -1,13 +1,16 @@
-export const MODE_COLORS: Record<string, string> = {
-	code: "#EB6E00",
-	plan: "#A78BFA",
-	debug: "#34D399",
-	orchestrate: "#FACC15",
-};
+export const ORANGE = "#EB6E00";
 
 export const MUTED_BULLET_COLOR = "#666666";
 export const DIM_COLOR = MUTED_BULLET_COLOR;
 export const MUTED_COLOR = "#808080";
+
+export const MODE_COLORS: Record<string, string> = {
+	code: MUTED_COLOR,
+	plan: MUTED_COLOR,
+	debug: MUTED_COLOR,
+	orchestrate: MUTED_COLOR,
+};
+
 export const PAGE_BG = "#18181e";
 export const TEXT_COLOR = "#d4d4d4";
 
@@ -76,6 +79,34 @@ export function setQuizActive(active: boolean): void {
 	(globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] = active;
 }
 
+/** Scroll-review flag stored on `globalThis` via `Symbol.for` so it survives
+ *  jiti module duplication. While active the user is reading terminal
+ *  scrollback — live renders, gradient ticks, and cursor blink pause until
+ *  follow mode resumes (`resume_scroll_follow_from_editor`). */
+const SCROLL_REVIEW_ACTIVE_KEY = Symbol.for("pi-ember-ui:scroll-review-active");
+
+export function isScrollReviewActive(): boolean {
+	return (globalThis as GlobalThis)[SCROLL_REVIEW_ACTIVE_KEY] === true;
+}
+
+export function setScrollReviewActive(active: boolean): void {
+	(globalThis as GlobalThis)[SCROLL_REVIEW_ACTIVE_KEY] = active;
+}
+
+/** Whether tool rows have appeared in the current turn. Set on `tool_call` /
+ *  Cursor tool updates; cleared on visible user `message_start` and
+ *  `session_shutdown`. Switches the Thinking host from the in-message bubble
+ *  (pre-tool wait) to the above-editor widget once tools are on screen. */
+const TURN_TOOL_TRANSCRIPT_ACTIVE_KEY = Symbol.for("pi-ember-ui:turn-tool-transcript-active");
+
+export function isTurnToolTranscriptActive(): boolean {
+	return (globalThis as GlobalThis)[TURN_TOOL_TRANSCRIPT_ACTIVE_KEY] === true;
+}
+
+export function setTurnToolTranscriptActive(active: boolean): void {
+	(globalThis as GlobalThis)[TURN_TOOL_TRANSCRIPT_ACTIVE_KEY] = active;
+}
+
 let latestSubagentRunningFlag = false;
 
 /**
@@ -105,6 +136,55 @@ export function isToolGroupActive(): boolean {
 
 export function setToolGroupActive(active: boolean): void {
 	toolGroupActive = active;
+}
+
+let groupThinkingChildActive = false;
+
+/** Whether a settled compact group is painting an in-group Thinking child row. */
+export function isGroupThinkingChildActive(): boolean {
+	return groupThinkingChildActive;
+}
+
+export function setGroupThinkingChildActive(active: boolean): void {
+	groupThinkingChildActive = active;
+}
+
+let groupReopenableActive = false;
+
+/** Settled compact group can host in-group Thinking instead of the external widget. */
+export function isGroupReopenableActive(): boolean {
+	return groupReopenableActive;
+}
+
+export function setGroupReopenableActive(active: boolean): void {
+	groupReopenableActive = active;
+}
+
+let subagentActivityCount = 0;
+let subagentActivityActive = false;
+
+/** Whether any subagent tool call is active (delegating or running). */
+export function isSubagentActivityActive(): boolean {
+	return subagentActivityActive;
+}
+
+export function markSubagentActivityStarted(): void {
+	subagentActivityCount += 1;
+	subagentActivityActive = true;
+	setLatestSubagentRunning(true);
+}
+
+export function markSubagentActivityEnded(): void {
+	subagentActivityCount = Math.max(0, subagentActivityCount - 1);
+	const active = subagentActivityCount > 0;
+	subagentActivityActive = active;
+	setLatestSubagentRunning(active);
+}
+
+export function resetSubagentActivity(): void {
+	subagentActivityCount = 0;
+	subagentActivityActive = false;
+	setLatestSubagentRunning(false);
 }
 
 let thinkingBlocksHidden = false;
@@ -275,9 +355,12 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 	};
 }
 
+/** Slash-menu / autocomplete selected-row background (neutral, no accent tint). */
+export const SELECTED_BG = blendToHex(TEXT_COLOR, PAGE_BG, 0.1);
+
 export function buildThemeBgColors(_accentHex: string): Record<string, string> {
 	return {
-		selectedBg: "#3a3a4a",
+		selectedBg: SELECTED_BG,
 		userMessageBg: MUTED_MESSAGE_BG,
 		subagentBg: MUTED_MESSAGE_BG,
 		customMessageBg: MUTED_MESSAGE_BG,

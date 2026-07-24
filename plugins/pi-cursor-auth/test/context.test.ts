@@ -1,270 +1,199 @@
 import { describe, expect, test } from "bun:test";
-import type { Context, Tool } from "@earendil-works/pi-ai";
+import { build_cursor_user_prompt, cursor_serialize_tool, resolve_pi_tool_name, __test_only } from "../src/context.ts";
 import { Type } from "typebox";
-import type { SerializedContent } from "../src/context.ts";
-import {
-	__test_only,
-	build_cursor_prompt,
-	normalize_tool_arguments,
-	resolve_pi_tool_name,
-} from "../src/context.ts";
+import type { Context, Message } from "@earendil-works/pi-ai";
 
-const TOOLS: Tool[] = [
-	{
-		name: "read",
-		description: "Read a file",
-		parameters: Type.Object({ path: Type.String() }),
-	},
-	{
-		name: "bash",
-		description: "Run a command",
-		parameters: Type.Object({ command: Type.String() }),
-	},
-	{
-		name: "edit",
-		description: "Edit a file",
-		parameters: Type.Object({
-			path: Type.String(),
-			edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
-		}),
-	},
-	{
-		name: "find",
-		description: "Find files",
-		parameters: Type.Object({ pattern: Type.String() }),
-	},
-];
+function make_context(messages: Message[]): Context {
+	return {
+		systemPrompt: "default system prompt",
+		messages,
+		tools: [],
+	};
+}
 
-describe("Cursor request mapping", () => {
-	test("uses a neutral API envelope without provider persona injection", () => {
-		expect(__test_only.REQUEST_PREAMBLE.toLowerCase()).not.toContain("you are");
-		expect(__test_only.REQUEST_PREAMBLE.toLowerCase()).not.toContain("composer");
-		expect(__test_only.REQUEST_PREAMBLE.toLowerCase()).not.toContain("cursor");
-	});
-
-	test("preserves the complete system prompt, history, and tool schema", () => {
-		const context: Context = {
-			systemPrompt: "SYSTEM EXACT\nDo the work.",
-			messages: [
-				{ role: "user", content: "Inspect src/index.ts", timestamp: 1 },
-				{
-					role: "assistant",
-					content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/index.ts" } }],
-					api: "test",
-					provider: "test",
-					model: "test",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "toolUse",
-					timestamp: 2,
-				},
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "read",
-					content: [{ type: "text", text: "file body" }],
-					isError: false,
-					timestamp: 3,
-				},
-			],
-			tools: TOOLS,
-		};
-		const prompt = build_cursor_prompt(context);
-		const json = prompt.match(/<pi_model_request>\n([\s\S]+)\n<\/pi_model_request>/)?.[1];
-		expect(json).toBeTruthy();
-		const request = JSON.parse(json || "{}") as Record<string, unknown>;
-		expect(request.systemPrompt).toBe(context.systemPrompt);
-		expect((request.messages as unknown[]).length).toBe(3);
-		expect((request.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
-			"Read",
-			"Shell",
-			"Edit",
-			"Glob",
+describe("Cursor user prompt builder", () => {
+	test("extracts the last user message text", () => {
+		const context = make_context([
+			{ role: "user", content: "first", timestamp: 1 },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }], api: "cursor-cli", provider: "cursor", model: "auto", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 2 },
+			{ role: "user", content: "second", timestamp: 3 },
 		]);
+
+		expect(build_cursor_user_prompt(context, "code", true)).toContain("second");
+		expect(build_cursor_user_prompt(context, "code", true)).toContain("You are in code mode");
 	});
 
-	test("serializes image content as a data URL in tool results", () => {
-		const context: Context = {
-			messages: [
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "read",
-					content: [{ type: "image", data: "xyz", mimeType: "image/jpeg" }],
-					isError: false,
-					timestamp: 1,
-				},
-			],
+	test("omits mode directive when requested", () => {
+		const context = make_context([
+			{ role: "user", content: "hello", timestamp: 1 },
+		]);
+
+		expect(build_cursor_user_prompt(context, "plan", false)).toBe("hello");
+	});
+
+	test("uses code directive as default", () => {
+		const context = make_context([
+			{ role: "user", content: "hello", timestamp: 1 },
+		]);
+
+		expect(build_cursor_user_prompt(context, undefined, true)).toContain("You are in code mode");
+	});
+
+	test("includes plan mode directive", () => {
+		const context = make_context([
+			{ role: "user", content: "plan this", timestamp: 1 },
+		]);
+
+		expect(build_cursor_user_prompt(context, "plan", true)).toContain(
+			"You are in plan mode",
+		);
+	});
+
+	test("skips empty tip user messages and keeps walking", () => {
+		const context = make_context([
+			{ role: "user", content: "real ask", timestamp: 1 },
+			{ role: "assistant", content: [{ type: "text", text: "ok" }], api: "cursor-cli", provider: "cursor", model: "auto", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 2 },
+			{ role: "user", content: "   ", timestamp: 3 },
+		]);
+
+		expect(build_cursor_user_prompt(context, "code", false)).toBe("real ask");
+	});
+
+	test("skips mode-enter boilerplate and finds the visible task", () => {
+		const context = make_context([
+			{
+				role: "user",
+				content: "Step blocks must overlap after burst when End Buffer > 0",
+				timestamp: 1,
+			},
+			{
+				role: "user",
+				content: "Entered Plan mode.",
+				display: false,
+				customType: "pi-agents-enter-plan",
+				timestamp: 2,
+			} as Message,
+		]);
+
+		expect(build_cursor_user_prompt(context, "plan", true)).toContain(
+			"Step blocks must overlap",
+		);
+		expect(build_cursor_user_prompt(context, "plan", true)).not.toContain("Entered Plan mode.");
+	});
+
+	test("does not forward directive-only when boilerplate is the only context row", () => {
+		const context = make_context([
+			{
+				role: "user",
+				content: "Entered Plan mode.",
+				display: false,
+				timestamp: 1,
+			} as Message,
+		]);
+
+		expect(build_cursor_user_prompt(context, "plan", false)).toBe("");
+	});
+
+	test("explicit before_agent_start prompt wins over hidden context rows", () => {
+		const context = make_context([
+			{
+				role: "user",
+				content: "Entered Plan mode.",
+				display: false,
+				timestamp: 1,
+			} as Message,
+		]);
+
+		expect(build_cursor_user_prompt(context, "code", false, "my real ask")).toBe("my real ask");
+	});
+
+	test("handles content arrays with images", () => {
+		const context = make_context([
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "describe" },
+					{ type: "image", data: "abc", mimeType: "image/png" },
+				],
+				timestamp: 1,
+			},
+		]);
+
+		expect(build_cursor_user_prompt(context, "code", true)).toContain("describe");
+		expect(build_cursor_user_prompt(context, "code", true)).toContain("[image/image/png]");
+	});
+});
+
+describe("Cursor tool serialization", () => {
+	test("serializes a tool with cursor-style names", () => {
+		const tool = {
+			name: "edit",
+			description: "Edit a file",
+			parameters: Type.Object({
+				path: Type.String(),
+				oldText: Type.String(),
+				newText: Type.String(),
+			}),
 		};
-		const prompt = build_cursor_prompt(context);
-		const json = prompt.match(/<pi_model_request>\n([\s\S]+)\n<\/pi_model_request>/)?.[1];
-		const request = JSON.parse(json || "{}") as { messages: Array<{ content: SerializedContent[] }> };
-		expect(request.messages[0].content[0]).toEqual({
-			type: "image",
-			image_url: "data:image/jpeg;base64,xyz",
+
+		const serialized = cursor_serialize_tool(tool);
+		expect(serialized.name).toBe("Edit");
+		expect(serialized.description).toBe("Edit a file");
+		expect(serialized.parameters).toMatchObject({
+			type: "object",
+			properties: {
+				file_path: { type: "string" },
+				old_string: { type: "string" },
+				new_string: { type: "string" },
+			},
 		});
 	});
 
-	test("serializes image content as a data URL in user messages", () => {
-		const context: Context = {
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "image", data: "abc", mimeType: "image/png" }],
-					timestamp: 1,
+	test("resolve_pi_tool_name maps Cursor names without a Pi tool registry", () => {
+		expect(resolve_pi_tool_name("shellToolCall", [])).toBe("bash");
+		expect(resolve_pi_tool_name("readFileToolCall", [])).toBe("read");
+		expect(resolve_pi_tool_name("grepToolCall", [])).toBe("grep");
+		expect(resolve_pi_tool_name("globFileSearchToolCall", [])).toBe("find");
+		expect(resolve_pi_tool_name("unknownThing", [])).toBeUndefined();
+	});
+
+	test("serializes extended tools with cursor arg remaps", () => {
+		const tool = {
+			name: "web_search",
+			description: "Search the web",
+			parameters: {
+				type: "object",
+				properties: {
+					query: { type: "string" },
 				},
-			],
+				required: ["query"],
+			},
 		};
-		const prompt = build_cursor_prompt(context);
-		const json = prompt.match(/<pi_model_request>\n([\s\S]+)\n<\/pi_model_request>/)?.[1];
-		const request = JSON.parse(json || "{}") as { messages: Array<{ content: SerializedContent[] }> };
-		expect(request.messages[0].content[0]).toEqual({
-			type: "image",
-			image_url: "data:image/png;base64,abc",
+
+		const serialized = cursor_serialize_tool(tool);
+		expect(serialized.name).toBe("web_search");
+		expect(serialized.parameters).toMatchObject({
+			type: "object",
+			properties: {
+				search_term: { type: "string" },
+			},
+			required: ["search_term"],
 		});
 	});
 
-	test("maps native CLI aliases only onto Pi's active tool list", () => {
-		expect(resolve_pi_tool_name("shellToolCall", TOOLS)).toBe("bash");
-		expect(resolve_pi_tool_name("readToolCall", TOOLS)).toBe("read");
-		expect(resolve_pi_tool_name("globToolCall", TOOLS)).toBe("find");
-		expect(resolve_pi_tool_name("deleteToolCall", TOOLS)).toBeUndefined();
+	test("resolve_pi_tool_name maps Cursor web and todo aliases", () => {
+		expect(resolve_pi_tool_name("webSearchToolCall", [])).toBe("web_search");
+		expect(resolve_pi_tool_name("updateTodosToolCall", [])).toBe("todo");
+		expect(resolve_pi_tool_name("askQuestionToolCall", [])).toBe("quiz");
+	});
+});
+
+describe("Mode directive builder", () => {
+	test("maps debug mode to a directive", () => {
+		expect(__test_only.build_mode_directive("debug")).toContain("debug mode");
 	});
 
-	test("repairs Cursor edit arguments to Pi's batch edit schema", () => {
-		expect(
-			normalize_tool_arguments("edit", {
-				filePath: "src/index.ts",
-				oldString: "before",
-				newString: "after",
-			}),
-		).toEqual({
-			path: "src/index.ts",
-			edits: [{ oldText: "before", newText: "after" }],
-		});
-
-		expect(
-			normalize_tool_arguments("edit", {
-				path: "src/index.ts",
-				strReplace: { oldText: "before", newText: "after" },
-			}),
-		).toEqual({
-			path: "src/index.ts",
-			edits: [{ oldText: "before", newText: "after" }],
-		});
-
-		expect(
-			normalize_tool_arguments("edit", {
-				path: "src/index.ts",
-				multiStrReplace: {
-					edits: [
-						{ oldText: "a", newText: "b" },
-						{ oldText: "c", newText: "d" },
-					],
-				},
-			}),
-		).toEqual({
-			path: "src/index.ts",
-			edits: [
-				{ oldText: "a", newText: "b" },
-				{ oldText: "c", newText: "d" },
-			],
-		});
-	});
-
-	test("maps Cursor write arguments including fileText", () => {
-		expect(
-			normalize_tool_arguments("write", {
-				path: "src/index.ts",
-				fileText: "console.log(1);",
-			}),
-		).toEqual({
-			path: "src/index.ts",
-			content: "console.log(1);",
-		});
-	});
-
-	test("maps glob tool call arguments to Pi's find schema", () => {
-		expect(
-			normalize_tool_arguments("find", {
-				pattern: "**/*.ts",
-				path: "src",
-			}),
-		).toEqual({
-			pattern: "**/*.ts",
-			path: "src",
-		});
-
-		expect(
-			normalize_tool_arguments("find", {
-				glob: "**/*.tsx",
-				directory: "plugins",
-				limit: 20,
-			}),
-		).toEqual({
-			pattern: "**/*.tsx",
-			path: "plugins",
-			limit: 20,
-		});
-	});
-
-	test("advertises Cursor-style tool names and remaps argument names in the schema", () => {
-		const context: Context = {
-			systemPrompt: "",
-			messages: [],
-			tools: [
-				{
-					name: "read",
-					description: "Read a file",
-					parameters: Type.Object({
-						path: Type.String(),
-						offset: Type.Optional(Type.Number()),
-						limit: Type.Optional(Type.Number()),
-					}),
-				},
-				{
-					name: "find",
-					description: "Find files",
-					parameters: Type.Object({
-						pattern: Type.String(),
-						path: Type.Optional(Type.String()),
-					}),
-				},
-			],
-		};
-		const prompt = build_cursor_prompt(context);
-		const json = prompt.match(/<pi_model_request>\n([\s\S]+)\n<\/pi_model_request>/)?.[1];
-		const request = JSON.parse(json || "{}") as {
-			tools: Array<{ name: string; parameters: { properties: Record<string, unknown> } }>;
-		};
-		const read_tool = request.tools.find((t) => t.name === "Read");
-		expect(read_tool).toBeDefined();
-		expect(read_tool!.parameters.properties).toHaveProperty("file_path");
-		expect(read_tool!.parameters.properties).not.toHaveProperty("path");
-
-		const glob_tool = request.tools.find((t) => t.name === "Glob");
-		expect(glob_tool).toBeDefined();
-		expect(glob_tool!.parameters.properties).toHaveProperty("glob");
-		expect(glob_tool!.parameters.properties).not.toHaveProperty("pattern");
-	});
-
-	test("maps Cursor grep arguments to Pi's grep schema", () => {
-		expect(
-			normalize_tool_arguments("grep", {
-				pattern: "TODO",
-				include: "*.ts",
-				limit: 10,
-			}),
-		).toEqual({
-			pattern: "TODO",
-			path: "*.ts",
-			limit: 10,
-		});
+	test("falls back to code directive for unknown modes", () => {
+		expect(__test_only.build_mode_directive("unknown")).toContain("You are in code mode");
 	});
 });

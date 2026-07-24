@@ -4,7 +4,7 @@ import {
 	CURSOR_DEFAULT_CONTEXT_WINDOW,
 	CURSOR_DEFAULT_MAX_TOKENS,
 } from "./constants.js";
-import type { DiscoveredCursorModel } from "./cli.js";
+import type { DiscoveredCursorModel } from "./cloud-direct/catalog.js";
 
 const ZERO_COST = {
 	input: 0,
@@ -20,10 +20,10 @@ export function build_cursor_models(
 		id: model.id,
 		name: model.name,
 		api: CURSOR_API_IDENTIFIER,
-		reasoning: false,
+		reasoning: model.reasoning,
 		input: ["text", "image"],
 		cost: ZERO_COST,
-		contextWindow: CURSOR_DEFAULT_CONTEXT_WINDOW,
-		maxTokens: CURSOR_DEFAULT_MAX_TOKENS,
+		contextWindow: model.context_window ?? CURSOR_DEFAULT_CONTEXT_WINDOW,
+		maxTokens: model.max_tokens ?? CURSOR_DEFAULT_MAX_TOKENS,
 	}));
 }

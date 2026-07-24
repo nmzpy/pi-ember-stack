@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+- Removed the OpenAI/Codex web search provider. `web_search` now uses Exa only (plus Brave, Parallel, Tavily, Perplexity, and Gemini via the existing fallback chain). Deleted `openai-search.ts`, dropped the `openai` provider enum value, removed OpenAI from curator provider buttons/tags/CSS, removed Codex/OpenAI from summary-model and query-rewrite preferred candidates, and removed the OpenAI search test. The `provider` parameter now accepts `auto`, `exa`, `brave`, `parallel`, `tavily`, `perplexity`, or `gemini`.
+
+
 ## [0.13.0] - 2026-06-25
 
 ### Added

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	consume_pending_shell_submit_enter,
 	intercept_shell_input,
 	process_shell_input,
 	sync_shell_mode_from_editor_text,
@@ -236,6 +237,31 @@ describe("shell mode input result", () => {
 		expect(result?.consume).toBeUndefined();
 		expect(isShellMode()).toBe(false);
 		expect(editor.getText()).toBe("!git status");
+		expect(consume_pending_shell_submit_enter()).toBe(true);
+		expect(consume_pending_shell_submit_enter()).toBe(false);
+	});
+
+	test("shell submit enter flag survives until consumed (TUI then editor path)", () => {
+		setShellMode(true);
+		const editor = makeEditorWithTui("ls -la");
+		process_shell_input(ENTER, editor);
+		// Editor path would no-op because shell mode already exited.
+		expect(process_shell_input(ENTER, editor)?.consume).toBeUndefined();
+		expect(consume_pending_shell_submit_enter()).toBe(true);
+	});
+
+	test("shell submit enter skips history sync and clears the chatbox", () => {
+		setShellMode(true);
+		const editor = makeEditorWithTui("git status");
+		process_shell_input(ENTER, editor);
+		expect(editor.getText()).toBe("!git status");
+		if (consume_pending_shell_submit_enter()) {
+			with_suppressed_shell_history_sync(() => editor.setText(""));
+		} else if (sync_shell_mode_from_editor_text(editor)) {
+			throw new Error("sync should not run after shell submit enter");
+		}
+		expect(editor.getText()).toBe("");
+		expect(isShellMode()).toBe(false);
 	});
 
 	test("submit setText is not stripped by sync_shell_mode when suppressed", () => {
