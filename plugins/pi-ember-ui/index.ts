@@ -45,6 +45,8 @@ import {
 	render_gradient,
 	set_gradient_render_request,
 	shutdown_gradient_clock,
+	subscribe_gradient_tick,
+	unsubscribe_gradient_tick,
 } from "./gradient.ts";
 import {
 	bind_slash_command_exit_render,
@@ -62,7 +64,6 @@ import {
 	isQuizActive,
 	isScrollReviewActive,
 	isShellMode,
-	isGroupReopenableActive,
 	isGroupThinkingChildActive,
 	isSubagentActivityActive,
 	isToolGroupActive,
@@ -273,6 +274,9 @@ const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
 
 /** Monotonic start of the visible user turn — used only for the final elapsed notify. */
 let turnStartedAt = 0;
+/** Monotonic start of the current Thinking pass — reset on each arm, shown inline. */
+let thinkingPassStartedAt = 0;
+let thinkingTimerTickCb: (() => void) | undefined;
 let latestAssistantMessageTimestamp: number | undefined;
 /** Latest assistant message has mounted an in-transcript Thinking host. */
 let assistantThinkingHostReady = false;
@@ -291,6 +295,37 @@ export function formatElapsed(ms: number): string {
 	return `${minutes}m ${seconds}s`;
 }
 
+/** Reset the live Thinking-pass timer (each header arm starts fresh). */
+export function reset_thinking_pass_timer(): void {
+	thinkingPassStartedAt = performance.now();
+}
+
+/** Dim elapsed suffix for Thinking labels — SSOT for widget + in-group rows. */
+export function format_thinking_pass_elapsed_suffix(theme: {
+	fg: (color: string, text: string) => string;
+}): string {
+	if (summarizingActive || thinkingPassStartedAt <= 0) return "";
+	const elapsedMs = performance.now() - thinkingPassStartedAt;
+	if (elapsedMs < 1000) return "";
+	return theme.fg("dim", ` ${formatElapsed(elapsedMs)}`);
+}
+
+function ensure_thinking_timer_tick(): void {
+	if (thinkingTimerTickCb) return;
+	thinkingTimerTickCb = (): void => {
+		if (thinking_status_should_show() || isGroupThinkingChildActive()) {
+			requestRender?.();
+		}
+	};
+	subscribe_gradient_tick(thinkingTimerTickCb);
+}
+
+function drop_thinking_timer_tick(): void {
+	if (!thinkingTimerTickCb) return;
+	unsubscribe_gradient_tick(thinkingTimerTickCb);
+	thinkingTimerTickCb = undefined;
+}
+
 /** Whether the in-transcript assistant bubble should host Thinking (only the
  *  pre-tool wait right below the user message). After any tool rows appear,
  *  the above-editor widget owns Thinking so it stays near the live tail. */
@@ -299,15 +334,15 @@ function thinking_uses_in_message_host(): boolean {
 }
 
 /** Whether any Thinking/Summarizing host should paint a status line. */
-function thinking_status_should_show(): boolean {
+export function thinking_status_should_show(): boolean {
 	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return false;
 	if (summarizingActive) return true;
 	if (!agentRunPending && !thinkingActive) return false;
+	// Thinking blocks visible — user sees the stream; gradient header is redundant.
+	if (!isThinkingBlocksHidden()) return false;
 	if (thinkingHeaderSuppressed || isToolGroupActive()) return false;
-	// In-group Thinking owns the status row for settled/reopenable compact groups.
-	if (isThinkingBlocksHidden() && (isGroupThinkingChildActive() || isGroupReopenableActive())) {
-		return false;
-	}
+	// In-group Thinking owns the status row only when the child row is actually painted.
+	if (isThinkingBlocksHidden() && isGroupThinkingChildActive()) return false;
 	return true;
 }
 
@@ -318,9 +353,21 @@ export function sync_thinking_gradient_clock(): void {
 	// "thinking" preset even though the external widget is suppressed.
 	if (thinking_status_should_show() || isGroupThinkingChildActive()) {
 		activate_gradient("thinking");
+		ensure_thinking_timer_tick();
 	} else {
 		deactivate_gradient("thinking");
+		drop_thinking_timer_tick();
 	}
+}
+
+/** SSOT terminal padding around the Thinking/Summarizing status row. */
+export function thinking_status_terminal_layout(
+	host: "widget" | "in_message" | "compact",
+): { padAbove: number; padBelow: number } {
+	if (host === "compact") return { padAbove: 0, padBelow: 0 };
+	if (host === "in_message") return { padAbove: 1, padBelow: 1 };
+	// Above-editor widget: Pi owns the single chatbox gap below — no extra pad.
+	return { padAbove: 0, padBelow: 0 };
 }
 
 /** Shared Thinking / Summarizing status row used by the above-editor widget
@@ -329,15 +376,15 @@ function render_thinking_status_lines(): string[] {
 	if (!thinking_status_should_show()) return [];
 	const WIDGET_INSET = 1;
 	const widgetPad = " ".repeat(WIDGET_INSET);
+	const theme = resolve_live_theme();
 	const label = summarizingActive ? "Summarizing" : "Thinking";
 	const labelGradient = renderLiveGradient(label, "thinking");
-	const row = `${widgetPad}${labelGradient}${widgetPad}`;
-	const in_compact_group =
-		isThinkingBlocksHidden() && (isGroupThinkingChildActive() || isGroupReopenableActive());
-	if (in_compact_group) return [row];
-	// One blank row above and below the in-message Thinking host.
-	if (thinking_uses_in_message_host()) return ["", row, ""];
-	return [row, ""];
+	const elapsedColored = format_thinking_pass_elapsed_suffix(theme);
+	const row = `${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`;
+	const in_compact_group = isThinkingBlocksHidden() && isGroupThinkingChildActive();
+	const host = in_compact_group ? "compact" : thinking_uses_in_message_host() ? "in_message" : "widget";
+	const { padAbove, padBelow } = thinking_status_terminal_layout(host);
+	return [...Array(padAbove).fill(""), row, ...Array(padBelow).fill("")];
 }
 
 /** Update status state and let Pi perform the normal component-tree render. */
@@ -577,12 +624,10 @@ function stopThinkingAnimation(): void {
 /** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
 export function arm_pre_token_thinking_status(): void {
 	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return;
+	reset_thinking_pass_timer();
 	agentRunPending = true;
-	// In-group linger or real in-group Thinking owns the status row.
-	if (
-		isThinkingBlocksHidden() &&
-		(isToolGroupActive() || isGroupThinkingChildActive() || isGroupReopenableActive())
-	) {
+	// Running tool children or a painted in-group Thinking row own the status slot.
+	if (isThinkingBlocksHidden() && (isToolGroupActive() || isGroupThinkingChildActive())) {
 		refresh_thinking_status();
 		return;
 	}
@@ -593,6 +638,7 @@ export function arm_pre_token_thinking_status(): void {
 
 function startThinkingAnimation(): void {
 	thinkingActive = true;
+	reset_thinking_pass_timer();
 	activate_gradient("thinking");
 	refresh_thinking_status();
 }
@@ -2120,6 +2166,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 				stopLogoOnFirstUserMessage();
 			}
 			turnStartedAt = performance.now();
+			reset_thinking_pass_timer();
 			setTurnToolTranscriptActive(false);
 			thinkingHeaderSuppressed = false;
 			// Show Thinking immediately after send — agent_start may arrive later.
@@ -2180,6 +2227,8 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setLatestSubagentRunning(false);
 		const duration = turnStartedAt > 0 ? performance.now() - turnStartedAt : 0;
 		turnStartedAt = 0;
+		thinkingPassStartedAt = 0;
+		drop_thinking_timer_tick();
 		try {
 			if (ctx.mode === "tui" && duration >= 1000) {
 				const model = ctx.model;
@@ -2293,11 +2342,12 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		summarizingActive = false;
 		assistantThinkingHostReady = false;
 		turnStartedAt = 0;
+		thinkingPassStartedAt = 0;
+		drop_thinking_timer_tick();
 		setShellMode(false);
 		reset_scroll_review_state();
 		setLatestSubagentRunning(false);
 		resetSubagentActivity();
-		setThinkingBlocksHidden(false);
 		setToolGroupActive(false);
 		setGroupThinkingChildActive(false);
 		setGroupReopenableActive(false);

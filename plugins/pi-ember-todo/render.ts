@@ -20,14 +20,6 @@ export interface TranscriptTask {
 	blockedBy?: number[];
 }
 
-const STATUS_GLYPH: Record<TaskStatus, string> = {
-	pending: "○",
-	in_progress: "◐",
-	completed: "●",
-	deleted: "⊘",
-};
-
-/** Tree prefixes align under the `T` in `• Todo`; glyph sits on the horizontal bar. */
 const TREE_TEE = "  ├─";
 const TREE_LAST = "  └─";
 
@@ -38,20 +30,19 @@ export function task_subject_token(status: TaskStatus): "dim" | "text" | "muted"
 	return "dim";
 }
 
-export function format_transcript_task_line(
+function format_transcript_task_subject(
 	task: TranscriptTask,
 	theme: Theme,
 	show_id: boolean,
 ): string {
 	const token = task_subject_token(task.status);
-	const glyph = theme.fg(token, STATUS_GLYPH[task.status]);
 	let subject = theme.fg(token, task.subject);
 	if (task.status === "completed" || task.status === "deleted") {
 		subject = theme.strikethrough(subject);
 	}
-	let line = glyph;
-	if (show_id) line += ` ${theme.fg("dim", `#${task.id}`)}`;
-	line += ` ${subject}`;
+	let line = "";
+	if (show_id) line += `${theme.fg("dim", `#${task.id}`)} `;
+	line += subject;
 	if (task.status === "in_progress" && task.activeForm) {
 		line += ` ${theme.fg("dim", `(${task.activeForm})`)}`;
 	}
@@ -61,29 +52,22 @@ export function format_transcript_task_line(
 	return line;
 }
 
+export function format_transcript_task_line(
+	task: TranscriptTask,
+	theme: Theme,
+	show_id: boolean,
+): string {
+	return format_transcript_task_subject(task, theme, show_id);
+}
+
 function format_transcript_task_tree_row(
 	task: TranscriptTask,
 	theme: Theme,
 	show_id: boolean,
 	is_last: boolean,
 ): string {
-	const token = task_subject_token(task.status);
-	const glyph = theme.fg(token, STATUS_GLYPH[task.status]);
-	let subject = theme.fg(token, task.subject);
-	if (task.status === "completed" || task.status === "deleted") {
-		subject = theme.strikethrough(subject);
-	}
 	const prefix = is_last ? TREE_LAST : TREE_TEE;
-	let line = theme.fg("dim", prefix) + glyph;
-	if (show_id) line += ` ${theme.fg("dim", `#${task.id}`)}`;
-	line += ` ${subject}`;
-	if (task.status === "in_progress" && task.activeForm) {
-		line += ` ${theme.fg("dim", `(${task.activeForm})`)}`;
-	}
-	if (task.blockedBy?.length) {
-		line += ` ${theme.fg("dim", `⛓ ${task.blockedBy.map((id) => `#${id}`).join(",")}`)}`;
-	}
-	return line;
+	return theme.fg("dim", prefix) + format_transcript_task_subject(task, theme, show_id);
 }
 
 function todo_header_bullet(tasks: TranscriptTask[], theme: Theme): string {

@@ -292,15 +292,16 @@
   `agent_start` sets it true; `agent_settled` (and `session_shutdown`, the
   safety floor) clear it. While it is true the label shows `Thinking` and the
   editor border stays muted, so the header state is never lost during
-  compaction/retry/follow-up gaps. **Post-tool Thinking (`tool_execution_end` →
-  `arm_pre_token_thinking_status()`) applies only outside compact groups**
-  (standalone tool rows / above-editor widget). In-group multi-member rows keep
-  the lingering tool verb (`Searching`, `Bashing`, …) after completion; in-group
-  `Thinking` replaces that linger only on a real thinking/reasoning stream
-  (`message_update` → `noteThinking()`). Single-member standalone rows clear
-  `isToolGroupActive` on completion so the external widget can paint. The
-  gradient label never shows a live elapsed suffix; total turn time is notified
-  once on `agent_end` via `turnStartedAt`. When Pi is compacting context (manual
+  compaction/retry/follow-up gaps. **Post-tool / inter-run Thinking lives in-group**
+  for multi-member compact groups: `armInGroupThinking()` on `tool_execution_end`,
+  `agent_end`, and `agent_start` paints `└ Thinking` under the settled header and
+  suppresses the external `ember-thinking` widget. Standalone single-member rows
+  still use the above-editor widget via `arm_pre_token_thinking_status()`.
+  Same-key batches reopen the latest settled group (`findReopenableGroup`) instead
+  of spawning another `Explored`/`Edited`/… header. Each Thinking pass resets
+  `thinkingPassStartedAt` and shows a dim live elapsed suffix after 1s (widget +
+  in-group `└ Thinking`); total turn time still notifies once on `agent_end`.
+  When Pi is compacting context (manual
   `/compact`, threshold, or overflow recovery), `summarizingActive` is set by a
   prototype patch on `InteractiveMode.showStatusIndicator`/
   `clearStatusIndicator`. The status then shows `Summarizing` with the live
@@ -516,11 +517,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `settleGroup`/`settleGroups`/`settleAllGroups`/`noteThinking` are the
     soft setters; `noteVisibleText`/`noteUserMessage` are the hard
     boundaries. Settled same-key groups reopen when a new call arrives
-    while `currentGroup` is still held. When thinking blocks are hidden, only a
-    real thinking/reasoning stream (`message_update` → `noteThinking()`) enters
-    the thinking lane: gradient `Thinking` replaces the lingering
-    `Searching`/`Reading` child in the single `└` pipe row. Post-tool gaps keep
-    the linger verb until reasoning starts. Anything that is not hidden thinking exits the group — visible `text_delta`, user message,
+    while `currentGroup` is still held. When thinking blocks are hidden, inter-run
+    gaps (`armInGroupThinking` on `tool_execution_end` / `agent_end` /
+    `agent_start`) and real thinking/reasoning streams (`message_update` →
+    `noteThinking()`) enter the thinking lane: gradient `Thinking` replaces the
+    lingering `Searching`/`Reading` child in the single `└` pipe row. Same-key
+    batches reopen via `findReopenableGroup` when `currentGroup` was lost so
+    another `Explored` header is not spawned. Anything that is not hidden thinking exits the group — visible `text_delta`, user message,
     different group key, non-groupable tool → `hardExitGroup()` (header-only,
     drop reopen, `hardExited` set); same-key `tool_call` → reopen tool lane
     (recovers frozen group via `findReopenableGroup` if `currentGroup` was
@@ -1037,10 +1040,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `pi-compact-tools` with `statusBulletColor` (SSOT): `muted` while any
   visible task is incomplete, `success` when every visible task is
   `completed`; label stays `muted` bold `Todo`. Pending entries use `dim`,
-  in-progress uses `text`, completed uses `muted`. No accent, `toolTitle`,
-  or `warning` tokens on task rows. Transcript layout lives in `render.ts`
-  (`task_subject_token`, `format_transcript_task_line`,
-  `TodoTranscriptComponent`).
+  in-progress uses `text`, completed uses `muted` + strikethrough (no status
+  glyphs on child rows). No accent, `toolTitle`, or `warning` tokens on task
+  rows. Transcript layout lives in `render.ts` (`task_subject_token`,
+  `format_transcript_task_line`, `TodoTranscriptComponent`).
 - Each tool-result row paints the `details.tasks` snapshot from that call;
   historical rows stay point-in-time on rebuild.
 - Dotted tool-name rewrite: a `message_end` handler in `pi-ember-todo/index.ts`

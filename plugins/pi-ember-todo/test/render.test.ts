@@ -90,19 +90,22 @@ describe("todo transcript render", () => {
 		expect(comp.render(120)).toHaveLength(4);
 	});
 
-	test("tree rows align under Todo label with glyph on the branch", () => {
+	test("tree rows use status text color without status glyphs", () => {
 		const text = format_todo_block(
 			[
-				{ id: 1, subject: "First", status: "pending" },
-				{ id: 2, subject: "Second", status: "pending" },
+				{ id: 1, subject: "Idle task", status: "pending" },
+				{ id: 2, subject: "Active task", status: "in_progress" },
+				{ id: 3, subject: "Done task", status: "completed" },
 			],
 			mock_theme,
 		);
 		const lines = text.split("\n");
-		expect(lines[1]).toContain("  ├─");
-		expect(lines[2]).toContain("  └─");
-		expect(lines[1]).not.toContain("├─ ○");
-		expect(lines[2]).not.toContain("└─ ○");
+		expect(lines[1]).toContain("[dim]  ├─[/dim][dim]Idle task[/dim]");
+		expect(lines[2]).toContain("[dim]  ├─[/dim][text]Active task[/text]");
+		expect(lines[3]).toContain("[dim]  └─[/dim]~~[muted]Done task[/muted]~~");
+		expect(lines.join("\n")).not.toContain("●");
+		expect(lines.join("\n")).not.toContain("○");
+		expect(lines.join("\n")).not.toContain("◐");
 	});
 
 	test("consecutive todo calls fold into one header block", () => {

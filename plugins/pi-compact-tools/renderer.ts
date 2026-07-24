@@ -6,6 +6,8 @@ import { BULLET, CompactGroupText } from "./compact-text.ts";
 import {
 	MUTED_GROUP_GRADIENT_PRESET,
 	requestTuiRender,
+	reset_thinking_pass_timer,
+	format_thinking_pass_elapsed_suffix,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
@@ -632,8 +634,11 @@ function renderRunningGradient(text: string): string {
 }
 
 /** Gradient Thinking child row under a settled group header — SSOT with the status label. */
-function formatGroupThinkingChildRow(): string {
-	return render_gradient("Thinking", "thinking", get_gradient_phase());
+function formatGroupThinkingChildRow(theme: ThemeLike): string {
+	return (
+		render_gradient("Thinking", "thinking", get_gradient_phase()) +
+		format_thinking_pass_elapsed_suffix(theme)
+	);
 }
 
 /** Present-tense child verb for absorb+linger rows (SSOT for compact + cursor). */
@@ -970,8 +975,8 @@ function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
 	}
 	const headerText = groupHeaderLabel(group, theme);
 	const lines = [groupBulletColor(group, theme) + headerText];
-	if (group.thinkingChild) {
-		lines.push(theme.fg("dim", TREE_BRANCH_LAST) + formatGroupThinkingChildRow());
+	if (group.thinkingChild && isThinkingBlocksHidden()) {
+		lines.push(theme.fg("dim", TREE_BRANCH_LAST) + formatGroupThinkingChildRow(theme));
 		return lines.join("\n");
 	}
 	const children = groupVisibleChildren(group);
@@ -1066,7 +1071,8 @@ export class CompactRenderer {
 	 * - Tool lane: running/lingering children (Searching, Reading, …).
 	 * - Thinking lane: one gradient Thinking row replaces the linger child.
 	 *
-	 * Enter thinking lane: thinking stream → `noteThinking()` (real reasoning only).
+	 * Enter thinking lane: inter-run gaps (`armInGroupThinking`) and real
+	 * thinking streams (`noteThinking()`).
 	 * Leave thinking lane:
 	 *   - same-key `tool_call` → `appendToGroup` (reopen tool lane);
 	 *   - visible assistant text, user message, different group key, or
@@ -1098,6 +1104,37 @@ export class CompactRenderer {
 	private resolveLiveGroup(): DiscoveryGroup | undefined {
 		if (this.currentGroup && !this.currentGroup.hardExited) return this.currentGroup;
 		return undefined;
+	}
+
+	/** Recover the latest settled same-key group when `currentGroup` was lost. */
+	private findReopenableGroup(key: string): DiscoveryGroup | undefined {
+		let candidate: DiscoveryGroup | undefined;
+		let candidate_index = -1;
+		let index = 0;
+		for (const record of this.calls.values()) {
+			const group = record.group;
+			if (group && !group.hardExited && group.key === key) {
+				if (index >= candidate_index) {
+					candidate_index = index;
+					candidate = group;
+				}
+			}
+			index++;
+		}
+		return candidate;
+	}
+
+	/** Paint in-group Thinking during inter-run gaps (not standalone single rows). */
+	armInGroupThinking(): void {
+		let group = this.resolveLiveGroup();
+		if (!group && this.reopenGroupKey) {
+			group = this.findReopenableGroup(this.reopenGroupKey);
+			if (group) this.currentGroup = group;
+		}
+		if (!group || group.records.length < 2) return;
+		if (group.records.some((r) => !r._completed)) return;
+		reset_thinking_pass_timer();
+		this.noteThinking();
 	}
 
 	/** Soft settle for hidden thinking: flip the header to past tense and
@@ -1197,7 +1234,7 @@ export class CompactRenderer {
 
 	/** Whether the live group is painting an in-group Thinking child row. */
 	hasGroupThinkingChild(): boolean {
-		return this.currentGroup?.thinkingChild === true;
+		return this.currentGroup?.thinkingChild === true && isThinkingBlocksHidden();
 	}
 
 	/** Re-paint the group's shared callText when group state changes without a
@@ -1358,12 +1395,22 @@ export class CompactRenderer {
 		} else if (this.currentGroup?.key === key && !this.currentGroup.hardExited) {
 			this.appendToGroup(this.currentGroup, record);
 		} else {
-			if (this.currentGroup && !this.currentGroup.hardExited) {
-				this.currentGroup.hardExited = true;
+			const block_reopen =
+				this.currentGroup != null &&
+				!this.currentGroup.hardExited &&
+				this.currentGroup.key !== key;
+			const reopenable = block_reopen ? undefined : this.findReopenableGroup(key);
+			if (reopenable) {
+				this.currentGroup = reopenable;
+				this.appendToGroup(reopenable, record);
+			} else {
+				if (block_reopen && this.currentGroup) {
+					this.currentGroup.hardExited = true;
+					this.freezeGroup(this.currentGroup);
+					this.unsubscribeGroupTick();
+				}
+				this.startGroup(key, record);
 			}
-			this.freezeGroup(this.currentGroup);
-			this.unsubscribeGroupTick();
-			this.startGroup(key, record);
 		}
 		record.invalidate = invalidate;
 		return record;

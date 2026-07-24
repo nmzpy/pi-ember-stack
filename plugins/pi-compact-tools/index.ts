@@ -23,6 +23,7 @@ import {
 	isThinkingBlocksHidden,
 	setGroupReopenableActive,
 	setGroupThinkingChildActive,
+	set_thinking_blocks_visibility_listener,
 	setToolGroupActive,
 	setTurnToolTranscriptActive,
 } from "../pi-ember-ui/mode-colors.ts";
@@ -106,6 +107,7 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		unsubscribe_theme_refresh?.();
 		unsubscribe_theme_refresh = undefined;
+		set_thinking_blocks_visibility_listener(undefined);
 	});
 	pi.on("turn_start", () => renderer.beginTurn());
 	pi.on("turn_end", () => {
@@ -114,9 +116,11 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	});
 	pi.on("agent_end", () => {
 		renderer.settleAllGroups();
+		if (isThinkingBlocksHidden()) renderer.armInGroupThinking();
 		update_tool_group_active(renderer);
 	});
 	pi.on("agent_start", () => {
+		if (isThinkingBlocksHidden()) renderer.armInGroupThinking();
 		update_tool_group_active(renderer);
 	});
 	pi.on("agent_settled", () => {
@@ -124,7 +128,9 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		update_tool_group_active(renderer);
 	});
 	pi.on("message_start", (event: any) => {
-		if (event?.message?.role === "user") renderer.noteUserMessage();
+		if (event?.message?.role !== "user") return;
+		const display = (event.message as { display?: boolean }).display;
+		if (display !== false) renderer.noteUserMessage();
 	});
 	pi.on("message_update", (event: any) => {
 		// Group contract (thinking blocks hidden):
@@ -154,6 +160,7 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 	// (all members done) — update the shared flag so group state and the
 	// group header gradient stay synchronized.
 	pi.on("tool_execution_end", () => {
+		if (isThinkingBlocksHidden()) renderer.armInGroupThinking();
 		update_tool_group_active(renderer);
 	});
 	// Reset the shared renderer on session replacement so stale call rows
@@ -165,6 +172,11 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		setToolGroupActive(false);
 		setGroupThinkingChildActive(false);
 		setGroupReopenableActive(false);
+		set_thinking_blocks_visibility_listener((hidden) => {
+			if (hidden) return;
+			renderer.clearGroupThinkingChild();
+			update_tool_group_active(renderer);
+		});
 		syncThinkingGradientClock();
 	});
 	for (const [name, factory] of Object.entries(TOOL_FACTORIES)) {

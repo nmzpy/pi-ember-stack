@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { CompactRenderer, formatCallBody, strip_bash_command_preview } from "../renderer.ts";
+import { setThinkingBlocksHidden } from "../../pi-ember-ui/mode-colors.ts";
 
 function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -332,6 +333,7 @@ describe("CompactRenderer group child linger", () => {
 
 describe("CompactRenderer thinking collapse", () => {
 	test("noteThinking eagerly paints Thinking child without renderCall", () => {
+		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -371,6 +373,7 @@ describe("CompactRenderer thinking collapse", () => {
 	});
 
 	test("noteVisibleText collapses thinking lane to header-only", () => {
+		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -466,6 +469,7 @@ describe("CompactRenderer thinking collapse", () => {
 	});
 
 	test("noteThinking soft-settles then same-key call reopens under one header", () => {
+		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -661,6 +665,7 @@ describe("CompactRenderer thinking collapse", () => {
 	});
 
 	test("agent_end lifecycle shows Thinking child then reopens same group", async () => {
+		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -745,6 +750,66 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(row).toContain("Explored");
 	});
 
+	test("three discovery batches across agent_end cycles reopen one Explored header", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("batch-owner", owner_state) as any;
+		let baby_id = 0;
+
+		const run_first_batch = (paths: string[]) => {
+			r.renderCall("grep", { pattern: "x", path: paths[0] }, theme, owner_ctx);
+			const child_ctx = makeContext(`batch-baby-${baby_id++}`, {}) as any;
+			r.renderCall("grep", { pattern: "x", path: paths[1] }, theme, child_ctx);
+			r.renderResult(
+				"grep",
+				{ pattern: "x", path: paths[0] },
+				{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...owner_ctx, isError: false },
+			);
+			r.renderResult(
+				"grep",
+				{ pattern: "x", path: paths[1] },
+				{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...child_ctx, isError: false },
+			);
+			r.settleAllGroups();
+			r.armInGroupThinking();
+		};
+
+		const run_next_batch = (paths: string[]) => {
+			for (const file_path of paths) {
+				const child_ctx = makeContext(`batch-baby-${baby_id++}`, {}) as any;
+				r.renderCall("grep", { pattern: "x", path: file_path }, theme, child_ctx);
+				r.renderResult(
+					"grep",
+					{ pattern: "x", path: file_path },
+					{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+					{ expanded: false, isPartial: false },
+					theme,
+					{ ...child_ctx, isError: false },
+				);
+			}
+			r.renderCall("grep", { pattern: "x", path: paths[0] }, theme, owner_ctx);
+			r.settleAllGroups();
+			r.armInGroupThinking();
+		};
+
+		run_first_batch(["a.ts", "b.ts"]);
+		run_next_batch(["c.ts", "d.ts"]);
+		run_next_batch(["e.ts", "f.ts"]);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Explored");
+		expect(row).toMatch(/Explored [56] files/);
+		expect(row).not.toMatch(/Explored[\s\S]*Explored/);
+	});
+
 	test("standalone bash does not keep group active after completion", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -765,12 +830,13 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(r.hasActiveGroups()).toBe(false);
 	});
 
-	test("in-group keeps linger until real thinking stream", () => {
+	test("in-group Thinking child is hidden when thinking blocks are visible", () => {
+		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
-		const owner_ctx = makeContext("post1", owner_state) as any;
-		const child_ctx = makeContext("post2", {}) as any;
+		const owner_ctx = makeContext("visible-blocks", owner_state) as any;
+		const child_ctx = makeContext("visible-blocks2", {}) as any;
 
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
@@ -792,15 +858,57 @@ describe("CompactRenderer thinking collapse", () => {
 			{ ...child_ctx, isError: false },
 		);
 
+		r.armInGroupThinking();
+		expect(r.hasGroupThinkingChild()).toBe(true);
 		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Search");
+		expect(row).toContain("Thinking");
+
+		setThinkingBlocksHidden(false);
+		expect(r.hasGroupThinkingChild()).toBe(false);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).not.toContain("Thinking");
 
-		r.noteThinking();
-		row = stripAnsi((owner_state.callText as any).text);
+		setThinkingBlocksHidden(true);
+	});
+
+	test("same-key call reopens settled group instead of spawning a second header", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("reopen1", owner_state) as any;
+		const child_ctx = makeContext("reopen2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		(r as any).currentGroup = undefined;
+
+		const baby_state: Record<string, any> = {};
+		const baby_ctx = makeContext("reopen3", baby_state) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, baby_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("c.ts");
 		expect(row).toContain("Explored");
-		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
+		expect(baby_state.callText).toBeUndefined();
 	});
 });
 

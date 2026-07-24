@@ -189,12 +189,24 @@ export function resetSubagentActivity(): void {
 
 let thinkingBlocksHidden = false;
 
+type ThinkingBlocksVisibilityListener = (hidden: boolean) => void;
+let thinkingBlocksVisibilityListener: ThinkingBlocksVisibilityListener | undefined;
+
+/** Register a listener fired when thinking-block visibility toggles (Ctrl+T). */
+export function set_thinking_blocks_visibility_listener(
+	listener: ThinkingBlocksVisibilityListener | undefined,
+): void {
+	thinkingBlocksVisibilityListener = listener;
+}
+
 export function isThinkingBlocksHidden(): boolean {
 	return thinkingBlocksHidden;
 }
 
 export function setThinkingBlocksHidden(hidden: boolean): void {
+	const prev = thinkingBlocksHidden;
 	thinkingBlocksHidden = hidden;
+	if (prev !== hidden) thinkingBlocksVisibilityListener?.(hidden);
 }
 
 let planAutoContinuing = false;
