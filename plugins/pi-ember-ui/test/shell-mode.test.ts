@@ -12,9 +12,12 @@ function makeEditorWithTui(initialText: string): {
 	getText: () => string;
 	setText: (t: string) => void;
 	isEditorEmpty: () => boolean;
+	submitted: string[];
+	submitValue: () => void;
 	tui: { requestRenderCalls: boolean[]; requestRender: (force?: boolean) => void };
 } {
 	const holder = { text: initialText };
+	const submitted: string[] = [];
 	const tui = { requestRenderCalls: [] as boolean[], requestRender(force = false) {
 		tui.requestRenderCalls.push(force);
 	} };
@@ -24,6 +27,11 @@ function makeEditorWithTui(initialText: string): {
 			holder.text = t;
 		},
 		isEditorEmpty: () => holder.text.length === 0,
+		submitted,
+		submitValue: () => {
+			submitted.push(holder.text.trim());
+			holder.text = "";
+		},
 		tui,
 	};
 }
@@ -124,13 +132,14 @@ describe("shell mode", () => {
 		expect(isShellMode()).toBe(true);
 	});
 
-	test("enter with command prepends '!' and exits shell mode (falls through to submit)", () => {
+	test("enter with command submits, clears editor, and consumes Enter", () => {
 		setShellMode(true);
-		const editor = makeEditor("git status");
+		const editor = makeEditorWithTui("git status");
 		const consumed = intercept_shell_input(ENTER, editor);
-		expect(consumed).toBe(false);
+		expect(consumed).toBe(true);
 		expect(isShellMode()).toBe(false);
-		expect(editor.getText()).toBe("!git status");
+		expect(editor.getText()).toBe("");
+		expect(editor.submitted).toEqual(["!git status"]);
 	});
 
 	test("enter with empty command exits shell mode and clears editor", () => {
@@ -230,37 +239,41 @@ describe("shell mode input result", () => {
 		expect(editor.getText()).toBe("");
 	});
 
-	test("non-empty enter in shell mode falls through with '!' prefix", () => {
+	test("non-empty enter in shell mode submits, clears, and consumes Enter", () => {
 		setShellMode(true);
 		const editor = makeEditorWithTui("git status");
+		const result = process_shell_input(ENTER, editor);
+		expect(result?.consume).toBe(true);
+		expect(isShellMode()).toBe(false);
+		expect(editor.getText()).toBe("");
+		expect(editor.submitted).toEqual(["!git status"]);
+		expect(consume_pending_shell_submit_enter()).toBe(false);
+	});
+
+	test("non-empty enter without submitValue falls through with pending flag", () => {
+		setShellMode(true);
+		const editor = makeEditor("git status");
 		const result = process_shell_input(ENTER, editor);
 		expect(result?.consume).toBeUndefined();
 		expect(isShellMode()).toBe(false);
 		expect(editor.getText()).toBe("!git status");
 		expect(consume_pending_shell_submit_enter()).toBe(true);
-		expect(consume_pending_shell_submit_enter()).toBe(false);
 	});
 
-	test("shell submit enter flag survives until consumed (TUI then editor path)", () => {
+	test("shell submit enter flag only set on legacy fall-through path", () => {
 		setShellMode(true);
-		const editor = makeEditorWithTui("ls -la");
+		const editor = makeEditor("ls -la");
 		process_shell_input(ENTER, editor);
-		// Editor path would no-op because shell mode already exited.
 		expect(process_shell_input(ENTER, editor)?.consume).toBeUndefined();
 		expect(consume_pending_shell_submit_enter()).toBe(true);
 	});
 
-	test("shell submit enter skips history sync and clears the chatbox", () => {
+	test("shell submit enter clears the chatbox after synchronous submit", () => {
 		setShellMode(true);
 		const editor = makeEditorWithTui("git status");
 		process_shell_input(ENTER, editor);
-		expect(editor.getText()).toBe("!git status");
-		if (consume_pending_shell_submit_enter()) {
-			with_suppressed_shell_history_sync(() => editor.setText(""));
-		} else if (sync_shell_mode_from_editor_text(editor)) {
-			throw new Error("sync should not run after shell submit enter");
-		}
 		expect(editor.getText()).toBe("");
+		expect(editor.submitted).toEqual(["!git status"]);
 		expect(isShellMode()).toBe(false);
 	});
 

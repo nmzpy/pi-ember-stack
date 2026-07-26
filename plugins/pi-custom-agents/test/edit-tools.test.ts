@@ -4,6 +4,7 @@ import {
 	DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS,
 	OPENAI_CODEX_PROVIDER,
 	resolve_patch_tool_name,
+	SUBAGENT_RESUME_TOOL_NAME,
 	uses_apply_patch_provider,
 	with_provider_patch_tool,
 } from "../edit-tools.ts";
@@ -28,6 +29,14 @@ describe("edit-tools provider resolution", () => {
 		expect(codex).not.toContain("edit");
 		expect(devin).toContain("edit");
 		expect(devin).not.toContain("apply_patch");
+	});
+
+	test("build_full_tools excludes subagent delegation tools", () => {
+		for (const provider of [OPENAI_CODEX_PROVIDER, "devin", undefined]) {
+			const tools = build_full_tools(provider);
+			expect(tools).not.toContain("subagent");
+			expect(tools).not.toContain(SUBAGENT_RESUME_TOOL_NAME);
+		}
 	});
 
 	test("with_provider_patch_tool normalizes agent lists", () => {

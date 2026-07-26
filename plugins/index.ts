@@ -206,8 +206,16 @@ function registerPluginCommand(pi: ExtensionAPI, enabledPlugins: Set<PluginId>):
 
 export default async function piEmberStackPlugin(pi: ExtensionAPI): Promise<void> {
 	const enabledPlugins = readEnabledPlugins();
+	const fffEnabled = enabledPlugins.has("pi-ember-fff");
 	for (const plugin of PLUGINS) {
 		if (!enabledPlugins.has(plugin.id)) continue;
+		if (plugin.id === "pi-compact-tools") {
+			await piCompactToolsPlugin(
+				pi,
+				fffEnabled ? { excludeTools: ["grep", "find"] } : undefined,
+			);
+			continue;
+		}
 		await plugin.extension(pi);
 	}
 	registerPluginCommand(pi, enabledPlugins);

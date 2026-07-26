@@ -5,6 +5,7 @@ import {
 	task_subject_token,
 	TodoRenderer,
 	TodoTranscriptComponent,
+	seed_todo_renderer_from_branch,
 } from "../render.ts";
 
 const mock_theme = {
@@ -108,7 +109,41 @@ describe("todo transcript render", () => {
 		expect(lines.join("\n")).not.toContain("◐");
 	});
 
-	test("consecutive todo calls fold into one header block", () => {
+	test("consecutive todo calls fold into one header at the latest call position", () => {
+		const renderer = new TodoRenderer();
+		const theme = mock_theme;
+		const state_a: Record<string, unknown> = {};
+		const state_b: Record<string, unknown> = {};
+		const mk_ctx = (id: string, state: Record<string, unknown>) => ({
+			toolCallId: id,
+			invalidate: () => {},
+			state,
+		});
+
+		renderer.renderCall([], theme, mk_ctx("a", state_a));
+		renderer.renderResult([{ id: 1, subject: "Module 1", status: "pending" }], theme, mk_ctx("a", state_a));
+
+		const second = renderer.renderCall([], theme, mk_ctx("b", state_b));
+		expect(second.render(80).length).toBeGreaterThan(1);
+
+		renderer.renderResult(
+			[
+				{ id: 1, subject: "Module 1", status: "pending" },
+				{ id: 2, subject: "Module 2", status: "pending" },
+			],
+			theme,
+			mk_ctx("b", state_b),
+		);
+
+		const first = renderer.renderCall([], theme, mk_ctx("a", state_a));
+		expect(first.render(80)).toHaveLength(0);
+
+		const lines = second.render(120);
+		expect(lines.filter((l) => l.includes("Todo"))).toHaveLength(1);
+		expect(lines).toHaveLength(3);
+	});
+
+	test("todos interleaved with other tools stay in one group at the latest todo", () => {
 		const renderer = new TodoRenderer();
 		const theme = mock_theme;
 		const mk_ctx = (id: string) => ({
@@ -117,23 +152,54 @@ describe("todo transcript render", () => {
 			state: {} as Record<string, unknown>,
 		});
 
-		renderer.renderCall([], theme, mk_ctx("a"));
-		renderer.renderResult([{ id: 1, subject: "Module 1", status: "pending" }], theme, mk_ctx("a"));
-
-		const second = renderer.renderCall([], theme, mk_ctx("b"));
-		expect(second.render(80)).toHaveLength(0);
-
+		renderer.renderCall([], theme, mk_ctx("todo-a"));
+		renderer.renderResult([{ id: 1, subject: "One", status: "pending" }], theme, mk_ctx("todo-a"));
+		// Simulates edit/grep/bash between todos without settling the todo group.
+		const latest = renderer.renderCall([], theme, mk_ctx("todo-b"));
 		renderer.renderResult(
 			[
-				{ id: 1, subject: "Module 1", status: "pending" },
-				{ id: 2, subject: "Module 2", status: "pending" },
+				{ id: 1, subject: "One", status: "completed" },
+				{ id: 2, subject: "Two", status: "pending" },
 			],
 			theme,
-			mk_ctx("b"),
+			mk_ctx("todo-b"),
 		);
 
-		const first = renderer.renderCall([], theme, mk_ctx("a"));
-		const lines = first.render(120);
+		expect(renderer.renderCall([], theme, mk_ctx("todo-a")).render(80)).toHaveLength(0);
+		const lines = latest.render(120);
+		expect(lines.filter((l) => l.includes("Todo"))).toHaveLength(1);
+	});
+
+	test("rebuild does not duplicate grouped todo headers", () => {
+		const renderer = new TodoRenderer();
+		const theme = mock_theme;
+		const state_a: Record<string, unknown> = {};
+		const state_b: Record<string, unknown> = {};
+		const mk_ctx = (id: string, state: Record<string, unknown>) => ({
+			toolCallId: id,
+			invalidate: () => {},
+			state,
+		});
+
+		renderer.renderCall([], theme, mk_ctx("a", state_a));
+		renderer.renderResult([{ id: 1, subject: "One", status: "pending" }], theme, mk_ctx("a", state_a));
+		renderer.renderCall([], theme, mk_ctx("b", state_b));
+		renderer.renderResult(
+			[
+				{ id: 1, subject: "One", status: "completed" },
+				{ id: 2, subject: "Two", status: "pending" },
+			],
+			theme,
+			mk_ctx("b", state_b),
+		);
+
+		renderer.settleGroup();
+
+		const rebuilt_a = renderer.renderCall([], theme, mk_ctx("a", state_a));
+		const rebuilt_b = renderer.renderCall([], theme, mk_ctx("b", state_b));
+		expect(rebuilt_a.render(80)).toHaveLength(0);
+
+		const lines = rebuilt_b.render(120);
 		expect(lines.filter((l) => l.includes("Todo"))).toHaveLength(1);
 		expect(lines).toHaveLength(3);
 	});
@@ -162,5 +228,129 @@ describe("todo transcript render", () => {
 		const lines = comp.render(80);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("[error]");
+	});
+
+	test("renderCall alone restores tasks from stored snapshot after renderResult", () => {
+		const renderer = new TodoRenderer();
+		const state: Record<string, unknown> = {};
+		const mk_ctx = (id: string) => ({
+			toolCallId: id,
+			invalidate: () => {},
+			state,
+		});
+		const tasks = [
+			{ id: 1, subject: "Module 1", status: "pending" as const },
+			{ id: 2, subject: "Module 2", status: "in_progress" as const },
+		];
+
+		renderer.renderCall([], mock_theme, mk_ctx("todo-1"));
+		renderer.renderResult(tasks, mock_theme, mk_ctx("todo-1"));
+
+		const rebuilt_state: Record<string, unknown> = {};
+		const rebuilt = renderer.renderCall([], mock_theme, {
+			toolCallId: "todo-1",
+			invalidate: () => {},
+			state: rebuilt_state,
+		});
+		expect(rebuilt.render(120)).toHaveLength(3);
+	});
+
+	test("renderResult before renderCall on rebuild still paints full block", () => {
+		const renderer = new TodoRenderer();
+		const tasks = [{ id: 1, subject: "Ship", status: "pending" as const }];
+		const state: Record<string, unknown> = {};
+		const ctx = { toolCallId: "todo-1", invalidate: () => {}, state };
+
+		renderer.renderResult(tasks, mock_theme, ctx);
+		const call = renderer.renderCall([], mock_theme, ctx);
+		expect(call.render(120)).toHaveLength(2);
+	});
+
+	test("previous todo owner invalidates when a newer todo joins the group", () => {
+		const renderer = new TodoRenderer();
+		const theme = mock_theme;
+		let invalidates_a = 0;
+		const state_a: Record<string, unknown> = {};
+		const state_b: Record<string, unknown> = {};
+		const mk_ctx = (id: string, state: Record<string, unknown>, invalidate?: () => void) => ({
+			toolCallId: id,
+			invalidate: invalidate ?? (() => {}),
+			state,
+		});
+
+		renderer.renderCall([], theme, mk_ctx("a", state_a, () => invalidates_a++));
+		renderer.renderResult(
+			[{ id: 1, subject: "One", status: "pending" }],
+			theme,
+			mk_ctx("a", state_a, () => invalidates_a++),
+		);
+
+		renderer.renderCall([], theme, mk_ctx("b", state_b));
+		expect(invalidates_a).toBe(1);
+
+		renderer.renderResult(
+			[
+				{ id: 1, subject: "One", status: "pending" },
+				{ id: 2, subject: "Two", status: "pending" },
+			],
+			theme,
+			mk_ctx("b", state_b),
+		);
+
+		expect(renderer.renderCall([], theme, mk_ctx("a", state_a)).render(80)).toHaveLength(0);
+		const lines = renderer.renderCall([], theme, mk_ctx("b", state_b)).render(120);
+		expect(lines.filter((l) => l.includes("Todo"))).toHaveLength(1);
+	});
+
+	test("seed from branch restores grouped snapshots before chat rebuild", () => {
+		const renderer = new TodoRenderer();
+		const branch = [
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "todo-a", name: "todo" },
+						{ type: "toolCall", id: "todo-b", name: "todo" },
+					],
+				},
+			},
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "todo-a",
+					toolName: "todo",
+					details: {
+						tasks: [{ id: 1, subject: "One", status: "pending" }],
+					},
+				},
+			},
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "todo-b",
+					toolName: "todo",
+					details: {
+						tasks: [
+							{ id: 1, subject: "One", status: "completed" },
+							{ id: 2, subject: "Two", status: "pending" },
+						],
+					},
+				},
+			},
+		] as never;
+
+		renderer.resetForSession();
+		seed_todo_renderer_from_branch(branch, renderer);
+
+		const owner = renderer.renderCall([], mock_theme, {
+			toolCallId: "todo-b",
+			invalidate: () => {},
+			state: {},
+		});
+		expect(owner.render(120)).toHaveLength(3);
+		expect(renderer.renderCall([], mock_theme, { toolCallId: "todo-a", invalidate: () => {}, state: {} }).render(80)).toHaveLength(0);
 	});
 });

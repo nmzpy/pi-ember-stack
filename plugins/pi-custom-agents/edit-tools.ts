@@ -11,6 +11,26 @@ export type PatchToolName = "apply_patch" | "edit";
 
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"] as const;
 
+/** Canonical resume tool name — Codex requires `^[a-zA-Z0-9_-]+$` (no dots). */
+export const SUBAGENT_RESUME_TOOL_NAME = "subagent_resume" as const;
+
+/** Legacy dotted name kept for transcript/policy compatibility only. */
+export const LEGACY_SUBAGENT_RESUME_TOOL_NAME = "subagent.resume" as const;
+
+/** Parent-mode delegation tools — not available in code mode. */
+export const SUBAGENT_DELEGATION_TOOLS = ["subagent", SUBAGENT_RESUME_TOOL_NAME] as const;
+
+export function is_subagent_resume_tool(toolName: string): boolean {
+	return (
+		toolName === SUBAGENT_RESUME_TOOL_NAME || toolName === LEGACY_SUBAGENT_RESUME_TOOL_NAME
+	);
+}
+
+export function without_subagent_delegation_tools(tools: string[]): string[] {
+	const blocked = new Set<string>(SUBAGENT_DELEGATION_TOOLS);
+	return tools.filter((tool) => !blocked.has(tool));
+}
+
 export function uses_apply_patch_provider(provider: string | undefined): boolean {
 	return provider === OPENAI_CODEX_PROVIDER;
 }
@@ -36,7 +56,6 @@ export function build_full_tools(provider: string | undefined): string[] {
 		"ls",
 		"quiz",
 		"todo",
-		"subagent",
 		...WEB_ACCESS_TOOLS,
 	];
 }

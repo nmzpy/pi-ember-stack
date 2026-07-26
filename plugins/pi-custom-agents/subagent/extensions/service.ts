@@ -3,6 +3,7 @@ import type { AgentConfig } from "./agents.ts";
 import {
 	DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS,
 	model_provider_of,
+	without_subagent_delegation_tools,
 	with_provider_patch_tool,
 } from "../../edit-tools.ts";
 import { runSubAgent, type SubAgentResult } from "./runner.ts";
@@ -48,9 +49,7 @@ export async function runNamedAgent(options: {
 		systemPrompt: contract ? `${options.agent.systemPrompt}\n\n## Task Contract\n${contract}` : options.agent.systemPrompt,
 		task: options.task,
 		tools: with_provider_patch_tool(
-			(options.agent.tools ?? [...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS]).filter(
-				(tool) => tool !== "subagent",
-			),
+			without_subagent_delegation_tools(options.agent.tools ?? [...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS]),
 			model_provider_of(model),
 		),
 		model,

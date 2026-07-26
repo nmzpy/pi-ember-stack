@@ -21,8 +21,7 @@ Bundled roles inherit the parent model so they work with the account already act
 
 ## Agent naming
 
-- **Single mode** shows the bare agent name: `Scout` or `Coder`.
-- **Parallel/chain mode** assigns a session-global per-type letter so individual agents are easy to track: `Coder A`, `Coder B`, `Scout A`, `Scout B`, etc. The letter persists across tool calls within a session and resets on session replacement (`/resume`, `/new`, `/fork`, `/reload`). The lettered name appears in the TUI render, the thread viewer, and the tool result text returned to the orchestrating agent.
+Every subagent invocation gets a session-global per-type letter so repeated agents are easy to track: `Coder A`, `Coder B`, `Scout A`, `Scout B`, etc. Letters persist across tool calls within a session (single, parallel, and chain) and reset on session replacement (`/resume`, `/new`, `/fork`, `/reload`). The lettered name appears in the TUI render, the thread viewer, and the tool result text returned to the orchestrating agent.
 
 ## Agent files
 
@@ -46,7 +45,17 @@ Project agents require confirmation when requested through the public tool. Defi
 
 Children use in-memory SDK sessions with no extensions, skills, prompt templates, or automatic `AGENTS.md` loading. The optional `instructions` argument passes a bounded 16 KB task/repository contract. Only Pi built-in tools are available; Serena, FFF, web, and Munin are not available in lean children.
 
-Threads are session-memory only and are cleared when Pi replaces or reloads the session. Timeout and parent cancellation propagate to child sessions. Subagents cannot recursively invoke `subagent`.
+Threads are session-memory only and are cleared when Pi replaces or reloads the session. Timeout and parent cancellation propagate to child sessions. Subagents cannot recursively invoke `subagent` or `subagent_resume`.
+
+## Resume (`subagent_resume`)
+
+Continue a prior **single-mode** subagent by its lettered display name (`Coder A`, `Scout B`, …). The child session is persisted under `~/.pi/agent/subagent-sessions/<parentSessionId>/<originToolCallId>/` and reopened for a follow-up `session.prompt()` — true continuation, not a context re-paste.
+
+```json
+{ "agent": "Coder A", "task": "Continue implementing module 2 and run tests." }
+```
+
+Resume is not supported for parallel or chain batches. Spawn the initial run with `subagent` before calling `subagent_resume`.
 
 ## Extension contract
 

@@ -16,6 +16,7 @@ const PI_TO_CURSOR_TOOL_NAME = new Map<string, string>([
 	["todo", "todo"],
 	["apply_patch", "apply_patch"],
 	["subagent", "subagent"],
+	["subagent_resume", "subagent"],
 	["quiz", "quiz"],
 	["task", "task"],
 	["web_search", "web_search"],
@@ -226,6 +227,7 @@ const CANONICAL_PI_TOOLS = new Set([
 	"apply_patch",
 	"task",
 	"subagent",
+	"subagent_resume",
 	"todo",
 ]);
 

@@ -1,0 +1,78 @@
+import { truncateToWidth } from "@earendil-works/pi-tui";
+import { statusBulletColor } from "../pi-compact-tools/renderer.ts";
+import {
+	type GradientPreset,
+	get_gradient_phase,
+	render_gradient,
+	subscribe_gradient_tick,
+	unsubscribe_gradient_tick,
+} from "./gradient.ts";
+
+type CompactionStatusIndicator = {
+	invalidate?: () => void;
+};
+
+let active_compaction_indicator: CompactionStatusIndicator | undefined;
+let compaction_tick_cb: (() => void) | undefined;
+
+function ensure_compaction_status_tick(): void {
+	if (compaction_tick_cb) return;
+	compaction_tick_cb = (): void => {
+		active_compaction_indicator?.invalidate?.();
+	};
+	subscribe_gradient_tick(compaction_tick_cb);
+}
+
+function drop_compaction_status_tick(): void {
+	if (!compaction_tick_cb) return;
+	unsubscribe_gradient_tick(compaction_tick_cb);
+	compaction_tick_cb = undefined;
+}
+
+/** Wire the live compaction status row to the shared 20 FPS gradient clock. */
+export function bind_compaction_status_indicator(indicator: unknown): void {
+	active_compaction_indicator = indicator as CompactionStatusIndicator;
+	ensure_compaction_status_tick();
+}
+
+/** Clear compaction status tick wiring when the indicator is removed. */
+export function unbind_compaction_status_indicator(): void {
+	active_compaction_indicator = undefined;
+	drop_compaction_status_tick();
+}
+
+/** Minimal theme shape for compaction rows. */
+export type CompactionThemeLike = {
+	fg(tag: string, text: string): string;
+	bold(text: string): string;
+};
+
+/** Same dim→text sweep as the Thinking header — one shared 20 FPS clock. */
+export const COMPACTION_GRADIENT_PRESET: GradientPreset = "thinking";
+
+/** Gradient `Compacting` label at the live sweep phase. */
+export function render_compacting_gradient_label(): string {
+	return render_gradient("Compacting", COMPACTION_GRADIENT_PRESET, get_gradient_phase());
+}
+
+/** Running compaction row: muted bullet + gradient `Compacting`. */
+export function format_compacting_row(theme: CompactionThemeLike, width: number): string[] {
+	const bullet = statusBulletColor(false, false, theme);
+	const line = bullet + render_compacting_gradient_label();
+	return [truncateToWidth(line, Math.max(1, width))];
+}
+
+/** Completed compaction row: success bullet + `Compacted N tokens into ~M.` */
+export function format_compacted_row(
+	theme: CompactionThemeLike,
+	tokens_before: number,
+	summary_length: number,
+	is_error = false,
+): string {
+	const bullet = statusBulletColor(is_error, !is_error, theme);
+	const before = tokens_before.toLocaleString();
+	const after = Math.ceil(summary_length / 4).toLocaleString();
+	const label = theme.fg("muted", theme.bold("Compacted"));
+	const stats = theme.fg("muted", ` ${before} tokens into ~${after}.`);
+	return bullet + label + stats;
+}

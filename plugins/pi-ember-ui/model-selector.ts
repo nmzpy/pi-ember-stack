@@ -60,6 +60,7 @@ const EFFORT_OPACITY_FOUR: Record<"low" | "medium" | "high" | "xhigh" | "max", n
 };
 
 const EFFORT_OPACITY_FIVE: Record<EffortSliderPoint, number> = {
+	default: 0.5,
 	low: 0.2,
 	medium: 0.4,
 	high: 0.6,
@@ -74,8 +75,14 @@ const EFFORT_OPACITY_THREE: Record<"low" | "medium" | "high", number> = {
 };
 
 function effort_point_opacity(point: EffortSliderPoint, efforts: EffortSliderPoint[]): number {
+	if (point === "default") {
+		if (efforts.length === 2 && efforts.includes("max") && efforts.includes("default")) {
+			return 0.66;
+		}
+		return 0.5;
+	}
 	if (efforts.includes("max")) {
-		return EFFORT_OPACITY_FIVE[point];
+		return EFFORT_OPACITY_FIVE[point as keyof typeof EFFORT_OPACITY_FIVE];
 	}
 	if (!efforts.includes("xhigh")) {
 		if (point === "low" || point === "medium" || point === "high") {
@@ -93,7 +100,9 @@ export function effort_point_color(
 	const opacity =
 		efforts && efforts.length > 0
 			? effort_point_opacity(point, efforts)
-			: EFFORT_OPACITY_FOUR[point];
+			: point === "default"
+			  ? 0.5
+			  : EFFORT_OPACITY_FOUR[point];
 	return blendToHex(ORANGE, PAGE_BG, opacity);
 }
 

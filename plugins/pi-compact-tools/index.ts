@@ -11,33 +11,27 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { type Component } from "@earendil-works/pi-tui";
+import { bashGrepInfo, rewriteGrepToRg } from "./bash-grep.ts";
+import { sync_compact_group_flags } from "./group-flags.ts";
 import {
 	CompactRenderer,
 	GROUPABLE_TOOLS,
-	bashGrepInfo,
-	resolve_assistant_group_boundary_event,
 	type ToolRenderContext,
 	type ToolRenderResultOptions,
 } from "./renderer.ts";
+import { getSharedRenderer } from "./shared-renderer.ts";
 import {
 	isThinkingBlocksHidden,
-	setGroupReopenableActive,
-	setGroupThinkingChildActive,
 	set_thinking_blocks_visibility_listener,
+	setGroupReopenableActive,
 	setToolGroupActive,
+	setGroupThinkingChildActive,
 	setTurnToolTranscriptActive,
 } from "../pi-ember-ui/mode-colors.ts";
 import { syncThinkingGradientClock } from "../pi-ember-ui/index.ts";
 import { subscribe_theme_refresh } from "../pi-ember-ui/theme-refresh.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
-
-function update_tool_group_active(renderer: CompactRenderer): void {
-	setToolGroupActive(renderer.hasActiveGroups());
-	setGroupThinkingChildActive(renderer.hasGroupThinkingChild());
-	setGroupReopenableActive(isThinkingBlocksHidden() && renderer.hasReopenableGroup());
-	syncThinkingGradientClock();
-}
 
 type ToolFactory = (cwd: string) => any;
 
@@ -88,17 +82,15 @@ function registerCompactTool(
 	});
 }
 
-let sharedRenderer: CompactRenderer | null = null;
 let unsubscribe_theme_refresh: (() => void) | undefined;
 
-export { bashGrepInfo };
+export { bashGrepInfo, rewriteGrepToRg, getSharedRenderer };
+export type CompactToolsOptions = { excludeTools?: readonly string[] };
 
-export function getSharedRenderer(): CompactRenderer {
-	if (!sharedRenderer) sharedRenderer = new CompactRenderer();
-	return sharedRenderer;
-}
-
-export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
+export default function piCompactToolsPlugin(
+	pi: ExtensionAPI,
+	opts?: CompactToolsOptions,
+): void {
 	const renderer = getSharedRenderer();
 	unsubscribe_theme_refresh?.();
 	unsubscribe_theme_refresh = subscribe_theme_refresh((theme) => {
@@ -109,59 +101,47 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		unsubscribe_theme_refresh = undefined;
 		set_thinking_blocks_visibility_listener(undefined);
 	});
-	pi.on("turn_start", () => renderer.beginTurn());
+	pi.on("turn_start", () => {
+		renderer.beginTurn();
+		sync_compact_group_flags(renderer);
+	});
 	pi.on("turn_end", () => {
 		renderer.endTurn();
-		update_tool_group_active(renderer);
+		sync_compact_group_flags(renderer);
 	});
 	pi.on("agent_end", () => {
 		renderer.settleAllGroups();
-		if (isThinkingBlocksHidden()) renderer.armInGroupThinking();
-		update_tool_group_active(renderer);
+		sync_compact_group_flags(renderer);
 	});
 	pi.on("agent_start", () => {
-		if (isThinkingBlocksHidden()) renderer.armInGroupThinking();
-		update_tool_group_active(renderer);
+		sync_compact_group_flags(renderer);
 	});
 	pi.on("agent_settled", () => {
 		renderer.clearGroupThinkingChild();
-		update_tool_group_active(renderer);
+		sync_compact_group_flags(renderer);
 	});
 	pi.on("message_start", (event: any) => {
 		if (event?.message?.role !== "user") return;
 		const display = (event.message as { display?: boolean }).display;
 		if (display !== false) renderer.noteUserMessage();
-	});
-	pi.on("message_update", (event: any) => {
-		// Group contract (thinking blocks hidden):
-		// - visible text → hard exit (header-only, drop reopen pointer);
-		// - thinking stream → thinking lane inside the live group;
-		// - visible thinking blocks → hard exit like visible text.
-		const ev = event?.assistantMessageEvent;
-		if (!ev) return;
-		const boundary = resolve_assistant_group_boundary_event(ev);
-		if (boundary === "visible_text") {
-			renderer.noteVisibleText();
-			update_tool_group_active(renderer);
-		} else if (boundary === "thinking") {
-			if (isThinkingBlocksHidden()) renderer.noteThinking();
-			else renderer.noteVisibleText();
-			update_tool_group_active(renderer);
-		}
+		sync_compact_group_flags(renderer);
 	});
 	pi.on("tool_call", (event: any) => {
-		if (GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName]) {
+		const is_groupable =
+			GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName];
+		if (is_groupable) {
 			setTurnToolTranscriptActive(true);
 			renderer.registerCall(event.toolName, event.toolCallId, event.input);
-			update_tool_group_active(renderer);
+		} else {
+			renderer.noteInterveningToolCall();
 		}
+		sync_compact_group_flags(renderer);
 	});
-	// A completed group member may flip the group-active flag to false
-	// (all members done) — update the shared flag so group state and the
-	// group header gradient stay synchronized.
+	// Completed group members may flip the group-active flag; child-row fold
+	// happens on thinking stream, turn boundaries, visible assistant text, user
+	// message, or the next tool wave (appendToGroup reopen).
 	pi.on("tool_execution_end", () => {
-		if (isThinkingBlocksHidden()) renderer.armInGroupThinking();
-		update_tool_group_active(renderer);
+		sync_compact_group_flags(renderer);
 	});
 	// Reset the shared renderer on session replacement so stale call rows
 	// from the previous session do not leak into the new one. The renderer
@@ -175,11 +155,13 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI): void {
 		set_thinking_blocks_visibility_listener((hidden) => {
 			if (hidden) return;
 			renderer.clearGroupThinkingChild();
-			update_tool_group_active(renderer);
+			sync_compact_group_flags(renderer);
 		});
 		syncThinkingGradientClock();
 	});
+	const excluded = new Set(opts?.excludeTools ?? []);
 	for (const [name, factory] of Object.entries(TOOL_FACTORIES)) {
+		if (excluded.has(name)) continue;
 		registerCompactTool(pi, name, factory, renderer);
 	}
 }

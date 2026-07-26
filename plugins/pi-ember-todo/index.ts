@@ -15,7 +15,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { coerce_id, prepare_todo_arguments } from "./normalize.ts";
-import { getSharedTodoRenderer } from "./render.ts";
+import { getSharedTodoRenderer, seed_todo_renderer_from_branch } from "./render.ts";
+import { flatten_todo_timeline, todo_group_boundary_before } from "./timeline.ts";
 
 /**
  * String enum as `{ type: "string", enum: [...] }` (provider-safe + TypeBox
@@ -118,7 +119,10 @@ export const TodoParamsSchema = Type.Object({
 				removeBlockedBy: Type.Optional(Type.Array(Type.Number())),
 				owner: Type.Optional(Type.String()),
 			}),
-			{ description: "Batch status/subject updates (provider-native todo arrays)" },
+			{
+				description:
+					"One or more per-task updates. With action update: a single item merges with top-level id/status; multiple items run as batch. Prefer action batch for multi-task updates.",
+			},
 		),
 	),
 });
@@ -131,6 +135,15 @@ export type TodoParams = Static<typeof TodoParamsSchema>;
 
 const sessions = new Map<string, TaskState>();
 let active_render_session = "";
+let active_render_ctx: ExtensionContext | undefined;
+
+function settle_todo_group_before_render(ctx: ExtensionContext, tool_call_id: string): void {
+	const branch = ctx.sessionManager.getBranch() ?? [];
+	const timeline = flatten_todo_timeline(branch);
+	if (todo_group_boundary_before(timeline, tool_call_id)) {
+		getSharedTodoRenderer().settleGroup();
+	}
+}
 
 // Replay cache: avoid rescanning the entire branch message history on every
 // session event when nothing has changed. Keyed by session id; validated by
@@ -360,6 +373,25 @@ function apply_mutation(state: TaskState, action: TaskAction, params: TodoParams
 		}
 
 		case "update": {
+			// Safety net when prepareArguments did not flatten a batch payload.
+			if (Array.isArray(params.batch) && params.batch.length > 0) {
+				if (params.batch.length === 1) {
+					const item = params.batch[0] as Record<string, unknown>;
+					const merged = {
+						...params,
+						...item,
+						action: "update",
+						id: coerce_id(item.id) ?? coerce_id(params.id),
+					} as TodoParams;
+					delete (merged as { batch?: unknown }).batch;
+					return apply_mutation(state, "update", merged);
+				}
+				return apply_mutation(state, "batch", {
+					action: "batch",
+					batch: params.batch,
+				} as TodoParams);
+			}
+
 			if (params.id === undefined) return err("id required for update");
 			const id = coerce_id(params.id);
 			if (id === undefined) return err("id must be a number");
@@ -394,8 +426,12 @@ function apply_mutation(state: TaskState, action: TaskAction, params: TodoParams
 				const keys = Object.keys(params ?? {})
 					.sort()
 					.join(", ");
+				const batch_hint =
+					"batch" in (params ?? {})
+						? " (batch items need id and a mutable field such as status; multi-item updates use action batch automatically after normalization)"
+						: "";
 				return err(
-					`update requires at least one mutable field (subject, description, activeForm, status, owner, metadata, addBlockedBy, removeBlockedBy); received keys: [${keys}]`,
+					`update requires at least one mutable field (subject, description, activeForm, status, owner, metadata, addBlockedBy, removeBlockedBy)${batch_hint}; received keys: [${keys}]`,
 				);
 			}
 
@@ -629,6 +665,9 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		},
 
 		renderCall(_args: TodoParams, theme: Theme, context: ToolRenderContext) {
+			if (active_render_ctx) {
+				settle_todo_group_before_render(active_render_ctx, context.toolCallId);
+			}
 			return todo_renderer.renderCall([], theme, context);
 		},
 
@@ -733,20 +772,21 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		if (rewritten) return { message: rewritten };
 	});
 
-	pi.on("tool_call", (event) => {
-		if (event.toolName !== TOOL_NAME) todo_renderer.settleGroup();
-	});
-
 	pi.on("message_start", (event) => {
-		if (event?.message?.role === "user") todo_renderer.settleGroup();
+		if (event?.message?.role !== "user") return;
+		const display = (event.message as { display?: boolean }).display;
+		if (display === false) return;
+		todo_renderer.settleGroup();
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		todo_renderer.resetForSession();
+		active_render_ctx = ctx;
 		try {
 			const id = session_id(ctx);
 			active_render_session = id;
 			const branch = ctx.sessionManager.getBranch() ?? [];
+			seed_todo_renderer_from_branch(branch, todo_renderer);
 			if (branch_has_todo_history(ctx)) {
 				sessions.set(id, replay_from_branch(ctx));
 			} else {
@@ -770,6 +810,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		todo_renderer.resetForSession();
+		active_render_ctx = undefined;
 		let id = "";
 		try {
 			id = session_id(ctx);

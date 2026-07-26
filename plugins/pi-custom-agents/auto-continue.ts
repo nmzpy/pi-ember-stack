@@ -19,23 +19,11 @@ const BENIGN_COMPACT_SUBSTRINGS: readonly string[] = [
 
 const COMPACT_FAILED_PREFIX = "Compaction failed: ";
 
-/**
- * SSOT customInstructions passed to ctx.compact() during output-limit
- * recovery. The summarizer must emit only the four labeled lines; no
- * markdown headers, no bullets, no narrative, no split-turn sections.
- */
-export const COMPACT_FOCUS_INSTRUCTIONS: string = [
-	"Compaction. Output only these four labeled lines and nothing else:",
-	"Goal: <what the user asked for>",
-	"Files: <file paths that were read or modified, preserving exact paths>",
-	"Done: <work already completed in this session>",
-	"Left: <remaining work as numbered next steps plus the exact resume point>",
-].join("\n");
-
 const RESUME_DIRECTIVE = [
 	"Output was cut off by the maximum output token limit.",
-	"Continue the interrupted task from Left:. Do not redo work listed in Done:. Use Files: for context.",
-].join("\n");
+	"Continue the interrupted task from ## Next Steps in the compaction checkpoint.",
+	"Do not redo work listed under ### Done. Use ## Critical Context and file tags for context.",
+].join(" ");
 
 // ---------------------------------------------------------------------------
 // is_benign_compact_error
@@ -106,9 +94,8 @@ export type AutoContinueContentInput = {
 /**
  * Build hidden pi-agents-auto-continue content.
  *
- * The compaction summary (Goal/Files/Done/Left) is already in context after
- * compact(); this returns a short resume directive only. It does NOT paste
- * the plan draft again, avoiding split-turn duplication.
+ * The compaction checkpoint is already in context after compact(); this returns
+ * a short resume directive only. It does NOT paste the plan draft again.
  */
 export function build_auto_continue_content(input: AutoContinueContentInput): string {
 	const max_chars = input.max_chars ?? DEFAULT_AUTO_CONTINUE_MAX_CHARS;

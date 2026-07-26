@@ -9,8 +9,9 @@
  *   - Chain:    { chain: [{ agent: "Scout", task: "..." }, ...] }
  *
  * Compared to process-spawning, this saves ~4-11K tokens per sub-agent
- * by using the pi SDK directly with a minimal system prompt, no AGENTS.md,
- * no extensions, no skills, no thinking, and no compaction.
+ * by using the pi SDK directly with a minimal system prompt and no AGENTS.md.
+ * Child sessions enable Pi compaction (Ember summarizer via compaction-wiring) and optional
+ * DCP outbound strategies when globally enabled — not the full parent extension stack.
  */
 
 import * as path from "node:path";
@@ -21,12 +22,16 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	getAgentDir,
+	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, SelectList, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS,
+	is_subagent_resume_tool,
 	model_provider_of,
+	SUBAGENT_RESUME_TOOL_NAME,
+	without_subagent_delegation_tools,
 	with_provider_patch_tool,
 } from "../../edit-tools.ts";
 
@@ -71,8 +76,11 @@ interface CustomUi {
 
 import { getSharedRenderer } from "../../../pi-compact-tools/index.ts";
 import { subscribeGradientTick, unsubscribeGradientTick } from "../../../pi-ember-ui/index.ts";
+import { buildSelectListTheme } from "../../../pi-ember-ui/select-list-theme.ts";
 import {
+	clearSubagentDelegating,
 	isThinkingBlocksHidden,
+	noteSubagentDelegating,
 	setGroupReopenableActive,
 	setGroupThinkingChildActive,
 	setToolGroupActive,
@@ -89,12 +97,15 @@ import {
 import {
 	anySubagentRunning,
 	buildSubagentLayoutComponent,
-	isSubagentDelegating,
+	shouldShowSubagentDelegating,
 	renderSubagentExpanded,
 } from "./render.ts";
-import { getSubagentGroupRenderer } from "./subagent-group.ts";
+import { getSubagentGroupRenderer, type SubagentArgs, seed_subagent_renderer_from_branch } from "./subagent-group.ts";
 import {
+	agent_tool_result_content,
 	DEFAULT_SUBAGENT_TIMEOUT_MS,
+	format_agent_tool_result_batch,
+	format_agent_tool_result_text,
 	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
@@ -102,6 +113,7 @@ import {
 	runSubAgent,
 	type SubAgentResult,
 } from "./runner.ts";
+import { prune_foreign_checkpoints, resolve_resume_target } from "./resume-store.ts";
 import { runNamedAgent, SUBAGENT_REQUEST_EVENT, type SubagentRunRequest } from "./service.ts";
 import { ThreadViewer, type ThreadViewerCallbacks } from "./thread-viewer.ts";
 import { type SubagentThread, threadStore } from "./threads.ts";
@@ -140,6 +152,7 @@ interface SubagentTickRecord {
 	args: unknown;
 	results: SubAgentResult[];
 	theme: CustomFactoryTheme | undefined;
+	invalidate?: () => void;
 }
 
 const subagentTickRecords = new Map<string, SubagentTickRecord>();
@@ -149,7 +162,7 @@ function getOrCreateTickRecord(toolCallId: string): SubagentTickRecord {
 	if (!record) {
 		const rec: SubagentTickRecord = {
 			callback: (): void => {
-				/* The shared gradient clock requests one normal Pi render per tick. */
+				rec.invalidate?.();
 			},
 			toolCallId,
 			args: {},
@@ -167,11 +180,13 @@ function updateTickRecord(
 	args: unknown,
 	results: SubAgentResult[],
 	theme: CustomFactoryTheme,
+	invalidate?: () => void,
 ): SubagentTickRecord {
 	const record = getOrCreateTickRecord(toolCallId);
 	record.args = args;
 	record.results = results;
 	record.theme = theme;
+	if (invalidate) record.invalidate = invalidate;
 	return record;
 }
 
@@ -180,8 +195,9 @@ function subscribeTick(
 	args: unknown,
 	results: SubAgentResult[],
 	theme: CustomFactoryTheme,
+	invalidate: () => void,
 ): void {
-	const record = updateTickRecord(toolCallId, args, results, theme);
+	const record = updateTickRecord(toolCallId, args, results, theme, invalidate);
 	subscribeGradientTick(record.callback);
 }
 
@@ -200,44 +216,14 @@ function clearAllTickRecords(): void {
 	subagentTickRecords.clear();
 }
 
-/** Elapsed-time tracking per subagent tool call — SSOT with Thinking's formatElapsed. */
-const subagentStartedAt = new Map<string, number>();
-const subagentFinalElapsedMs = new Map<string, number>();
-
-function markSubagentRunning(toolCallId: string): void {
-	if (!subagentStartedAt.has(toolCallId)) {
-		subagentStartedAt.set(toolCallId, performance.now());
-	}
-}
-
-function markSubagentTerminal(toolCallId: string): void {
-	if (subagentFinalElapsedMs.has(toolCallId)) return;
-	const start = subagentStartedAt.get(toolCallId);
-	if (start !== undefined) {
-		subagentFinalElapsedMs.set(toolCallId, performance.now() - start);
-	}
-}
-
-function getSubagentElapsedMs(toolCallId: string): number {
-	const final = subagentFinalElapsedMs.get(toolCallId);
-	if (final !== undefined) return final;
-	const start = subagentStartedAt.get(toolCallId);
-	if (start === undefined) return 0;
-	return performance.now() - start;
-}
-
-function getGroupElapsedMs(batch: Array<{ toolCallId: string }>): number {
-	let max = 0;
-	for (const member of batch) {
-		max = Math.max(max, getSubagentElapsedMs(member.toolCallId));
-	}
-	return max;
-}
-
-function clearSubagentTiming(): void {
-	subagentStartedAt.clear();
-	subagentFinalElapsedMs.clear();
-}
+import {
+	clearSubagentTiming,
+	getGroupElapsedMs,
+	getSubagentElapsedMs,
+	isSubagentToolTerminal,
+	markSubagentRunning,
+	markSubagentTerminal,
+} from "./subagent-timing.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -284,6 +270,24 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 	description:
 		'Which agent directories to use. Default: "user". Use "both" to include project-local agents.',
 	default: "user",
+});
+
+const SubagentResumeParams = Type.Object({
+	agent: Type.String({
+		description: 'Lettered display name of the prior subagent to continue (e.g. "Coder A", "Scout B")',
+	}),
+	task: Type.String({ description: "Follow-up instruction for the continued subagent run" }),
+	cwd: Type.Optional(Type.String({ description: "Working directory override (defaults to prior run cwd)" })),
+	timeout: Type.Optional(
+		Type.Number({
+			description: `Timeout in milliseconds. Default: ${DEFAULT_SUBAGENT_TIMEOUT_MS} (120s).`,
+		}),
+	),
+	instructions: Type.Optional(
+		Type.String({
+			description: "Bounded repository/task instructions passed to the child (max 16 KB)",
+		}),
+	),
 });
 
 const SubagentParams = Type.Object({
@@ -341,10 +345,9 @@ interface SubagentDetails {
 export default function (pi: ExtensionAPI) {
 	let currentCtx: ExtensionContext | undefined;
 
-	// Session-global per-type letter counters for parallel/chain agents.
-	// Each agent type (e.g. "Coder", "Scout") gets its own A, B, C… sequence
-	// that persists across tool calls within a session and resets on session
-	// replacement. Single-mode calls do NOT get a letter.
+	// Session-global per-type letter counters. Each agent type (e.g. "Coder",
+	// "Scout") gets its own A, B, C… sequence that persists across tool calls
+	// within a session and resets on session replacement.
 	const agentLetterCounters = new Map<string, number>();
 
 	function assign_agent_letter(agentName: string): string {
@@ -370,10 +373,21 @@ export default function (pi: ExtensionAPI) {
 		clearAllTickRecords();
 		clearSubagentTiming();
 		getSubagentGroupRenderer().resetForSession();
+		try {
+			const branch = ctx.sessionManager.getBranch() ?? [];
+			seed_subagent_renderer_from_branch(branch, getSubagentGroupRenderer());
+		} catch {
+			/* branch may be unavailable during early startup */
+		}
 		agentLetterCounters.clear();
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_event, ctx) => {
+		try {
+			prune_foreign_checkpoints(ctx.sessionManager.getSessionId());
+		} catch {
+			/* session may already be torn down */
+		}
 		currentCtx = undefined;
 		threadStore.clear();
 		clearAllTickRecords();
@@ -384,7 +398,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", (event: { toolName?: string }) => {
 		const compact = getSharedRenderer();
-		if (event.toolName === "subagent") {
+		if (event.toolName === "subagent" || is_subagent_resume_tool(event.toolName ?? "")) {
 			compact.clearGroupThinkingChild();
 			setGroupThinkingChildActive(compact.hasGroupThinkingChild());
 			setGroupReopenableActive(isThinkingBlocksHidden() && compact.hasReopenableGroup());
@@ -393,6 +407,17 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		getSubagentGroupRenderer().hardExit();
+	});
+
+	pi.on("tool_execution_end", (event: { toolName?: string; toolCallId?: string }) => {
+		if (
+			(event.toolName === "subagent" || is_subagent_resume_tool(event.toolName ?? "")) &&
+			typeof event.toolCallId === "string"
+		) {
+			clearSubagentDelegating(event.toolCallId);
+			markSubagentTerminal(event.toolCallId);
+			unsubscribeTick(event.toolCallId);
+		}
 	});
 
 	pi.on("message_start", (event: { message?: { role?: string } }) => {
@@ -412,7 +437,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				systemPrompt:
 					event.systemPrompt +
-					"\n\nThe subagent tool is available for delegating tasks to specialized agents with isolated context. Use /subagent to list available agents. Bundled: Scout (fast codebase exploration), Coder (implementation). Modes: single, parallel (max 8), chain.",
+					"\n\nThe subagent tool is available for delegating tasks to specialized agents with isolated context. Use subagent_resume with a lettered name (e.g. Coder A) to continue a prior subagent. Use /subagent to list available agents. Bundled: Scout (fast codebase exploration), Coder (implementation). Modes: single, parallel (max 8), chain.",
 			};
 		}
 	});
@@ -551,6 +576,162 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	function render_subagent_call(
+		args: SubagentArgs,
+		theme: CustomFactoryTheme,
+		context: { toolCallId: string; invalidate: () => void; state: Record<string, unknown> },
+	): Component {
+		const group_renderer = getSubagentGroupRenderer();
+		const state_results = (context.state.results as SubAgentResult[] | undefined) ?? [];
+		const record = group_renderer.register(
+			context.toolCallId,
+			args,
+			state_results,
+			context.invalidate,
+		);
+		const results = record.results;
+		const terminal = isSubagentToolTerminal(context.toolCallId);
+
+		if (!terminal && shouldShowSubagentDelegating(results, terminal)) {
+			noteSubagentDelegating(context.toolCallId);
+		} else {
+			clearSubagentDelegating(context.toolCallId);
+		}
+
+		if (!group_renderer.isOwner(context.toolCallId)) {
+			return new Text("", 0, 0);
+		}
+
+		let shell = context.state.shell;
+		if (!(shell instanceof Container)) {
+			shell = new Container();
+			context.state.shell = shell;
+		}
+		(shell as Container).clear();
+
+		const batch = group_renderer.getBatch(context.toolCallId);
+		const grouped_members = group_renderer.shouldUseGroupLayout(context.toolCallId)
+			? batch.map((member) => ({
+					args: member.args,
+					results: member.results,
+					displayName: member.displayName,
+					terminal: isSubagentToolTerminal(member.toolCallId),
+				}))
+			: undefined;
+		if (!terminal) {
+			markSubagentRunning(context.toolCallId);
+		}
+		const elapsedMs = grouped_members
+			? getGroupElapsedMs(batch)
+			: getSubagentElapsedMs(context.toolCallId);
+		const layout = buildSubagentLayoutComponent(
+			args,
+			results,
+			theme,
+			elapsedMs,
+			grouped_members,
+			terminal,
+		);
+		context.state.layout = layout;
+		(shell as Container).addChild(layout);
+
+		const running =
+			!terminal &&
+			(shouldShowSubagentDelegating(results, terminal) ||
+				anySubagentRunning(args, results, terminal));
+		if (running) {
+			subscribeTick(context.toolCallId, args, results, theme, context.invalidate);
+		} else {
+			updateTickRecord(context.toolCallId, args, results, theme, context.invalidate);
+			if (terminal) {
+				unsubscribeTick(context.toolCallId);
+			}
+		}
+		return shell as Container;
+	}
+
+	function render_subagent_result(
+		result: { content: Array<{ type: string; text?: string }>; details?: unknown },
+		expanded: boolean,
+		theme: CustomFactoryTheme,
+		context: {
+			toolCallId: string;
+			invalidate: () => void;
+			state: Record<string, unknown>;
+			args: SubagentArgs;
+		},
+	): Component {
+		const group_renderer = getSubagentGroupRenderer();
+		const details = result.details as SubagentDetails | undefined;
+		const results = details?.results ?? [];
+		context.state.results = results;
+		group_renderer.register(context.toolCallId, context.args, results, context.invalidate);
+
+		if (!group_renderer.isOwner(context.toolCallId)) {
+			const owner = group_renderer.getBatch(context.toolCallId)[0];
+			owner?.invalidate?.();
+			return new Text("", 0, 0);
+		}
+
+		let terminal = isSubagentToolTerminal(context.toolCallId);
+		const isRunning = details
+			? !terminal &&
+				(shouldShowSubagentDelegating(results, terminal) ||
+					anySubagentRunning(context.args, results, terminal))
+			: false;
+		if (!terminal) {
+			markSubagentRunning(context.toolCallId);
+		}
+		if (!isRunning) {
+			markSubagentTerminal(context.toolCallId);
+		}
+		terminal = isSubagentToolTerminal(context.toolCallId);
+		const batch = group_renderer.getBatch(context.toolCallId);
+		const grouped_members = group_renderer.shouldUseGroupLayout(context.toolCallId)
+			? batch.map((member) => ({
+					args: member.args,
+					results: member.results,
+					displayName: member.displayName,
+					terminal: isSubagentToolTerminal(member.toolCallId),
+				}))
+			: undefined;
+		const elapsedMs = grouped_members
+			? getGroupElapsedMs(batch)
+			: getSubagentElapsedMs(context.toolCallId);
+		if (!isRunning) {
+			unsubscribeTick(context.toolCallId);
+		} else {
+			subscribeTick(context.toolCallId, context.args, results, theme, context.invalidate);
+		}
+		if (!details) {
+			const outputBlock = result.content.find((item) => item.type === "text");
+			const output = outputBlock?.type === "text" ? outputBlock.text : "(no output)";
+			return new Text(output ?? "(no output)", 0, 0);
+		}
+
+		const shell = context.state.shell;
+		if (shell instanceof Container) {
+			shell.clear();
+			const layout = buildSubagentLayoutComponent(
+				context.args,
+				results,
+				theme,
+				elapsedMs,
+				grouped_members,
+				terminal,
+			);
+			context.state.layout = layout;
+			shell.addChild(layout);
+		}
+
+		if (expanded && !isRunning && details && details.results.length > 0) {
+			const expandedContent = renderSubagentExpanded(details, theme);
+			if (expandedContent) return expandedContent;
+		}
+
+		return new Text("", 0, 0);
+	}
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
@@ -671,6 +852,19 @@ export default function (pi: ExtensionAPI) {
 				onProgress?: (partial: SubAgentResult) => void,
 				displayName?: string,
 				onToolCall?: (partial: SubAgentResult) => void,
+				runOptions?: {
+					checkpoint?: {
+						parentSessionId: string;
+						originToolCallId: string;
+						displayName: string;
+						agentName: string;
+					};
+					resume?: {
+						parentSessionId: string;
+						originToolCallId: string;
+						displayName: string;
+					};
+				},
 			): Promise<SubAgentResult> {
 				const agent = resolveAgent(agents, agentName);
 
@@ -729,7 +923,7 @@ export default function (pi: ExtensionAPI) {
 					agent.tools ?? defaultTools,
 					model_provider_of(resolved.model),
 				);
-				tools = tools.filter((t) => t !== "subagent");
+				tools = without_subagent_delegation_tools(tools);
 
 				return runSubAgent({
 					cwd: cwd ?? ctx.cwd,
@@ -746,6 +940,8 @@ export default function (pi: ExtensionAPI) {
 					thinkingLevel: agent.thinking,
 					onMessage: onProgress,
 					onToolCall,
+					checkpoint: runOptions?.checkpoint,
+					resume: runOptions?.resume,
 				});
 			}
 
@@ -823,25 +1019,24 @@ export default function (pi: ExtensionAPI) {
 
 					const isError = isFailedResult(result);
 					if (isError) {
-						const errorMsg = getResultOutput(result);
 						if (onUpdate) {
 							onUpdate({
-								content: [{ type: "text", text: errorMsg }],
+								content: agent_tool_result_content(result),
 								details: makeDetails("chain")(results),
 							});
 						}
-						// Include successful previous step outputs in the error content
 						const prevCount = i;
-						let contentText = `Chain stopped at step ${i + 1} (${stepAgentName}): ${errorMsg}`;
+						let contentText: string;
 						if (prevCount > 0) {
 							const prevSummaries = results
 								.slice(0, prevCount)
-								.map((r, j) => {
-									const out = getResultOutput(r).slice(0, 500);
-									return `Step ${j + 1} (${r.agent}): ${out}`;
-								})
-								.join("\n");
-							contentText = `Chain stopped at step ${i + 1}/${params.chain.length}. ${prevCount} previous step(s) succeeded:\n\n${prevSummaries}\n\nError at step ${i + 1} (${stepAgentName}): ${errorMsg}`;
+								.map((r) =>
+									format_agent_tool_result_text(r, (body) => body.slice(0, 500)),
+								)
+								.join("\n\n");
+							contentText = `Chain stopped at step ${i + 1}/${params.chain.length}. ${prevCount} previous step(s) succeeded:\n\n${prevSummaries}\n\nError at step ${i + 1}:\n\n${format_agent_tool_result_text(result)}`;
+						} else {
+							contentText = `Chain stopped at step ${i + 1}/${params.chain.length}:\n\n${format_agent_tool_result_text(result)}`;
 						}
 						return {
 							content: [{ type: "text", text: contentText }],
@@ -854,7 +1049,7 @@ export default function (pi: ExtensionAPI) {
 
 					if (onUpdate) {
 						onUpdate({
-							content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+							content: agent_tool_result_content(result),
 							details: makeDetails("chain")(results),
 						});
 					}
@@ -862,7 +1057,7 @@ export default function (pi: ExtensionAPI) {
 
 				const last = results[results.length - 1];
 				return {
-					content: [{ type: "text", text: getFinalOutput(last.messages) || "(no output)" }],
+					content: agent_tool_result_content(last),
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -1035,13 +1230,6 @@ export default function (pi: ExtensionAPI) {
 				const cancelCount = results.filter(
 					(r) => r.stopReason === "aborted" && r.errorMessage?.includes("Cancelled"),
 				).length;
-				const summaries = results.map((r) => {
-					const output = truncateParallelOutput(getResultOutput(r));
-					const status = isFailedResult(r)
-						? `failed${r.stopReason ? ` (${r.stopReason})` : ""}`
-						: "completed";
-					return `### [${r.agent}] ${status}\n\n${output}`;
-				});
 
 				let headerText = `Parallel: ${successCount}/${results.length} succeeded`;
 				if (cancelCount > 0) headerText += ` (${cancelCount} cancelled)`;
@@ -1049,7 +1237,10 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `${headerText}\n\n${summaries.join("\n\n---\n\n")}`,
+							text: format_agent_tool_result_batch(results, {
+								header: headerText,
+								format_body: truncateParallelOutput,
+							}),
 						},
 					],
 					details: makeDetails("parallel")(results),
@@ -1059,8 +1250,10 @@ export default function (pi: ExtensionAPI) {
 			// --- Single mode ---
 			if (params.agent && params.task) {
 				const agentName = resolve_agent_name(params.agent);
+				const displayName = assign_agent_letter(agentName);
+				getSubagentGroupRenderer().setDisplayName(_toolCallId, displayName);
 				const thread = threadStore.createThread({
-					agentName,
+					agentName: displayName,
 					task: params.task,
 					mode: "single",
 					toolCallId: _toolCallId,
@@ -1075,7 +1268,7 @@ export default function (pi: ExtensionAPI) {
 					turns: 0,
 				};
 				const runningPlaceholder: SubAgentResult = {
-					agent: agentName,
+					agent: displayName,
 					task: params.task,
 					exitCode: -1,
 					messages: [],
@@ -1084,7 +1277,7 @@ export default function (pi: ExtensionAPI) {
 				};
 				if (onUpdate) {
 					onUpdate({
-						content: [{ type: "text", text: "(running...)" }],
+						content: agent_tool_result_content(runningPlaceholder),
 						details: makeDetails("single")([runningPlaceholder]),
 					});
 				}
@@ -1095,20 +1288,23 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					params.timeout,
 					(partial) => threadStore.updateThread(thread.id, { result: partial }),
-					undefined,
+					displayName,
 					(partial) => {
 						threadStore.updateThread(thread.id, { result: partial });
 						if (onUpdate) {
 							onUpdate({
-								content: [
-									{
-										type: "text",
-										text: getFinalOutput(partial.messages) || "(running...)",
-									},
-								],
+								content: agent_tool_result_content(partial),
 								details: makeDetails("single")([partial]),
 							});
 						}
+					},
+					{
+						checkpoint: {
+							parentSessionId: ctx.sessionManager.getSessionId(),
+							originToolCallId: _toolCallId,
+							displayName,
+							agentName,
+						},
 					},
 				);
 				threadStore.updateThread(thread.id, {
@@ -1123,27 +1319,21 @@ export default function (pi: ExtensionAPI) {
 
 				if (onUpdate) {
 					onUpdate({
-						content: [{ type: "text", text: getFinalOutput(result.messages) || "(running...)" }],
+						content: agent_tool_result_content(result),
 						details: makeDetails("single")([result]),
 					});
 				}
 
 				if (isError) {
-					const errorMsg = getResultOutput(result);
 					return {
-						content: [
-							{
-								type: "text",
-								text: `Agent ${result.stopReason || "failed"}: ${errorMsg}`,
-							},
-						],
+						content: agent_tool_result_content(result),
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
 				}
 
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: agent_tool_result_content(result),
 					details: makeDetails("single")([result]),
 				};
 			}
@@ -1161,115 +1351,188 @@ export default function (pi: ExtensionAPI) {
 		// ------------------------------------------------------------------
 
 		renderCall(args, theme, context) {
-			const group_renderer = getSubagentGroupRenderer();
-			const results = context.state.results ?? [];
-			group_renderer.register(context.toolCallId, args, results, context.invalidate);
-
-			if (!group_renderer.isOwner(context.toolCallId)) {
-				return new Text("", 0, 0);
-			}
-
-			let shell = context.state.shell;
-			if (!(shell instanceof Container)) {
-				shell = new Container();
-				context.state.shell = shell;
-			}
-			shell.clear();
-
-			const batch = group_renderer.getBatch(context.toolCallId);
-			const grouped_members =
-				group_renderer.shouldUseGroupLayout(context.toolCallId)
-					? batch.map((member) => ({ args: member.args, results: member.results }))
-					: undefined;
-			markSubagentRunning(context.toolCallId);
-			const elapsedMs = grouped_members
-				? getGroupElapsedMs(batch)
-				: getSubagentElapsedMs(context.toolCallId);
-			const layout = buildSubagentLayoutComponent(args, results, theme, elapsedMs, grouped_members);
-			context.state.layout = layout;
-			shell.addChild(layout);
-
-			const running = isSubagentDelegating(results) || anySubagentRunning(args, results);
-			if (running) {
-				subscribeTick(context.toolCallId, args, results, theme);
-			} else {
-				updateTickRecord(context.toolCallId, args, results, theme);
-			}
-			return shell;
+			return render_subagent_call(args, theme, context);
 		},
 
 		renderResult(result, { expanded }, theme, context) {
-			const group_renderer = getSubagentGroupRenderer();
-			const details = result.details as SubagentDetails | undefined;
-			const results = details?.results ?? [];
-			context.state.results = results;
-			group_renderer.register(context.toolCallId, context.args, results, context.invalidate);
+			return render_subagent_result(result, expanded === true, theme, context);
+		},
+	});
 
-			if (!group_renderer.isOwner(context.toolCallId)) {
-				const owner = group_renderer.getBatch(context.toolCallId)[0];
-				owner?.invalidate?.();
-				return new Text("", 0, 0);
-			}
-
-			const isRunning = details
-				? isSubagentDelegating(results) || anySubagentRunning(context.args, results)
-				: false;
-			markSubagentRunning(context.toolCallId);
-			if (!isRunning) {
-				markSubagentTerminal(context.toolCallId);
-			}
-			const batch = group_renderer.getBatch(context.toolCallId);
-			const grouped_members =
-				group_renderer.shouldUseGroupLayout(context.toolCallId)
-					? batch.map((member) => ({ args: member.args, results: member.results }))
-					: undefined;
-			const elapsedMs = grouped_members
-				? getGroupElapsedMs(batch)
-				: getSubagentElapsedMs(context.toolCallId);
-			// Unsubscribe the stable tick callback when the tool call is
-			// terminal (no agents running). This is idempotent — if the
-			// record was already removed (e.g. a second renderResult), the
-			// unsubscribe is a no-op.
-			if (!isRunning) {
-				unsubscribeTick(context.toolCallId);
-			} else {
-				subscribeTick(context.toolCallId, context.args, results, theme);
-			}
-			if (!details) {
-				const outputBlock = result.content.find(
-					(item: { type: string; text?: string }) => item.type === "text",
-				);
-				const output = outputBlock?.type === "text" ? outputBlock.text : "(no output)";
-				return new Text(output, 0, 0);
+	pi.registerTool({
+		name: SUBAGENT_RESUME_TOOL_NAME,
+		label: "Subagent Resume",
+		description:
+			"Continue a prior single-mode subagent by its lettered display name (e.g. Coder A). Requires a persisted child session from an earlier subagent call in this parent session.",
+		parameters: SubagentResumeParams,
+		renderShell: "self",
+		promptSnippet: "Continue a prior subagent (Coder A, Scout B, …)",
+		promptGuidelines: [
+			"Use subagent_resume when a prior lettered subagent (e.g. Coder A) should continue the same isolated session with a follow-up task.",
+			"Resume only works for single-mode subagent runs, not parallel or chain batches.",
+			"Spawn the initial run with subagent before calling subagent_resume.",
+		],
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const resolved = resolve_resume_target(ctx, params.agent);
+			if (!resolved.ok) {
+				return {
+					content: [{ type: "text", text: resolved.error }],
+					details: {
+						mode: "single" as const,
+						agentScope: "user" as const,
+						projectAgentsDir: null,
+						results: [],
+					},
+					isError: true,
+				};
 			}
 
-			// Rebuild the layout Container with the latest statuses.
-			// renderResult runs after renderCall in updateDisplay, so this
-			// wins the paint. The shell from renderCall is reused — we
-			// replace the layout child in the shell.
-			const shell = context.state.shell;
-			if (shell instanceof Container) {
-				shell.clear();
-				const layout = buildSubagentLayoutComponent(
-					context.args,
-					results,
-					theme,
-					elapsedMs,
-					grouped_members,
-				);
-				context.state.layout = layout;
-				shell.addChild(layout);
+			const target = resolved.target;
+			const discovery = discoverAgents(ctx.cwd, "user", bundledAgentsDir);
+			const agent = resolveAgent(discovery.agents, target.agentName);
+			if (!agent) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Unknown agent for resume target "${target.displayName}": ${target.agentName}`,
+						},
+					],
+					details: {
+						mode: "single" as const,
+						agentScope: "user" as const,
+						projectAgentsDir: discovery.projectAgentsDir,
+						results: [],
+					},
+					isError: true,
+				};
 			}
 
-			// Expanded view (Ctrl+O): detailed per-agent output with a background
-			// on each completed agent rather than the entire subagent block.
-			if (expanded && !isRunning && details && details.results.length > 0) {
-				const expandedContent = renderSubagentExpanded(details, theme);
-				if (expandedContent) return expandedContent;
+			const displayName = target.displayName;
+			getSubagentGroupRenderer().setDisplayName(_toolCallId, displayName);
+			const thread = threadStore.createThread({
+				agentName: displayName,
+				task: params.task,
+				mode: "single",
+				toolCallId: _toolCallId,
+			});
+
+			const modelRegistry = ctx.modelRegistry;
+			const resolvedModel = resolveModel(agent.model, ctx.model, ctx.modelRegistry);
+			if (!resolvedModel.model) {
+				const tried = resolvedModel.attempted.join(", ") || "none";
+				return {
+					content: [{ type: "text", text: `Model not found for resume target (tried: ${tried}).` }],
+					details: {
+						mode: "single" as const,
+						agentScope: "user" as const,
+						projectAgentsDir: discovery.projectAgentsDir,
+						results: [],
+					},
+					isError: true,
+				};
 			}
 
-			// Collapsed: the shell from renderCall is the visible component.
-			return new Text("", 0, 0);
+			let tools = with_provider_patch_tool(
+				agent.tools ?? [...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS],
+				model_provider_of(resolvedModel.model),
+			);
+			tools = without_subagent_delegation_tools(tools);
+
+			const runningPlaceholder: SubAgentResult = {
+				agent: displayName,
+				task: params.task,
+				exitCode: -1,
+				messages: [],
+				stderr: "",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					cost: 0,
+					contextTokens: 0,
+					turns: 0,
+				},
+			};
+			const makeDetails = (results: SubAgentResult[]): SubagentDetails => ({
+				mode: "single",
+				agentScope: "user",
+				projectAgentsDir: discovery.projectAgentsDir,
+				results,
+			});
+
+			if (onUpdate) {
+				onUpdate({
+					content: agent_tool_result_content(runningPlaceholder),
+					details: makeDetails([runningPlaceholder]),
+				});
+			}
+
+			const result = await runSubAgent({
+				cwd: params.cwd ?? target.cwd ?? ctx.cwd,
+				systemPrompt: params.instructions
+					? `${agent.systemPrompt}\n\n## Task Contract\n${params.instructions.slice(0, 16 * 1024)}`
+					: agent.systemPrompt,
+				task: params.task,
+				tools,
+				model: resolvedModel.model,
+				modelRegistry,
+				parentSignal: signal,
+				timeoutMs: params.timeout,
+				agentName: displayName,
+				thinkingLevel: agent.thinking,
+				onMessage: (partial) => threadStore.updateThread(thread.id, { result: partial }),
+				onToolCall: (partial) => {
+					threadStore.updateThread(thread.id, { result: partial });
+					onUpdate?.({
+						content: agent_tool_result_content(partial),
+						details: makeDetails([partial]),
+					});
+				},
+				resume: {
+					parentSessionId: target.parentSessionId,
+					originToolCallId: target.originToolCallId,
+					displayName,
+				},
+			});
+
+			threadStore.updateThread(thread.id, {
+				status: isFailedResult(result)
+					? result.stopReason === "aborted"
+						? "aborted"
+						: "failed"
+					: "completed",
+				result,
+			});
+
+			if (onUpdate) {
+				onUpdate({
+					content: agent_tool_result_content(result),
+					details: makeDetails([result]),
+				});
+			}
+
+			if (isFailedResult(result)) {
+				return {
+					content: agent_tool_result_content(result),
+					details: makeDetails([result]),
+					isError: true,
+				};
+			}
+
+			return {
+				content: agent_tool_result_content(result),
+				details: makeDetails([result]),
+			};
+		},
+
+		renderCall(args, theme, context) {
+			return render_subagent_call(args, theme, context);
+		},
+
+		renderResult(result, { expanded }, theme, context) {
+			return render_subagent_result(result, expanded === true, theme, context);
 		},
 	});
 	// /agent command — switch between subagent threads.
@@ -1372,21 +1635,11 @@ export default function (pi: ExtensionAPI) {
 				const selectList = new SelectList(
 					items.map((it) => ({ value: it.value, label: it.label, description: it.description })),
 					Math.min(items.length + 2, 15),
-					{
-						selectedPrefix: (t: string) => theme.fg("accent", t),
-						selectedText: (t: string) => theme.fg("accent", t),
-						description: (t: string) => theme.fg("muted", t),
-						scrollInfo: (t: string) => theme.fg("dim", t),
-						noMatch: (t: string) => theme.fg("warning", t),
-					},
+					buildSelectListTheme(theme as unknown as Theme),
 				);
 				selectList.onSelect = (item) => done(item.value);
 				selectList.onCancel = () => done(null);
 				container.addChild(selectList);
-
-				container.addChild(
-					new Text(`${theme.fg("dim", "↑↓ navigate · enter select · esc back")}`, 1, 0),
-				);
 
 				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 

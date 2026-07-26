@@ -64,6 +64,17 @@ export function setShellMode(active: boolean): void {
 	(globalThis as GlobalThis)[SHELL_MODE_KEY] = active;
 }
 
+/** User `!` bash is actively streaming in the transcript (not shell-mode typing). */
+const USER_BASH_RUNNING_KEY = Symbol.for("pi-ember-ui:user-bash-running");
+
+export function isUserBashRunning(): boolean {
+	return (globalThis as GlobalThis)[USER_BASH_RUNNING_KEY] === true;
+}
+
+export function setUserBashRunning(active: boolean): void {
+	(globalThis as GlobalThis)[USER_BASH_RUNNING_KEY] = active;
+}
+
 /** Quiz-overlay-active flag stored on `globalThis` via `Symbol.for`
  *  so it survives jiti module duplication (same pattern as SHELL_MODE_KEY).
  *  Set by the quiz tool when a custom overlay opens/closes. Read
@@ -105,6 +116,84 @@ export function isTurnToolTranscriptActive(): boolean {
 
 export function setTurnToolTranscriptActive(active: boolean): void {
 	(globalThis as GlobalThis)[TURN_TOOL_TRANSCRIPT_ACTIVE_KEY] = active;
+}
+
+let agentRunPending = false;
+
+/** Whether Pi may still auto-retry, compact, or continue follow-ups this turn. */
+export function isAgentRunPending(): boolean {
+	return agentRunPending;
+}
+
+export function setAgentRunPending(active: boolean): void {
+	agentRunPending = active;
+}
+
+/** Set on visible user `message_start`; cleared on `agent_settled` / `session_shutdown`. */
+let userTurnCommitted = false;
+/** Visible user message timestamp for the active turn — excludes pre-turn assistant hosts. */
+let userTurnAnchorTimestamp: number | undefined;
+
+export function isCurrentTurnAssistantTimestamp(timestamp: number | undefined): boolean {
+	if (timestamp === undefined) return false;
+	if (userTurnAnchorTimestamp === undefined) return true;
+	return timestamp >= userTurnAnchorTimestamp;
+}
+
+export function setUserTurnAnchorTimestamp(timestamp: number | undefined): void {
+	userTurnAnchorTimestamp = timestamp;
+}
+
+export function isUserTurnCommitted(): boolean {
+	return userTurnCommitted;
+}
+
+export function setUserTurnCommitted(active: boolean): void {
+	userTurnCommitted = active;
+	if (!active) userTurnAnchorTimestamp = undefined;
+}
+
+/**
+ * SSOT: agent is in the idle-thinking wait state (no tool/subagent in flight).
+ * `thinkingActive` is passed from pi-ember-ui when a thinking stream has started.
+ *
+ * `userTurnCommitted` gates idle display between turns. `agentRunPending` alone
+ * is sufficient during compact-and-continue / auto-continue sub-runs where
+ * `agent_settled` clears the user flag before the next `agent_start`.
+ */
+export function is_agent_thinking_wait(thinkingActive = false): boolean {
+	if (!agentRunPending && !thinkingActive) return false;
+	if (!userTurnCommitted && !agentRunPending) return false;
+	if (toolExecutionInFlight > 0) return false;
+	if (latestSubagentRunningFlag || subagentActivityActive) return false;
+	if (isSubagentDelegatingActive()) return false;
+	if ((globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] === true) return false;
+	return true;
+}
+
+let toolExecutionInFlight = 0;
+
+export function isToolExecutionInFlight(): boolean {
+	return toolExecutionInFlight > 0;
+}
+
+export function markToolExecutionStarted(): void {
+	toolExecutionInFlight += 1;
+}
+
+export function markToolExecutionEnded(): void {
+	toolExecutionInFlight = Math.max(0, toolExecutionInFlight - 1);
+}
+
+export function resetToolExecutionInFlight(): void {
+	toolExecutionInFlight = 0;
+}
+
+/** Between tool batches while the agent is still working (OpenAI/Codex planning text). */
+export function isInterRunGap(): boolean {
+	return (
+		agentRunPending && !isToolExecutionInFlight() && isTurnToolTranscriptActive()
+	);
 }
 
 let latestSubagentRunningFlag = false;
@@ -185,6 +274,29 @@ export function resetSubagentActivity(): void {
 	subagentActivityCount = 0;
 	subagentActivityActive = false;
 	setLatestSubagentRunning(false);
+	resetSubagentDelegating();
+}
+
+const subagentDelegatingToolCallIds = new Set<string>();
+
+/** Parent subagent tool is streaming/executing but child placeholders are not published yet. */
+export function isSubagentDelegatingActive(): boolean {
+	return subagentDelegatingToolCallIds.size > 0;
+}
+
+/** Idempotent — safe from subagent renderCall while Delegating is visible. */
+export function noteSubagentDelegating(toolCallId: string): void {
+	if (!toolCallId) return;
+	subagentDelegatingToolCallIds.add(toolCallId);
+}
+
+export function clearSubagentDelegating(toolCallId: string): void {
+	if (!toolCallId) return;
+	subagentDelegatingToolCallIds.delete(toolCallId);
+}
+
+export function resetSubagentDelegating(): void {
+	subagentDelegatingToolCallIds.clear();
 }
 
 let thinkingBlocksHidden = false;

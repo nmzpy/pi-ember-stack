@@ -1,14 +1,17 @@
 /**
  * Transcript rendering for the `todo` tool — neutral text/dim/muted tokens only.
- * Consecutive `todo` calls fold into one header with tree child rows (compact-group
- * pattern): only the first call renders; later calls update the shared block.
+ * Consecutive `todo` calls in one assistant burst fold into one header with tree
+ * child rows: only the latest call renders at its transcript position; earlier
+ * calls in the burst collapse to zero height. User messages start a fresh group.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { BULLET, CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { statusBulletColor } from "../pi-compact-tools/renderer.ts";
+import { flatten_todo_timeline, todo_group_boundary_before } from "./timeline.ts";
 
 type TaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 
@@ -127,6 +130,8 @@ interface TodoCallRecord {
 	id: string;
 	tasks: TranscriptTask[];
 	error?: string;
+	group?: TodoGroup;
+	invalidate?: () => void;
 }
 
 interface TodoGroup {
@@ -156,15 +161,26 @@ export class TodoRenderer {
 
 	registerCall(id: string): TodoCallRecord {
 		const existing = this.calls.get(id);
-		if (existing) return existing;
+		if (existing) {
+			if (existing.group && !this.currentGroup) {
+				this.currentGroup = existing.group;
+			}
+			return existing;
+		}
 
 		const record: TodoCallRecord = { id, tasks: [] };
 		this.calls.set(id, record);
 
 		if (this.currentGroup) {
+			const prev_owner = this.currentGroup.renderOwner;
 			this.currentGroup.records.push(record);
+			record.group = this.currentGroup;
+			this.currentGroup.renderOwner = record;
+			if (prev_owner !== record) prev_owner.invalidate?.();
 		} else {
-			this.currentGroup = { records: [record], renderOwner: record };
+			const group: TodoGroup = { records: [record], renderOwner: record };
+			this.currentGroup = group;
+			record.group = group;
 		}
 		return record;
 	}
@@ -177,8 +193,7 @@ export class TodoRenderer {
 	}
 
 	private groupFor(record: TodoCallRecord): TodoGroup | undefined {
-		if (!this.currentGroup?.records.includes(record)) return undefined;
-		return this.currentGroup;
+		return record.group;
 	}
 
 	latest_group_snapshot(group: TodoGroup): { tasks: TranscriptTask[]; error?: string } {
@@ -190,10 +205,26 @@ export class TodoRenderer {
 		return { tasks: [], error: undefined };
 	}
 
-	private sync_group_text(group: TodoGroup, theme: Theme): void {
-		if (!group.callText) return;
-		const { tasks, error } = this.latest_group_snapshot(group);
-		group.callText.setText(format_todo_block(tasks, theme, error));
+	private bind_call_text(
+		group: TodoGroup | undefined,
+		theme: Theme,
+		context: ToolRenderContext,
+		fallback_tasks: TranscriptTask[],
+		fallback_error?: string,
+	): CompactGroupText {
+		const callText =
+			context.state.callText instanceof CompactGroupText
+				? context.state.callText
+				: group?.callText instanceof CompactGroupText
+					? group.callText
+					: new CompactGroupText();
+		context.state.callText = callText;
+		if (group) group.callText = callText;
+		const snapshot = group ? this.latest_group_snapshot(group) : { tasks: fallback_tasks, error: fallback_error };
+		const display_tasks = snapshot.tasks.length > 0 ? snapshot.tasks : fallback_tasks;
+		const display_error = snapshot.error ?? fallback_error;
+		callText.setText(format_todo_block(display_tasks, theme, display_error));
+		return callText;
 	}
 
 	renderCall(
@@ -203,24 +234,14 @@ export class TodoRenderer {
 		error?: string,
 	): Component {
 		const record = this.registerCall(context.toolCallId);
+		record.invalidate = context.invalidate;
 		const group = this.groupFor(record);
 
-		if (group && group.records.length > 1 && group.renderOwner !== record) {
+		if (group && group.renderOwner !== record) {
 			return new Text("", 0, 0);
 		}
 
-		const callText =
-			context.state.callText instanceof CompactGroupText
-				? context.state.callText
-				: new CompactGroupText();
-		context.state.callText = callText;
-		if (group) group.callText = callText;
-
-		const snapshot = group ? this.latest_group_snapshot(group) : { tasks, error };
-		const display_tasks = snapshot.tasks.length > 0 ? snapshot.tasks : tasks;
-		const display_error = snapshot.error ?? error;
-		callText.setText(format_todo_block(display_tasks, theme, display_error));
-		return callText;
+		return this.bind_call_text(group, theme, context, tasks, error);
 	}
 
 	renderResult(
@@ -229,14 +250,14 @@ export class TodoRenderer {
 		context: ToolRenderContext,
 		error?: string,
 	): Component {
+		const record = this.registerCall(context.toolCallId);
+		record.invalidate = context.invalidate;
 		this.setResult(context.toolCallId, tasks, error);
-		const record = this.calls.get(context.toolCallId);
-		if (!record) return new Text("", 0, 0);
 
 		const group = this.groupFor(record);
 		if (group) {
-			this.sync_group_text(group, theme);
-			if (group.records.length > 1 && group.renderOwner !== record) {
+			this.bind_call_text(group, theme, context, tasks, error);
+			if (group.renderOwner !== record) {
 				return new Text("", 0, 0);
 			}
 		}
@@ -249,4 +270,34 @@ let shared_renderer: TodoRenderer | undefined;
 export function getSharedTodoRenderer(): TodoRenderer {
 	if (!shared_renderer) shared_renderer = new TodoRenderer();
 	return shared_renderer;
+}
+
+/** Point-in-time task snapshots from branch tool results — SSOT for Pi rebuilds. */
+export function seed_todo_renderer_from_branch(
+	branch: SessionEntry[],
+	renderer: TodoRenderer,
+): void {
+	const result_by_id = new Map<string, { tasks: TranscriptTask[]; error?: string }>();
+	for (const entry of branch) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+		if (msg?.role !== "toolResult" || msg.toolName !== "todo") continue;
+		const id = msg.toolCallId;
+		const details = msg.details as { tasks?: TranscriptTask[]; error?: string } | undefined;
+		if (typeof id !== "string" || !details || !Array.isArray(details.tasks)) continue;
+		result_by_id.set(id, { tasks: details.tasks, error: details.error });
+	}
+
+	const timeline = flatten_todo_timeline(branch);
+	for (const entry of timeline) {
+		if (entry.kind !== "tool" || entry.name !== "todo") continue;
+		if (todo_group_boundary_before(timeline, entry.id)) {
+			renderer.settleGroup();
+		}
+		renderer.registerCall(entry.id);
+		const snapshot = result_by_id.get(entry.id);
+		if (snapshot) {
+			renderer.setResult(entry.id, snapshot.tasks, snapshot.error);
+		}
+	}
 }

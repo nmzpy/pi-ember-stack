@@ -28,6 +28,27 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { CompactGroupText } from "../pi-compact-tools/compact-text.ts";
+import { sync_compact_group_flags } from "../pi-compact-tools/group-flags.ts";
+import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
+import { render_thinking_gradient_label } from "./thinking-status-render.ts";
+import {
+	bind_thinking_in_message_host,
+	bind_thinking_widget_host,
+	set_thinking_status_render_request,
+	sync_thinking_status_tick,
+	unbind_thinking_status_hosts,
+} from "./thinking-status-tick.ts";
+import {
+	apply_assistant_stream_boundary,
+	resolve_assistant_stream_boundary_event,
+} from "./assistant-stream-boundary.ts";
+import {
+	bind_compaction_status_indicator,
+	format_compacted_row,
+	format_compacting_row,
+	unbind_compaction_status_indicator,
+} from "./compaction-render.ts";
 import {
 	activate_gradient,
 	clamp_lerp,
@@ -64,6 +85,7 @@ import {
 	isQuizActive,
 	isScrollReviewActive,
 	isShellMode,
+	isUserBashRunning,
 	isGroupThinkingChildActive,
 	isSubagentActivityActive,
 	isToolGroupActive,
@@ -77,12 +99,24 @@ import {
 	setPlanAutoContinuing,
 	setScrollReviewActive,
 	setShellMode,
+	setUserBashRunning,
+	isAgentRunPending,
+	isInterRunGap,
 	isThinkingBlocksHidden,
-	setThinkingBlocksHidden,
+	isUserTurnCommitted,
+	is_agent_thinking_wait,
+	markToolExecutionEnded,
+	markToolExecutionStarted,
+	resetToolExecutionInFlight,
+	setAgentRunPending,
 	setGroupReopenableActive,
 	setToolGroupActive,
 	setGroupThinkingChildActive,
 	setTurnToolTranscriptActive,
+	setThinkingBlocksHidden,
+	setUserTurnCommitted,
+	setUserTurnAnchorTimestamp,
+	isCurrentTurnAssistantTimestamp,
 	TEXT_COLOR,
 	isTurnToolTranscriptActive,
 } from "./mode-colors.ts";
@@ -108,6 +142,7 @@ export {
 	installEmberFooter,
 	model_name_has_thinking_variant as modelNameHasThinkingVariant,
 	recompute_footer_stats as recomputeFooterStats,
+	refresh_footer,
 	refresh_footer as refreshFooter,
 	reset_footer_state as resetFooterState,
 	schedule_footer_stats as scheduleFooterStats,
@@ -131,6 +166,7 @@ export {
 	install_shell_history_sync_patch as installShellHistorySyncPatch,
 	intercept_shell_input as interceptShellInput,
 	process_shell_input as processShellInput,
+	submit_shell_command_from_editor as submitShellCommandFromEditor,
 	type ShellModeEditor,
 	set_shell_sync_callback as setShellSyncCallback,
 	sync_shell_mode_from_editor_text as syncShellModeFromEditorText,
@@ -152,6 +188,12 @@ import {
 	set_shell_sync_callback as setShellSyncCallback,
 } from "./shell-mode.ts";
 import { notify_theme_refresh } from "./theme-refresh.ts";
+import {
+	bind_thinking_wait_handlers,
+	is_planning_style_text_delta,
+	sync_thinking_wait_ui,
+} from "./thinking-wait.ts";
+import { build_transcript_entries } from "./transcript-entries.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const THEME_JSON = path.join(SOURCE_ROOT, "ember.json");
@@ -252,20 +294,6 @@ function placeBoxShadow(
 }
 
 let thinkingActive = false;
-/** Whether the agent loop is still running across retries/compaction/
- *  queued follow-ups. `agent_end` fires between each low-level run, but
- *  Pi may auto-retry, auto-compact and retry, or continue with queued
- *  follow-ups afterwards — only `agent_settled` means Pi will not run
- *  again automatically. This flag keeps the `Thinking` label
- *  visible during inter-run gaps so the header state is never
- *  lost while the agent is still working on the user's task. Cleared on
- *  `agent_settled` and `session_shutdown` (the safety floor). */
-let agentRunPending = false;
-/** Whether context compaction (manual, threshold, or overflow recovery)
- *  is in progress. When true the Thinking widget displays `Summarizing`
- *  with the Thinking accent gradient and hides the Thinking label.
- *  Cleared on compaction_end and `session_shutdown`. */
-let summarizingActive = false;
 let logoAnimating = false;
 let logoStatic = true;
 /** Cleared on session_start; set when the user sends their first visible message. */
@@ -276,7 +304,7 @@ const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
 let turnStartedAt = 0;
 /** Monotonic start of the current Thinking pass — reset on each arm, shown inline. */
 let thinkingPassStartedAt = 0;
-let thinkingTimerTickCb: (() => void) | undefined;
+/** Rebound on latest assistant updateContent — drives 20 FPS in-message gradient. */
 let latestAssistantMessageTimestamp: number | undefined;
 /** Latest assistant message has mounted an in-transcript Thinking host. */
 let assistantThinkingHostReady = false;
@@ -295,94 +323,159 @@ export function formatElapsed(ms: number): string {
 	return `${minutes}m ${seconds}s`;
 }
 
-/** Reset the live Thinking-pass timer (each header arm starts fresh). */
+/** Reset the live Thinking-pass timer (each new header arm starts fresh). */
 export function reset_thinking_pass_timer(): void {
 	thinkingPassStartedAt = performance.now();
+}
+
+/** Whether a thinking-pass timer is already running for the current header. */
+export function is_thinking_pass_timer_armed(): boolean {
+	return thinkingPassStartedAt > 0;
+}
+
+/** Test seam: pin pass start time so elapsed suffix tests are deterministic. */
+export function set_thinking_pass_started_at_for_tests(at: number): void {
+	thinkingPassStartedAt = at;
 }
 
 /** Dim elapsed suffix for Thinking labels — SSOT for widget + in-group rows. */
 export function format_thinking_pass_elapsed_suffix(theme: {
 	fg: (color: string, text: string) => string;
 }): string {
-	if (summarizingActive || thinkingPassStartedAt <= 0) return "";
+	if (thinkingPassStartedAt <= 0) return "";
 	const elapsedMs = performance.now() - thinkingPassStartedAt;
 	if (elapsedMs < 1000) return "";
 	return theme.fg("dim", ` ${formatElapsed(elapsedMs)}`);
 }
 
-function ensure_thinking_timer_tick(): void {
-	if (thinkingTimerTickCb) return;
-	thinkingTimerTickCb = (): void => {
-		if (thinking_status_should_show() || isGroupThinkingChildActive()) {
-			requestRender?.();
-		}
-	};
-	subscribe_gradient_tick(thinkingTimerTickCb);
+function build_thinking_status_row_text(host: "widget" | "in_message"): string {
+	const WIDGET_INSET = 1;
+	const widgetPad = host === "widget" ? " ".repeat(WIDGET_INSET) : "";
+	const theme = resolve_live_theme();
+	const labelGradient = render_thinking_gradient_label();
+	const elapsedColored = format_thinking_pass_elapsed_suffix(theme);
+	return `${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`;
 }
 
-function drop_thinking_timer_tick(): void {
-	if (!thinkingTimerTickCb) return;
-	unsubscribe_gradient_tick(thinkingTimerTickCb);
-	thinkingTimerTickCb = undefined;
+/** Keep the thinking gradient clock aligned with visible Thinking UI. */
+export function sync_thinking_gradient_clock(): void {
+	const should_run = thinking_status_should_show() || isGroupThinkingChildActive();
+	if (should_run) {
+		activate_gradient("thinking");
+	} else {
+		deactivate_gradient("thinking");
+	}
+	sync_thinking_status_tick(should_run);
 }
 
-/** Whether the in-transcript assistant bubble should host Thinking (only the
- *  pre-tool wait right below the user message). After any tool rows appear,
- *  the above-editor widget owns Thinking so it stays near the live tail. */
-function thinking_uses_in_message_host(): boolean {
-	return assistantThinkingHostReady && !isTurnToolTranscriptActive();
+/** Whether the latest assistant message belongs to the current user turn. */
+export function is_current_turn_assistant_timestamp(timestamp: number | undefined): boolean {
+	return isCurrentTurnAssistantTimestamp(timestamp);
 }
 
-/** Whether any Thinking/Summarizing host should paint a status line. */
+/** Whether a running compact group (not the in-group Thinking lane) blocks the header. */
+function running_compact_group_blocks_thinking_header(): boolean {
+	const renderer = getSharedRenderer();
+	return renderer.hasActiveGroups() && !renderer.hasGroupThinkingChild();
+}
+
+/** Inter-run gap with lingering tool rows — keep children visible, no fake Thinking. */
+function lingering_tool_children_block_thinking_header(): boolean {
+	if (!isInterRunGap() || !isThinkingBlocksHidden()) return false;
+	return getSharedRenderer().hasVisibleGroupChildren();
+}
+
+/** Test seam for lingering-tool suppression of external Thinking. */
+export function lingering_tool_children_visible_for_tests(): boolean {
+	return lingering_tool_children_block_thinking_header();
+}
+
+/** In-group `└ Thinking` owns the status slot only when the live compact
+ *  group is actually painting that row (renderer SSOT — not the synced flag). */
+export function compact_thinking_lane_owns_status(): boolean {
+	if (!isThinkingBlocksHidden() || !isTurnToolTranscriptActive()) return false;
+	return getSharedRenderer().hasGroupThinkingChild();
+}
+
+/** SSOT: mutually exclusive surface for the gradient Thinking row. */
+export function resolve_thinking_status_host(): "in_message" | "widget" | null {
+	if (!thinking_status_should_show()) return null;
+	if (compact_thinking_lane_owns_status()) return null;
+	// Pre-tool: above-editor widget until the first tool row lands in the transcript.
+	if (is_pre_tool_thinking_gap()) return "widget";
+	if (assistantThinkingHostReady) return "in_message";
+	return "widget";
+}
+
+/** Pre-tool wait: user just sent, no tool rows on screen yet this turn. */
+export function is_pre_tool_thinking_gap(): boolean {
+	return isAgentRunPending() && !isTurnToolTranscriptActive();
+}
+
+/** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
-	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return false;
-	if (summarizingActive) return true;
-	if (!agentRunPending && !thinkingActive) return false;
-	// Thinking blocks visible — user sees the stream; gradient header is redundant.
+	if (!is_agent_thinking_wait(thinkingActive)) return false;
+
+	const pre_tool = is_pre_tool_thinking_gap();
+	// Right after send: always show feedback, even when thinking blocks are visible
+	// or stale in-group flags from the prior turn have not cleared yet.
+	if (pre_tool) return !thinkingHeaderSuppressed;
+
+	// Live thinking/reasoning stream — keep the gradient header even when thinking
+	// blocks are visible in the transcript (starter must not vanish on first delta).
+	// When blocks are hidden the in-group `└ Thinking` row owns the slot only if
+	// the renderer is actually painting it; otherwise fall back to external hosts.
+	if (thinkingActive) {
+		if (thinkingHeaderSuppressed) return false;
+		if (compact_thinking_lane_owns_status()) return false;
+		if (running_compact_group_blocks_thinking_header()) return false;
+		return true;
+	}
+
 	if (!isThinkingBlocksHidden()) return false;
-	if (thinkingHeaderSuppressed || isToolGroupActive()) return false;
-	// In-group Thinking owns the status row only when the child row is actually painted.
-	if (isThinkingBlocksHidden() && isGroupThinkingChildActive()) return false;
+	if (thinkingHeaderSuppressed) return false;
+	if (compact_thinking_lane_owns_status()) return false;
+	if (running_compact_group_blocks_thinking_header()) return false;
+	if (lingering_tool_children_block_thinking_header()) return false;
 	return true;
 }
 
-/** Keep the thinking gradient clock aligned with visible Thinking/Summarizing UI. */
-export function sync_thinking_gradient_clock(): void {
-	if (summarizingActive) return;
-	// In-group Thinking rows under settled compact groups use the same
-	// "thinking" preset even though the external widget is suppressed.
-	if (thinking_status_should_show() || isGroupThinkingChildActive()) {
-		activate_gradient("thinking");
-		ensure_thinking_timer_tick();
-	} else {
-		deactivate_gradient("thinking");
-		drop_thinking_timer_tick();
+/**
+ * SSOT: whether a stream event should hide the gradient Thinking header.
+ * Bare text_start, empty deltas, pre-tool/inter-run gaps, and thinking events never suppress.
+ */
+export function should_suppress_thinking_header_for_stream_event(ev: {
+	type: string;
+	delta?: unknown;
+}): boolean {
+	if (ev.type === "thinking_start" || ev.type === "thinking_delta") return false;
+	if (is_pre_tool_thinking_gap() || isInterRunGap()) return false;
+	if (ev.type === "text_start") return false;
+	if (ev.type === "text_delta") {
+		const delta = typeof ev.delta === "string" ? ev.delta : "";
+		if (!delta.trim()) return false;
+		if (isThinkingBlocksHidden() && is_planning_style_text_delta(delta)) return false;
+		return true;
 	}
+	return false;
 }
 
-/** SSOT terminal padding around the Thinking/Summarizing status row. */
+/** SSOT terminal padding around the Thinking status row. */
 export function thinking_status_terminal_layout(
 	host: "widget" | "in_message" | "compact",
 ): { padAbove: number; padBelow: number } {
 	if (host === "compact") return { padAbove: 0, padBelow: 0 };
-	if (host === "in_message") return { padAbove: 1, padBelow: 1 };
-	// Above-editor widget: Pi owns the single chatbox gap below — no extra pad.
-	return { padAbove: 0, padBelow: 0 };
+	// In-message: one row only — the status line itself (no extra spacers).
+	if (host === "in_message") return { padAbove: 0, padBelow: 0 };
+	// Above-editor widget: one blank row between Thinking and the chatbox.
+	return { padAbove: 0, padBelow: 1 };
 }
 
-/** Shared Thinking / Summarizing status row used by the above-editor widget
- *  (pre-assistant) and the in-message ThinkingStatusComponent. */
-function render_thinking_status_lines(): string[] {
-	if (!thinking_status_should_show()) return [];
-	const WIDGET_INSET = 1;
-	const widgetPad = " ".repeat(WIDGET_INSET);
-	const theme = resolve_live_theme();
-	const label = summarizingActive ? "Summarizing" : "Thinking";
-	const labelGradient = renderLiveGradient(label, "thinking");
-	const elapsedColored = format_thinking_pass_elapsed_suffix(theme);
-	const row = `${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`;
-	const in_compact_group = isThinkingBlocksHidden() && isGroupThinkingChildActive();
-	const host = in_compact_group ? "compact" : thinking_uses_in_message_host() ? "in_message" : "widget";
+/** Shared Thinking status row — live gradient at render time (same path as in-group rows). */
+function render_thinking_status_lines(width: number): string[] {
+	const host = resolve_thinking_status_host();
+	if (!host) return [];
+	const row = truncateToWidth(build_thinking_status_row_text(host), Math.max(1, width));
 	const { padAbove, padBelow } = thinking_status_terminal_layout(host);
 	return [...Array(padAbove).fill(""), row, ...Array(padBelow).fill("")];
 }
@@ -409,20 +502,52 @@ export function resume_thinking_header_for_think_stream(): void {
 	}
 }
 
+/** Whether this assistant message should host the in-transcript Thinking row. */
+export function is_in_message_thinking_status_target(timestamp: number | undefined): boolean {
+	if (timestamp === undefined) return false;
+	if (resolve_thinking_status_host() !== "in_message") return false;
+	if (timestamp !== latestAssistantMessageTimestamp) return false;
+	return is_current_turn_assistant_timestamp(timestamp);
+}
+
+/** Test seam: pin in-message Thinking host ownership. */
+export function set_thinking_status_host_fixtures_for_tests(fixtures: {
+	latestAssistantMessageTimestamp?: number;
+	assistantThinkingHostReady?: boolean;
+}): void {
+	if (fixtures.latestAssistantMessageTimestamp !== undefined) {
+		latestAssistantMessageTimestamp = fixtures.latestAssistantMessageTimestamp;
+	}
+	if (fixtures.assistantThinkingHostReady !== undefined) {
+		assistantThinkingHostReady = fixtures.assistantThinkingHostReady;
+	}
+}
+
 class ThinkingStatusComponent implements Component {
 	messageTimestamp: number | undefined;
-	render(_width: number): string[] {
-		if (latestAssistantMessageTimestamp === undefined) return [];
-		if (this.messageTimestamp !== latestAssistantMessageTimestamp) return [];
-		if (!thinking_uses_in_message_host()) return [];
-		return render_thinking_status_lines();
+	render(width: number): string[] {
+		if (!is_in_message_thinking_status_target(this.messageTimestamp)) return [];
+		return render_thinking_status_lines(width);
 	}
 	invalidate(): void {
-		/* Lifecycle handlers request the normal native render. */
+		requestRender?.();
 	}
 }
 
 let requestRender: (() => void) | undefined;
+
+/** Bind Pi's public TUI render request — ctx.ui has no requestRender API. */
+function bind_live_tui_render(tui: { requestRender?: (force?: boolean) => void } | undefined): void {
+	if (!tui?.requestRender) return;
+	tuiRef = tui;
+	const schedule_render = (): void => {
+		tui.requestRender?.();
+	};
+	requestRender = schedule_render;
+	set_gradient_render_request(schedule_render);
+	set_thinking_status_render_request(schedule_render);
+}
+
 let sessionCtx: any;
 let shellInputUnsubscribe: (() => void) | undefined;
 let scrollReviewInputUnsubscribe: (() => void) | undefined;
@@ -451,7 +576,7 @@ function recompute_latest_subagent_running(): boolean {
 		const msg = entry.message;
 		if (msg?.role !== "assistant") continue;
 		for (const part of msg.content ?? []) {
-			if (part?.type === "toolCall" && part?.name === "subagent") {
+			if (part?.type === "toolCall" && (part?.name === "subagent" || part?.name === "subagent_resume")) {
 				latestSubagentCallId = part.id;
 				break;
 			}
@@ -473,6 +598,10 @@ function recompute_latest_subagent_running(): boolean {
 	}
 	setLatestSubagentRunning(running);
 	return running;
+}
+
+function is_subagent_delegation_tool(toolName: string | undefined): boolean {
+	return toolName === "subagent" || toolName === "subagent_resume";
 }
 
 /** Live-gradient tick subscribers are managed by gradient.ts.
@@ -607,7 +736,7 @@ function installScrollReviewInputListener(ctx: any): void {
 		}
 		if (
 			!isScrollReviewActive() &&
-			!agentRunPending &&
+			!isAgentRunPending() &&
 			(matchesKey(data, Key.pageUp) || matchesKey(data, Key.home))
 		) {
 			setScrollReviewActive(true);
@@ -621,53 +750,62 @@ function stopThinkingAnimation(): void {
 	refresh_thinking_status();
 }
 
+/** Test seam: clear leaked thinking-header module state between unit tests. */
+export function reset_thinking_header_state_for_tests(): void {
+	thinkingActive = false;
+	thinkingHeaderSuppressed = false;
+	assistantThinkingHostReady = false;
+	latestAssistantMessageTimestamp = undefined;
+	thinkingPassStartedAt = 0;
+}
+
 /** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
 export function arm_pre_token_thinking_status(): void {
 	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return;
+	sync_compact_group_flags(getSharedRenderer());
 	reset_thinking_pass_timer();
-	agentRunPending = true;
-	// Running tool children or a painted in-group Thinking row own the status slot.
-	if (isThinkingBlocksHidden() && (isToolGroupActive() || isGroupThinkingChildActive())) {
+	setAgentRunPending(true);
+	thinkingHeaderSuppressed = false;
+	// In-group Thinking owns the slot only when the renderer is painting that row.
+	if (compact_thinking_lane_owns_status()) {
 		refresh_thinking_status();
 		return;
 	}
-	thinkingHeaderSuppressed = false;
 	activate_gradient("thinking");
 	refresh_thinking_status();
 }
 
 function startThinkingAnimation(): void {
 	thinkingActive = true;
-	reset_thinking_pass_timer();
+	// Stream start is not a new header — keep elapsed time from arm_pre_token.
+	if (!is_thinking_pass_timer_armed()) reset_thinking_pass_timer();
 	activate_gradient("thinking");
 	refresh_thinking_status();
 }
 
-function startSummarizingAnimation(): void {
-	summarizingActive = true;
-	activate_gradient("summarizing");
-	refresh_thinking_status();
-}
-
-function stopSummarizingAnimation(): void {
-	summarizingActive = false;
-	deactivate_gradient("summarizing");
-	refresh_thinking_status();
+/** Mark the live thinking/reasoning stream active (header stays visible). */
+export function arm_thinking_stream_status(): void {
+	startThinkingAnimation();
 }
 
 /** Above-editor Thinking host: pre-tool wait (before transcript tools) and
  *  every later agent-work gap with no live tool children on screen. */
 function installThinkingWidget(ctx: any): void {
 	if (ctx.mode !== "tui") return;
-	ctx.ui.setWidget("ember-thinking", (_tui: any, _theme: any) => ({
-		render(_width: number): string[] {
-			if (thinking_uses_in_message_host()) return [];
-			return render_thinking_status_lines();
-		},
-		invalidate() {
-			/* gradient ticks repaint in-place */
-		},
-	}));
+	ctx.ui.setWidget("ember-thinking", (tui: any, _theme: any) => {
+		bind_live_tui_render(tui);
+		const host = {
+			render(width: number): string[] {
+				if (resolve_thinking_status_host() !== "widget") return [];
+				return render_thinking_status_lines(width);
+			},
+			invalidate(): void {
+				tui.requestRender?.();
+			},
+		};
+		bind_thinking_widget_host(host);
+		return host;
+	});
 }
 
 function wrapThemeWithCodeBg(base: Theme): Theme {
@@ -954,6 +1092,61 @@ export function renderGradientLabel(text: string, _accent?: string, _phaseOffset
 	return render_gradient(text, "thinking", get_gradient_phase());
 }
 
+/** Extra horizontal inset on each side while user bash output is streaming. */
+const USER_BASH_EXTRA_INSET = 1;
+const EDITOR_BASE_INNER_PAD = 1;
+const EDITOR_GUTTER_COLS = 2;
+
+/** Chatbox inner padding — +1 col/side while user bash is running. */
+export function shell_aware_editor_inner_pad(): number {
+	return EDITOR_BASE_INNER_PAD + (isUserBashRunning() ? USER_BASH_EXTRA_INSET : 0);
+}
+
+/** Border/prompt color for the shell-aware editor. */
+export function shell_aware_editor_border_hex(): string {
+	const muted = isShellMode() || isAgentRunPending();
+	if (isUserBashRunning()) {
+		const base = muted ? MUTED_COLOR : TEXT_COLOR;
+		return blendToHex(base, PAGE_BG, 0.5);
+	}
+	return muted ? MUTED_COLOR : TEXT_COLOR;
+}
+
+/** Left pad for bash transcript rows so content aligns with the editor body. */
+export function bash_execution_content_pad_cols(): number {
+	return shell_aware_editor_inner_pad() + EDITOR_GUTTER_COLS;
+}
+
+function is_horizontal_rule_line(line: string): boolean {
+	const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+	return /^[\s\u2500]*$/.test(stripped) && stripped.includes("\u2500");
+}
+
+/** Ember bash transcript rows — running mode drops the bottom rule for chatbox integration. */
+export function format_ember_bash_transcript_lines(
+	rawLines: string[],
+	width: number,
+	running: boolean,
+): string[] {
+	const result: string[] = [];
+	let ruleIndex = 0;
+	for (const line of rawLines) {
+		if (is_horizontal_rule_line(line)) {
+			ruleIndex += 1;
+			if (ruleIndex > 1 && running) continue;
+			result.push(chatboxBorderColor("\u2500".repeat(width)));
+			continue;
+		}
+
+		const pad = " ".repeat(running ? bash_execution_content_pad_cols() : 1);
+		const padded = pad + line;
+		const visLen = visibleWidth(padded);
+		const padNeeded = Math.max(0, width - visLen);
+		result.push(padded + " ".repeat(padNeeded));
+	}
+	return result;
+}
+
 /**
  * Render an Editor instance with shell-mode prompt/border styling.
  * Extracted from `installThinkingBorderOverride` so it can also be applied
@@ -965,14 +1158,14 @@ function render_shell_aware_editor(
 	originalRender: (width: number) => string[],
 	width: number,
 ): string[] {
-	const borderColor =
-		isShellMode() || agentRunPending || summarizingActive ? MUTED_COLOR : TEXT_COLOR;
-	const border = (text: string): string => colorize(text, borderColor);
+	const integrate_user_bash = isUserBashRunning();
+	const borderHex = shell_aware_editor_border_hex();
+	const border = (text: string): string => colorize(text, borderHex);
 	const dimBorder = (text: string): string => colorize(text, DIM_COLOR);
 	const INSET = 0;
-	const INNER_PAD = 1;
+	const innerPad = shell_aware_editor_inner_pad();
 	const SLASH_MIDDLE_INSET = 1;
-	const innerWidth = Math.max(1, width - INSET * 2 - 2 - INNER_PAD * 2);
+	const innerWidth = Math.max(1, width - INSET * 2 - 2 - innerPad * 2);
 	const originalBorderColor = instance.borderColor;
 	instance.borderColor = border;
 	const lines = originalRender.call(instance, innerWidth);
@@ -1001,8 +1194,8 @@ function render_shell_aware_editor(
 	const middleBorderIdx = -1;
 
 	const pad = " ".repeat(INSET);
-	const innerPad = " ".repeat(INNER_PAD);
-	const promptGlyph = isShellMode() ? "!" : ">";
+	const innerPadStr = " ".repeat(innerPad);
+	const promptGlyph = isShellMode() || isUserBashRunning() ? "!" : ">";
 	const promptStr = border(`${promptGlyph} `);
 	const gutter = "  ";
 	const fit = (s: string): string =>
@@ -1023,7 +1216,7 @@ function render_shell_aware_editor(
 	const middleSep = padRight(
 		isSlashMode || modelPickerActive
 			? slashMiddleSep
-			: `${pad}${innerPad}${gutter}${border("\u2500".repeat(innerWidth))}`,
+			: `${pad}${innerPadStr}${gutter}${border("\u2500".repeat(innerWidth))}`,
 	);
 
 	let firstBody = true;
@@ -1039,15 +1232,15 @@ function render_shell_aware_editor(
 			continue;
 		}
 		const gutterStr = firstBody ? promptStr : gutter;
-		lines[i] = padRight(`${pad}${innerPad}${gutterStr}${lines[i]}`);
+		lines[i] = padRight(`${pad}${innerPadStr}${gutterStr}${lines[i]}`);
 		firstBody = false;
 	}
 	lines[topIdx] = topRule;
-	if (bottomBorderIdx >= 0) {
+	if (bottomBorderIdx >= 0 && !integrate_user_bash) {
 		lines[bottomBorderIdx] = middleBorderIdx >= 0 ? middleSep : bottomRule;
 	}
 	const lastLineIdx = lines.length - 1;
-	if (lastLineIdx > bottomBorderIdx && lastLineIdx > 0) {
+	if (!integrate_user_bash && lastLineIdx > bottomBorderIdx && lastLineIdx > 0) {
 		lines.push(bottomRule);
 	}
 	if (hasAutocompleteRows && bottomBorderIdx >= 0) {
@@ -1057,14 +1250,18 @@ function render_shell_aware_editor(
 		const bottomRuleIdx = lines.length - 1;
 		const autocompleteLines = lines.slice(bottomBorderIdx + 1, bottomRuleIdx);
 		const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
-		return [topRule, ...editorLines, middleSep, ...autocompleteLines, bottomRule].map(fit);
+		const rows = [topRule, ...editorLines, middleSep, ...autocompleteLines];
+		if (!integrate_user_bash) rows.push(bottomRule);
+		return rows.map(fit);
 	}
 	if (modelPickerActive && bottomBorderIdx >= 0) {
 		const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
 		const pickerLines = render_model_picker_rows(innerWidth).map((line) =>
-			padRight(`${pad}${innerPad}${gutter}${line}`),
+			padRight(`${pad}${innerPadStr}${gutter}${line}`),
 		);
-		return [topRule, ...editorLines, middleSep, ...pickerLines, bottomRule].map(fit);
+		const rows = [topRule, ...editorLines, middleSep, ...pickerLines];
+		if (!integrate_user_bash) rows.push(bottomRule);
+		return rows.map(fit);
 	}
 	if (lines.length === 0) return lines;
 	return lines.map(fit);
@@ -1106,7 +1303,13 @@ function installAssistantMessagePatch(): void {
 			msgTimestamp !== undefined &&
 			msgTimestamp === latestAssistantMessageTimestamp
 		) {
-			assistantThinkingHostReady = true;
+			bind_thinking_in_message_host(this._emberThinkingStatus);
+			if (
+				(isUserTurnCommitted() || isAgentRunPending()) &&
+				is_current_turn_assistant_timestamp(msgTimestamp)
+			) {
+				assistantThinkingHostReady = true;
+			}
 		}
 
 		const hide = this.hideThinkingBlock;
@@ -1139,6 +1342,7 @@ function installAssistantMessagePatch(): void {
 		this._emberContentKey = cacheKey;
 		this._emberContentMessage = message;
 		this.lastMessage = message;
+		this._emberRenderBodyCache = undefined;
 
 		this.contentContainer.clear();
 
@@ -1249,12 +1453,23 @@ function installAssistantMessagePatch(): void {
 	const originalRender = assistantPrototype.render;
 	if (typeof originalRender === "function") {
 		assistantPrototype.render = function (this: any, width: number): string[] {
-			const lines = originalRender.call(this, width) as string[];
-			const status = this._emberThinkingStatus as ThinkingStatusComponent | undefined;
-			if (!status) return lines;
-			const statusLines = status.render(width);
-			if (statusLines.length === 0) return lines;
-			return [...lines, ...statusLines];
+			const cacheKey = `${this._emberContentKey ?? ""}|${width}`;
+			if (!this._emberRenderBodyCache || this._emberRenderBodyCacheKey !== cacheKey) {
+				this._emberRenderBodyCache = originalRender.call(this, width) as string[];
+				this._emberRenderBodyCacheKey = cacheKey;
+			}
+			const msgTimestamp =
+				typeof this.message?.timestamp === "number"
+					? this.message.timestamp
+					: typeof this.lastMessage?.timestamp === "number"
+						? this.lastMessage.timestamp
+						: this._emberThinkingStatus?.messageTimestamp;
+			if (!is_in_message_thinking_status_target(msgTimestamp)) {
+				return this._emberRenderBodyCache;
+			}
+			const statusLines = render_thinking_status_lines(width);
+			if (statusLines.length === 0) return this._emberRenderBodyCache;
+			return [...this._emberRenderBodyCache, ...statusLines];
 		};
 	}
 }
@@ -1381,6 +1596,83 @@ function installUpdateNotificationPatch(): void {
 }
 
 const STATUS_PATCH_MARKER = Symbol.for("pi-ember-ui:status-patched");
+const COMPACTION_TRANSCRIPT_PATCH_MARKER = Symbol.for("pi-ember-ui:compaction-transcript-patched");
+
+/** Chronological compaction transcript + skip Pi's redundant compaction_end append. */
+function installCompactionTranscriptPatch(): void {
+	const proto = (InteractiveMode as any).prototype;
+	if (proto[COMPACTION_TRANSCRIPT_PATCH_MARKER]) return;
+	proto[COMPACTION_TRANSCRIPT_PATCH_MARKER] = true;
+
+	const original_handle_event = proto.handleEvent;
+
+	proto.rebuildChatFromMessages = function emberRebuildChatFromMessages(this: {
+		chatContainer: { clear(): void };
+		sessionManager: Parameters<typeof build_transcript_entries>[0];
+		renderSessionEntries(entries: unknown[]): void;
+	}): void {
+		this.chatContainer.clear();
+		this.renderSessionEntries(build_transcript_entries(this.sessionManager));
+	};
+
+	proto.renderInitialMessages = function emberRenderInitialMessages(this: {
+		sessionManager: Parameters<typeof build_transcript_entries>[0] & {
+			getEntries(): { type?: string }[];
+		};
+		renderSessionEntries(entries: unknown[], options?: unknown): void;
+		renderProjectTrustWarningIfNeeded(): void;
+		showStatus(message: string): void;
+	}): void {
+		const entries = build_transcript_entries(this.sessionManager);
+		this.renderSessionEntries(entries, { updateFooter: true, populateHistory: true });
+		this.renderProjectTrustWarningIfNeeded();
+		const all_entries = this.sessionManager.getEntries();
+		const compaction_count = all_entries.filter((e) => e.type === "compaction").length;
+		if (compaction_count > 0) {
+			const times = compaction_count === 1 ? "1 time" : `${compaction_count} times`;
+			this.showStatus(`Session compacted ${times}`);
+		}
+	};
+
+	proto.handleEvent = async function emberHandleEvent(
+		this: {
+			isInitialized: boolean;
+			init(): Promise<void>;
+			footer: { invalidate(): void };
+			settingsManager: { getShowTerminalProgress(): boolean };
+			ui: { terminal: { setProgress(value: boolean): void }; requestRender(): void };
+			autoCompactionEscapeHandler?: () => void;
+			defaultEditor: { onEscape?: () => void };
+			clearStatusIndicator(kind?: string): void;
+			rebuildChatFromMessages(): void;
+			flushCompactionQueue(options: { willRetry?: boolean }): Promise<void>;
+		},
+		event: { type?: string; result?: unknown; willRetry?: boolean },
+	): Promise<void> {
+		if (!this.isInitialized) {
+			await this.init();
+		}
+		// Pi rebuilds the transcript on compaction_end then redundantly appends the
+		// same compactionSummary row — skip the append; rebuild already paints it.
+		if (event?.type === "compaction_end" && event.result) {
+			this.footer.invalidate();
+			if (this.settingsManager.getShowTerminalProgress()) {
+				this.ui.terminal.setProgress(false);
+			}
+			if (this.autoCompactionEscapeHandler) {
+				this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
+				this.autoCompactionEscapeHandler = undefined;
+			}
+			this.clearStatusIndicator("compaction");
+			this.rebuildChatFromMessages();
+			this.footer.invalidate();
+			void this.flushCompactionQueue({ willRetry: event.willRetry });
+			this.ui.requestRender();
+			return;
+		}
+		return original_handle_event.call(this, event);
+	};
+}
 
 function installCompactionStatusPatch(): void {
 	const proto = (InteractiveMode as any).prototype;
@@ -1390,21 +1682,29 @@ function installCompactionStatusPatch(): void {
 	const originalShowStatusIndicator = proto.showStatusIndicator;
 	const originalClearStatusIndicator = proto.clearStatusIndicator;
 
-	function suppress_compaction_status_indicator(indicator: any): void {
+	function patch_compaction_status_indicator(indicator: any): void {
 		if (indicator?.kind !== "compaction") return;
-		// Stop Pi's spinner/timer so it does not keep requesting renders.
+		// Stop Pi's stock spinner/timer — the shared 20 FPS gradient clock
+		// drives gradient text via bind_compaction_status_indicator.
 		if (typeof indicator.stop === "function") indicator.stop();
-		// Replace render so the status row contributes no visible lines.
-		indicator.render = () => [];
+		activate_gradient("compaction");
+		bind_compaction_status_indicator(indicator);
+		indicator.render = (width: number): string[] => {
+			const theme = resolve_live_theme();
+			if (!theme) return [];
+			return format_compacting_row(theme, width);
+		};
+	}
+
+	function clear_compaction_status_indicator(indicator: any): void {
+		if (indicator?.kind !== "compaction") return;
+		deactivate_gradient("compaction");
+		unbind_compaction_status_indicator();
 	}
 
 	proto.showStatusIndicator = function emberShowStatusIndicator(this: any, indicator: any): any {
 		if (indicator?.kind === "compaction") {
-			startSummarizingAnimation();
-			suppress_compaction_status_indicator(indicator);
-			// Still flow through original so activeStatusIndicator is set and
-			// clearStatusIndicator can dispose it. The suppressed render makes
-			// the container empty.
+			patch_compaction_status_indicator(indicator);
 		}
 		return originalShowStatusIndicator.call(this, indicator);
 	};
@@ -1414,7 +1714,7 @@ function installCompactionStatusPatch(): void {
 		const wasCompaction =
 			active?.kind === "compaction" &&
 			(kind === undefined || kind === "compaction" || kind === active.kind);
-		if (wasCompaction) stopSummarizingAnimation();
+		if (wasCompaction) clear_compaction_status_indicator(active);
 		return originalClearStatusIndicator.call(this, kind);
 	};
 }
@@ -1426,8 +1726,22 @@ function installBashExecutionPatch(): void {
 
 	const originalRender = proto.render;
 	const originalUpdateDisplay = proto.updateDisplay;
+	const originalSetComplete = proto.setComplete;
+
+	proto.setComplete = function emberBashSetComplete(this: any, ...args: unknown[]): void {
+		if (typeof originalSetComplete === "function") {
+			originalSetComplete.apply(this, args);
+		}
+		setUserBashRunning(false);
+		requestRender?.();
+	};
 
 	proto.updateDisplay = function emberBashUpdateDisplay(this: any): void {
+		const running = this.status === "running";
+		if (isUserBashRunning() !== running) {
+			setUserBashRunning(running);
+			requestRender?.();
+		}
 		originalUpdateDisplay.call(this);
 		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
 		if (!theme) return;
@@ -1445,30 +1759,13 @@ function installBashExecutionPatch(): void {
 	};
 
 	proto.render = function renderEmberBash(this: any, width: number): string[] {
+		const running = this.status === "running";
 		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
 		if (!theme) return originalRender.call(this, width);
 
 		const innerWidth = Math.max(1, width - 2);
 		const rawLines = originalRender.call(this, innerWidth) as string[];
-
-		const result: string[] = [];
-		const pad = " ";
-		for (const line of rawLines) {
-			const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
-			if (/^[\s\u2500]*$/.test(stripped)) {
-				if (stripped.includes("\u2500")) {
-					result.push(chatboxBorderColor("\u2500".repeat(width)));
-				}
-				continue;
-			}
-
-			const padded = pad + line;
-			const visLen = visibleWidth(padded);
-			const padNeeded = Math.max(0, width - visLen);
-			const fullLine = padded + " ".repeat(padNeeded);
-			result.push(fullLine);
-		}
-		return result;
+		return format_ember_bash_transcript_lines(rawLines, width, running);
 	};
 }
 
@@ -1528,34 +1825,28 @@ function installCompactionSummaryPatch(): void {
 		this.clear();
 
 		const theme = resolve_live_theme();
-		const before = this.message.tokensBefore.toLocaleString();
-		const after = Math.ceil(this.message.summary.length / 4).toLocaleString();
+		const is_error = this.message?.isError === true;
+		const row = format_compacted_row(
+			theme,
+			this.message.tokensBefore ?? 0,
+			this.message.summary?.length ?? 0,
+			is_error,
+		);
+		const expandKey = (globalThis as any).process?.env?.["PI_EXPAND_KEY"] || "ctrl+o";
+		const callText = new CompactGroupText();
+		callText.setText(
+			this.expanded ? row : row + theme.fg("dim", ` (${expandKey} to expand)`),
+		);
+		this.addChild(callText);
 
-		const wrapper = new Container();
-		const header = new Text(theme.fg("text", "\x1b[1mCompaction\x1b[22m"), 0, 0);
-		wrapper.addChild(header);
-		wrapper.addChild(new Spacer(1));
-
-		const bodyText = `Summarized ${before} tokens into ~${after}.`;
-		let body: any;
-		if (this.expanded) {
-			body = new Markdown(this.message.summary, 0, 0, this.markdownTheme, {
-				color: (text: string) => theme.fg("customMessageText", text),
-			});
-		} else {
-			const expandKey = (globalThis as any).process?.env?.["PI_EXPAND_KEY"] || "ctrl+o";
-			body = new Text(
-				theme.fg("customMessageText", bodyText) + theme.fg("dim", ` (${expandKey} to expand)`),
-				0,
-				0,
+		if (this.expanded && this.message.summary) {
+			this.addChild(new Spacer(1));
+			this.addChild(
+				new Markdown(this.message.summary, 0, 0, this.markdownTheme, {
+					color: (text: string) => theme.fg("customMessageText", text),
+				}),
 			);
 		}
-
-		const bodyWrapper = new Box(0, 0, undefined);
-		bodyWrapper.addChild(body);
-		wrapper.addChild(bodyWrapper);
-
-		this.addChild(chatboxBorderContainer(wrapper, 1));
 	};
 }
 
@@ -1939,7 +2230,7 @@ function installStartupHeader(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 
 	ctx.ui.setHeader((tui: any, theme: any) => {
-		tuiRef = tui;
+		bind_live_tui_render(tui);
 		const render_header = (width: number): string[] => {
 			// Re-read every render so model/dir/mode changes are reflected.
 			const dir = folderNameFromCwd(ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd());
@@ -2039,7 +2330,30 @@ function updateInstalledThemeExport(exportColors: {
 	}
 }
 
+/** Best-effort sync of Ctrl+T hide state before the first assistant updateContent. */
+function sync_thinking_blocks_hidden_from_ctx(ctx: any): void {
+	const settings = ctx?.settings;
+	if (settings && typeof settings.hideThinkingBlock === "boolean") {
+		setThinkingBlocksHidden(settings.hideThinkingBlock === true);
+		return;
+	}
+	const hide = ctx?.hideThinkingBlock;
+	if (typeof hide === "boolean") {
+		setThinkingBlocksHidden(hide === true);
+		return;
+	}
+	const session_hide = ctx?.session?.hideThinkingBlock;
+	if (typeof session_hide === "boolean") {
+		setThinkingBlocksHidden(session_hide === true);
+	}
+}
+
 export default function piEmberUiPlugin(pi: ExtensionAPI): void {
+	bind_thinking_wait_handlers({
+		armPreTokenThinkingStatus: arm_pre_token_thinking_status,
+		refreshThinkingStatus: refresh_thinking_status,
+		getThinkingActive: () => thinkingActive,
+	});
 	bind_slash_command_exit_render(() => requestTuiRender());
 	// /model + /resume: prototype intercepts only (no registerCommand — that
 	// conflicts with built-ins and shows in Extension issues).
@@ -2066,6 +2380,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	installBashExecutionPatch();
 	installUserMessagePatch();
 	installCompactionSummaryPatch();
+	installCompactionTranscriptPatch();
 	installCompactionStatusPatch();
 	installUpdateNotificationPatch();
 	applyDynamicTheme();
@@ -2077,10 +2392,8 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		liveTheme = undefined;
 		if (ctx.mode === "tui") {
 			bind_model_picker_session(ctx, pi);
-			requestRender = () => {
-				(tuiRef as { requestRender?: () => void } | undefined)?.requestRender?.();
-			};
-			set_gradient_render_request(requestRender);
+			requestRender = undefined;
+			set_gradient_render_request(undefined);
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHiddenThinkingLabel("");
 			setShellSyncCallback(() => {
@@ -2090,6 +2403,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 		applyDynamicTheme();
 		if (ctx.mode === "tui") {
+			sync_thinking_blocks_hidden_from_ctx(ctx);
 			startLogoAnimation();
 			installStartupHeader(ctx);
 			installThinkingWidget(ctx);
@@ -2131,7 +2445,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		if (typeof event.prompt === "string" && event.prompt.trim()) {
+			setUserTurnCommitted(true);
 			arm_pre_token_thinking_status();
+			sync_thinking_wait_ui();
 		}
 	});
 
@@ -2140,11 +2456,37 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		const ev = event.assistantMessageEvent;
 		const isText = ev?.type === "text_start" || ev?.type === "text_delta";
 		const isThinking = ev?.type === "thinking_start" || ev?.type === "thinking_delta";
+
+		if (ev) {
+			const boundary = resolve_assistant_stream_boundary_event(ev);
+			if (boundary === "visible_text" || boundary === "thinking") {
+				const planning = apply_assistant_stream_boundary(getSharedRenderer(), ev);
+				sync_compact_group_flags(getSharedRenderer());
+				if (planning === "planning_text") {
+					resume_thinking_header_for_think_stream();
+					if (!thinkingActive) startThinkingAnimation();
+					sync_thinking_wait_ui();
+				}
+			}
+		}
+
 		if (ev && isThinking) {
 			resume_thinking_header_for_think_stream();
 			if (!thinkingActive) startThinkingAnimation();
+			sync_thinking_wait_ui();
 		}
-		if (ev && isText) {
+		if (ev?.type === "text_delta" && typeof ev.delta === "string") {
+			const planning =
+				isThinkingBlocksHidden() &&
+				is_agent_thinking_wait(thinkingActive) &&
+				is_planning_style_text_delta(ev.delta);
+			if (planning) {
+				resume_thinking_header_for_think_stream();
+				if (!thinkingActive) startThinkingAnimation();
+				sync_thinking_wait_ui();
+			}
+		}
+		if (ev && should_suppress_thinking_header_for_stream_event(ev)) {
 			suppress_thinking_header_for_work();
 		}
 		if (isText || isThinking) {
@@ -2169,17 +2511,28 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			reset_thinking_pass_timer();
 			setTurnToolTranscriptActive(false);
 			thinkingHeaderSuppressed = false;
+			assistantThinkingHostReady = false;
+			setGroupThinkingChildActive(false);
+			setGroupReopenableActive(false);
+			setUserTurnAnchorTimestamp(
+				typeof event.message.timestamp === "number" ? event.message.timestamp : undefined,
+			);
 			// Show Thinking immediately after send — agent_start may arrive later.
 			if (display !== false) {
-				agentRunPending = true;
-				activate_gradient("thinking");
-				refresh_thinking_status();
+				sync_thinking_blocks_hidden_from_ctx(ctx);
+				setUserTurnCommitted(true);
+				setAgentRunPending(true);
+				sync_compact_group_flags(getSharedRenderer());
+				arm_pre_token_thinking_status();
 			}
 		} else if (event.message?.role === "assistant" && typeof event.message.timestamp === "number") {
 			if (
 				event.message.timestamp >= (latestAssistantMessageTimestamp ?? Number.NEGATIVE_INFINITY)
 			) {
 				latestAssistantMessageTimestamp = event.message.timestamp;
+			}
+			if (is_current_turn_assistant_timestamp(event.message.timestamp)) {
+				assistantThinkingHostReady = true;
 			}
 			refresh_thinking_status();
 		}
@@ -2205,6 +2558,17 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		// immediately so it shows the new post-compaction usage instead of
 		// the old full value.
 		recompute_footer_stats(ctx);
+		// Chat rebuild after compact must not leave stale group/thinking flags
+		// or a suppressed header from the pre-compact turn.
+		const renderer = getSharedRenderer();
+		renderer.clearGroupThinkingChild();
+		sync_compact_group_flags(renderer);
+		thinkingHeaderSuppressed = false;
+		assistantThinkingHostReady = false;
+		if (isUserTurnCommitted() || isAgentRunPending()) {
+			arm_pre_token_thinking_status();
+			sync_thinking_wait_ui();
+		}
 		requestRender?.();
 	});
 
@@ -2217,6 +2581,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		arm_pre_token_thinking_status();
+		sync_thinking_wait_ui();
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
@@ -2225,20 +2590,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		// subagent can still be running. Reset the flag so the editor border
 		// reverts from the dim inset to the full-opacity accent line.
 		setLatestSubagentRunning(false);
-		const duration = turnStartedAt > 0 ? performance.now() - turnStartedAt : 0;
-		turnStartedAt = 0;
-		thinkingPassStartedAt = 0;
-		drop_thinking_timer_tick();
-		try {
-			if (ctx.mode === "tui" && duration >= 1000) {
-				const model = ctx.model;
-				const modelName = model?.name ?? model?.id ?? "model";
-				ctx.ui.notify(`${modelName} · ${formatElapsed(duration)}`, "info");
-			}
-		} catch {
-			/* stale ctx after replacement/dispose; skip notify */
-		}
-		refresh_thinking_status();
+		// Turn timer + notify live on agent_settled only — agent_end fires per
+		// low-level run (tool batch, TTFB timeout retry, compact-and-retry) and
+		// must not clear turnStartedAt or show the final elapsed toast early.
+		sync_thinking_wait_ui();
 	});
 
 	// `agent_settled` is the only event that means Pi will not auto-retry,
@@ -2247,13 +2602,22 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// done. `agent_end` only fires for the current low-level run and may be
 	// followed by another `agent_start` after compaction/retry/follow-ups.
 	pi.on("agent_settled", (_event, ctx) => {
-		agentRunPending = false;
+		setAgentRunPending(false);
+		setUserTurnCommitted(false);
 		thinkingHeaderSuppressed = false;
 		setTurnToolTranscriptActive(false);
 		resetSubagentActivity();
 		stopLogoAnimation();
 		stopThinkingAnimation();
+		const duration = turnStartedAt > 0 ? performance.now() - turnStartedAt : 0;
+		turnStartedAt = 0;
+		thinkingPassStartedAt = 0;
 		try {
+			if (ctx.mode === "tui" && duration >= 1000) {
+				const model = ctx.model;
+				const modelName = model?.name ?? model?.id ?? "model";
+				ctx.ui.notify(`${modelName} · ${formatElapsed(duration)}`, "info");
+			}
 			if (ctx.mode === "tui") refresh_thinking_status();
 		} catch {
 			/* stale ctx after replacement/dispose; no render */
@@ -2264,7 +2628,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		if (ctx.mode !== "tui") return;
 		suppress_thinking_header_for_work();
 		setTurnToolTranscriptActive(true);
-		if (event.toolName === "subagent") {
+		if (is_subagent_delegation_tool(event.toolName)) {
 			markSubagentActivityStarted();
 			refresh_thinking_status();
 		}
@@ -2272,9 +2636,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("tool_execution_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		markToolExecutionStarted();
 		suppress_thinking_header_for_work();
 		setTurnToolTranscriptActive(true);
-		if (event.toolName === "subagent") {
+		if (is_subagent_delegation_tool(event.toolName)) {
 			recompute_latest_subagent_running();
 		}
 		refresh_thinking_status();
@@ -2286,13 +2651,20 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		} catch {
 			return;
 		}
+		markToolExecutionEnded();
 		schedule_footer_stats(ctx);
-		if (event.toolName === "subagent") {
+		if (is_subagent_delegation_tool(event.toolName)) {
+			recompute_latest_subagent_running();
 			markSubagentActivityEnded();
-			requestRender?.();
+			// Last subagent finished — arm Thinking before the parent streams again.
+			if (!isSubagentActivityActive() && !isLatestSubagentRunning()) {
+				sync_thinking_wait_ui();
+			} else {
+				refresh_thinking_status();
+			}
 			return;
 		}
-		arm_pre_token_thinking_status();
+		sync_thinking_wait_ui();
 	});
 
 	pi.registerCommand("welcome", {
@@ -2336,14 +2708,16 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		logo_settled_by_user_message = false;
 		stopLogoAnimation();
 		shutdown_gradient_clock();
+		unbind_thinking_status_hosts();
+		set_thinking_status_render_request(undefined);
 		thinkingActive = false;
-		agentRunPending = false;
+		setAgentRunPending(false);
+		setUserTurnCommitted(false);
+		resetToolExecutionInFlight();
 		thinkingHeaderSuppressed = false;
-		summarizingActive = false;
 		assistantThinkingHostReady = false;
 		turnStartedAt = 0;
 		thinkingPassStartedAt = 0;
-		drop_thinking_timer_tick();
 		setShellMode(false);
 		reset_scroll_review_state();
 		setLatestSubagentRunning(false);
@@ -2353,6 +2727,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setGroupReopenableActive(false);
 		setTurnToolTranscriptActive(false);
 		setPlanAutoContinuing(false);
+		setUserBashRunning(false);
 		setShellSyncCallback(undefined);
 		reset_footer_state();
 		if (ctx.hasUI) {

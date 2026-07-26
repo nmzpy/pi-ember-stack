@@ -126,8 +126,15 @@ describe("extract_variant_token / strip_variant_token", () => {
 });
 
 describe("effort helpers", () => {
-	test("slider points are low/medium/high/xhigh/max", () => {
-		expect([...EFFORT_SLIDER_POINTS]).toEqual(["low", "medium", "high", "xhigh", "max"]);
+	test("slider points include Default then low/medium/high/xhigh/max", () => {
+		expect([...EFFORT_SLIDER_POINTS]).toEqual([
+			"default",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
 	});
 
 	test("variant_to_effort_point maps slider tokens only", () => {
@@ -144,6 +151,7 @@ describe("effort helpers", () => {
 	});
 
 	test("format_effort_display_label title-cases effort points", () => {
+		expect(format_effort_display_label("default")).toBe("Default");
 		expect(format_effort_display_label("low")).toBe("Low");
 		expect(format_effort_display_label("medium")).toBe("Medium");
 		expect(format_effort_display_label("high")).toBe("High");
@@ -151,8 +159,48 @@ describe("effort helpers", () => {
 		expect(format_effort_display_label("max")).toBe("Max");
 	});
 
+	test("extracts none as a variant alias for no", () => {
+		expect(extract_variant_token("SWE-1.7 None")).toBe("none");
+		expect(extract_variant_token("swe-1-7-none")).toBe("none");
+		expect(strip_variant_token("SWE-1.7 None")).toBe("SWE-1.7");
+		expect(strip_variant_token("swe-1-7-none")).toBe("swe-1-7");
+	});
+
+	test("stale Pi xhigh does not leak without thinkingLevelMap or catalog family", () => {
+		expect(
+			resolve_model_effort_level(
+				{ id: "some-model", name: "Some Model", reasoning: true },
+				"xhigh",
+			),
+		).toBe("off");
+	});
+
+	test("GLM-5.2 base resolves to Default, not stale Pi xhigh", () => {
+		const catalog = [
+			{ provider: "devin", id: "glm-5-2", name: "GLM-5.2" },
+			{ provider: "devin", id: "glm-5-2-max", name: "GLM-5.2 Max" },
+		];
+		expect(
+			resolve_model_effort_level(
+				{ provider: "devin", id: "glm-5-2", name: "GLM-5.2" },
+				"xhigh",
+				catalog,
+			),
+		).toBe("default");
+		expect(
+			resolve_model_effort_level(
+				{ provider: "devin", id: "glm-5-2-high", name: "GLM-5.2 High" },
+				"xhigh",
+				[
+					...catalog,
+					{ provider: "devin", id: "glm-5-2-high", name: "GLM-5.2 High" },
+				],
+			),
+		).toBe("high");
+	});
+
 	test("resolve_model_effort_level reads Pi level and catalog siblings", () => {
-		expect(resolve_model_effort_level(undefined, "high")).toBe("high");
+		expect(resolve_model_effort_level(undefined, "high")).toBe("off");
 		expect(
 			resolve_model_effort_level(
 				{ id: "cursor-grok-4.5-high", name: "Cursor Grok 4.5" },
@@ -177,6 +225,28 @@ describe("effort helpers", () => {
 				"off",
 			),
 		).toBe("max");
+		expect(
+			resolve_model_effort_level(
+				{ id: "swe-1-7-medium", name: "SWE-1.7 Medium", reasoning: true },
+				"high",
+			),
+		).toBe("medium");
+		expect(
+			resolve_model_effort_level(
+				{ id: "swe-1-7-none", name: "SWE-1.7 None" },
+				"high",
+			),
+		).toBe("off");
+		expect(
+			resolve_model_effort_level(
+				{
+					id: "o3-mini",
+					reasoning: true,
+					thinkingLevelMap: { low: "low", medium: "medium", high: "high" },
+				},
+				"high",
+			),
+		).toBe("high");
 	});
 
 	test("get_baked_thinking_variant still finds max/minimal", () => {

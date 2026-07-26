@@ -6,14 +6,18 @@
 import {
 	type EffortSliderPoint,
 	EFFORT_SLIDER_POINTS,
+	SIBLING_DEFAULT_EFFORT,
 	build_fast_line_model_ids,
 	effort_from_fast_line_id,
 	extract_model_class_token,
 	extract_variant_token,
 	has_standalone_model_class,
+	baked_effort_from_model,
+	has_baked_effort_variant,
 	is_effort_slider_point,
 	is_fast_line_model_id,
 	is_thinking_fast_variant,
+	is_unlabeled_sibling_base,
 	strip_effort_preserve_fast_class_name,
 	strip_fast_line_id_to_base,
 	strip_for_family_grouping,
@@ -126,6 +130,24 @@ function prefer_sibling(existing: FamilyModel, candidate: FamilyModel): FamilyMo
 	return existing;
 }
 
+/**
+ * Devin GLM-style families: bare `glm-5-2` is the standard tier beside `*-max`.
+ * Register it as slider `Default` when Max is the only other named variant.
+ */
+function maybe_register_default_sibling(
+	baseModel: FamilyModel,
+	variants: Partial<Record<EffortSliderPoint, FamilyModel>>,
+	distinctEfforts: EffortSliderPoint[],
+): void {
+	if (!is_unlabeled_sibling_base(baseModel)) return;
+	if (!distinctEfforts.includes("max")) return;
+	if (distinctEfforts.some((point) => point !== "max" && variants[point] != null)) {
+		return;
+	}
+	if (distinctEfforts.some((point) => variants[point]?.id === baseModel.id)) return;
+	variants[SIBLING_DEFAULT_EFFORT] = baseModel;
+}
+
 /** Levels from thinkingLevelMap that are Effort slider points with a non-null mapping. */
 export function efforts_from_thinking_level_map(
 	map: Record<string, string | null | undefined> | undefined,
@@ -207,21 +229,23 @@ export function build_model_families(
 		}
 		const distinctEfforts = EFFORT_SLIDER_POINTS.filter((p) => variants[p] != null);
 
-		// Collapse when ≥2 catalog rows share a base and we resolved ≥2 efforts,
+		// Collapse when ≥2 catalog rows share a base and we resolved ≥1 effort,
 		// OR when ≥2 rows share a base and at least one carries a thinking/effort
-		// suffix (so "No Thinking" + "Low/Medium/High Thinking*" still fold).
+		// suffix (so "No/None Thinking" + "Medium" still fold).
 		const hasVariantSuffix = group.some(
 			(m) =>
 				extract_variant_token(m.id) !== undefined ||
 				(m.name ? extract_variant_token(m.name) !== undefined : false) ||
 				is_fast_line_model_id(m.id, fastLineIds),
 		);
-		if (group.length >= 2 && distinctEfforts.length >= 2 && hasVariantSuffix) {
+		if (group.length >= 2 && distinctEfforts.length >= 1 && hasVariantSuffix) {
 			const baseModel =
 				group.find((m) => effort_from_model(m, fastLineIds) === undefined) ??
 				variants.medium ??
 				variants[distinctEfforts[0]] ??
 				group[0];
+			maybe_register_default_sibling(baseModel, variants, distinctEfforts);
+			const efforts = EFFORT_SLIDER_POINTS.filter((p) => variants[p] != null);
 			families.push({
 				key: bucketKey,
 				provider: group[0].provider,
@@ -230,7 +254,7 @@ export function build_model_families(
 				kind: "sibling",
 				baseModel,
 				variants,
-				efforts: distinctEfforts,
+				efforts,
 			});
 			continue;
 		}
@@ -238,12 +262,15 @@ export function build_model_families(
 		if (group.length === 1) {
 			const model = group[0];
 			const mapEfforts = efforts_from_thinking_level_map(model.thinkingLevelMap);
+			const bakedVariant = has_baked_effort_variant(model);
 			const thinkingEfforts =
 				mapEfforts.length >= 2
 					? mapEfforts
-					: model.reasoning && !has_standalone_model_class(model)
-						? efforts_from_available_levels(options?.availableThinkingLevels)
-						: [];
+					: bakedVariant
+						? []
+						: model.reasoning && !has_standalone_model_class(model)
+							? efforts_from_available_levels(options?.availableThinkingLevels)
+							: [];
 
 			if (thinkingEfforts.length >= 2) {
 				families.push({
@@ -365,6 +392,9 @@ export function initial_effort_for_family(
 				family.baseModel.provider.toLowerCase() === p &&
 				family.baseModel.id.toLowerCase() === id
 			) {
+				if (family.variants[SIBLING_DEFAULT_EFFORT]?.id.toLowerCase() === id) {
+					return SIBLING_DEFAULT_EFFORT;
+				}
 				return nearest_effort(family.efforts, undefined);
 			}
 		}
@@ -377,4 +407,67 @@ export function initial_effort_for_family(
 	}
 
 	return nearest_effort(family.efforts, "medium");
+}
+
+/** Find the collapsed family that contains a catalog model row. */
+export function find_family_for_model(
+	catalog: readonly FamilyModel[],
+	model: { provider?: string; id?: string },
+	options?: { availableThinkingLevels?: readonly string[] },
+): ModelFamily | undefined {
+	if (!model?.provider || !model?.id) return undefined;
+	const families = build_model_families(catalog, options);
+	return families.find((family) => family_contains_model(family, model.provider!, model.id));
+}
+
+/**
+ * Effort level for footer / mode display — SSOT.
+ * Baked catalog variant wins; sibling families use the active catalog row;
+ * thinking families clamp Pi level to supported efforts; stale Pi levels
+ * (e.g. xhigh on GLM-5.2) never leak when the model has no thinkingLevelMap.
+ */
+export function resolve_model_effort_level(
+	model: FamilyModel | undefined,
+	thinkingLevel = "off",
+	catalog?: readonly FamilyModel[],
+	options?: { availableThinkingLevels?: readonly string[] },
+): EffortSliderPoint | "off" {
+	if (!model) return "off";
+
+	const baked = baked_effort_from_model(model);
+	if (baked) return baked;
+	if (has_baked_effort_variant(model)) return "off";
+
+	const family =
+		catalog && catalog.length > 0
+			? find_family_for_model(catalog, model, options)
+			: undefined;
+
+	if (family && family.efforts.length >= 2) {
+		if (family.kind === "sibling") {
+			const effort = initial_effort_for_family(family, {
+				provider: model.provider,
+				id: model.id,
+				name: model.name,
+				thinkingLevel,
+			});
+			return effort ?? "off";
+		}
+		const normalized = (thinkingLevel ?? "off").toLowerCase();
+		if (normalized !== "off" && is_effort_slider_point(normalized)) {
+			return nearest_effort(family.efforts, normalized) ?? "off";
+		}
+		return "off";
+	}
+
+	const mapEfforts = efforts_from_thinking_level_map(model.thinkingLevelMap);
+	const normalized = (thinkingLevel ?? "off").toLowerCase();
+	if (normalized !== "off" && is_effort_slider_point(normalized)) {
+		if (mapEfforts.includes(normalized)) return normalized;
+		if (mapEfforts.length > 0) {
+			return nearest_effort(mapEfforts, normalized) ?? "off";
+		}
+	}
+
+	return "off";
 }

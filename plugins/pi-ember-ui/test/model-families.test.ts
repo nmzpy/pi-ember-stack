@@ -9,6 +9,38 @@ import {
 } from "../model-families.ts";
 
 describe("build_model_families", () => {
+	test("collapses Devin GLM-5.2 base + Max into Default and Max efforts", () => {
+		const families = build_model_families([
+			{ provider: "devin", id: "glm-5-2", name: "GLM-5.2" },
+			{ provider: "devin", id: "glm-5-2-max", name: "GLM-5.2 Max" },
+		]);
+		expect(families).toHaveLength(1);
+		expect(families[0].kind).toBe("sibling");
+		expect(families[0].displayName).toBe("GLM-5.2");
+		expect(families[0].efforts).toEqual(["default", "max"]);
+		expect(families[0].variants.default?.id).toBe("glm-5-2");
+		expect(families[0].variants.max?.id).toBe("glm-5-2-max");
+		expect(resolve_family_selection(families[0], "default").model.id).toBe("glm-5-2");
+		expect(resolve_family_selection(families[0], "max").model.id).toBe("glm-5-2-max");
+		expect(
+			initial_effort_for_family(families[0], {
+				provider: "devin",
+				id: "glm-5-2",
+			}),
+		).toBe("default");
+	});
+
+	test("does not add Default when explicit High sibling exists", () => {
+		const families = build_model_families([
+			{ provider: "devin", id: "glm-5-2", name: "GLM-5.2" },
+			{ provider: "devin", id: "glm-5-2-high", name: "GLM-5.2 High" },
+			{ provider: "devin", id: "glm-5-2-max", name: "GLM-5.2 Max" },
+		]);
+		expect(families).toHaveLength(1);
+		expect(families[0].efforts).toEqual(["high", "max"]);
+		expect(families[0].variants.default).toBeUndefined();
+	});
+
 	test("collapses Devin Thinking / Thinking Fast label variants", () => {
 		const families = build_model_families([
 			{
@@ -235,6 +267,36 @@ describe("build_model_families", () => {
 		expect(families).toHaveLength(1);
 		expect(families[0].kind).toBe("thinking");
 		expect(families[0].efforts).toEqual(["low", "medium", "high", "xhigh"]);
+	});
+
+	test("baked-variant singleton with reasoning does not become thinking family", () => {
+		const families = build_model_families(
+			[
+				{
+					provider: "devin",
+					id: "swe-1-7-medium",
+					name: "SWE-1.7 Medium",
+					reasoning: true,
+				},
+			],
+			{ availableThinkingLevels: ["low", "medium", "high"] },
+		);
+		expect(families).toHaveLength(1);
+		expect(families[0].kind).toBe("none");
+		expect(families[0].efforts).toEqual([]);
+		expect(families[0].displayName).toBe("SWE-1.7");
+	});
+
+	test("collapses SWE-1.7 none and medium siblings without inventing high", () => {
+		const families = build_model_families([
+			{ provider: "devin", id: "swe-1-7-none", name: "SWE-1.7 None", reasoning: true },
+			{ provider: "devin", id: "swe-1-7-medium", name: "SWE-1.7 Medium", reasoning: true },
+		]);
+		expect(families).toHaveLength(1);
+		expect(families[0].kind).toBe("sibling");
+		expect(families[0].displayName).toBe("SWE-1.7");
+		expect(families[0].efforts).toEqual(["medium"]);
+		expect(families[0].baseModel.id).toBe("swe-1-7-none");
 	});
 
 	test("ignores null thinkingLevelMap entries", () => {

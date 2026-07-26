@@ -56,4 +56,28 @@ describe("prepare_todo_arguments", () => {
 		expect(out.batch?.[0]).toMatchObject({ id: 1, status: "completed" });
 		expect(out.batch?.[1]).toMatchObject({ id: 2, status: "in_progress" });
 	});
+
+	test("flattens action=update + id + single-item batch", () => {
+		const out = prepare_todo_arguments({
+			action: "update",
+			id: 1,
+			batch: [{ status: "in_progress" }],
+		});
+		expect(out).toEqual({ action: "update", id: 1, status: "in_progress" });
+		expect(out).not.toHaveProperty("batch");
+	});
+
+	test("rewrites action=update + multi-item batch to batch action", () => {
+		const out = prepare_todo_arguments({
+			action: "update",
+			id: 1,
+			batch: [
+				{ id: 1, status: "completed" },
+				{ id: 2, status: "in_progress" },
+			],
+		});
+		expect(out.action).toBe("batch");
+		expect(out.batch).toHaveLength(2);
+		expect(out).not.toHaveProperty("id");
+	});
 });

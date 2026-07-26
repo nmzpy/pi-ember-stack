@@ -1,6 +1,15 @@
 import { describe, expect, mock, test } from "bun:test";
-import { CompactRenderer, formatCallBody, strip_bash_command_preview } from "../renderer.ts";
-import { setThinkingBlocksHidden } from "../../pi-ember-ui/mode-colors.ts";
+import {
+	apply_assistant_stream_boundary,
+	resolve_assistant_stream_boundary_event,
+} from "../../pi-ember-ui/assistant-stream-boundary.ts";
+import { CompactRenderer, formatCallBody, strip_bash_command_preview, GROUP_CHILD_FOLD_DEBOUNCE_MS } from "../renderer.ts";
+import {
+	resetToolExecutionInFlight,
+	setAgentRunPending,
+	setThinkingBlocksHidden,
+	setTurnToolTranscriptActive,
+} from "../../pi-ember-ui/mode-colors.ts";
 
 function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -13,6 +22,10 @@ function makeTheme() {
 
 function makeContext(id: string, state: Record<string, any> = {}) {
 	return { args: {}, toolCallId: id, invalidate: mock(() => {}), state };
+}
+
+async function flush_group_child_fold_debounce(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, GROUP_CHILD_FOLD_DEBOUNCE_MS + 25));
 }
 
 describe("CompactRenderer streaming edit stats", () => {
@@ -30,7 +43,7 @@ describe("CompactRenderer streaming edit stats", () => {
 		);
 		let row = stripAnsi((state.callText as any).text);
 		expect(row).toContain("+1");
-		expect(row).toContain("-0");
+		expect(row).not.toContain("-0");
 
 		// Token 2: two lines added, one removed
 		r.renderCall(
@@ -91,7 +104,7 @@ describe("CompactRenderer streaming edit stats", () => {
 		);
 		const row = stripAnsi((state.callText as any).text);
 		expect(row).toContain("+1");
-		expect(row).toContain("-0");
+		expect(row).not.toContain("-0");
 	});
 
 	test("edits as a truncated JSON string still yields live +N -N", () => {
@@ -134,7 +147,7 @@ describe("CompactRenderer streaming edit stats", () => {
 		);
 		row = stripAnsi((state.callText as any).text);
 		expect(row).toContain("+1");
-		expect(row).toContain("-0");
+		expect(row).not.toContain("-0");
 	});
 
 	test("empty oldText/newText suppresses +0 -0 placeholder", () => {
@@ -166,7 +179,7 @@ describe("CompactRenderer streaming edit stats", () => {
 		);
 		let row = stripAnsi((state.callText as any).text);
 		expect(row).toContain("+1");
-		expect(row).toContain("-0");
+		expect(row).not.toContain("-0");
 
 		r.renderCall(
 			"edit",
@@ -241,8 +254,8 @@ describe("CompactRenderer streaming write stats", () => {
 	});
 });
 
-describe("CompactRenderer group child linger", () => {
-	test("completed child lingers until the next baby arrives", () => {
+describe("CompactRenderer group child visibility", () => {
+	test("completed children stay visible until the next tool call absorbs them", async () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -272,14 +285,14 @@ describe("CompactRenderer group child linger", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		// Both complete: latest child still lingers under the Explored header.
+		// Both complete: every child row stays under the unified work header.
 		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
+		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Read");
+		expect(row).toContain("a.ts");
 		expect(row).toContain("b.ts");
-		expect(row).not.toContain("a.ts");
 
-		// Next baby absorbs the linger; only the new runner shows.
+		// Prior wave lingers during the debounce window, then folds into the header.
 		const baby_state: Record<string, any> = {};
 		const baby_ctx = makeContext("g3", baby_state) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, baby_ctx);
@@ -287,16 +300,256 @@ describe("CompactRenderer group child linger", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("c.ts");
+		expect(row).toContain("b.ts");
+		await flush_group_child_fold_debounce();
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).not.toContain("b.ts");
+
+		// Next tool wave on a settled group folds prior rows after debounce.
+		r.settleAllGroups();
+		const next_state: Record<string, any> = {};
+		const next_ctx = makeContext("g4", next_state) as any;
+		r.renderCall("read", { path: "d.ts" }, theme, next_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Reading");
+		expect(row).toContain("d.ts");
+		await flush_group_child_fold_debounce();
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).not.toContain("c.ts");
 		expect(row).not.toContain("b.ts");
 	});
 
-	test("settling clears the lingering child", () => {
+	test("beginTurn folds lingering completed children into the header", () => {
+		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
-		const child_state: Record<string, any> = {};
+		const owner_ctx = makeContext("noop-turn1", owner_state) as any;
+		const child_ctx = makeContext("noop-turn2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		r.beginTurn();
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Explored");
+		expect(row).not.toContain("b.ts");
+	});
+
+	test("parallel burst keeps prior children visible for debounce window", async () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("burst-owner", owner_state) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.settleAllGroups();
+
+		const wave2: string[] = [];
+		for (let i = 0; i < 4; i++) {
+			const id = `burst-${i}`;
+			const ctx = makeContext(id, {}) as any;
+			wave2.push(id);
+			r.renderCall("read", { path: `${id}.ts` }, theme, ctx);
+			r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		}
+		const row = stripAnsi((owner_state.callText as any).text);
+		for (const id of wave2) {
+			expect(row).toContain(`${id}.ts`);
+		}
+		expect(row).toContain("a.ts");
+	});
+
+	test("new tool wave folds prior completed children even when group is unsettled", async () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("wave-fold1", owner_state) as any;
+		const child_ctx = makeContext("wave-fold2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("b.ts");
+
+		const wave2_ctx = makeContext("wave-fold3", {}) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, wave2_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Reading");
+		expect(row).toContain("c.ts");
+		expect(row).toContain("b.ts");
+		await flush_group_child_fold_debounce();
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).not.toContain("b.ts");
+	});
+
+	test("completed tools stay visible after settle without thinking stream", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("linger-settle1", owner_state) as any;
+		const child_ctx = makeContext("linger-settle2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Read");
+		expect(row).toContain("Search");
+		expect(row).toContain("a.ts");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+	});
+
+	test("completed tools stay visible until thinking stream folds them", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("no-flush1", owner_state) as any;
+		const child_ctx = makeContext("no-flush2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Search");
+		expect(row).toContain("b.ts");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+
+		r.noteThinking();
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
+		expect(row).not.toContain("Search");
+	});
+
+	test("hasActiveGroups is false when only lingering completed children remain", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("linger-active1", owner_state) as any;
+		const child_ctx = makeContext("linger-active2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+
+		expect(r.hasActiveGroups()).toBe(false);
+		expect(r.hasReopenableGroup()).toBe(true);
+	});
+
+	test("noteThinking replaces tool rows with in-group Thinking child", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
 		const owner_ctx = makeContext("s1", owner_state) as any;
-		const child_ctx = makeContext("s2", child_state) as any;
+		const child_ctx = makeContext("s2", {}) as any;
 
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
@@ -318,21 +571,62 @@ describe("CompactRenderer group child linger", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		expect(stripAnsi((owner_state.callText as any).text)).toContain("b.ts");
+		r.noteThinking();
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row.toLowerCase()).toContain("explored");
+		expect(row).toContain("Thinking");
+		expect(row).not.toContain("a.ts");
+		expect(row).not.toContain("b.ts");
+		expect(r.hasGroupThinkingChild()).toBe(true);
+
+		const baby_ctx = makeContext("s3", {}) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, baby_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Reading");
+		expect(row).toContain("c.ts");
+		expect(row).not.toContain("b.ts");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+	});
+
+	test("visible text hard-exits and clears child rows", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("hard-vis1", owner_state) as any;
+		const child_ctx = makeContext("hard-vis2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
 
 		r.noteVisibleText();
-		// Settle schedules an owner invalidate; re-render the owner to pick up
-		// the settled (header-only) format.
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
+		expect(row.toLowerCase()).toContain("explored");
 		expect(row).not.toContain("Reading");
 		expect(row).not.toContain("b.ts");
 	});
 });
 
 describe("CompactRenderer thinking collapse", () => {
-	test("noteThinking eagerly paints Thinking child without renderCall", () => {
+	test("noteThinking soft-settles header and replaces tool rows with Thinking child", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -360,19 +654,16 @@ describe("CompactRenderer thinking collapse", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Search");
-		expect(row).not.toContain("Thinking");
-
 		r.noteThinking();
-		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
 		expect(row).not.toContain("Search");
+		expect(row).not.toContain("b.ts");
 		expect(r.hasGroupThinkingChild()).toBe(true);
 	});
 
-	test("noteVisibleText collapses thinking lane to header-only", () => {
+	test("noteVisibleText collapses to header-only", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -401,17 +692,19 @@ describe("CompactRenderer thinking collapse", () => {
 		);
 
 		r.noteThinking();
-		expect(stripAnsi((owner_state.callText as any).text)).toContain("Thinking");
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
+		expect(row).not.toContain("Search");
 
 		r.noteVisibleText();
-		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
-		expect(row).not.toContain("Thinking");
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row.toLowerCase()).toContain("explored");
 		expect(row).not.toContain("Searching");
 		expect(r.hasGroupThinkingChild()).toBe(false);
 	});
 
-	test("different group key freezes prior thinking lane", () => {
+	test("edit joins unified work group after thinking settle", () => {
+		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -442,10 +735,12 @@ describe("CompactRenderer thinking collapse", () => {
 		r.noteThinking();
 		r.renderCall("edit", { file_path: "c.ts", oldText: "a", newText: "b" }, theme, edit_ctx);
 		r.renderCall("edit", { file_path: "d.ts", oldText: "a", newText: "b" }, theme, edit_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 
-		const discovery_row = stripAnsi((owner_state.callText as any).text);
-		expect(discovery_row).toContain("Explored");
-		expect(discovery_row).not.toContain("Thinking");
+		const work_row = stripAnsi((owner_state.callText as any).text);
+		expect(work_row).not.toContain("Thinking");
+		expect(work_row).toContain("Editing");
+		expect(work_row).toContain("d.ts");
 	});
 
 	test("noteVisibleText settles active group for thinking handoff", () => {
@@ -457,14 +752,29 @@ describe("CompactRenderer thinking collapse", () => {
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		r.renderCall("read", { path: "b.ts" }, theme, makeContext("t2", {}) as any);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		expect(r.hasActiveGroups()).toBe(true);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...makeContext("t2", {}), isError: false },
+		);
+		expect(r.hasActiveGroups()).toBe(false);
 
 		r.noteVisibleText();
 		expect(r.hasActiveGroups()).toBe(false);
 
-		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
+		expect(row.toLowerCase()).toContain("explored");
 		expect(row).not.toContain("Reading");
 	});
 
@@ -500,21 +810,21 @@ describe("CompactRenderer thinking collapse", () => {
 
 		r.noteThinking();
 		expect(r.hasActiveGroups()).toBe(true);
-		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		expect(r.hasGroupThinkingChild()).toBe(true);
 		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
+		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
 		expect(row).not.toContain("Search");
+		expect(row).not.toContain("b.ts");
 
 		const baby_state: Record<string, any> = {};
 		const baby_ctx = makeContext("soft3", baby_state) as any;
 		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, baby_ctx);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		// Same owner header reopened — not a second Explored row.
 		expect(row).toContain("Searching");
 		expect(row).toContain("c.ts");
-		expect(row).toContain("4 matches");
+		expect(row).not.toContain("b.ts");
 		expect(baby_state.callText).toBeUndefined();
 	});
 
@@ -545,9 +855,8 @@ describe("CompactRenderer thinking collapse", () => {
 		);
 
 		r.noteVisibleText();
-		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		const old_row = stripAnsi((owner_state.callText as any).text);
-		expect(old_row).toContain("Explored");
+		expect(old_row.toLowerCase()).toContain("explored");
 		expect(old_row).not.toContain("Reading");
 
 		const fresh_state: Record<string, any> = {};
@@ -556,12 +865,12 @@ describe("CompactRenderer thinking collapse", () => {
 		// Fresh group owner — standalone until a second member joins.
 		const fresh_row = stripAnsi((fresh_state.callText as any).text);
 		expect(fresh_row).toContain("c.ts");
-		expect(fresh_row).not.toContain("Explored");
+		expect(fresh_row.toLowerCase()).not.toContain("explored");
 		// Prior header stayed settled header-only (no reopen onto hard1).
 		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
 	});
 
-	test("does not reopen a group above intervening transcript content", () => {
+	test("unified work group reopens across tool types until hard exit", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const explore_owner_state: Record<string, any> = {};
@@ -611,22 +920,17 @@ describe("CompactRenderer thinking collapse", () => {
 		);
 		r.settleAllGroups();
 
-		const fresh_state: Record<string, any> = {};
-		const fresh_ctx = makeContext("chrono4", fresh_state) as any;
+		const fresh_ctx = makeContext("chrono4", {}) as any;
 		r.renderCall("grep", { pattern: "y", path: "e.ts" }, theme, fresh_ctx);
 		r.renderCall("read", { path: "a.ts" }, theme, explore_owner_ctx);
 
-		const prior_explore = stripAnsi((explore_owner_state.callText as any).text);
-		expect(prior_explore).toContain("Explored");
-		expect(prior_explore).not.toContain("e.ts");
-		expect(prior_explore).not.toContain("Searching");
-
-		const fresh_row = stripAnsi((fresh_state.callText as any).text);
-		expect(fresh_row).toContain("e.ts");
-		expect(fresh_row).not.toContain("Explored");
+		const prior_work = stripAnsi((explore_owner_state.callText as any).text);
+		expect(prior_work).toContain("Edited");
+		expect(prior_work.toLowerCase()).toContain("explored");
+		expect(prior_work).toContain("e.ts");
 	});
 
-	test("edited group collapses pipe child after settle", () => {
+	test("edited group folds prior wave when next tool batch reopens", async () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -660,11 +964,23 @@ describe("CompactRenderer thinking collapse", () => {
 		r.settleAllGroups();
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Edited");
-		expect(row).not.toContain("└");
-		expect(row).not.toContain("runner.ts");
+		expect(row).toContain("└");
+		expect(row).toContain("other.ts");
+
+		const baby_ctx = makeContext("edit-collapse3", {}) as any;
+		r.renderCall("edit", { file_path: "next.ts", oldText: "a", newText: "b" }, theme, baby_ctx);
+		r.renderCall("edit", { file_path: "runner.ts", oldText: "a", newText: "b" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Editing");
+		expect(row).toContain("next.ts");
+		expect(row).toContain("other.ts");
+		await flush_group_child_fold_debounce();
+		r.renderCall("edit", { file_path: "runner.ts", oldText: "a", newText: "b" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).not.toContain("other.ts");
 	});
 
-	test("agent_end lifecycle shows Thinking child then reopens same group", async () => {
+	test("agent_end lifecycle shows Thinking child then reopens with folded prior batch", async () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -697,16 +1013,20 @@ describe("CompactRenderer thinking collapse", () => {
 		await Promise.resolve();
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
+		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
+		expect(row).not.toContain("Search");
 		expect(r.hasActiveGroups()).toBe(true);
+		expect(r.hasGroupThinkingChild()).toBe(true);
 
 		const baby_ctx = makeContext("ae3", {}) as any;
 		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, baby_ctx);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Searching");
 		expect(row).toContain("c.ts");
-		expect(row).not.toMatch(/Explored[\s\S]*Explored/);
+		expect(row).not.toContain("b.ts");
+		expect(row).not.toMatch(/explored[\s\S]*explored/i);
 	});
 
 	test("settleAllGroups keeps currentGroup so same-key call reopens", () => {
@@ -738,8 +1058,9 @@ describe("CompactRenderer thinking collapse", () => {
 
 		r.settleAllGroups();
 		expect(r.hasActiveGroups()).toBe(false);
+		expect(r.hasReopenableGroup()).toBe(true);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("Reading");
+		expect(stripAnsi((owner_state.callText as any).text)).toContain("Read");
 
 		const baby_ctx = makeContext("end3", {}) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, baby_ctx);
@@ -747,10 +1068,10 @@ describe("CompactRenderer thinking collapse", () => {
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("c.ts");
-		expect(row).toContain("Explored");
+		expect(row.toLowerCase()).toContain("explored");
 	});
 
-	test("three discovery batches across agent_end cycles reopen one Explored header", () => {
+	test("three discovery batches across agent_end cycles reopen one work header", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -779,7 +1100,6 @@ describe("CompactRenderer thinking collapse", () => {
 				{ ...child_ctx, isError: false },
 			);
 			r.settleAllGroups();
-			r.armInGroupThinking();
 		};
 
 		const run_next_batch = (paths: string[]) => {
@@ -797,7 +1117,6 @@ describe("CompactRenderer thinking collapse", () => {
 			}
 			r.renderCall("grep", { pattern: "x", path: paths[0] }, theme, owner_ctx);
 			r.settleAllGroups();
-			r.armInGroupThinking();
 		};
 
 		run_first_batch(["a.ts", "b.ts"]);
@@ -805,9 +1124,8 @@ describe("CompactRenderer thinking collapse", () => {
 		run_next_batch(["e.ts", "f.ts"]);
 
 		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
-		expect(row).toMatch(/Explored [56] files/);
-		expect(row).not.toMatch(/Explored[\s\S]*Explored/);
+		expect(row).toContain("6 searches");
+		expect(row).not.toMatch(/6 searches[\s\S]*6 searches/);
 	});
 
 	test("standalone bash does not keep group active after completion", () => {
@@ -830,7 +1148,30 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(r.hasActiveGroups()).toBe(false);
 	});
 
-	test("in-group Thinking child is hidden when thinking blocks are visible", () => {
+	test("noteThinking paints in-group Thinking for a single settled tool", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("single-tool", owner_state) as any;
+
+		r.renderCall("read", { path: "solo.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "solo.ts" },
+			{ content: [{ type: "text", text: "solo" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+
+		r.noteThinking();
+		expect(r.hasGroupThinkingChild()).toBe(true);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
+	});
+
+	test("noteThinking paints in-group Thinking when blocks are hidden", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -858,18 +1199,63 @@ describe("CompactRenderer thinking collapse", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		r.armInGroupThinking();
+		r.noteThinking();
 		expect(r.hasGroupThinkingChild()).toBe(true);
-		let row = stripAnsi((owner_state.callText as any).text);
+		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Thinking");
+		expect(row).not.toContain("Search");
+		expect(row).not.toContain("b.ts");
+	});
 
-		setThinkingBlocksHidden(false);
-		expect(r.hasGroupThinkingChild()).toBe(false);
+	test("noteInterveningToolCall hard-exits so later exploration starts a fresh group", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("chrono-explore", owner_state) as any;
+		const child_ctx = makeContext("chrono-explore2", {}) as any;
+
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).not.toContain("Thinking");
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		const prior_row = stripAnsi((owner_state.callText as any).text);
+		expect(prior_row.toLowerCase()).toContain("explored");
 
-		setThinkingBlocksHidden(true);
+		r.noteInterveningToolCall();
+
+		const fresh_state: Record<string, any> = {};
+		const fresh_ctx = makeContext("chrono-explore3", fresh_state) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
+		r.renderCall("grep", { pattern: "y", path: "d.ts" }, theme, makeContext("chrono-explore4", {}) as any);
+		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
+		r.renderResult(
+			"read",
+			{ path: "c.ts" },
+			{ content: [{ type: "text", text: "c" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...fresh_ctx, isError: false },
+		);
+		const fresh_row = stripAnsi((fresh_state.callText as any).text);
+		expect(fresh_row).toContain("c.ts");
+		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
+		expect(stripAnsi((owner_state.callText as any).text).toLowerCase()).toContain("explored");
 	});
 
 	test("same-key call reopens settled group instead of spawning a second header", () => {
@@ -907,7 +1293,7 @@ describe("CompactRenderer thinking collapse", () => {
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("c.ts");
-		expect(row).toContain("Explored");
+		expect(row.toLowerCase()).toContain("explored");
 		expect(baby_state.callText).toBeUndefined();
 	});
 });
@@ -1002,6 +1388,166 @@ describe("CompactRenderer native render invalidation", () => {
 	});
 });
 
+describe("unified work header", () => {
+	test("formats cross-type summary with bright aggregate diff", async () => {
+		const { formatUnifiedWorkHeader } = await import("../renderer.ts");
+		const theme = makeTheme() as any;
+		const group = {
+			records: [
+				{
+					name: "read",
+					args: { path: "a.ts" },
+					_completed: true,
+					isError: false,
+				},
+				{
+					name: "grep",
+					args: { pattern: "x", path: "b.ts" },
+					_completed: true,
+					isError: false,
+				},
+				{
+					name: "edit",
+					args: { file_path: "c.ts" },
+					_completed: true,
+					isError: false,
+					result: { details: { diff: "+\n+\n-" } },
+				},
+				{
+					name: "bash",
+					args: { command: "npm test" },
+					_completed: true,
+					isError: false,
+				},
+			],
+			type: "work",
+			key: "__work__",
+		} as any;
+		const header = stripAnsi(formatUnifiedWorkHeader(group, theme));
+		expect(header).toContain("Edited 1 file");
+		expect(header).toContain("Explored 1 file");
+		expect(header).toContain("1 search");
+		expect(header).toContain("Ran 1 command");
+		expect(header).toContain("+2");
+		expect(header).toContain("-1");
+	});
+
+	test("omits -0 when aggregate removals are zero", async () => {
+		const { formatUnifiedWorkHeader } = await import("../renderer.ts");
+		const theme = makeTheme() as any;
+		const group = {
+			records: [
+				{
+					name: "edit",
+					args: { file_path: "a.ts" },
+					_completed: true,
+					isError: false,
+					result: { details: { diff: "+\n".repeat(279) } },
+				},
+				{
+					name: "bash",
+					args: { command: "npm test" },
+					_completed: true,
+					isError: false,
+				},
+			],
+			type: "work",
+			key: "__work__",
+		} as any;
+		const header = stripAnsi(formatUnifiedWorkHeader(group, theme));
+		expect(header).toContain("+279");
+		expect(header).not.toContain("-0");
+	});
+
+	test("folded bash failure clears active error from work group header", async () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("bash-err-owner", owner_state) as any;
+		const child_ctx = makeContext("bash-err-child", {}) as any;
+
+		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "a.ts" }, theme, child_ctx);
+		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
+		r.renderResult(
+			"bash",
+			{ command: "npm test" },
+			{ content: [{ type: "text", text: "(no output)" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: true },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "a.ts" },
+			{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
+		let row = (owner_state.callText as any).text as string;
+		expect(row).toContain("[error:• ]");
+
+		const wave_ctx = makeContext("bash-err-wave", {}) as any;
+		r.renderCall("grep", { pattern: "y", path: "b.ts" }, theme, wave_ctx);
+		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
+		row = (owner_state.callText as any).text as string;
+		expect(row).toContain("[error:• ]");
+		await flush_group_child_fold_debounce();
+		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
+		row = (owner_state.callText as any).text as string;
+		expect(row).not.toContain("[error:• ]");
+		expect(row).toContain("[muted:• ]");
+
+		const error_row = r.renderResult(
+			"bash",
+			{ command: "npm test" },
+			{ content: [{ type: "text", text: "(no output)" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: true },
+		);
+		expect(stripAnsi((error_row as any).text ?? "")).toBe("");
+	});
+
+	test("grouped edit child stats use muted diff colors", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("muted-child1", owner_state) as any;
+		const child_ctx = makeContext("muted-child2", {}) as any;
+
+		r.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "bb" }, theme, owner_ctx);
+		r.renderCall("edit", { file_path: "b.ts", oldText: "a", newText: "bb" }, theme, child_ctx);
+		r.renderResult(
+			"edit",
+			{ file_path: "a.ts", oldText: "a", newText: "bb" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+++\n-" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"edit",
+			{ file_path: "b.ts", oldText: "a", newText: "bb" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "bb" }, theme, owner_ctx);
+		const row = (owner_state.callText as any).text as string;
+		expect(row).toContain("Edited 2 files");
+		expect(row).toContain("Edit");
+		expect(row).toContain("[success:+1]");
+		expect(row).toContain("[error:-1]");
+		expect(row).toContain("[muted:+1]");
+		expect(row).toContain("a.ts");
+		expect(row).toContain("b.ts");
+	});
+});
+
 describe("resolve_compact_group_type", () => {
 	test("routes bash grep into discovery and other bash into bashing", async () => {
 		const { resolve_compact_group_type } = await import("../renderer.ts");
@@ -1087,11 +1633,12 @@ describe("compact tool row colors", () => {
 		r.renderCall("bash", { command: "npm test" }, theme, bash_ctx);
 		expect((bash_state.callText as any).text).toContain("[success:• ]");
 
+		const edit_renderer = new CompactRenderer();
 		const edit_state: Record<string, any> = {};
 		const edit_ctx = makeContext("edit-bullet", edit_state) as any;
-		r.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "b" }, theme, edit_ctx);
+		edit_renderer.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "b" }, theme, edit_ctx);
 		expect((edit_state.callText as any).text).toContain("[muted:• ]");
-		r.renderResult(
+		edit_renderer.renderResult(
 			"edit",
 			{ file_path: "a.ts", oldText: "a", newText: "b" },
 			{ content: [{ type: "text", text: "ok" }], details: { diff: { additions: 1, removals: 0 } } },
@@ -1099,7 +1646,7 @@ describe("compact tool row colors", () => {
 			theme,
 			{ ...edit_ctx, isError: false },
 		);
-		r.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "b" }, theme, edit_ctx);
+		edit_renderer.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "b" }, theme, edit_ctx);
 		expect((edit_state.callText as any).text).toContain("[success:• ]");
 	});
 
@@ -1152,23 +1699,247 @@ describe("compact tool row colors", () => {
 	});
 });
 
-describe("resolve_assistant_group_boundary_event", () => {
-	test("ignores text_start and empty text_delta", async () => {
-		const { resolve_assistant_group_boundary_event } = await import("../renderer.ts");
-		expect(resolve_assistant_group_boundary_event({ type: "text_start" })).toBeNull();
-		expect(resolve_assistant_group_boundary_event({ type: "text_delta", delta: "" })).toBeNull();
-		expect(resolve_assistant_group_boundary_event({ type: "text_delta", delta: "   " })).toBeNull();
-		expect(resolve_assistant_group_boundary_event({ type: "text_delta", delta: "hello" })).toBe(
+describe("resolve_assistant_stream_boundary_event", () => {
+	test("ignores text_start and empty text_delta", () => {
+		expect(resolve_assistant_stream_boundary_event({ type: "text_start" })).toBeNull();
+		expect(resolve_assistant_stream_boundary_event({ type: "text_delta", delta: "" })).toBeNull();
+		expect(resolve_assistant_stream_boundary_event({ type: "text_delta", delta: "   " })).toBeNull();
+		expect(resolve_assistant_stream_boundary_event({ type: "text_delta", delta: "hello" })).toBe(
 			"visible_text",
 		);
 	});
 
-	test("classifies thinking stream events", async () => {
-		const { resolve_assistant_group_boundary_event } = await import("../renderer.ts");
-		expect(resolve_assistant_group_boundary_event({ type: "thinking_start" })).toBe("thinking");
-		expect(resolve_assistant_group_boundary_event({ type: "thinking_delta", delta: "" })).toBe(
+	test("classifies thinking stream events", () => {
+		expect(resolve_assistant_stream_boundary_event({ type: "thinking_start" })).toBe("thinking");
+		expect(resolve_assistant_stream_boundary_event({ type: "thinking_delta", delta: "" })).toBe(
 			"thinking",
 		);
+	});
+});
+
+describe("apply_assistant_stream_boundary inter-run gap", () => {
+	function setup_inter_run_gap(): void {
+		setAgentRunPending(true);
+		setTurnToolTranscriptActive(true);
+		resetToolExecutionInFlight();
+	}
+
+	function settle_discovery_pair(
+		r: CompactRenderer,
+		theme: ReturnType<typeof makeTheme>,
+		owner_ctx: ReturnType<typeof makeContext>,
+		child_ctx: ReturnType<typeof makeContext>,
+	): void {
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+	}
+
+	test("inter-run planning text does not fold child rows", () => {
+		setThinkingBlocksHidden(true);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ir-plan1", owner_state) as any;
+		const child_ctx = makeContext("ir-plan2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+
+		const result = apply_assistant_stream_boundary(r, {
+			type: "text_delta",
+			delta: "Task: continue investigation",
+		});
+		expect(result).toBe("planning_text");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Search");
+		expect(row).toContain("b.ts");
+		expect(r.hasReopenableGroup()).toBe(true);
+	});
+
+	test("inter-run non-planning text hard-exits the group", () => {
+		setThinkingBlocksHidden(true);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ir-gap1", owner_state) as any;
+		const child_ctx = makeContext("ir-gap2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+
+		apply_assistant_stream_boundary(r, { type: "text_delta", delta: "Here is the final answer." });
+		expect(r.hasActiveGroups()).toBe(false);
+
+		const fresh_ctx = makeContext("ir-gap3", {}) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
+		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
+	});
+
+	test("three discovery batches with inter-run planning text keep one work header", () => {
+		setThinkingBlocksHidden(true);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ir-batch-owner", owner_state) as any;
+		let baby_id = 0;
+
+		const run_batch = (paths: string[]) => {
+			if (baby_id === 0) {
+				r.renderCall("grep", { pattern: "x", path: paths[0] }, theme, owner_ctx);
+			}
+			for (const file_path of paths) {
+				const child_ctx = makeContext(`ir-batch-${baby_id++}`, {}) as any;
+				r.renderCall("grep", { pattern: "x", path: file_path }, theme, child_ctx);
+				r.renderResult(
+					"grep",
+					{ pattern: "x", path: file_path },
+					{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+					{ expanded: false, isPartial: false },
+					theme,
+					{ ...child_ctx, isError: false },
+				);
+			}
+			r.renderCall("grep", { pattern: "x", path: paths[0] }, theme, owner_ctx);
+			r.settleAllGroups();
+			apply_assistant_stream_boundary(r, {
+				type: "text_delta",
+				delta: "Task: next batch",
+			});
+		};
+
+		run_batch(["a.ts", "b.ts"]);
+		run_batch(["c.ts", "d.ts"]);
+		run_batch(["e.ts", "f.ts"]);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("6 searches");
+		expect(row).not.toMatch(/6 searches[\s\S]*6 searches/);
+	});
+
+	test("visible_text after agent settled still hardExits", () => {
+		setThinkingBlocksHidden(true);
+		setAgentRunPending(false);
+		setTurnToolTranscriptActive(true);
+		resetToolExecutionInFlight();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ir-hard1", owner_state) as any;
+		const child_ctx = makeContext("ir-hard2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+
+		apply_assistant_stream_boundary(r, { type: "text_delta", delta: "final answer text" });
+		expect(r.hasActiveGroups()).toBe(false);
+
+		const fresh_ctx = makeContext("ir-hard3", {}) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
+		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
+	});
+
+	test("thinking_delta with hidden blocks shows in-group Thinking child", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ir-think-hidden1", owner_state) as any;
+		const child_ctx = makeContext("ir-think-hidden2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
+		expect(row).not.toContain("Search");
+		expect(r.hasGroupThinkingChild()).toBe(true);
+	});
+
+	test("thinking_delta with blocks visible does not hardExit", () => {
+		setThinkingBlocksHidden(false);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ir-think1", owner_state) as any;
+		const child_ctx = makeContext("ir-think2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
+		expect(r.hasReopenableGroup()).toBe(true);
+
+		const baby_ctx = makeContext("ir-think3", {}) as any;
+		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, baby_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Searching");
+		expect(row).not.toMatch(/explored[\s\S]*explored/i);
+	});
+	test("noteUserMessage hard-exits the group", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("user-msg1", owner_state) as any;
+		const child_ctx = makeContext("user-msg2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.noteThinking();
+		expect(r.hasGroupThinkingChild()).toBe(true);
+		expect(r.hasActiveGroups()).toBe(true);
+
+		r.noteUserMessage();
+		expect(r.hasGroupThinkingChild()).toBe(false);
+		expect(r.hasActiveGroups()).toBe(false);
 	});
 });
 

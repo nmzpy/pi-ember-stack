@@ -3,8 +3,21 @@
  * family collapse, and the Switch Model Effort slider.
  */
 
+/**
+ * Unlabeled catalog base row in a sibling family (e.g. Devin `glm-5-2` beside
+ * `glm-5-2-max`). Shown as "Default" on the Effort slider — not a wire suffix.
+ */
+export const SIBLING_DEFAULT_EFFORT = "default" as const;
+
 /** Effort points shown on the Switch Model slider (UI axis only). */
-export const EFFORT_SLIDER_POINTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const EFFORT_SLIDER_POINTS = [
+	SIBLING_DEFAULT_EFFORT,
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
 
 export type EffortSliderPoint = (typeof EFFORT_SLIDER_POINTS)[number];
 
@@ -20,12 +33,14 @@ export const THINKING_VARIANT_TOKENS = [
 	"xhigh",
 	"max",
 	"no",
+	"none",
 ] as const;
 
 export type ThinkingVariantToken = (typeof THINKING_VARIANT_TOKENS)[number];
 
 /** Screenshot-style captions under the Effort slider. */
 export const EFFORT_DESCRIPTIONS: Record<EffortSliderPoint, string> = {
+	default: "Standard tier for this model family.",
 	low: "Faster responses with lighter reasoning.",
 	medium: "Balanced speed and reasoning quality for most tasks.",
 	high: "Deeper reasoning for harder problems.",
@@ -43,7 +58,7 @@ const EFFORT_SLIDER_SET = new Set<string>(EFFORT_SLIDER_POINTS);
  * Bare "*-thinking" (Cursor reasoning ids) is intentionally NOT matched.
  */
 const THINKING_SUFFIX_RE =
-	/(?:^|[-_.\s]+)(no|minimal|low|medium|high|xhigh|max)[-_\s]+thinking(?:[-_\s]+fast)?$/i;
+	/(?:^|[-_.\s]+)(no|none|minimal|low|medium|high|xhigh|max)[-_\s]+thinking(?:[-_\s]+fast)?$/i;
 
 /**
  * Speed-tier suffixes without "Thinking" in the label:
@@ -51,7 +66,7 @@ const THINKING_SUFFIX_RE =
  *   id: gpt-5-2-codex-low-fast, gpt-5-2-codex-medium-fast
  */
 const LEVEL_FAST_SUFFIX_RE =
-	/(?:^|[-_.\s]+)(no|minimal|low|medium|high|xhigh|max)[-_\s]+fast$/i;
+	/(?:^|[-_.\s]+)(no|none|minimal|low|medium|high|xhigh|max)[-_\s]+fast$/i;
 
 /**
  * Standalone product-line suffixes (not effort variants).
@@ -68,7 +83,7 @@ function model_class_suffix_re(token: string): RegExp {
 	return new RegExp(`(?:^|[-_.\\s])${token}$`, "i");
 }
 
-const EFFORT_TOKEN_CAPTURE = "(no|minimal|low|medium|high|xhigh|max)";
+const EFFORT_TOKEN_CAPTURE = "(no|none|minimal|low|medium|high|xhigh|max)";
 
 /** Cursor-style ids: `cursor-grok-4.5-high-fast` paired with `cursor-grok-4.5-high`. */
 const FAST_LINE_ID_RE = new RegExp(`^(.*)-${EFFORT_TOKEN_CAPTURE}-fast$`, "i");
@@ -190,7 +205,7 @@ export function model_name_has_thinking_variant(modelName: string): boolean {
 	if (LEVEL_FAST_SUFFIX_RE.test(trimmed)) return true;
 	const tokens = new Set(normalize_tokens(modelName));
 	for (const token of THINKING_VARIANT_TOKENS) {
-		if (token === "no") continue; // alone "no" is too noisy; require Thinking suffix
+		if (token === "no" || token === "none") continue; // alone is too noisy; require suffix
 		if (tokens.has(token)) return true;
 	}
 	return false;
@@ -199,10 +214,10 @@ export function model_name_has_thinking_variant(modelName: string): boolean {
 /** First baked thinking-variant token in a display name/id, or undefined. */
 export function get_baked_thinking_variant(modelName: string): string | undefined {
 	const fromThinking = extract_variant_token(modelName);
-	if (fromThinking && fromThinking !== "no") return fromThinking;
+	if (fromThinking && fromThinking !== "no" && fromThinking !== "none") return fromThinking;
 	const tokens = new Set(normalize_tokens(modelName));
 	for (const token of THINKING_VARIANT_TOKENS) {
-		if (token === "no") continue;
+		if (token === "no" || token === "none") continue;
 		if (tokens.has(token)) return token;
 	}
 	return undefined;
@@ -230,14 +245,14 @@ export function extract_variant_token(idOrName: string): ThinkingVariantToken | 
 	}
 
 	// Trailing suffix after -, _, ., or whitespace: foo-high, foo_medium, "Foo High"
-	const suffix = /(?:^|[-_.\s])(minimal|low|medium|high|xhigh|max)$/i.exec(trimmed);
+	const suffix = /(?:^|[-_.\s])(minimal|low|medium|high|xhigh|max|none)$/i.exec(trimmed);
 	if (suffix) {
 		const token = suffix[1].toLowerCase() as ThinkingVariantToken;
 		if (VARIANT_TOKEN_SET.has(token)) return token;
 	}
 
 	// Parenthetical: "GPT-OSS 120B (Medium)"
-	const paren = /\(\s*(minimal|low|medium|high|xhigh|max)\s*\)$/i.exec(trimmed);
+	const paren = /\(\s*(minimal|low|medium|high|xhigh|max|none)\s*\)$/i.exec(trimmed);
 	if (paren) {
 		const token = paren[1].toLowerCase() as ThinkingVariantToken;
 		if (VARIANT_TOKEN_SET.has(token)) return token;
@@ -266,10 +281,13 @@ export function strip_variant_token(idOrName: string): string {
 		return withoutLevelFast.trim().replace(/[-_.\s]+$/g, "").trim();
 	}
 
-	const withoutParen = trimmed.replace(/\s*\(\s*(minimal|low|medium|high|xhigh|max)\s*\)$/i, "");
+	const withoutParen = trimmed.replace(/\s*\(\s*(minimal|low|medium|high|xhigh|max|none)\s*\)$/i, "");
 	if (withoutParen !== trimmed) return withoutParen.trim();
 
-	const withoutSuffix = trimmed.replace(/[-_.\s]+(minimal|low|medium|high|xhigh|max)$/i, "");
+	const withoutSuffix = trimmed.replace(
+		/[-_.\s]+(minimal|low|medium|high|xhigh|max|none)$/i,
+		"",
+	);
 	if (withoutSuffix !== trimmed && withoutSuffix.length > 0) return withoutSuffix.trim();
 
 	return trimmed;
@@ -287,9 +305,36 @@ export function variant_to_effort_point(
 ): EffortSliderPoint | undefined {
 	if (!token) return undefined;
 	const lower = token.toLowerCase();
-	if (lower === "no") return undefined; // "No Thinking" — not a slider tick
+	if (lower === "no" || lower === "none") return undefined; // not a slider tick
 	if (EFFORT_SLIDER_SET.has(lower)) return lower as EffortSliderPoint;
 	return undefined;
+}
+
+/** Effort baked into a catalog id/name (sibling catalogs, Fast-line ids). */
+export function baked_effort_from_model(model: {
+	id?: string;
+	name?: string;
+}): EffortSliderPoint | undefined {
+	const fromFastLine = model.id ? effort_from_fast_line_id(model.id) : undefined;
+	if (fromFastLine) return fromFastLine;
+	const fromId = variant_to_effort_point(extract_variant_token(model.id ?? ""));
+	if (fromId) return fromId;
+	if (model.name) {
+		return variant_to_effort_point(extract_variant_token(model.name));
+	}
+	return undefined;
+}
+
+/** Whether effort or none/no is encoded in the catalog row (not Pi thinkingLevel). */
+export function has_baked_effort_variant(model: { id?: string; name?: string }): boolean {
+	if (baked_effort_from_model(model)) return true;
+	const idToken = extract_variant_token(model.id ?? "");
+	if (idToken === "no" || idToken === "none") return true;
+	if (model.name) {
+		const nameToken = extract_variant_token(model.name);
+		if (nameToken === "no" || nameToken === "none") return true;
+	}
+	return false;
 }
 
 /** True when `point` is one of the Effort slider ticks. */
@@ -299,36 +344,27 @@ export function is_effort_slider_point(value: string): value is EffortSliderPoin
 
 /** Title-case effort label for inline display (`high` → `High`, `xhigh` → `xHigh`). */
 export function format_effort_display_label(point: EffortSliderPoint): string {
+	if (point === "default") return "Default";
 	if (point === "xhigh") return "xHigh";
 	if (point === "max") return "Max";
 	return point.charAt(0).toUpperCase() + point.slice(1);
 }
 
-/**
- * Effort level for footer display: Pi thinking level when set, otherwise
- * effort baked into the active catalog model id/name (sibling catalogs).
- */
-export function resolve_model_effort_level(
-	model: { id?: string; name?: string } | undefined,
-	thinkingLevel = "off",
-): EffortSliderPoint | "off" {
-	const normalized = (thinkingLevel ?? "off").toLowerCase();
-	if (normalized !== "off" && is_effort_slider_point(normalized)) {
-		return normalized;
-	}
-	if (!model) return "off";
-
-	const baked = get_baked_thinking_variant(model.name ?? "");
-	if (baked && is_effort_slider_point(baked)) return baked;
-
-	const fromFastLine = model.id ? effort_from_fast_line_id(model.id) : undefined;
-	if (fromFastLine) return fromFastLine;
-
-	const fromId = variant_to_effort_point(extract_variant_token(model.id ?? ""));
-	if (fromId) return fromId;
-
-	return "off";
+/** Bare id/name with no baked effort suffix (not even `none` / `no`). */
+export function is_unlabeled_sibling_base(model: {
+	id?: string;
+	name?: string;
+}): boolean {
+	const id = model.id?.trim() ?? "";
+	if (!id) return false;
+	if (extract_variant_token(id)) return false;
+	if (model.name && extract_variant_token(model.name)) return false;
+	if (baked_effort_from_model(model)) return false;
+	return true;
 }
+
+/** @see resolve_model_effort_level in model-families.ts */
+export { resolve_model_effort_level } from "./model-families.ts";
 
 /** Caption for an effort point (fallback empty). */
 export function effort_description(point: EffortSliderPoint): string {

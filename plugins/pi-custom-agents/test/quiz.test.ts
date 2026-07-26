@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
 	format_answers_for_model,
 	format_quiz_call_row,
+	format_quiz_transcript_answers,
+	finalize_quiz_tool_render,
 	should_hide_quiz_call_row,
 	type QuizQuestion,
 } from "../quiz-tool.ts";
@@ -100,6 +102,20 @@ describe("format_quiz_call_row", () => {
 		expect(row).toContain("[muted]2 questions");
 		expect(row).not.toContain("[dim]Quiz");
 	});
+
+	test("cancelled row uses error bullet and Quiz cancelled label only", () => {
+		const theme = {
+			fg: (tag: string, text: string) => `[${tag}]${text}`,
+			bold: (text: string) => text,
+		};
+		const row = format_quiz_call_row({ questions: [questions[0]] }, theme as any, {
+			completed: true,
+			hidden: false,
+			cancelled: true,
+		});
+		expect(row).toBe("[error]• [dim]Quiz cancelled");
+		expect(row).not.toContain("question");
+	});
 });
 
 describe("should_hide_quiz_call_row", () => {
@@ -108,5 +124,33 @@ describe("should_hide_quiz_call_row", () => {
 		expect(should_hide_quiz_call_row("quiz-1", true, "quiz-1")).toBe(false);
 		expect(should_hide_quiz_call_row("quiz-1", false, "quiz-2")).toBe(false);
 		expect(should_hide_quiz_call_row("quiz-1", false, undefined)).toBe(false);
+	});
+});
+
+describe("finalize_quiz_tool_render", () => {
+	test("marks completed and invalidates only on first pass", () => {
+		const state: Record<string, unknown> = {};
+		let invalidations = 0;
+		const invalidate = () => {
+			invalidations++;
+		};
+
+		finalize_quiz_tool_render("quiz-1", state, invalidate);
+		expect(state.quizCompleted).toBe(true);
+		expect(invalidations).toBe(1);
+
+		finalize_quiz_tool_render("quiz-1", state, invalidate);
+		expect(invalidations).toBe(1);
+	});
+});
+
+describe("format_quiz_transcript_answers", () => {
+	test("emits one dim question arrow text answer line per answer", () => {
+		const out = format_quiz_transcript_answers(
+			questions,
+			[{ id: "plan-review", value: "implement", label: "Implement Plan", wasCustom: false }],
+			mock_theme as any,
+		);
+		expect(out).toBe("Plan Review: Choose what to do with the plan. → Implement Plan");
 	});
 });

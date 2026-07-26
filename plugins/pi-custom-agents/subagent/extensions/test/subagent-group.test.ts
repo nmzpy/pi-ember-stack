@@ -53,4 +53,15 @@ describe("SubagentGroupRenderer", () => {
 		expect(renderer.shouldUseGroupLayout("a")).toBe(false);
 		expect(renderer.shouldUseGroupLayout("b")).toBe(false);
 	});
+
+	test("register preserves populated results across empty rebuild placeholder", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		const results = [makeResult("Coder A", 0)];
+		renderer.register("a", { agent: "Coder", task: "one" }, results);
+		renderer.register("a", { agent: "Coder", task: "one" }, []);
+
+		expect(renderer.getRecord("a")?.results).toEqual(results);
+	});
 });

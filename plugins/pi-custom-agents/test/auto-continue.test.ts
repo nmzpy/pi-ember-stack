@@ -3,7 +3,6 @@ import {
 	build_auto_continue_content,
 	is_benign_compact_error,
 	should_skip_compact,
-	COMPACT_FOCUS_INSTRUCTIONS,
 	DEFAULT_AUTO_CONTINUE_MAX_CHARS,
 } from "../auto-continue.ts";
 
@@ -65,27 +64,6 @@ describe("is_benign_compact_error", () => {
 });
 
 // ---------------------------------------------------------------------------
-// COMPACT_FOCUS_INSTRUCTIONS
-// ---------------------------------------------------------------------------
-
-describe("COMPACT_FOCUS_INSTRUCTIONS", () => {
-	test("contains all four required labels", () => {
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Goal:");
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Done:");
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Left:");
-		expect(COMPACT_FOCUS_INSTRUCTIONS).toContain("Files:");
-	});
-
-	test("demands no extra sections", () => {
-		expect(COMPACT_FOCUS_INSTRUCTIONS.toLowerCase()).toContain("nothing else");
-	});
-
-	test("mentions the output token limit context", () => {
-		expect(COMPACT_FOCUS_INSTRUCTIONS.toLowerCase()).toContain("output only");
-	});
-});
-
-// ---------------------------------------------------------------------------
 // build_auto_continue_content
 // ---------------------------------------------------------------------------
 
@@ -95,8 +73,8 @@ describe("build_auto_continue_content", () => {
 		expect(out.length).toBeGreaterThan(0);
 		expect(out).not.toBe("continue");
 		expect(out).toContain("cut off by the maximum output token limit");
-		expect(out).toContain("Continue the interrupted task from Left:");
-		expect(out).toContain("Do not redo work listed in Done:");
+		expect(out).toContain("## Next Steps");
+		expect(out).toContain("### Done");
 	});
 
 	test("does not include Checkpoint: or raw summary dump", () => {

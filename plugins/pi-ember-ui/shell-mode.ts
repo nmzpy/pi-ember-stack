@@ -12,7 +12,8 @@ export type ShellModeEditor = {
 	getText?: () => string;
 	setText?: (text: string) => void;
 	isEditorEmpty?: () => boolean;
-	tui?: { requestRender?: () => void };
+	submitValue?: () => void;
+	tui?: { requestRender?: (force?: boolean) => void };
 };
 
 export type ShellModeInputResult = {
@@ -36,6 +37,23 @@ let on_shell_sync: (() => void) | undefined;
 /** Install a callback fired after a successful history→shell conversion. */
 export function set_shell_sync_callback(fn: (() => void) | undefined): void {
 	on_shell_sync = fn;
+}
+
+/** Clear the chatbox after a shell submit without re-entering shell mode. */
+function clear_shell_submit_editor(editor: ShellModeEditor): void {
+	with_suppressed_shell_history_sync(() => editor.setText?.(""));
+	editor.tui?.requestRender?.();
+}
+
+/**
+ * Submit a bang-prefixed bash command and clear the editor — SSOT for shell Enter.
+ * Returns true when submit ran synchronously (caller should consume the Enter key).
+ */
+export function submit_shell_command_from_editor(editor: ShellModeEditor): boolean {
+	if (typeof editor.submitValue !== "function") return false;
+	editor.submitValue();
+	clear_shell_submit_editor(editor);
+	return true;
 }
 
 /** Reentrancy guard for the setTextInternal patch. */
@@ -162,9 +180,9 @@ export function sync_shell_mode_from_editor_text(editor: ShellModeEditor): boole
  * will not repaint the chatbox row otherwise. The prompt glyph (`>` ↔ `!`)
  * and border color only update when `render` fires and re-reads `isShellMode()`.
  *
- * Enter submits: the editor text is prefixed with '!' so Pi's built-in
- * onSubmit bash handler (interactive-mode.js, text.startsWith("!"))
- * picks it up and runs the command through the normal bash pipeline.
+ * Enter submits synchronously when the editor exposes `submitValue`: prefix `!`,
+ * call submit, clear the chatbox, and consume the key so the TUI listener
+ * path cannot leave the command visible while bash runs.
  */
 export function process_shell_input(
 	data: string,
@@ -208,8 +226,13 @@ export function process_shell_input(
 		// Pi's onSubmit needs to identify a bash command.
 		with_suppressed_shell_history_sync(() => editor.setText?.(`!${text}`));
 		setShellMode(false);
+		// TUI listeners run before the editor handleInput chain. Submit and clear
+		// here so the chatbox never keeps the command visible while bash runs.
+		if (submit_shell_command_from_editor(editor)) {
+			pending_shell_submit_enter = false;
+			return { consume: true };
+		}
 		pending_shell_submit_enter = true;
-		// Let the normal submit run; Pi's own render path repaints after setText.
 		return undefined;
 	}
 

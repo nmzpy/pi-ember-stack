@@ -135,9 +135,15 @@ export function should_hide_quiz_call_row(
 export function format_quiz_call_row(
 	args: QuizCallArgs,
 	theme: Theme,
-	options: { completed: boolean; hidden: boolean },
+	options: { completed: boolean; hidden: boolean; cancelled?: boolean },
 ): string {
 	if (options.hidden) return "";
+	if (options.cancelled) {
+		return (
+			statusBulletColor(true, false, theme) +
+			theme.fg("dim", theme.bold("Quiz cancelled"))
+		);
+	}
 	const count = args.questions?.length ?? 0;
 	const count_text = theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`);
 	if (options.completed) {
@@ -155,7 +161,26 @@ export function format_quiz_call_row(
 	);
 }
 
-class QuizCallComponent implements Component {
+/** Transcript answer lines under the Quiz call row (user-facing only). */
+export function format_quiz_transcript_answers(
+	questions: QuizQuestion[],
+	answers: QuizAnswer[],
+	theme: Theme,
+): string {
+	return answers
+		.map((answer) => {
+			const q = questions.find((item) => item.id === answer.id);
+			const q_title = q?.label ?? q?.id ?? answer.id;
+			const q_prompt = q?.prompt ?? "";
+			const prefix = answer.wasCustom ? "(custom) " : "";
+			const questionText = `${q_title}: ${q_prompt}`;
+			const answerText = `${prefix}${answer.label}`;
+			return `${theme.fg("dim", `${questionText} → `)}${theme.fg("text", answerText)}`;
+		})
+		.join("\n");
+}
+
+class QuizTranscriptComponent implements Component {
 	constructor(
 		private readonly args: QuizCallArgs,
 		private readonly theme: Theme,
@@ -165,15 +190,47 @@ class QuizCallComponent implements Component {
 
 	render(width: number): string[] {
 		const completed = this.state.quizCompleted === true;
-		const line = format_quiz_call_row(this.args, this.theme, {
+		const cancelled = this.state.quizCancelled === true;
+		const hidden = quiz_call_hidden(this.toolCallId, completed);
+		const availableWidth = Math.max(1, width);
+		const lines: string[] = [];
+		const call_line = format_quiz_call_row(this.args, this.theme, {
 			completed,
-			hidden: quiz_call_hidden(this.toolCallId, completed),
+			hidden,
+			cancelled,
 		});
-		if (!line) return [];
-		return [truncateToWidth(line, Math.max(1, width), "…")];
+		if (call_line) {
+			lines.push(truncateToWidth(call_line, availableWidth, "…"));
+		}
+		if (completed && !hidden && !cancelled) {
+			const answers = (this.state.quizAnswers as QuizAnswer[] | undefined) ?? [];
+			const questions = this.args.questions ?? [];
+			const answer_block = format_quiz_transcript_answers(questions, answers, this.theme);
+			if (answer_block) {
+				for (const line of answer_block.split("\n")) {
+					lines.push(truncateToWidth(line, availableWidth, "…"));
+				}
+			}
+		}
+		return lines;
 	}
 
 	invalidate(): void {}
+}
+
+/** One-shot call-row refresh after the overlay closes — never from every renderResult pass. */
+export function finalize_quiz_tool_render(
+	toolCallId: string,
+	state: Record<string, unknown>,
+	invalidate: () => void,
+): void {
+	const was_completed = state.quizCompleted === true;
+	state.quizCompleted = true;
+	if (awaiting_quiz_tool_call_id === toolCallId) {
+		awaiting_quiz_tool_call_id = undefined;
+	}
+	unsubscribe_quiz_tick(toolCallId);
+	if (!was_completed) invalidate();
 }
 
 /**
@@ -372,7 +429,7 @@ export async function askQuiz(
 						addWrappedWithPrefix(
 							lines,
 							prefix,
-							theme.fg("muted", `${i + 1}. ${option.label}`),
+							theme.fg("dim", `${i + 1}. ${option.label}`),
 							renderWidth,
 						);
 					}
@@ -412,7 +469,7 @@ export async function askQuiz(
 						addWrappedWithPrefix(
 							lines,
 							"     ",
-							theme.fg("muted", option.description),
+							theme.fg(selected ? "muted" : "dim", option.description),
 							renderWidth,
 						);
 					}
@@ -565,42 +622,28 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 			} else {
 				unsubscribe_quiz_tick(context.toolCallId);
 			}
-			return new QuizCallComponent(args, theme, context.toolCallId, context.state);
+			return new QuizTranscriptComponent(args, theme, context.toolCallId, context.state);
 		},
 		renderResult(
 			result: { details?: { answers?: QuizAnswer[]; cancelled?: boolean } },
-			_options: ToolRenderResultOptions,
+			options: ToolRenderResultOptions,
 			theme: Theme,
 			context: ToolRenderContext & { args?: QuizCallArgs },
 		): Component {
-			context.state.quizCompleted = true;
-			if (awaiting_quiz_tool_call_id === context.toolCallId) {
-				awaiting_quiz_tool_call_id = undefined;
-			}
-			unsubscribe_quiz_tick(context.toolCallId);
-			context.invalidate();
-			requestTuiRender();
 			const details = result.details;
 			if (details?.cancelled) {
-				return new Text(theme.fg("warning", "Cancelled"), 0, 0);
+				context.state.quizCancelled = true;
+				context.state.quizAnswers = [];
+				finalize_quiz_tool_render(context.toolCallId, context.state, context.invalidate);
+				return new Text("", 0, 0);
 			}
-			const answers = details?.answers ?? [];
-			const questions = context?.args?.questions ?? [];
-			return new Text(
-				answers
-					.map((answer) => {
-						const q = questions.find((q: QuizQuestion) => q.id === answer.id);
-						const q_title = q?.label ?? q?.id ?? answer.id;
-						const q_prompt = q?.prompt ?? "";
-						const prefix = answer.wasCustom ? "(custom) " : "";
-						const questionText = `${q_title}: ${q_prompt}`;
-						const answerText = `${prefix}${answer.label}`;
-						return `${theme.fg("dim", `${questionText} → `)}${theme.fg("text", answerText)}`;
-					})
-					.join("\n"),
-				0,
-				0,
-			);
+			if (options.isPartial) {
+				return new Text("", 0, 0);
+			}
+			context.state.quizAnswers = details?.answers ?? [];
+			finalize_quiz_tool_render(context.toolCallId, context.state, context.invalidate);
+			// Answers render on the call row (todo-style); avoid a second result row.
+			return new Text("", 0, 0);
 		},
 	});
 

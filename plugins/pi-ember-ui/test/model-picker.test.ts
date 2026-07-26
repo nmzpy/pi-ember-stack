@@ -3,6 +3,9 @@ import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 import {
 	find_exact_model_reference,
 	find_session_reference,
+	fallback_to_native_resume_for_tests,
+	bind_live_editor_for_tests,
+	set_native_editor_submit_value_for_tests,
 	should_auto_submit_slash_text,
 } from "../model-picker.ts";
 
@@ -99,5 +102,47 @@ describe("should_auto_submit_slash_text", () => {
 		expect(should_auto_submit_slash_text("/model ")).toBe(false);
 		expect(should_auto_submit_slash_text("/export path/to/dir/")).toBe(false);
 		expect(should_auto_submit_slash_text('/export "path/to/dir/"')).toBe(false);
+	});
+});
+
+describe("native /resume fallback", () => {
+	const NATIVE_SUBMIT_KEY = Symbol.for("pi-ember-ui:native-submit");
+
+	test("delegates to per-editor native submitValue when switchSession capture is missing", () => {
+		let editor_text = "";
+		let native_called = false;
+		const editor = {
+			setText(text: string) {
+				editor_text = text;
+			},
+			[NATIVE_SUBMIT_KEY]() {
+				native_called = true;
+			},
+		};
+		bind_live_editor_for_tests(editor);
+
+		const ok = fallback_to_native_resume_for_tests("/sessions/alpha.jsonl");
+		expect(ok).toBe(true);
+		expect(editor_text).toBe("/resume /sessions/alpha.jsonl");
+		expect(native_called).toBe(true);
+	});
+
+	test("falls back to prototype native submit when instance key is missing", () => {
+		let native_called = false;
+		const editor = { setText() {} };
+		bind_live_editor_for_tests(editor);
+		set_native_editor_submit_value_for_tests(function native_submit(this: unknown) {
+			native_called = true;
+			void this;
+		});
+
+		expect(fallback_to_native_resume_for_tests("/sessions/beta.jsonl")).toBe(true);
+		expect(native_called).toBe(true);
+	});
+
+	test("returns false when native submit or editor is unavailable", () => {
+		bind_live_editor_for_tests(undefined);
+		set_native_editor_submit_value_for_tests(undefined);
+		expect(fallback_to_native_resume_for_tests("/sessions/alpha.jsonl")).toBe(false);
 	});
 });

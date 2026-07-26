@@ -143,10 +143,6 @@ function infer_action(target: Record<string, unknown>): void {
 
 	if (Array.isArray(target.batch) && target.batch.length > 0) {
 		target.action = target.batch.length > 1 ? "batch" : "update";
-		if (target.batch.length === 1) {
-			merge_item_fields(target, target.batch[0] as Record<string, unknown>);
-			delete target.batch;
-		}
 		return;
 	}
 
@@ -162,6 +158,49 @@ function infer_action(target: Record<string, unknown>): void {
 	if (target.subject !== undefined) {
 		target.action = "create";
 	}
+}
+
+/**
+ * Flatten `action: "update"` + `batch` combos models send after reading the schema.
+ * Single-item batch merges into a plain update; multi-item rewrites to `batch` action.
+ */
+function finalize_batch_shape(target: Record<string, unknown>): void {
+	const raw_batch = target.batch;
+	if (!Array.isArray(raw_batch) || raw_batch.length === 0) return;
+
+	const batch = raw_batch
+		.map((item) => normalize_batch_item(item))
+		.filter((item): item is Record<string, unknown> => item !== undefined);
+
+	if (batch.length === 0) {
+		delete target.batch;
+		return;
+	}
+
+	if (batch.length === 1) {
+		const item = batch[0];
+		const top_id = coerce_id(target.id);
+		if (top_id !== undefined && item.id === undefined) item.id = top_id;
+		if (target.status !== undefined && item.status === undefined) {
+			item.status = target.status;
+		}
+		merge_item_fields(target, item);
+		delete target.batch;
+		if (!target.action || target.action === "batch") target.action = "update";
+		return;
+	}
+
+	target.action = "batch";
+	target.batch = batch;
+	delete target.id;
+	delete target.status;
+	delete target.subject;
+	delete target.description;
+	delete target.activeForm;
+	delete target.addBlockedBy;
+	delete target.removeBlockedBy;
+	delete target.owner;
+	delete target.metadata;
 }
 
 function coerce_id_lists(target: Record<string, unknown>): void {
@@ -235,6 +274,7 @@ export function prepare_todo_arguments(args: unknown): TodoParamsLike {
 	}
 
 	infer_action(target);
+	finalize_batch_shape(target);
 	coerce_id_lists(target);
 
 	return target as TodoParamsLike;

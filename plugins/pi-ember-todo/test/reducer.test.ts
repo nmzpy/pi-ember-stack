@@ -149,6 +149,38 @@ describe("pi-ember-todo reducer", () => {
 		expect(ok.details.tasks[0].status).toBe("in_progress");
 	});
 
+	test("update with single-item batch merges id and status", async () => {
+		const { pi, tools } = make_api();
+		piEmberTodo(pi);
+		const ctx = make_ctx("s9");
+		await run(tools, ctx, { action: "create", subject: "Module 1" });
+		const ok = await run(tools, ctx, {
+			action: "update",
+			id: 1,
+			batch: [{ status: "in_progress" }],
+		});
+		expect(ok.isError).toBeFalsy();
+		expect(ok.details.tasks[0].status).toBe("in_progress");
+	});
+
+	test("update with multi-item batch applies all updates", async () => {
+		const { pi, tools } = make_api();
+		piEmberTodo(pi);
+		const ctx = make_ctx("s10");
+		await run(tools, ctx, { action: "create", subject: "Module 1" });
+		await run(tools, ctx, { action: "create", subject: "Module 2" });
+		const ok = await run(tools, ctx, {
+			action: "update",
+			batch: [
+				{ id: 1, status: "completed" },
+				{ id: 2, status: "in_progress" },
+			],
+		});
+		expect(ok.isError).toBeFalsy();
+		expect(ok.details.tasks[0].status).toBe("completed");
+		expect(ok.details.tasks[1].status).toBe("in_progress");
+	});
+
 	test("clear wipes all tasks", async () => {
 		const { pi, tools } = make_api();
 		piEmberTodo(pi);

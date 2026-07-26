@@ -22,7 +22,10 @@ import {
 	sync_slash_command_active,
 } from "./layout.ts";
 import { refresh_footer, set_footer_thinking_level } from "./footer.ts";
-import { resolve_model_effort_level } from "./model-variants.ts";
+import {
+	PI_AGENTS_BIND_MODE_MODEL_EVENT,
+	model_identity_from_user_selection,
+} from "../pi-custom-agents/mode-models.ts";
 import {
 	close_model_picker,
 	handle_model_picker_input,
@@ -32,6 +35,11 @@ import {
 } from "./model-selector.ts";
 import type { EffortSliderPoint } from "./model-variants.ts";
 import { buildSelectListTheme, resolve_select_list_theme } from "./select-list-theme.ts";
+import {
+	get_switch_session_fn,
+	install_command_context_capture,
+	resolve_switch_session_fn,
+} from "./command-context-capture.ts";
 
 /** Same layout Pi uses for slash-command autocomplete rows. */
 const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
@@ -64,11 +72,6 @@ type PendingModelPick = {
 	resolve: (result: ModelPickResult) => void;
 };
 
-type SwitchSessionFn = (
-	sessionPath: string,
-	options?: { withSession?: (ctx: any) => Promise<void> },
-) => Promise<{ cancelled: boolean }>;
-
 let model_picker_ctx: any;
 let model_picker_pi: ExtensionAPI | undefined;
 let live_editor: any;
@@ -76,8 +79,10 @@ let pending_pick: PendingModelPick | null = null;
 /** True while the in-editor Switch Model list is open. */
 let model_selector_busy = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:model-picker-patched");
-/** Captured from ExtensionRunner.bindCommandContext — same role as pi.setModel for /model. */
-let switch_session_fn: SwitchSessionFn | undefined;
+/** Per-editor native submit — instance patch may differ from Editor.prototype. */
+const NATIVE_SUBMIT_KEY = Symbol.for("pi-ember-ui:native-submit");
+/** Pre-patch Editor.submitValue fallback when instance key is missing. */
+let native_editor_submit_value: ((this: Editor) => void) | undefined;
 
 /** Cached session list for /resume argument completions (refreshed on open + TTL). */
 let session_cache: SessionInfo[] | null = null;
@@ -85,7 +90,7 @@ let session_cache_at = 0;
 let session_cache_loading: Promise<SessionInfo[]> | null = null;
 
 /** Mirrors pi-coding-agent `findExactModelReferenceMatch` for /model submit handling. */
-export function find_exact_model_reference<T extends { provider: string; id: string }>(
+export function find_exact_model_reference<T extends { provider: string; id: string; name?: string }>(
 	modelReference: string,
 	availableModels: T[],
 ): T | undefined {
@@ -185,13 +190,26 @@ async function apply_model_selection(
 				}
 			}
 		} else {
-			const level = resolve_model_effort_level(
-				model,
-				(pi as { getThinkingLevel?: () => string }).getThinkingLevel?.() ?? "off",
-			);
-			set_footer_thinking_level(level);
+			const piLevel = (pi as { getThinkingLevel?: () => string }).getThinkingLevel?.() ?? "off";
+			set_footer_thinking_level(piLevel);
 		}
 		refresh_footer(ctx);
+		const identity = model_identity_from_user_selection(
+			{ provider: model.provider, id: model.id, name: model.name },
+			{
+				thinkingLevel: selection.thinkingLevel,
+				syncThinkingLevelToPi: selection.syncThinkingLevelToPi,
+			},
+		);
+		if (identity) {
+			pi.events.emit(PI_AGENTS_BIND_MODE_MODEL_EVENT, {
+				provider: identity.provider,
+				modelId: identity.modelId,
+				name: model.name,
+				thinkingLevel: identity.thinkingLevel,
+				syncThinkingLevelToPi: selection.syncThinkingLevelToPi,
+			});
+		}
 		const effortHint = selection.thinkingLevel ? ` · ${selection.thinkingLevel}` : "";
 		ctx.ui.notify(`Model: ${model.id}${effortHint} • ${model.provider}`, "info");
 		return true;
@@ -358,7 +376,7 @@ function handle_resume_command_text(editor: any, text: string): boolean {
 	return true;
 }
 
-async function apply_resume_from_term(searchTerm: string): Promise<void> {
+export async function apply_resume_from_term(searchTerm: string): Promise<void> {
 	const ctx = model_picker_ctx;
 	if (!ctx) return;
 	const sessions = await load_sessions_for_ctx(ctx);
@@ -369,18 +387,65 @@ async function apply_resume_from_term(searchTerm: string): Promise<void> {
 		else ctx.ui.setEditorText?.(`${RESUME_PREFIX} ${searchTerm}`);
 		return;
 	}
-	if (!switch_session_fn) {
-		ctx.ui.notify("Resume is unavailable in this session.", "error");
+	const switch_session = resolve_switch_session_fn() ?? get_switch_session_fn();
+	if (!switch_session) {
+		if (fallback_to_native_resume(match.path)) return;
+		ctx.ui.notify(
+			"Could not switch sessions — Pi resume handler not ready. Retry in a moment, or restart Pi.",
+			"error",
+		);
 		return;
 	}
 	try {
-		const result = await switch_session_fn(match.path);
+		const result = await switch_session(match.path);
 		if (result?.cancelled) {
 			ctx.ui.notify("Resume cancelled", "info");
 		}
 	} catch (err) {
 		ctx.ui.notify(`Failed to resume: ${err instanceof Error ? err.message : String(err)}`, "error");
 	}
+}
+
+/** Delegate to Pi's built-in /resume when switchSession capture is temporarily missing. */
+function fallback_to_native_resume(session_path: string): boolean {
+	const editor = live_editor;
+	const native_submit = get_editor_native_submit(editor);
+	if (!editor || typeof native_submit !== "function") return false;
+	editor.setText?.(`${RESUME_PREFIX} ${session_path}`);
+	native_submit.call(editor);
+	return true;
+}
+
+function get_editor_native_submit(editor: unknown): ((this: Editor) => void) | undefined {
+	if (editor && typeof editor === "object") {
+		const per_instance = (editor as Record<symbol, unknown>)[NATIVE_SUBMIT_KEY];
+		if (typeof per_instance === "function") {
+			return per_instance as (this: Editor) => void;
+		}
+	}
+	return native_editor_submit_value;
+}
+
+/** Test seam: exercise native /resume fallback without switchSession capture. */
+export function fallback_to_native_resume_for_tests(session_path: string): boolean {
+	return fallback_to_native_resume(session_path);
+}
+
+/** Test seam: set native submit handler for fallback tests. */
+export function set_native_editor_submit_value_for_tests(
+	fn: ((this: Editor) => void) | undefined,
+): void {
+	native_editor_submit_value = fn;
+}
+
+/** Test seam: bind live editor for /resume fallback tests. */
+export function bind_live_editor_for_tests(editor: unknown): void {
+	live_editor = editor;
+}
+
+/** Test seam: bind ctx for /resume tests. */
+export function bind_model_picker_ctx_for_tests(ctx: unknown): void {
+	model_picker_ctx = ctx;
 }
 
 /** Route shared slash overrides before Pi's overlay selectors. */
@@ -431,6 +496,7 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 	// Editor.prototype patches from plugin load may miss this live instance.
 	const original_submit_value = editor.submitValue?.bind(editor);
 	if (typeof original_submit_value === "function") {
+		editor[NATIVE_SUBMIT_KEY] = original_submit_value;
 		editor.submitValue = (): void => {
 			if (is_model_picker_active()) return;
 			if (model_selector_busy) return;
@@ -661,21 +727,7 @@ function install_model_picker_prototype_patches(): void {
 	if (runnerProto[EMBER_PATCH_MARKER]) return;
 	runnerProto[EMBER_PATCH_MARKER] = true;
 
-	// Capture switchSession the same way InteractiveMode binds it — no extension
-	// command named "resume" (that conflicts with the built-in slash command).
-	const originalBindCommandContext = runnerProto.bindCommandContext;
-	if (typeof originalBindCommandContext === "function") {
-		runnerProto.bindCommandContext = function bindCommandContextResumeCapture(
-			this: ExtensionRunner,
-			actions?: { switchSession?: SwitchSessionFn },
-		) {
-			switch_session_fn =
-				actions && typeof actions.switchSession === "function"
-					? actions.switchSession.bind(actions)
-					: undefined;
-			return originalBindCommandContext.call(this, actions);
-		};
-	}
+	install_command_context_capture();
 
 	const editorProto = Editor.prototype as any;
 	if (typeof editorProto.createAutocompleteList === "function") {
@@ -698,6 +750,7 @@ function install_model_picker_prototype_patches(): void {
 
 	const originalSubmitValue = editorProto.submitValue;
 	if (typeof originalSubmitValue === "function") {
+		native_editor_submit_value = originalSubmitValue;
 		editorProto.submitValue = function submitValueSlashOverridePatched(this: Editor): void {
 			const trimmed = this.getText().trim();
 			if (handle_slash_override_text(this, trimmed)) return;
@@ -765,8 +818,7 @@ export function reset_model_picker_session(): void {
 	model_picker_ctx = undefined;
 	model_picker_pi = undefined;
 	live_editor = undefined;
-	// switch_session_fn is owned by bindCommandContext (set on bind, cleared on
-	// unbind) — do not null it here or a shutdown→rebind race drops the handler.
+	// switchSession is sticky in command-context-capture — survives shutdown/rebind races.
 	session_cache = null;
 	session_cache_at = 0;
 	session_cache_loading = null;

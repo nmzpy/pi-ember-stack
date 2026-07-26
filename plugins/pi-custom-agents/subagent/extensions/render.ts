@@ -9,9 +9,11 @@
 import * as os from "node:os";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { renderLiveGradient, formatElapsed } from "../../../pi-ember-ui/index.ts";
+import { format_in_group_thinking_row } from "../../../pi-ember-ui/thinking-status-render.ts";
 import {
 	BULLET,
-	formatCallBody,
+	formatGroupChildGradientVerb,
+	formatGroupedCallDetails,
 	groupBulletColorFromFlags,
 	statusBulletColor,
 	TREE_BRANCH_LAST,
@@ -355,8 +357,9 @@ export function aggregateUsage(results: SubAgentResult[]) {
  */
 type AgentStatus = "running" | "completed" | "failed";
 
-function agentStatus(result: SubAgentResult | undefined): AgentStatus {
-	if (!result || result.exitCode === -1) return "running";
+function agentStatus(result: SubAgentResult | undefined, terminal = false): AgentStatus {
+	if (!result) return terminal ? "failed" : "running";
+	if (result.exitCode === -1) return terminal ? "failed" : "running";
 	return isFailedResult(result) ? "failed" : "completed";
 }
 
@@ -415,15 +418,19 @@ function renderAgentRow(
 
 type FlatEntry =
 	| { type: "agent"; descriptor: AgentRowDescriptor; agentIndex: number }
-	| { type: "tool"; descriptor: AgentRowDescriptor; parentAgentIndex: number };
+	| { type: "tool"; descriptor: AgentRowDescriptor; parentAgentIndex: number }
+	| { type: "thinking"; descriptor: AgentRowDescriptor; parentAgentIndex: number };
 
 function buildFlatEntries(rows: AgentRowDescriptor[]): FlatEntry[] {
 	const entries: FlatEntry[] = [];
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i];
 		entries.push({ type: "agent", descriptor: row, agentIndex: i });
-		if (row.status === "running" && row.result?.latestToolCall) {
+		if (row.status !== "running") continue;
+		if (row.result?.latestToolCall) {
 			entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });
+		} else if (row.result?.isThinking && row.result.reasoning !== false) {
+			entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });
 		}
 	}
 	return entries;
@@ -449,20 +456,39 @@ function treePrefixForEntry(entry: FlatEntry, hasHeader: boolean, agentCount: nu
 	return toolTreePrefix(entry.parentAgentIndex, agentCount);
 }
 
+/** Nested Thinking row while a running subagent waits between tool calls. */
+export function renderSubagentThinkingRow(theme: ThemeLike, treePrefix: string): string {
+	const fg = theme.fg.bind(theme);
+	return fg("dim", treePrefix) + format_in_group_thinking_row();
+}
+
+function renderSubagentChildRow(
+	entry: FlatEntry,
+	row: AgentRowDescriptor,
+	theme: ThemeLike,
+	treePrefix: string,
+): string | undefined {
+	if (entry.type === "thinking") {
+		return renderSubagentThinkingRow(theme, treePrefix);
+	}
+	if (entry.type === "tool") {
+		return renderLatestToolRow(row, theme, treePrefix);
+	}
+	return undefined;
+}
+
 function renderLatestToolRow(
 	row: AgentRowDescriptor,
 	theme: ThemeLike,
 	treePrefix: string,
 ): string | undefined {
 	if (row.status !== "running" || !row.result?.latestToolCall) return undefined;
+	const { name, args } = row.result.latestToolCall;
 	const fg = theme.fg.bind(theme);
-	return `${fg("dim", treePrefix)}${formatCallBody(
-		row.result.latestToolCall.name,
-		row.result.latestToolCall.args,
-		theme,
-		true,
-		false,
-	)}`;
+	const body =
+		formatGroupChildGradientVerb(name, args) +
+		formatGroupedCallDetails(name, args, theme, false);
+	return `${fg("dim", treePrefix)}${body}`;
 }
 
 const DELEGATING_LABEL = "Delegating";
@@ -479,6 +505,15 @@ export function formatSubagentElapsedSuffix(theme: ThemeLike, elapsedMs: number 
 /** Parent tool is running but child session placeholders are not published yet. */
 export function isSubagentDelegating(results: SubAgentResult[]): boolean {
 	return results.length === 0;
+}
+
+/** Whether to paint the gradient Delegating row (never after the tool has settled). */
+export function shouldShowSubagentDelegating(
+	results: SubAgentResult[],
+	terminal: boolean,
+): boolean {
+	if (terminal) return false;
+	return isSubagentDelegating(results);
 }
 
 /** Compact single-row state while the parent invokes the subagent tool. */
@@ -524,25 +559,39 @@ interface AgentRowDescriptor {
 export interface SubagentLayoutMember {
 	args: SubagentArgs;
 	results: SubAgentResult[];
+	displayName?: string;
+	/** Tool execution finished — stop Delegating gradient + live elapsed timer. */
+	terminal?: boolean;
+}
+
+function resolve_member_display_name(member: SubagentLayoutMember): string {
+	return (
+		member.results[0]?.agent ??
+		member.displayName ??
+		asString(member.args.agent, "subagent")
+	);
 }
 
 /** Rows for consecutive single-mode subagent tool calls grouped under Subagents. */
 export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDescriptor[] {
 	return members.map((member) => {
+		const displayName = resolve_member_display_name(member);
+		const terminal = member.terminal === true;
 		if (
+			!terminal &&
 			isSingleModeSubagentArgs(member.args) &&
 			(member.results.length === 0 || isSubagentDelegating(member.results))
 		) {
 			return {
 				status: "running" as const,
-				name: asString(member.args.agent, "subagent"),
+				name: displayName,
 				result: member.results[0],
 				isSingle: false,
 			};
 		}
 		return {
-			status: agentStatus(member.results[0]),
-			name: member.results[0]?.agent ?? asString(member.args.agent, "subagent"),
+			status: agentStatus(member.results[0], terminal),
+			name: displayName,
 			result: member.results[0],
 			isSingle: false,
 		};
@@ -580,12 +629,12 @@ function fillSubagentLayoutContainer(
 			);
 			container.addChild(new Text(rowText, 0, 0));
 		} else {
-			const toolRow = renderLatestToolRow(row, theme, treePrefix);
-			if (toolRow) container.addChild(new SubagentToolText(toolRow));
+			const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
+			if (childRow) container.addChild(new SubagentToolText(childRow));
 		}
 	}
 	if (container.children.length === 0) {
-		container.addChild(new Text(fg("dim", "subagent"), 0, 0));
+		container.addChild(new Text(renderDelegatingRow(theme, elapsedMs), 0, 0));
 	}
 }
 
@@ -598,6 +647,7 @@ function fillSubagentLayoutContainer(
 function deriveAgentRows(
 	args: SubagentArgs,
 	results: SubAgentResult[],
+	terminal = false,
 ): {
 	headerLabel: string | undefined;
 	rows: AgentRowDescriptor[];
@@ -607,8 +657,8 @@ function deriveAgentRows(
 			headerLabel: undefined,
 			rows: [
 				{
-					status: agentStatus(results[0]),
-					name: results[0]?.agent ?? args.agent,
+					status: agentStatus(results[0], terminal),
+					name: results[0]?.agent ?? args.agent ?? "subagent",
 					result: results[0],
 					isSingle: true,
 				},
@@ -618,7 +668,7 @@ function deriveAgentRows(
 
 	if (args.tasks && args.tasks.length > 0) {
 		const tasks = args.tasks as Array<{ agent: string }>;
-		const statuses = tasks.map((_, i) => agentStatus(results[i]));
+		const statuses = tasks.map((_, i) => agentStatus(results[i], terminal));
 		const rows: AgentRowDescriptor[] = tasks.map((t, i) => ({
 			status: statuses[i],
 			name: results[i]?.agent ?? t.agent,
@@ -631,7 +681,7 @@ function deriveAgentRows(
 	if (args.chain && args.chain.length > 0) {
 		const chain = args.chain as Array<{ agent: string }>;
 		const started = chain.slice(0, results.length);
-		const statuses = started.map((_, i) => agentStatus(results[i]));
+		const statuses = started.map((_, i) => agentStatus(results[i], terminal));
 		const rows: AgentRowDescriptor[] = started.map((s, i) => ({
 			status: statuses[i],
 			name: results[i]?.agent ?? s.agent,
@@ -649,7 +699,8 @@ function deriveAgentRows(
  * string (no per-row backgrounds). Used by tests and as the text source
  * for the component builder.
  *
- * - Single mode: running `agentName` uses the muted group gradient;
+ * - Single mode: running `agentName` uses plain text color; nested tool rows
+ *   use the compact-group gradient verbs (Searching, Reading, …).
  *   completed and failed agents use green/red bullets.
  * - Parallel mode: `Subagents` header + `└ agent` children with the same
  *   running/completed/failed treatment.
@@ -664,6 +715,7 @@ export function renderSubagentLayout(
 	theme: ThemeLike,
 	elapsedMs?: number,
 	groupedMembers?: SubagentLayoutMember[],
+	terminal = false,
 ): string {
 	if (groupedMembers && groupedMembers.length > 1) {
 		const rows = memberRecordsToRows(groupedMembers);
@@ -690,18 +742,18 @@ export function renderSubagentLayout(
 					),
 				);
 			} else {
-				const toolRow = renderLatestToolRow(row, theme, treePrefix);
-				if (toolRow) lines.push(toolRow);
+				const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
+				if (childRow) lines.push(childRow);
 			}
 		}
 		return lines.join("\n");
 	}
-	if (isSubagentDelegating(results)) {
+	if (shouldShowSubagentDelegating(results, terminal)) {
 		if (isSingleModeSubagentArgs(args)) {
 			return renderDelegatingRow(theme, elapsedMs);
 		}
 	}
-	const { headerLabel, rows } = deriveAgentRows(args, results);
+	const { headerLabel, rows } = deriveAgentRows(args, results, terminal);
 	const fg = theme.fg.bind(theme);
 	const lines: string[] = [];
 	const hasHeader = headerLabel !== undefined;
@@ -728,11 +780,14 @@ export function renderSubagentLayout(
 				),
 			);
 		} else {
-			const toolRow = renderLatestToolRow(row, theme, treePrefix);
-			if (toolRow) lines.push(toolRow);
+			const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
+			if (childRow) lines.push(childRow);
 		}
 	}
-	if (lines.length === 0) return fg("dim", "subagent");
+	if (lines.length === 0) {
+		if (terminal) return "";
+		return renderDelegatingRow(theme, elapsedMs);
+	}
 	return lines.join("\n");
 }
 
@@ -752,6 +807,7 @@ export function buildSubagentLayoutComponent(
 	theme: ThemeLike,
 	elapsedMs?: number,
 	groupedMembers?: SubagentLayoutMember[],
+	terminal = false,
 ): Container {
 	const container = new Container();
 	if (groupedMembers && groupedMembers.length > 1) {
@@ -759,11 +815,11 @@ export function buildSubagentLayoutComponent(
 		fillSubagentLayoutContainer(container, "Subagents", rows, theme, elapsedMs);
 		return container;
 	}
-	if (isSubagentDelegating(results) && isSingleModeSubagentArgs(args)) {
+	if (shouldShowSubagentDelegating(results, terminal) && isSingleModeSubagentArgs(args)) {
 		container.addChild(new Text(renderDelegatingRow(theme, elapsedMs), 0, 0));
 		return container;
 	}
-	const { headerLabel, rows } = deriveAgentRows(args, results);
+	const { headerLabel, rows } = deriveAgentRows(args, results, terminal);
 	fillSubagentLayoutContainer(container, headerLabel, rows, theme, elapsedMs);
 	return container;
 }
@@ -771,17 +827,18 @@ export function buildSubagentLayoutComponent(
 /**
  * Whether any agent in the layout is still running (flashing).
  */
-export function anySubagentRunning(args: SubagentArgs, results: SubAgentResult[]): boolean {
+export function anySubagentRunning(args: SubagentArgs, results: SubAgentResult[], terminal = false): boolean {
+	if (terminal) return false;
 	if (isSingleModeSubagentArgs(args)) {
-		return agentStatus(results[0]) === "running";
+		return agentStatus(results[0], false) === "running";
 	}
 	if (args.tasks && args.tasks.length > 0) {
-		return args.tasks.some((_t: { agent: string; task: string }, i: number) => agentStatus(results[i]) === "running");
+		return args.tasks.some((_t: { agent: string; task: string }, i: number) => agentStatus(results[i], false) === "running");
 	}
 	if (args.chain && args.chain.length > 0) {
 		return args.chain
 			.slice(0, results.length)
-			.some((_s: { agent: string; task: string }, i: number) => agentStatus(results[i]) === "running");
+			.some((_s: { agent: string; task: string }, i: number) => agentStatus(results[i], false) === "running");
 	}
 	return false;
 }

@@ -5,31 +5,51 @@
  * parent's canonical ModelRuntime through its extension-facing ModelRegistry
  * facade. This keeps every registered provider (Devin, xAI, built-ins, custom
  * models.json entries) and credential source available without re-registration.
- * The session uses a minimal system prompt, no extensions,
- * no skills, no prompt templates, no thinking, and no compaction.
+ * Child sessions enable Pi compaction (Ember summarizer via compaction-wiring) and,
+ * when global DCP is enabled, outbound pruning strategies without the DCP
+ * compress tool.
  *
  * session.prompt() is async and does not block the TUI render loop — pi's
  * event loop keeps rendering while the subagent streams. This avoids the
  * worker_thread boundary that previously prevented provider inheritance.
  */
 
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Api, Message, Model } from "@earendil-works/pi-ai";
 import {
 	type AgentSessionEvent,
 	createAgentSession,
-	createExtensionRuntime,
+	discoverAndLoadExtensions,
 	getAgentDir,
 	loadProjectContextFiles,
+	type LoadExtensionsResult,
 	type ModelRegistry,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { is_benign_compact_error, should_skip_compact } from "../../auto-continue.ts";
+import { is_dcp_enabled_for_subagent } from "../../../pi-ember-dcp/lib/wiring.ts";
+import { infer_bare_agent_name } from "../../subagent-policy.ts";
+import {
+	get_checkpoint_dir,
+	persist_checkpoint_meta,
+	read_resume_meta,
+	type ResumeCheckpointMeta,
+} from "./resume-store.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 120_000;
+
+const SUBAGENT_EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const COMPACTION_WIRING_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../compaction-wiring.ts");
+const DCP_SUBAGENT_WIRING_PATH = path.resolve(
+	SUBAGENT_EXT_DIR,
+	"../../../pi-ember-dcp/subagent-wiring.ts",
+);
 
 const PARALLEL_TOOL_CALL_GUIDANCE = `
 
@@ -40,6 +60,51 @@ searching for different patterns), emit them all in a single response rather
 than one at a time. The runtime executes independent tool calls in parallel,
 so batching saves round-trips and reduces latency.
 `;
+
+const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
+	/prompt is too long/i,
+	/exceeds the context window/i,
+	/maximum context length/i,
+	/context window exceeds/i,
+	/too many tokens/i,
+	/token limit exceeded/i,
+];
+
+/** In-memory settings for subagent child sessions — compaction on, retries off. */
+export function build_subagent_settings(): {
+	compaction: { enabled: boolean };
+	retry: { enabled: boolean };
+} {
+	return {
+		compaction: { enabled: true },
+		retry: { enabled: false },
+	};
+}
+
+export function is_context_overflow_error(message: string | undefined): boolean {
+	if (!message) return false;
+	return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResult> {
+	const paths = [COMPACTION_WIRING_PATH];
+	if (is_dcp_enabled_for_subagent(cwd)) {
+		paths.push(DCP_SUBAGENT_WIRING_PATH);
+	}
+	return discoverAndLoadExtensions(paths, cwd);
+}
+
+async function compact_subagent_session(
+	session: NonNullable<Awaited<ReturnType<typeof createAgentSession>>["session"]>,
+): Promise<void> {
+	const branch = session.sessionManager.getBranch?.() ?? [];
+	if (should_skip_compact(branch)) return;
+	try {
+		await session.compact();
+	} catch (err) {
+		if (!is_benign_compact_error(err)) throw err;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -71,6 +136,10 @@ export interface SubAgentResult {
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
+	/** Child model exposes a reasoning/thinking stream (Pi `model.reasoning`). */
+	reasoning?: boolean;
+	/** Live thinking/reasoning stream from the child session. */
+	isThinking?: boolean;
 	stopReason?: string;
 	errorMessage?: string;
 	latestToolCall?: { name: string; args: Record<string, unknown> };
@@ -180,6 +249,19 @@ export function resolve_failure_message(result: SubAgentResult): string | undefi
 	return undefined;
 }
 
+export interface SubAgentCheckpoint {
+	parentSessionId: string;
+	originToolCallId: string;
+	displayName: string;
+	agentName: string;
+}
+
+export interface SubAgentResume {
+	parentSessionId: string;
+	originToolCallId: string;
+	displayName: string;
+}
+
 export async function runSubAgent(options: {
 	cwd: string;
 	systemPrompt: string;
@@ -194,6 +276,8 @@ export async function runSubAgent(options: {
 	onUpdate?: (text: string) => void;
 	onMessage?: (partialResult: SubAgentResult) => void;
 	onToolCall?: (partialResult: SubAgentResult) => void;
+	checkpoint?: SubAgentCheckpoint;
+	resume?: SubAgentResume;
 }): Promise<SubAgentResult> {
 	const {
 		cwd,
@@ -208,6 +292,8 @@ export async function runSubAgent(options: {
 		thinkingLevel = "off",
 		onMessage,
 		onToolCall,
+		checkpoint,
+		resume,
 	} = options;
 
 	let lastOutputTime = Date.now();
@@ -255,14 +341,14 @@ export async function runSubAgent(options: {
 			turns: 0,
 		},
 		model: `${model.provider}/${model.id}`,
+		reasoning: model.reasoning === true,
+		isThinking: false,
 	};
 
-	// Empty resource loader — no parent extensions, skills, prompts, or themes.
-	// createExtensionRuntime() provides the required ExtensionRuntime shape
-	// (pendingProviderRegistrations, flagValues, assertActive, ...) so
-	// createAgentSession's ExtensionRunner.bindCore() does not crash.
+	// Compaction + optional DCP strategies (no parent UI extensions/skills).
+	const extensionsResult = await load_subagent_extensions(cwd);
 	const resourceLoader = {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+		getExtensions: () => extensionsResult,
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
@@ -273,12 +359,34 @@ export async function runSubAgent(options: {
 		reload: async () => {},
 	};
 
-	const settingsManager = SettingsManager.inMemory({
-		compaction: { enabled: false },
-		retry: { enabled: false },
-	});
+	const settingsManager = SettingsManager.inMemory(build_subagent_settings());
 	const model_runtime = resolve_parent_model_runtime(modelRegistry);
 	const legacy_registry = is_legacy_model_registry(modelRegistry);
+
+	const checkpoint_dir =
+		checkpoint?.parentSessionId && checkpoint.originToolCallId
+			? get_checkpoint_dir(checkpoint.parentSessionId, checkpoint.originToolCallId)
+			: resume?.parentSessionId && resume.originToolCallId
+				? get_checkpoint_dir(resume.parentSessionId, resume.originToolCallId)
+				: undefined;
+
+	let sessionManager: SessionManager;
+	if (resume && checkpoint_dir) {
+		const meta = read_resume_meta(resume.parentSessionId, resume.originToolCallId);
+		if (!meta?.sessionFile) {
+			return failedResult(
+				agentName,
+				task,
+				"error",
+				`No saved session for ${resume.displayName}. Spawn with subagent first.`,
+			);
+		}
+		sessionManager = SessionManager.open(meta.sessionFile, checkpoint_dir, cwd);
+	} else if (checkpoint && checkpoint_dir) {
+		sessionManager = SessionManager.create(cwd, checkpoint_dir);
+	} else {
+		sessionManager = SessionManager.inMemory(cwd);
+	}
 
 	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 	let unsubscribe: (() => void) | undefined;
@@ -314,7 +422,7 @@ export async function runSubAgent(options: {
 			thinkingLevel,
 			resourceLoader,
 			tools,
-			sessionManager: SessionManager.inMemory(cwd),
+			sessionManager,
 			settingsManager,
 		};
 		// Pi 0.80.10+ exposes the canonical ModelRuntime via the registry facade;
@@ -329,6 +437,11 @@ export async function runSubAgent(options: {
 		const created = await createAgentSession(session_options);
 		session = created.session;
 
+		if (resume) {
+			result.messages = load_prior_messages(session);
+			result.usage.turns = result.messages.filter((m) => m.role === "assistant").length;
+		}
+
 		if (aborted) {
 			throw new Error("Sub-agent aborted before start");
 		}
@@ -340,6 +453,7 @@ export async function runSubAgent(options: {
 			args?: unknown;
 			arguments?: unknown;
 		}): void => {
+			result.isThinking = false;
 			result.latestToolCall = {
 				name: event.toolName ?? event.name ?? "unknown",
 				args: (event.input ?? event.args ?? event.arguments ?? {}) as Record<string, unknown>,
@@ -347,14 +461,48 @@ export async function runSubAgent(options: {
 			onToolCall?.({ ...result, messages: [...result.messages] });
 		};
 
+		const clear_latest_tool_call = (): void => {
+			if (!result.latestToolCall) return;
+			delete result.latestToolCall;
+			onToolCall?.({ ...result, messages: [...result.messages] });
+		};
+
+		const notify_subagent_activity = (): void => {
+			onToolCall?.({ ...result, messages: [...result.messages] });
+		};
+
 		unsubscribe = session.subscribe((event: AgentSessionEvent) => {
 			resetOutputTimeout();
+			if (event.type === "message_update") {
+				const ev = (event as { assistantMessageEvent?: { type?: string } }).assistantMessageEvent;
+				if (ev?.type === "thinking_start" || ev?.type === "thinking_delta") {
+					if (!result.isThinking) {
+						result.isThinking = true;
+						notify_subagent_activity();
+					}
+				} else if (
+					ev?.type === "thinking_end" ||
+					ev?.type === "text_start" ||
+					ev?.type === "text_delta"
+				) {
+					if (result.isThinking) {
+						result.isThinking = false;
+						notify_subagent_activity();
+					}
+				}
+			}
 			// Pi agent sessions emit tool_execution_start; extension hooks use tool_call.
 			if (
 				event.type === "tool_execution_start" ||
 				(event as { type: string }).type === "tool_call"
 			) {
 				capture_latest_tool_call(event as Parameters<typeof capture_latest_tool_call>[0]);
+			}
+			if (
+				event.type === "tool_execution_end" ||
+				(event as { type: string }).type === "tool_result"
+			) {
+				clear_latest_tool_call();
 			}
 			if (event.type === "message_end") {
 				resetOutputTimeout();
@@ -385,7 +533,25 @@ export async function runSubAgent(options: {
 			}
 		});
 
-		await session.prompt(task);
+		let overflow_retried = false;
+		while (true) {
+			try {
+				await session.prompt(task);
+				break;
+			} catch (prompt_error) {
+				const overflow_message = extractFailureMessage(prompt_error);
+				if (
+					!overflow_retried &&
+					session &&
+					is_context_overflow_error(overflow_message)
+				) {
+					overflow_retried = true;
+					await compact_subagent_session(session);
+					continue;
+				}
+				throw prompt_error;
+			}
+		}
 		if (!aborted && result.stopReason === "aborted") {
 			if (result.errorMessage) {
 				result.stopReason = "error";
@@ -416,6 +582,21 @@ export async function runSubAgent(options: {
 		if (combinedSignal) combinedSignal.removeEventListener("abort", onAbort);
 		unsubscribe?.();
 		try {
+			if (session && checkpoint_dir && (checkpoint || resume) && result.exitCode !== -1) {
+				const session_file = session.sessionManager.getSessionFile();
+				if (session_file) {
+					const meta: ResumeCheckpointMeta = {
+						parentSessionId: (checkpoint ?? resume)!.parentSessionId,
+						originToolCallId: (checkpoint ?? resume)!.originToolCallId,
+						displayName: checkpoint?.displayName ?? resume!.displayName,
+						agentName: checkpoint?.agentName ?? infer_bare_agent_name(resume!.displayName),
+						cwd,
+						sessionFile: session_file,
+						updatedAt: new Date().toISOString(),
+					};
+					persist_checkpoint_meta(meta);
+				}
+			}
 			session?.dispose();
 		} catch {}
 	}
@@ -481,6 +662,22 @@ function failedResult(
 	};
 }
 
+function load_prior_messages(
+	session: NonNullable<Awaited<ReturnType<typeof createAgentSession>>["session"]>,
+): Message[] {
+	const branch = session.sessionManager.getBranch?.() ?? [];
+	const messages: Message[] = [];
+	for (const entry of branch) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message as Message | undefined;
+		if (!msg) continue;
+		if (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult") {
+			messages.push(msg);
+		}
+	}
+	return messages;
+}
+
 function loadProjectContextFilesCompat({
 	cwd,
 	agentDir,
@@ -536,6 +733,57 @@ export function getResultOutput(result: SubAgentResult): string {
 		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 	}
 	return getFinalOutput(result.messages) || "(no output)";
+}
+
+function agent_result_status_label(result: SubAgentResult): string {
+	if (result.exitCode === -1) return "running";
+	if (isFailedResult(result)) {
+		return result.stopReason ? `failed (${result.stopReason})` : "failed";
+	}
+	return "completed";
+}
+
+/** Raw answer body for orchestrator tool-result content (no lettered label). */
+export function get_agent_result_body(result: SubAgentResult): string {
+	if (result.exitCode === -1) {
+		const partial = getFinalOutput(result.messages).trim();
+		return partial || "(running...)";
+	}
+	return getResultOutput(result);
+}
+
+/**
+ * Model-visible subagent tool-result text with lettered agent label (e.g. Coder A).
+ * SSOT for orchestrator context — TUI uses details + render.ts separately.
+ */
+export function format_agent_tool_result_text(
+	result: SubAgentResult,
+	format_body: (body: string) => string = (body) => body,
+): string {
+	const label = result.agent.trim();
+	const body = format_body(get_agent_result_body(result));
+	return `### [${label}] ${agent_result_status_label(result)}\n\n${body}`;
+}
+
+export function format_agent_tool_result_batch(
+	results: SubAgentResult[],
+	options?: {
+		header?: string;
+		format_body?: (body: string) => string;
+		separator?: string;
+	},
+): string {
+	const format_body = options?.format_body ?? ((body: string) => body);
+	const separator = options?.separator ?? "\n\n---\n\n";
+	const body = results.map((r) => format_agent_tool_result_text(r, format_body)).join(separator);
+	return options?.header ? `${options.header}\n\n${body}` : body;
+}
+
+export function agent_tool_result_content(
+	result: SubAgentResult,
+	format_body?: (body: string) => string,
+): Array<{ type: "text"; text: string }> {
+	return [{ type: "text", text: format_agent_tool_result_text(result, format_body) }];
 }
 
 /** Concurrency-limited map. Runs up to `concurrency` async operations at a time. */

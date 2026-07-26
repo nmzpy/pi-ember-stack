@@ -23,10 +23,12 @@ import {
 	copyToClipboard,
 	CustomEditor,
 	type KeybindingsManager,
+	type SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { install_bash_rules } from "./bash-rules.ts";
 import { install_bash_timeout } from "./bash-timeout.ts";
+import { validate_plan_mode_subagent } from "./subagent-policy.ts";
 import {
 	mutedBullet,
 	setActiveMode,
@@ -41,6 +43,7 @@ import {
 	modelNameHasThinkingVariant,
 	pickModelInEditor,
 	processShellInput,
+	refresh_footer,
 	requestShellModeVisualRefresh,
 	syncShellModeFromEditorText,
 	requestTuiRender,
@@ -48,6 +51,7 @@ import {
 	resumeScrollFollowFromEditor,
 	scheduleFooterStats,
 	setModeLabelResolver,
+	setFooterThinkingLevel,
 	wrapEditorRenderForShell,
 	wrapModelPickerEditor,
 } from "../pi-ember-ui/index.ts";
@@ -55,15 +59,33 @@ import { with_suppressed_shell_history_sync as withSuppressedShellHistorySync } 
 import { askQuiz, type QuizQuestion, registerQuizTool } from "./quiz-tool.ts";
 import {
 	build_auto_continue_content,
-	COMPACT_FOCUS_INSTRUCTIONS,
 	is_benign_compact_error,
 	should_skip_compact,
 } from "./auto-continue.ts";
+import install_compaction_wiring from "./compaction-wiring.ts";
 import {
 	build_full_tools,
 	model_provider_of,
 	resolve_patch_tool_name,
+	SUBAGENT_DELEGATION_TOOLS,
 } from "./edit-tools.ts";
+import {
+	bind_mode_model,
+	bound_identity_uses_baked_effort,
+	bound_model_matches_live,
+	canonicalize_persisted_identity,
+	get_mode_model,
+	get_pi_thinking_level,
+	identities_equal,
+	model_identity_of,
+	model_identity_from_user_selection,
+	normalize_mode_models,
+	normalize_thinking_level,
+	PI_AGENTS_BIND_MODE_MODEL_EVENT,
+	type ModelIdentity,
+} from "./mode-models.ts";
+import { build_plan_implement_message_content } from "./plan-implement.ts";
+import { get_new_session_fn, install_new_session_capture } from "./plan-fresh-session.ts";
 import { arm_plan_turn, build_plan_review_questions, resolve_plan_review_answer, should_show_plan_review } from "./plan-review.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
@@ -72,14 +94,10 @@ import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
  * Promisify ctx.compact() into a result discriminated union.
  * Never throws — both callback errors and synchronous throws are caught.
  */
-function compact_async(
-	ctx: any,
-	customInstructions: string,
-): Promise<{ ok: true } | { ok: false; error: Error }> {
+function compact_async(ctx: any): Promise<{ ok: true } | { ok: false; error: Error }> {
 	return new Promise((resolve) => {
 		try {
 			ctx.compact({
-				customInstructions,
 				onComplete: () => resolve({ ok: true }),
 				onError: (err: unknown) => {
 					const error = err instanceof Error ? err : new Error(String(err));
@@ -91,54 +109,6 @@ function compact_async(
 			resolve({ ok: false, error });
 		}
 	});
-}
-
-type ModelIdentity = { readonly provider: string; readonly modelId: string };
-
-function model_identity_of(model: Model<any> | undefined): ModelIdentity | undefined {
-	return model ? { provider: model.provider, modelId: model.id } : undefined;
-}
-
-function identities_equal(a?: ModelIdentity, b?: ModelIdentity): boolean {
-	if (!a && !b) return true;
-	if (!a || !b) return false;
-	return a.provider === b.provider && a.modelId === b.modelId;
-}
-
-function normalize_mode_models(raw: unknown): Partial<Record<string, ModelIdentity>> {
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-	const obj = raw as Record<string, unknown>;
-	const result: Partial<Record<string, ModelIdentity>> = {};
-	for (const [key, value] of Object.entries(obj)) {
-		if (
-			value &&
-			typeof value === "object" &&
-			!Array.isArray(value) &&
-			typeof (value as Record<string, unknown>).provider === "string" &&
-			typeof (value as Record<string, unknown>).modelId === "string"
-		) {
-			result[key] = {
-				provider: (value as Record<string, unknown>).provider as string,
-				modelId: (value as Record<string, unknown>).modelId as string,
-			};
-		}
-	}
-	return result;
-}
-
-function get_mode_model(
-	modeModels: Partial<Record<string, ModelIdentity>>,
-	modeId: string,
-): ModelIdentity | undefined {
-	return modeModels[modeId];
-}
-
-function bind_mode_model(
-	modeModels: Partial<Record<string, ModelIdentity>>,
-	modeId: string,
-	identity: ModelIdentity,
-): Partial<Record<string, ModelIdentity>> {
-	return { ...modeModels, [modeId]: identity };
 }
 
 function stable_serialize(value: unknown): string {
@@ -276,7 +246,7 @@ function writePersistedState(state: {
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
 const BASE_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "quiz", "todo", ...WEB_ACCESS_TOOLS];
 const READONLY_TOOLS = [...BASE_RESEARCH_TOOLS];
-const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, "subagent"];
+const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATION_TOOLS];
 function mode_tools_for_provider(modeId: string, provider: string | undefined): string[] {
 	if (modeId === "code") return build_full_tools(provider);
 	return MODES[modeId]?.tools ?? build_full_tools(provider);
@@ -319,7 +289,15 @@ Available subagents:
 - Scout: fast codebase reconnaissance; use to find files, patterns, and answers.
 - Coder: implementation agent with full tool access; use for edits, tests, and verification.
 
-Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}). Agent names are case-insensitive and surrounding whitespace is ignored.
+Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}). Use subagent_resume with a lettered name (e.g. Coder A) to continue a prior single-mode subagent run. Agent names are case-insensitive and surrounding whitespace is ignored.
+`;
+
+const PLAN_SUBAGENT_AWARENESS_PROMPT = `
+
+Available subagents (exploration only):
+- Scout: fast codebase reconnaissance; delegate broad search or discovery work so results stay in isolated context.
+
+Plan mode allows Scout subagent only — not Coder or other implementation agents. Modes: single {agent: "Scout", task}, parallel {tasks: [...]} (max 8), chain {chain: [...]} (Scout steps only). Use subagent_resume with a lettered Scout name (e.g. Scout A) to continue a prior exploration run.
 `;
 
 function format_available_tools(tools: string[]): string {
@@ -349,9 +327,9 @@ const ARCHITECT_PROMPT = compose_plan_prompt(`Plan mode is active. You are read-
 
 ${mode_intro(
 	"plan",
-	READONLY_TOOLS,
-	"If implementation is needed, produce a plan and wait for the user to approve it.",
-)}
+	READONLY_DELEGATING_TOOLS,
+	"Delegate broad codebase exploration to the Scout subagent when it would flood this context; otherwise use read/grep/find directly. If implementation is needed, produce a plan and wait for the user to approve it.",
+)}${PLAN_SUBAGENT_AWARENESS_PROMPT}
 
 Responsibility: explore, analyze, and produce a well-researched, actionable plan. Tie loose ends before implementation begins.
 
@@ -495,21 +473,24 @@ Delegation Prompts: <self-contained prompt for each module, ready for the Coder 
 function coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`Code mode is active. You have full tool access. Implement, test, and verify code with autonomy.
 
-${mode_intro("code", build_full_tools(provider))}${SUBAGENT_AWARENESS_PROMPT}`);
+${mode_intro("code", build_full_tools(provider))}`);
 }
 
 function exit_to_coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`You have switched from {mode} mode to code mode. You now have full tool access.
 
-${mode_intro("code", build_full_tools(provider))}${SUBAGENT_AWARENESS_PROMPT}`);
+${mode_intro("code", build_full_tools(provider))}`);
 }
 
-function plan_implement_prompt(provider: string | undefined): string {
-	return compose_mode_prompt(`The user has approved the plan above. Execute it now in full.
+function plan_implement_prompt(
+	provider: string | undefined,
+	plan_reference: "above" | "below" = "above",
+): string {
+	return compose_mode_prompt(`The user has approved the plan ${plan_reference}. Execute it now in full.
 
 Follow the plan modules in order. Implement, test, and verify each module before moving to the next. Run bash t.gate.sh <files> after each logical change. Report what you did and any deviations from the plan.
 
-${mode_intro("code", build_full_tools(provider), "")}${SUBAGENT_AWARENESS_PROMPT}`);
+${mode_intro("code", build_full_tools(provider), "")}`);
 }
 
 function mode_reminder(modeId: string, provider: string | undefined): string {
@@ -548,7 +529,7 @@ const MODES: Record<string, ModeConfig> = {
 		label: "plan",
 		icon: "P",
 		color: "warning",
-		tools: READONLY_TOOLS,
+		tools: READONLY_DELEGATING_TOOLS,
 		enterMessage: ARCHITECT_PROMPT,
 		exitMessage: exit_to_coder_prompt(undefined),
 	},
@@ -605,8 +586,10 @@ function getLastModeFromSession(ctx: any): string | null {
 const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
 
 export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
+	install_new_session_capture();
 	install_bash_rules(pi);
 	install_bash_timeout(pi);
+	install_compaction_wiring(pi);
 
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
@@ -642,8 +625,87 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	};
 	// Suppress bind during our own programmatic setModel (mode restore).
 	let applying_mode_model = false;
+	let applying_mode_thinking_level = false;
 	// Stale async apply guard — incremented at each apply_mode start.
 	let mode_apply_generation = 0;
+
+	function bind_current_mode_model(identity: ModelIdentity): void {
+		const canonical = canonicalize_persisted_identity(identity);
+		const existing = get_mode_model(mode_models, currentMode);
+		if (!identities_equal(existing, canonical)) {
+			mode_models = bind_mode_model(mode_models, currentMode, canonical);
+			writePersistedState({ mode: currentMode, modeModels: mode_models });
+		}
+	}
+
+	function sync_footer_after_model_restore(ctx: any): void {
+		setFooterThinkingLevel(get_pi_thinking_level(pi) ?? "off");
+		refresh_footer(ctx);
+	}
+
+	pi.events.on(
+		PI_AGENTS_BIND_MODE_MODEL_EVENT,
+		(payload: {
+			provider: string;
+			modelId: string;
+			name?: string;
+			thinkingLevel?: string;
+			syncThinkingLevelToPi?: boolean;
+		}) => {
+			const identity = model_identity_from_user_selection(
+				{ provider: payload.provider, id: payload.modelId, name: payload.name },
+				{
+					thinkingLevel: payload.thinkingLevel,
+					syncThinkingLevelToPi: payload.syncThinkingLevelToPi,
+				},
+			);
+			if (identity) bind_current_mode_model(identity);
+		},
+	);
+
+	async function apply_bound_thinking_level(ctx: any, bound: ModelIdentity): Promise<void> {
+		if (!bound.thinkingLevel || bound_identity_uses_baked_effort(bound)) return;
+		const model = ctx.model as Model<any> | undefined;
+		const modelName = model?.name ?? model?.id ?? "";
+		if (modelNameHasThinkingVariant(modelName)) return;
+		applying_mode_thinking_level = true;
+		try {
+			const setLevel = (pi as { setThinkingLevel?: (level: string) => Promise<void> | void })
+				.setThinkingLevel;
+			if (typeof setLevel === "function") {
+				await setLevel.call(pi, bound.thinkingLevel);
+			}
+			setFooterThinkingLevel(bound.thinkingLevel);
+		} finally {
+			applying_mode_thinking_level = false;
+		}
+	}
+
+	async function apply_bound_model(ctx: any, bound: ModelIdentity): Promise<void> {
+		const canonical = canonicalize_persisted_identity(bound);
+		const current = ctx.model as Model<any> | undefined;
+		const liveThinking = get_pi_thinking_level(pi);
+		if (bound_model_matches_live(canonical, current, liveThinking)) return;
+
+		const target = ctx.modelRegistry.find(
+			canonical.provider,
+			canonical.modelId,
+		) as Model<any> | undefined;
+		const needs_model =
+			current?.provider !== canonical.provider || current?.id !== canonical.modelId;
+		if (needs_model && (!target || !ctx.modelRegistry.hasConfiguredAuth(target))) return;
+
+		applying_mode_model = true;
+		try {
+			if (needs_model && target) {
+				await pi.setModel(target);
+			}
+			await apply_bound_thinking_level(ctx, canonical);
+			sync_footer_after_model_restore(ctx);
+		} finally {
+			applying_mode_model = false;
+		}
+	}
 
 	// Register the canonical mode-id → label resolver so the pi-ember-ui
 	// footer can render the active mode label without duplicating the MODES
@@ -728,24 +790,15 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 
 		// Per-mode model restore: if this mode has a bound model and it differs
-		// from the live model, restore it. Fail soft on missing auth — leave the
-		// live model, no throw.
+		// from the live model (or effort variant), restore it. Fail soft on
+		// missing auth — leave the live model, no throw.
 		const my_generation = ++mode_apply_generation;
 		const bound = get_mode_model(mode_models, modeId);
-		if (!bound) return;
-		const current = ctx.model as Model<any> | undefined;
-		const current_identity = model_identity_of(current);
-		if (identities_equal(bound, current_identity)) return;
-		const target = ctx.modelRegistry.find(bound.provider, bound.modelId) as Model<any> | undefined;
-		if (!target || !ctx.modelRegistry.hasConfiguredAuth(target)) return;
-		// Stale guard: if a newer apply_mode was started, abort.
 		if (my_generation !== mode_apply_generation) return;
-		applying_mode_model = true;
-		try {
-			await pi.setModel(target);
-		} finally {
-			applying_mode_model = false;
+		if (bound) {
+			await apply_bound_model(ctx, bound);
 		}
+		writePersistedState({ mode: currentMode, modeModels: mode_models });
 	}
 
 	async function switchMode(modeId: string, ctx: any): Promise<void> {
@@ -976,35 +1029,25 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			ctx.ui.notify("No plan text is available.", "error");
 			return;
 		}
-		if (!ctx.hasUI || typeof ctx.newSession !== "function") {
-			ctx.ui.notify("Fresh-context implement requires interactive mode.", "error");
+		const newSession = get_new_session_fn();
+		if (!ctx.hasUI || !newSession) {
+			ctx.ui.notify("Fresh-context implement is unavailable in this mode.", "error");
 			return;
 		}
 
 		waitingForPlan = false;
 		latest_plan_text = "";
 		const parentSession = ctx.sessionManager?.getSessionFile?.();
-		const result = await ctx.newSession({
+		const result = await newSession({
 			parentSession,
-			setup: async (sm: { appendMessage: (entry: unknown) => void }) => {
+			setup: async (sm: SessionManager) => {
 				sm.appendMessage({
 					role: "user",
 					content: [{ type: "text", text: plan }],
 					timestamp: Date.now(),
 				});
 			},
-			withSession: async (newCtx: {
-				model?: Model<any>;
-				sendMessage: (message: {
-					customType: string;
-					content: string;
-					display: boolean;
-				}) => Promise<void> | void;
-				sendUserMessage: (
-					content: string,
-					options?: { deliverAs?: "followUp" },
-				) => Promise<void> | void;
-			}) => {
+			withSession: async (newCtx) => {
 				await apply_mode(DEFAULT_MODE, newCtx);
 				await newCtx.sendMessage({
 					customType: "pi-agents-plan-implement",
@@ -1022,8 +1065,23 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	}
 
 	async function handlePlanImplement(ctx: any) {
+		const plan = latest_plan_text.trim();
+		if (!plan) {
+			ctx.ui.notify("No plan text is available.", "error");
+			return;
+		}
 		if (!ctx.hasUI) {
 			switchMode(DEFAULT_MODE, ctx);
+			pi.sendMessage({
+				customType: "pi-agents-plan-implement",
+				content: build_plan_implement_message_content(
+					plan,
+					plan_implement_prompt(model_provider_of(ctx.model), "below"),
+				),
+				display: false,
+			});
+			waitingForPlan = false;
+			latest_plan_text = "";
 			pi.sendUserMessage("Execute the plan following the modules.");
 			return;
 		}
@@ -1061,11 +1119,17 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			target === "Orchestrate"
 				? "Delegate the plan to subagents."
 				: "Execute the plan following the modules.";
+		const provider = model_provider_of(ctx.model);
 		pi.sendMessage({
 			customType: "pi-agents-plan-implement",
-			content: plan_implement_prompt(model_provider_of(ctx.model)),
+			content: build_plan_implement_message_content(
+				plan,
+				plan_implement_prompt(provider, "below"),
+			),
 			display: false,
 		});
+		waitingForPlan = false;
+		latest_plan_text = "";
 		pi.sendUserMessage(msg, { deliverAs: "followUp" });
 	}
 
@@ -1131,9 +1195,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	 * compact call is skipped; if compact fails with a non-benign error we
 	 * still resume — the user asked for unconditional continue within budget.
 	 *
-	 * The compact customInstructions (COMPACT_FOCUS_INSTRUCTIONS SSOT) steer
-	 * the single session checkpoint to plain Goal/Done/Left/Files labeled
-	 * lines. Pi injects that checkpoint into LLM context after compact().
+	 * session_before_compact runs Ember-owned summarization (compaction-prompts.ts).
+	 * Pi injects that checkpoint into LLM context after compact().
 	 * The hidden pi-agents-auto-continue message is a short non-duplicating
 	 * resume directive built by build_auto_continue_content — it does NOT
 	 * re-paste the compaction summary.
@@ -1145,7 +1208,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			| undefined;
 		const skip = should_skip_compact(branch ?? []);
 		if (!skip) {
-			const compact_result = await compact_async(ctx, COMPACT_FOCUS_INSTRUCTIONS);
+			const compact_result = await compact_async(ctx);
 			if (!compact_result.ok && !is_benign_compact_error(compact_result.error)) {
 				// Non-benign compact error: still resume. Pi may already show
 				// compaction_end error. Do not throw; do not abort resume.
@@ -1185,6 +1248,10 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				block: true,
 				reason: `Tool '${event.toolName}' is not available in ${MODES[currentMode]?.label ?? currentMode} mode. Available tools: ${activeTools.join(", ")}.`,
 			};
+		}
+		if (currentMode === "plan") {
+			const planSubagentBlock = validate_plan_mode_subagent(event.toolName, event.input);
+			if (planSubagentBlock) return planSubagentBlock;
 		}
 		const patch_tool = resolve_patch_tool_name(provider);
 		if (event.toolName === "apply_patch" && patch_tool !== "apply_patch") {
@@ -1337,17 +1404,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	async function restore_mode_model(ctx: any, modeId: string): Promise<void> {
 		const bound = get_mode_model(mode_models, modeId);
 		if (!bound) return;
-		const current = ctx.model as Model<any> | undefined;
-		const current_identity = model_identity_of(current);
-		if (identities_equal(bound, current_identity)) return;
-		const target = ctx.modelRegistry.find(bound.provider, bound.modelId) as Model<any> | undefined;
-		if (!target || !ctx.modelRegistry.hasConfiguredAuth(target)) return;
-		applying_mode_model = true;
-		try {
-			await pi.setModel(target);
-		} finally {
-			applying_mode_model = false;
-		}
+		await apply_bound_model(ctx, bound);
 	}
 
 	async function restoreMode(ctx: any): Promise<void> {
@@ -1403,18 +1460,12 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			sync_active_tools(ctx);
 			return;
 		}
-		// Only bind on explicit user picks: "set" (/model, Ctrl+P select) or
-		// "cycle" (Ctrl+P cycle). Ignore restore/unknown sources.
+		// Only bind on Ctrl+P cycle. `/model` and the Switch Model overlay emit
+		// pi-agents:bind-mode-model after model + effort are fully applied.
 		const source = event.source as string | undefined;
-		if (source === "set" || source === "cycle") {
-			const identity = model_identity_of(model);
-			if (identity) {
-				const existing = get_mode_model(mode_models, currentMode);
-				if (!identities_equal(existing, identity)) {
-					mode_models = bind_mode_model(mode_models, currentMode, identity);
-					writePersistedState({ mode: currentMode, modeModels: mode_models });
-				}
-			}
+		if (source === "cycle") {
+			const identity = model_identity_of(model, get_pi_thinking_level(pi));
+			if (identity) bind_current_mode_model(identity);
 		}
 		if (
 			currentMode === "code" &&
@@ -1438,8 +1489,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		last_patch_tool_provider = provider;
 	});
 
-	pi.on("thinking_level_select", (_event: any, ctx: any) => {
+	pi.on("thinking_level_select", (event: any, ctx: any) => {
 		if (!is_live_session(ctx)) return;
+		if (applying_mode_model || applying_mode_thinking_level) return;
+		const level = normalize_thinking_level(event?.level);
+		if (!level) return;
+		const identity = model_identity_of(ctx.model as Model<any> | undefined, level);
+		if (identity) bind_current_mode_model(identity);
 		request_live_mode_render(ctx);
 	});
 

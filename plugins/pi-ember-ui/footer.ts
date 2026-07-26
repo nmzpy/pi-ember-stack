@@ -23,6 +23,7 @@ import { getLiveTps } from "../pi-ember-tps/index.ts";
 import {
 	getActiveModeId,
 	isShellMode,
+	isUserBashRunning,
 	liveAccentFg,
 } from "./mode-colors.ts";
 import {
@@ -154,15 +155,13 @@ function recompute_footer_stats_impl(ctx: any): void {
 	};
 }
 
-/** Seed footer effort from Pi thinking level and/or the active catalog model. */
+/** Seed footer effort from Pi thinking level (resolved at render against catalog). */
 // biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
-export function init_footer_thinking_level(pi: any, ctx?: any): void {
-	const model = ctx?.model as { id?: string; name?: string } | undefined;
-	const piLevel = pi?.getThinkingLevel?.() ?? "off";
-	footerThinkingLevel = resolve_model_effort_level(model, piLevel);
+export function init_footer_thinking_level(pi: any, _ctx?: any): void {
+	footerThinkingLevel = pi?.getThinkingLevel?.() ?? "off";
 }
 
-/** Update the thinking level shown in the footer (thinking_level_select). */
+/** Store the live Pi thinking level; footer render resolves against catalog SSOT. */
 export function set_footer_thinking_level(level: string): void {
 	footerThinkingLevel = level ?? "off";
 }
@@ -217,7 +216,7 @@ export function installEmberFooter(ctx: any): void {
 				if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
 					statsParts.push(`$${totalCost.toFixed(3)}`);
 				}
-				const statsStr = isShellMode() ? "shell" : statsParts.join(" ");
+				const statsStr = isShellMode() || isUserBashRunning() ? "shell" : statsParts.join(" ");
 				const leftSide =
 					theme.fg("dim", folderName) +
 					` ${theme.fg("dim", "\u2022")} ` +
@@ -231,7 +230,8 @@ export function installEmberFooter(ctx: any): void {
 				const modeLabel = resolve_mode_label(getActiveModeId());
 				const modelName = model?.name ?? model?.id ?? "no model";
 				const provider = model?.provider ?? "unknown";
-				const level = footerThinkingLevel;
+				const catalog = footerCtx?.modelRegistry?.getAvailable?.() ?? [];
+				const level = resolve_model_effort_level(model, footerThinkingLevel, catalog);
 				let displayName = modelName;
 				let variant = "";
 				if (level !== "off" && is_effort_slider_point(level)) {

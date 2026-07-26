@@ -4,6 +4,7 @@ import {
 	buildSubagentLayoutComponent,
 	anySubagentRunning,
 	isSubagentDelegating,
+	shouldShowSubagentDelegating,
 	renderDelegatingRow,
 	formatSubagentElapsedSuffix,
 	memberRecordsToRows,
@@ -51,9 +52,14 @@ function makeResult(agent: string, exitCode: number, failed = false) {
 	} as any;
 }
 
-function makeRunning(agent: string): any {
+function makeRunning(
+	agent: string,
+	opts?: { isThinking?: boolean; reasoning?: boolean },
+): any {
 	const r = makeResult(agent, -1);
 	r.messages = [{ role: "assistant", content: [{ type: "text", text: "..." }] }];
+	r.reasoning = opts?.reasoning ?? true;
+	r.isThinking = opts?.isThinking ?? true;
 	return r;
 }
 
@@ -129,7 +135,25 @@ describe("subagent delegating state", () => {
 		expect(isSubagentDelegating([placeholder])).toBe(false);
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [placeholder], theme);
 		expect(stripAnsi(out)).not.toContain("Delegating");
+		expect(stripAnsi(out)).toContain("Coder");
 		expect(out).toContain("[text:Coder]");
+	});
+
+	test("terminal empty results show failed agent row, not Delegating", () => {
+		const theme = makeTheme() as any;
+		expect(shouldShowSubagentDelegating([], true)).toBe(false);
+		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [], theme, 146_000, undefined, true);
+		expect(stripAnsi(out)).not.toContain("Delegating");
+		expect(stripAnsi(out)).toContain("Coder");
+		expect(out).toContain("[dim:Coder]");
+		expect(out).toContain("[dim: 2m 26s]");
+		expect(out).not.toContain("\u001b[38;2;");
+	});
+
+	test("terminal freezes elapsed suffix and anySubagentRunning is false", () => {
+		const args = { agent: "Coder", task: "do stuff" };
+		expect(anySubagentRunning(args, [], true)).toBe(false);
+		expect(shouldShowSubagentDelegating([], true)).toBe(false);
 	});
 });
 
@@ -164,8 +188,8 @@ describe("subagent elapsed time", () => {
 		expect(lines[0]).toContain("[dim: 1m 5s]");
 		expect(stripAnsi(lines[1] ?? "")).toContain("Scout");
 		expect(lines[1]).not.toContain("1m 5s");
-		expect(stripAnsi(lines[2] ?? "")).toContain("Coder");
-		expect(lines[2]).not.toContain("1m 5s");
+		expect(stripAnsi(lines[3] ?? "")).toContain("Coder");
+		expect(lines[3]).not.toContain("1m 5s");
 	});
 
 	test("single delegating row shows elapsed when provided", () => {
@@ -178,9 +202,9 @@ describe("subagent elapsed time", () => {
 	test("grouped consecutive singles render one Subagents header", () => {
 		const theme = makeTheme() as any;
 		const members = [
-			{ args: { agent: "Coder", task: "a" }, results: [makeRunning("Coder")] },
-			{ args: { agent: "Coder", task: "b" }, results: [makeRunning("Coder")] },
-			{ args: { agent: "Coder", task: "c" }, results: [makeRunning("Coder")] },
+			{ args: { agent: "Coder", task: "a" }, results: [makeRunning("Coder A")], displayName: "Coder A" },
+			{ args: { agent: "Coder", task: "b" }, results: [makeRunning("Coder B")], displayName: "Coder B" },
+			{ args: { agent: "Coder", task: "c" }, results: [makeRunning("Coder C")], displayName: "Coder C" },
 		];
 		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, members[0].results, theme, 5000, members);
 		const lines = out.split("\n");
@@ -188,6 +212,9 @@ describe("subagent elapsed time", () => {
 		expect(lines[0]).toContain("[dim: 5s]");
 		expect(lines.length).toBeGreaterThanOrEqual(4);
 		expect(memberRecordsToRows(members).length).toBe(3);
+		expect(stripAnsi(out)).toContain("Coder A");
+		expect(stripAnsi(out)).toContain("Coder B");
+		expect(stripAnsi(out)).toContain("Coder C");
 	});
 });
 
@@ -195,15 +222,50 @@ describe("renderSubagentLayout (string)", () => {
 	test("running single mode uses text color for the agent label", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [makeRunning("Coder")], theme);
-		expect(stripAnsi(out)).toContain("Coder");
-		expect(out).toContain("[text:Coder]");
-		expect(out).not.toContain("\u001b[38;2;");
-		expect(stripAnsi(out)).toContain("\u2022");
+		const lines = out.split("\n");
+		expect(stripAnsi(lines[0])).toContain("Coder");
+		expect(lines[0]).toContain("[text:Coder]");
+		expect(lines[0]).not.toContain("\u001b[38;2;");
+		expect(stripAnsi(lines[1] ?? "")).toContain("Thinking");
+		expect(lines[1]).toContain("\u001b[38;2;");
+		expect(stripAnsi(lines[0])).toContain("\u2022");
 		expect(out).not.toContain("\u2713");
 		expect(out).not.toContain("\u2717");
 		expect(out).not.toContain("subagent");
 		expect(out).not.toContain("[user]");
 		expect(out).not.toContain("\u23f3");
+	});
+
+	test("running single mode shows Thinking when reasoning stream is active", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [makeRunning("Coder A")], theme);
+		const lines = out.split("\n");
+		expect(lines.length).toBe(2);
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(stripAnsi(lines[1])).toContain("Thinking");
+		expect(lines[1]).toContain("\u001b[38;2;");
+	});
+
+	test("running single mode hides Thinking when not reasoning", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "do stuff" },
+			[makeRunning("Coder A", { isThinking: false })],
+			theme,
+		);
+		expect(out.split("\n").length).toBe(1);
+		expect(stripAnsi(out)).not.toContain("Thinking");
+	});
+
+	test("running single mode hides Thinking when model.reasoning is false", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "do stuff" },
+			[makeRunning("Coder A", { isThinking: true, reasoning: false })],
+			theme,
+		);
+		expect(out.split("\n").length).toBe(1);
+		expect(stripAnsi(out)).not.toContain("Thinking");
 	});
 
 	test("running single mode shows latest tool call one column deeper than group children", () => {
@@ -218,6 +280,32 @@ describe("renderSubagentLayout (string)", () => {
 		expect(stripAnsi(lines[1])).toContain("  \u2514");
 		expect(stripAnsi(lines[1])).toContain("Read");
 		expect(stripAnsi(lines[1])).toContain("plugins/render.ts");
+		expect(lines[1]).toContain("\u001b[38;2;");
+	});
+
+	test("running parallel agents show Thinking until a tool starts", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[makeRunning("Coder A"), makeRunning("Scout A")],
+			theme,
+		);
+		const lines = out.split("\n");
+		expect(lines.filter((line) => stripAnsi(line).includes("Thinking")).length).toBe(2);
+	});
+
+	test("running tool row uses compact-group gradient verb for grep", () => {
+		const theme = makeTheme() as any;
+		const running = makeResult("Scout A", -1);
+		running.latestToolCall = { name: "grep", args: { pattern: "foo", path: "src" } };
+		const out = renderSubagentLayout(
+			{ tasks: [{ agent: "Scout", task: "a" }] },
+			[running],
+			theme,
+		);
+		const toolLine = out.split("\n").find((line) => stripAnsi(line).includes("Searching"));
+		expect(toolLine).toBeDefined();
+		expect(toolLine).toContain("\u001b[38;2;");
 	});
 
 	test("completed single mode uses muted bullet and dim agent name", () => {
@@ -326,8 +414,10 @@ describe("renderSubagentLayout (string)", () => {
 		expect(header).not.toContain("\u001b[38;2;");
 		expect(stripAnsi(lines[1])).toContain("  \u251c ");
 		expect(stripAnsi(lines[1])).toContain("Coder A");
-		expect(stripAnsi(lines[2])).toContain("  \u2514 ");
-		expect(stripAnsi(lines[2])).toContain("Scout A");
+		expect(stripAnsi(lines[2])).toContain("Thinking");
+		expect(stripAnsi(lines[3])).toContain("  \u2514 ");
+		expect(stripAnsi(lines[3])).toContain("Scout A");
+		expect(stripAnsi(lines[4])).toContain("Thinking");
 		expect(out).not.toContain("\u23f3");
 		expect(out).not.toContain("parallel");
 		expect(out).not.toContain("[user]");
@@ -348,6 +438,13 @@ describe("renderSubagentLayout (string)", () => {
 		const out = renderSubagentLayout(args, [makeResult("Coder A", -1)], theme);
 		expect(out).not.toContain("\u23f3");
 		expect(out).not.toContain("\u25d0");
+	});
+
+	test("empty args during streaming show Delegating instead of bare tool name", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout({}, [], theme);
+		expect(stripAnsi(out)).toContain("Delegating");
+		expect(stripAnsi(out)).not.toContain("subagent");
 	});
 
 	test("anySubagentRunning true when exitCode is -1", () => {

@@ -1,4 +1,6 @@
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SubAgentResult } from "./runner.ts";
+import { flatten_todo_timeline } from "../../../pi-ember-todo/timeline.ts";
 
 export interface SubagentArgs {
 	agent?: string;
@@ -12,6 +14,8 @@ export interface SubagentCallRecord {
 	args: SubagentArgs;
 	results: SubAgentResult[];
 	invalidate?: () => void;
+	/** Lettered display label (e.g. Coder A) assigned when the call starts. */
+	displayName?: string;
 }
 
 export function isSingleModeSubagentArgs(args: SubagentArgs): boolean {
@@ -38,6 +42,10 @@ export class SubagentGroupRenderer {
 		this.batch = undefined;
 	}
 
+	getRecord(toolCallId: string): SubagentCallRecord | undefined {
+		return this.by_id.get(toolCallId);
+	}
+
 	register(
 		toolCallId: string,
 		args: SubagentArgs,
@@ -47,7 +55,11 @@ export class SubagentGroupRenderer {
 		const existing = this.by_id.get(toolCallId);
 		if (existing) {
 			existing.args = args;
-			existing.results = results;
+			// Pi rebuilds may call renderCall with a fresh context before renderResult;
+			// never wipe a populated snapshot with an empty placeholder.
+			if (results.length > 0 || existing.results.length === 0) {
+				existing.results = results;
+			}
 			if (invalidate) existing.invalidate = invalidate;
 			return existing;
 		}
@@ -87,6 +99,11 @@ export class SubagentGroupRenderer {
 		return [...this.batch];
 	}
 
+	setDisplayName(toolCallId: string, displayName: string): void {
+		const record = this.by_id.get(toolCallId);
+		if (record) record.displayName = displayName;
+	}
+
 	isOwner(toolCallId: string): boolean {
 		const batch = this.getBatch(toolCallId);
 		return batch.length <= 1 || batch[0]?.toolCallId === toolCallId;
@@ -102,4 +119,56 @@ let shared_group_renderer: SubagentGroupRenderer | undefined;
 export function getSubagentGroupRenderer(): SubagentGroupRenderer {
 	if (!shared_group_renderer) shared_group_renderer = new SubagentGroupRenderer();
 	return shared_group_renderer;
+}
+
+const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_resume"]);
+
+/** Restore grouped subagent layout state from branch history before Pi rebuilds. */
+export function seed_subagent_renderer_from_branch(
+	branch: SessionEntry[],
+	renderer: SubagentGroupRenderer,
+): void {
+	const args_by_id = new Map<string, SubagentArgs>();
+	const results_by_id = new Map<string, SubAgentResult[]>();
+
+	for (const entry of branch) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+		if (!msg) continue;
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			for (const part of msg.content) {
+				if (!part || typeof part !== "object") continue;
+				if ((part as { type?: string }).type !== "toolCall") continue;
+				const tc = part as { id?: string; name?: string; arguments?: unknown };
+				if (typeof tc.id !== "string" || typeof tc.name !== "string") continue;
+				if (!SUBAGENT_TOOL_NAMES.has(tc.name)) continue;
+				args_by_id.set(tc.id, (tc.arguments ?? {}) as SubagentArgs);
+			}
+		}
+		if (msg.role === "toolResult") {
+			if (!SUBAGENT_TOOL_NAMES.has(msg.toolName)) continue;
+			const id = msg.toolCallId;
+			if (typeof id !== "string") continue;
+			const details = msg.details as { results?: SubAgentResult[] } | undefined;
+			if (details?.results) results_by_id.set(id, details.results);
+		}
+	}
+
+	const timeline = flatten_todo_timeline(branch);
+	for (const entry of timeline) {
+		if (entry.kind === "user") {
+			renderer.hardExit();
+			continue;
+		}
+		if (entry.kind !== "tool") continue;
+		if (!SUBAGENT_TOOL_NAMES.has(entry.name)) {
+			renderer.hardExit();
+			continue;
+		}
+		const args = args_by_id.get(entry.id) ?? {};
+		const results = results_by_id.get(entry.id) ?? [];
+		renderer.register(entry.id, args, results);
+		const displayName = results[0]?.agent;
+		if (displayName) renderer.setDisplayName(entry.id, displayName);
+	}
 }

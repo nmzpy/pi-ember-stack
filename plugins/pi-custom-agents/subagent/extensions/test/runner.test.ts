@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import type { Message } from "@earendil-works/pi-ai";
 import {
 	type SubAgentResult,
+	format_agent_tool_result_batch,
+	format_agent_tool_result_text,
+	get_agent_result_body,
 	isFailedResult,
 	resolve_failure_message,
 } from "../runner.ts";
@@ -135,5 +138,86 @@ describe("resolve_failure_message", () => {
 			],
 		});
 		expect(resolve_failure_message(result)).toBe("429 rate limit exceeded");
+	});
+});
+
+describe("format_agent_tool_result_text", () => {
+	test("includes lettered agent label for completed results", () => {
+		const result = makeResult({
+			agent: "Coder A",
+			exitCode: 0,
+			stopReason: "stop",
+			messages: [
+				assistantMessage({
+					content: [{ type: "text", text: "Done." }],
+				}),
+			],
+		});
+		expect(format_agent_tool_result_text(result)).toBe(
+			"### [Coder A] completed\n\nDone.",
+		);
+	});
+
+	test("includes failed status and error body", () => {
+		const result = makeResult({
+			agent: "Scout B",
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "401 Unauthorized",
+		});
+		expect(format_agent_tool_result_text(result)).toBe(
+			"### [Scout B] failed (error)\n\n401 Unauthorized",
+		);
+	});
+
+	test("running placeholder uses running status", () => {
+		const result = makeResult({ agent: "Coder A", exitCode: -1 });
+		expect(get_agent_result_body(result)).toBe("(running...)");
+		expect(format_agent_tool_result_text(result)).toBe(
+			"### [Coder A] running\n\n(running...)",
+		);
+	});
+
+	test("format_body hook can truncate parallel output", () => {
+		const result = makeResult({
+			agent: "Coder A",
+			exitCode: 0,
+			stopReason: "stop",
+			messages: [
+				assistantMessage({
+					content: [{ type: "text", text: "long output" }],
+				}),
+			],
+		});
+		const formatted = format_agent_tool_result_text(result, (body) => `${body.slice(0, 4)}…`);
+		expect(formatted).toBe("### [Coder A] completed\n\nlong…");
+	});
+});
+
+describe("format_agent_tool_result_batch", () => {
+	test("joins labeled summaries with header and separator", () => {
+		const results = [
+			makeResult({
+				agent: "Coder A",
+				exitCode: 0,
+				stopReason: "stop",
+				messages: [
+					assistantMessage({ content: [{ type: "text", text: "A done" }] }),
+				],
+			}),
+			makeResult({
+				agent: "Coder B",
+				exitCode: 0,
+				stopReason: "stop",
+				messages: [
+					assistantMessage({ content: [{ type: "text", text: "B done" }] }),
+				],
+			}),
+		];
+		expect(
+			format_agent_tool_result_batch(results, { header: "Parallel: 2/2 succeeded" }),
+		).toBe(
+			"Parallel: 2/2 succeeded\n\n### [Coder A] completed\n\nA done\n\n---\n\n### [Coder B] completed\n\nB done",
+		);
 	});
 });
