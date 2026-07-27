@@ -34,8 +34,8 @@ import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
 import { render_thinking_gradient_label } from "./thinking-status-render.ts";
 import {
 	bind_thinking_in_message_host,
+	bind_thinking_status_tick_should_paint,
 	bind_thinking_widget_host,
-	set_thinking_status_render_request,
 	sync_thinking_status_tick,
 	unbind_thinking_status_hosts,
 } from "./thinking-status-tick.ts";
@@ -66,13 +66,12 @@ import {
 	render_gradient,
 	set_gradient_render_request,
 	shutdown_gradient_clock,
+	stop_all_gradient_animation,
 	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
 import {
-	bind_slash_command_exit_render,
-	reset_scroll_review_state,
-	resume_scroll_follow_from_editor,
+	request_live_tui_render,
 	reset_slash_command_tracking,
 } from "./layout.ts";
 import {
@@ -83,7 +82,6 @@ import {
 	getActiveModeColor,
 	isLatestSubagentRunning,
 	isQuizActive,
-	isScrollReviewActive,
 	isShellMode,
 	isUserBashRunning,
 	isGroupThinkingChildActive,
@@ -97,7 +95,6 @@ import {
 	resetSubagentActivity,
 	setLatestSubagentRunning,
 	setPlanAutoContinuing,
-	setScrollReviewActive,
 	setShellMode,
 	setUserBashRunning,
 	isAgentRunPending,
@@ -105,6 +102,8 @@ import {
 	isThinkingBlocksHidden,
 	isUserTurnCommitted,
 	is_agent_thinking_wait,
+	begin_work_group_boundary_suppression,
+	end_work_group_boundary_suppression,
 	markToolExecutionEnded,
 	markToolExecutionStarted,
 	resetToolExecutionInFlight,
@@ -123,11 +122,13 @@ import {
 import {
 	bind_model_picker_session,
 	install_model_picker_patches,
+	install_model_picker_input_listener,
 	reset_model_picker_session,
+	uninstall_model_picker_input_listener,
 } from "./model-picker.ts";
 import {
+	bind_picker_editor,
 	is_model_picker_active,
-	is_model_picker_editor,
 	render_model_picker_rows,
 } from "./model-selector.ts";
 import {
@@ -151,8 +152,7 @@ export {
 } from "./footer.ts";
 export {
 	finalize_editor_input_after as finalizeEditorInputAfter,
-	reset_scroll_review_state as resetScrollReviewState,
-	resume_scroll_follow_from_editor as resumeScrollFollowFromEditor,
+	request_live_tui_render as requestLiveTuiRender,
 	reset_slash_command_tracking as resetSlashCommandTracking,
 	sync_slash_command_active as syncSlashCommandActive,
 } from "./layout.ts";
@@ -191,7 +191,7 @@ import { notify_theme_refresh } from "./theme-refresh.ts";
 import {
 	bind_thinking_wait_handlers,
 	is_planning_style_text_delta,
-	sync_thinking_wait_ui,
+	reconcile_thinking_wait_ui,
 } from "./thinking-wait.ts";
 import { build_transcript_entries } from "./transcript-entries.ts";
 
@@ -416,15 +416,13 @@ export function is_pre_tool_thinking_gap(): boolean {
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
 
+	// Visible thinking blocks own reasoning in the transcript — never duplicate
+	// with the external gradient header. Subagent nested Thinking rows are separate.
+	if (!isThinkingBlocksHidden()) return false;
+
 	const pre_tool = is_pre_tool_thinking_gap();
-	// Right after send: always show feedback, even when thinking blocks are visible
-	// or stale in-group flags from the prior turn have not cleared yet.
 	if (pre_tool) return !thinkingHeaderSuppressed;
 
-	// Live thinking/reasoning stream — keep the gradient header even when thinking
-	// blocks are visible in the transcript (starter must not vanish on first delta).
-	// When blocks are hidden the in-group `└ Thinking` row owns the slot only if
-	// the renderer is actually painting it; otherwise fall back to external hosts.
 	if (thinkingActive) {
 		if (thinkingHeaderSuppressed) return false;
 		if (compact_thinking_lane_owns_status()) return false;
@@ -432,7 +430,6 @@ export function thinking_status_should_show(): boolean {
 		return true;
 	}
 
-	if (!isThinkingBlocksHidden()) return false;
 	if (thinkingHeaderSuppressed) return false;
 	if (compact_thinking_lane_owns_status()) return false;
 	if (running_compact_group_blocks_thinking_header()) return false;
@@ -480,10 +477,18 @@ function render_thinking_status_lines(width: number): string[] {
 	return [...Array(padAbove).fill(""), row, ...Array(padBelow).fill("")];
 }
 
-/** Update status state and let Pi perform the normal component-tree render. */
+/** Update status state; request a render only when Thinking visibility changes. */
 function refresh_thinking_status(): void {
+	const should_paint = thinking_status_paint_active();
 	sync_thinking_gradient_clock();
-	requestRender?.();
+	if (should_paint === thinking_status_last_painted) return;
+	thinking_status_last_painted = should_paint;
+	if (requestRender) {
+		thinking_status_render_pending = false;
+		requestRender();
+	} else {
+		thinking_status_render_pending = should_paint;
+	}
 }
 
 /** Hide the gradient Thinking header while tools or visible assistant text run. */
@@ -530,6 +535,7 @@ class ThinkingStatusComponent implements Component {
 		return render_thinking_status_lines(width);
 	}
 	invalidate(): void {
+		if (!thinking_status_should_show() && !isGroupThinkingChildActive()) return;
 		requestRender?.();
 	}
 }
@@ -541,16 +547,18 @@ function bind_live_tui_render(tui: { requestRender?: (force?: boolean) => void }
 	if (!tui?.requestRender) return;
 	tuiRef = tui;
 	const schedule_render = (): void => {
-		tui.requestRender?.();
+		request_live_tui_render(tui);
 	};
 	requestRender = schedule_render;
 	set_gradient_render_request(schedule_render);
-	set_thinking_status_render_request(schedule_render);
+	if (thinking_status_render_pending) {
+		thinking_status_render_pending = false;
+		schedule_render();
+	}
 }
 
 let sessionCtx: any;
 let shellInputUnsubscribe: (() => void) | undefined;
-let scrollReviewInputUnsubscribe: (() => void) | undefined;
 let getShellEditor: (() => ShellModeEditor | undefined) | undefined;
 
 type EditorWithBorder = Editor & {
@@ -600,6 +608,27 @@ function recompute_latest_subagent_running(): boolean {
 	return running;
 }
 
+/** Clear stale wait blockers after compaction, transcript rebuild, or user send. */
+export function clear_stale_thinking_wait_blockers(): void {
+	resetToolExecutionInFlight();
+	const subagent_running = recompute_latest_subagent_running();
+	if (!subagent_running) {
+		resetSubagentActivity();
+	}
+	const renderer = getSharedRenderer();
+	renderer.clearGroupThinkingChild();
+	sync_compact_group_flags(renderer);
+	thinkingHeaderSuppressed = false;
+}
+
+/** Re-arm Thinking after compaction_end rebuilds the transcript. */
+export function reconcile_thinking_after_transcript_rebuild(): void {
+	reconcile_thinking_wait_ui({
+		clear_blockers: true,
+		force_arm: isUserTurnCommitted() || isAgentRunPending(),
+	});
+}
+
 function is_subagent_delegation_tool(toolName: string | undefined): boolean {
 	return toolName === "subagent" || toolName === "subagent_resume";
 }
@@ -616,7 +645,7 @@ export {
 export { sync_thinking_gradient_clock as syncThinkingGradientClock };
 
 /** Request a normal render through Pi's public UI API. */
-export function requestTuiRender(_force = false): void {
+export function requestTuiRender(): void {
 	requestRender?.();
 }
 
@@ -626,11 +655,9 @@ export function requestTuiRender(_force = false): void {
  * requestRender might be stale due to jiti module duplication. Falls back to
  * the module-level scheduler if the editor has no live TUI.
  */
-export function requestTuiRenderFromEditor(
-	editor: { tui?: { requestRender?: () => void } },
-): void {
-	if (editor?.tui?.requestRender) {
-		editor.tui.requestRender();
+export function requestTuiRenderFromEditor(editor: { tui?: { requestRender?: () => void } }): void {
+	if (editor?.tui) {
+		request_live_tui_render(editor.tui);
 		return;
 	}
 	requestRender?.();
@@ -711,52 +738,35 @@ function installShellModeInputListener(ctx: any): void {
 	});
 }
 
-/** Pause live TUI updates while the user reads terminal scrollback. */
-function installScrollReviewInputListener(ctx: any): void {
-	const tui = tuiRef ?? ctx?.ui;
-	if (!tui?.addInputListener) return;
-	if (scrollReviewInputUnsubscribe) {
-		scrollReviewInputUnsubscribe();
-		scrollReviewInputUnsubscribe = undefined;
-	}
-
-	scrollReviewInputUnsubscribe = tui.addInputListener((data: string) => {
-		if (isKeyRelease(data)) return undefined;
-		if (matchesKey(data, "shift+ctrl+s")) {
-			if (isScrollReviewActive()) {
-				resume_scroll_follow_from_editor({ tui });
-			} else {
-				setScrollReviewActive(true);
-				ctx.ui?.notify?.(
-					"Scroll review: live updates paused. Type or Ctrl+Shift+S to resume.",
-					"info",
-				);
-			}
-			return { consume: true };
-		}
-		if (
-			!isScrollReviewActive() &&
-			!isAgentRunPending() &&
-			(matchesKey(data, Key.pageUp) || matchesKey(data, Key.home))
-		) {
-			setScrollReviewActive(true);
-		}
-		return undefined;
-	});
-}
-
 function stopThinkingAnimation(): void {
 	thinkingActive = false;
 	refresh_thinking_status();
 }
 
-/** Test seam: clear leaked thinking-header module state between unit tests. */
-export function reset_thinking_header_state_for_tests(): void {
+/** Clear thinking-header module state on session replacement or between tests. */
+export function reset_thinking_header_session_state(): void {
 	thinkingActive = false;
 	thinkingHeaderSuppressed = false;
 	assistantThinkingHostReady = false;
 	latestAssistantMessageTimestamp = undefined;
 	thinkingPassStartedAt = 0;
+	turnStartedAt = 0;
+	thinking_status_last_painted = false;
+	setAgentRunPending(false);
+	setUserTurnCommitted(false);
+	resetToolExecutionInFlight();
+}
+
+/** Test seam: clear leaked thinking-header module state between unit tests. */
+export function reset_thinking_header_state_for_tests(): void {
+	reset_thinking_header_session_state();
+}
+
+let thinking_status_render_pending = false;
+let thinking_status_last_painted = false;
+
+function thinking_status_paint_active(): boolean {
+	return thinking_status_should_show() || isGroupThinkingChildActive();
 }
 
 /** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
@@ -800,7 +810,8 @@ function installThinkingWidget(ctx: any): void {
 				return render_thinking_status_lines(width);
 			},
 			invalidate(): void {
-				tui.requestRender?.();
+				if (!thinking_status_should_show() && !isGroupThinkingChildActive()) return;
+				request_live_tui_render(tui);
 			},
 		};
 		bind_thinking_widget_host(host);
@@ -1117,6 +1128,17 @@ export function bash_execution_content_pad_cols(): number {
 	return shell_aware_editor_inner_pad() + EDITOR_GUTTER_COLS;
 }
 
+/** Truncate overlong rows only — never pad with trailing spaces (rectangular mouse select). */
+export function fit_terminal_content_line(line: string, width: number): string {
+	return visibleWidth(line) > width ? truncateToWidth(line, width) : line;
+}
+
+/** Pad structural border/rule rows to the full terminal width. */
+function pad_terminal_rule_line(line: string, width: number): string {
+	const fitted = fit_terminal_content_line(line, width);
+	return fitted + " ".repeat(Math.max(0, width - visibleWidth(fitted)));
+}
+
 function is_horizontal_rule_line(line: string): boolean {
 	const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
 	return /^[\s\u2500]*$/.test(stripped) && stripped.includes("\u2500");
@@ -1139,10 +1161,7 @@ export function format_ember_bash_transcript_lines(
 		}
 
 		const pad = " ".repeat(running ? bash_execution_content_pad_cols() : 1);
-		const padded = pad + line;
-		const visLen = visibleWidth(padded);
-		const padNeeded = Math.max(0, width - visLen);
-		result.push(padded + " ".repeat(padNeeded));
+		result.push(fit_terminal_content_line(pad + line, width));
 	}
 	return result;
 }
@@ -1158,6 +1177,9 @@ function render_shell_aware_editor(
 	originalRender: (width: number) => string[],
 	width: number,
 ): string[] {
+	if (is_model_picker_active()) {
+		bind_picker_editor(instance);
+	}
 	const integrate_user_bash = isUserBashRunning();
 	const borderHex = shell_aware_editor_border_hex();
 	const border = (text: string): string => colorize(text, borderHex);
@@ -1187,8 +1209,9 @@ function render_shell_aware_editor(
 	const topIdx = borderIndices[0] ?? 0;
 	const bottomBorderIdx = borderIndices.length > 1 ? borderIndices[borderIndices.length - 1] : -1;
 	const isSlashMode = instance.getText?.().trimStart().startsWith("/") === true;
-	const modelPickerActive = is_model_picker_active() && is_model_picker_editor(instance);
-	const hasAutocompleteRows = bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
+	const modelPickerActive = is_model_picker_active();
+	const hasAutocompleteRows =
+		!modelPickerActive && bottomBorderIdx >= 0 && lines.length > bottomBorderIdx + 1;
 	// Slash autocomplete menu expands downward from the chatbox. The
 	// autocomplete rows stay after the editor body, so the menu grows below.
 	const middleBorderIdx = -1;
@@ -1198,12 +1221,8 @@ function render_shell_aware_editor(
 	const promptGlyph = isShellMode() || isUserBashRunning() ? "!" : ">";
 	const promptStr = border(`${promptGlyph} `);
 	const gutter = "  ";
-	const fit = (s: string): string =>
-		visibleWidth(s) > width ? truncateToWidth(s, width) : s;
-	const padRight = (s: string): string => {
-		const fitted = fit(s);
-		return fitted + " ".repeat(Math.max(0, width - visibleWidth(fitted)));
-	};
+	const fit = (s: string): string => fit_terminal_content_line(s, width);
+	const padRule = (s: string): string => pad_terminal_rule_line(s, width);
 	const bottomRule = " " + chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2))) + " ";
 	const topRule = bottomRule;
 	const slashMiddleSep =
@@ -1213,7 +1232,7 @@ function render_shell_aware_editor(
 			TEXT_COLOR,
 			0.5,
 		);
-	const middleSep = padRight(
+	const middleSep = padRule(
 		isSlashMode || modelPickerActive
 			? slashMiddleSep
 			: `${pad}${innerPadStr}${gutter}${border("\u2500".repeat(innerWidth))}`,
@@ -1232,7 +1251,7 @@ function render_shell_aware_editor(
 			continue;
 		}
 		const gutterStr = firstBody ? promptStr : gutter;
-		lines[i] = padRight(`${pad}${innerPadStr}${gutterStr}${lines[i]}`);
+		lines[i] = fit(`${pad}${innerPadStr}${gutterStr}${lines[i]}`);
 		firstBody = false;
 	}
 	lines[topIdx] = topRule;
@@ -1257,7 +1276,7 @@ function render_shell_aware_editor(
 	if (modelPickerActive && bottomBorderIdx >= 0) {
 		const editorLines = lines.slice(topIdx + 1, bottomBorderIdx);
 		const pickerLines = render_model_picker_rows(innerWidth).map((line) =>
-			padRight(`${pad}${innerPadStr}${gutter}${line}`),
+			fit(`${pad}${innerPadStr}${gutter}${line}`),
 		);
 		const rows = [topRule, ...editorLines, middleSep, ...pickerLines];
 		if (!integrate_user_bash) rows.push(bottomRule);
@@ -1278,11 +1297,25 @@ function installAssistantMessagePatch(): void {
 		assistantPrototype.setHideThinkingBlock = function (this: any, hide: boolean): void {
 			const next_hidden = hide === true;
 			const prev_hidden = isThinkingBlocksHidden();
+			if (prev_hidden === next_hidden) {
+				originalSetHideThinkingBlock.call(this, hide);
+				return;
+			}
+			begin_work_group_boundary_suppression();
 			setThinkingBlocksHidden(next_hidden);
 			originalSetHideThinkingBlock.call(this, hide);
-			if (prev_hidden !== next_hidden) {
-				refresh_thinking_status();
-			}
+			queueMicrotask(() => {
+				queueMicrotask(() => {
+					const renderer = getSharedRenderer();
+					renderer.repaintAfterThinkingBlocksToggle(
+						next_hidden,
+						next_hidden && is_agent_thinking_wait(thinkingActive),
+					);
+					sync_compact_group_flags(renderer);
+					end_work_group_boundary_suppression();
+				});
+			});
+			refresh_thinking_status();
 		};
 	}
 
@@ -1665,9 +1698,10 @@ function installCompactionTranscriptPatch(): void {
 			}
 			this.clearStatusIndicator("compaction");
 			this.rebuildChatFromMessages();
+			reconcile_thinking_after_transcript_rebuild();
 			this.footer.invalidate();
 			void this.flushCompactionQueue({ willRetry: event.willRetry });
-			this.ui.requestRender();
+			requestTuiRender();
 			return;
 		}
 		return original_handle_event.call(this, event);
@@ -2045,19 +2079,26 @@ function radialColorForCell(x: number, y: number, points: RadialPoint[]): [numbe
 	return [Math.round(r / totalWeight), Math.round(g / totalWeight), Math.round(b / totalWeight)];
 }
 
+let logo_tick_cb: (() => void) | undefined;
+
+function drop_logo_tick(): void {
+	if (!logo_tick_cb) return;
+	unsubscribe_gradient_tick(logo_tick_cb);
+	logo_tick_cb = undefined;
+}
+
 function startLogoAnimation(): void {
 	logo_settled_by_user_message = false;
-	logoAnimating = true;
-	logoStatic = false;
-	activate_gradient("logo");
-	requestRender?.();
+	logoAnimating = false;
+	logoStatic = true;
+	drop_logo_tick();
 }
 
 function stopLogoAnimation(): void {
 	if (!logoAnimating && logoStatic) return;
 	logoAnimating = false;
 	logoStatic = true;
-	deactivate_gradient("logo");
+	drop_logo_tick();
 	requestRender?.();
 }
 
@@ -2353,8 +2394,11 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		armPreTokenThinkingStatus: arm_pre_token_thinking_status,
 		refreshThinkingStatus: refresh_thinking_status,
 		getThinkingActive: () => thinkingActive,
+		clearStaleBlockers: clear_stale_thinking_wait_blockers,
 	});
-	bind_slash_command_exit_render(() => requestTuiRender());
+	bind_thinking_status_tick_should_paint(
+		() => thinking_status_should_show() || isGroupThinkingChildActive(),
+	);
 	// /model + /resume: prototype intercepts only (no registerCommand — that
 	// conflicts with built-ins and shows in Extension issues).
 	install_model_picker_patches();
@@ -2389,7 +2433,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		sessionCtx = ctx;
 		tuiRef = undefined;
 		requestRender = undefined;
+		thinking_status_render_pending = false;
 		liveTheme = undefined;
+		reset_thinking_header_session_state();
 		if (ctx.mode === "tui") {
 			bind_model_picker_session(ctx, pi);
 			requestRender = undefined;
@@ -2411,7 +2457,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			init_footer_thinking_level(pi, ctx);
 			recompute_footer_stats(ctx);
 			installShellModeInputListener(ctx);
-			installScrollReviewInputListener(ctx);
+			install_model_picker_input_listener(() => tuiRef ?? ctx?.ui);
 		}
 	});
 
@@ -2445,9 +2491,8 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		if (typeof event.prompt === "string" && event.prompt.trim()) {
-			setUserTurnCommitted(true);
-			arm_pre_token_thinking_status();
-			sync_thinking_wait_ui();
+			if (!isUserTurnCommitted()) setUserTurnCommitted(true);
+			reconcile_thinking_wait_ui({ force_arm: true });
 		}
 	});
 
@@ -2465,7 +2510,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 				if (planning === "planning_text") {
 					resume_thinking_header_for_think_stream();
 					if (!thinkingActive) startThinkingAnimation();
-					sync_thinking_wait_ui();
+					reconcile_thinking_wait_ui();
 				}
 			}
 		}
@@ -2473,7 +2518,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		if (ev && isThinking) {
 			resume_thinking_header_for_think_stream();
 			if (!thinkingActive) startThinkingAnimation();
-			sync_thinking_wait_ui();
+			reconcile_thinking_wait_ui();
 		}
 		if (ev?.type === "text_delta" && typeof ev.delta === "string") {
 			const planning =
@@ -2483,7 +2528,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			if (planning) {
 				resume_thinking_header_for_think_stream();
 				if (!thinkingActive) startThinkingAnimation();
-				sync_thinking_wait_ui();
+				reconcile_thinking_wait_ui();
 			}
 		}
 		if (ev && should_suppress_thinking_header_for_stream_event(ev)) {
@@ -2510,20 +2555,15 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			turnStartedAt = performance.now();
 			reset_thinking_pass_timer();
 			setTurnToolTranscriptActive(false);
-			thinkingHeaderSuppressed = false;
 			assistantThinkingHostReady = false;
-			setGroupThinkingChildActive(false);
-			setGroupReopenableActive(false);
 			setUserTurnAnchorTimestamp(
 				typeof event.message.timestamp === "number" ? event.message.timestamp : undefined,
 			);
-			// Show Thinking immediately after send — agent_start may arrive later.
+			// SSOT: visible user send arms Thinking before agent_start arrives.
 			if (display !== false) {
 				sync_thinking_blocks_hidden_from_ctx(ctx);
 				setUserTurnCommitted(true);
-				setAgentRunPending(true);
-				sync_compact_group_flags(getSharedRenderer());
-				arm_pre_token_thinking_status();
+				reconcile_thinking_wait_ui({ force_arm: true, clear_blockers: true });
 			}
 		} else if (event.message?.role === "assistant" && typeof event.message.timestamp === "number") {
 			if (
@@ -2558,17 +2598,11 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		// immediately so it shows the new post-compaction usage instead of
 		// the old full value.
 		recompute_footer_stats(ctx);
-		// Chat rebuild after compact must not leave stale group/thinking flags
-		// or a suppressed header from the pre-compact turn.
-		const renderer = getSharedRenderer();
-		renderer.clearGroupThinkingChild();
-		sync_compact_group_flags(renderer);
-		thinkingHeaderSuppressed = false;
 		assistantThinkingHostReady = false;
-		if (isUserTurnCommitted() || isAgentRunPending()) {
-			arm_pre_token_thinking_status();
-			sync_thinking_wait_ui();
-		}
+		reconcile_thinking_wait_ui({
+			clear_blockers: true,
+			force_arm: isUserTurnCommitted() || isAgentRunPending(),
+		});
 		requestRender?.();
 	});
 
@@ -2580,8 +2614,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		arm_pre_token_thinking_status();
-		sync_thinking_wait_ui();
+		reconcile_thinking_wait_ui();
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
@@ -2593,7 +2626,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		// Turn timer + notify live on agent_settled only — agent_end fires per
 		// low-level run (tool batch, TTFB timeout retry, compact-and-retry) and
 		// must not clear turnStartedAt or show the final elapsed toast early.
-		sync_thinking_wait_ui();
+		reconcile_thinking_wait_ui();
 	});
 
 	// `agent_settled` is the only event that means Pi will not auto-retry,
@@ -2609,6 +2642,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		resetSubagentActivity();
 		stopLogoAnimation();
 		stopThinkingAnimation();
+		stop_all_gradient_animation();
+		sync_thinking_status_tick(false);
+		thinking_status_last_painted = false;
 		const duration = turnStartedAt > 0 ? performance.now() - turnStartedAt : 0;
 		turnStartedAt = 0;
 		thinkingPassStartedAt = 0;
@@ -2658,13 +2694,13 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			markSubagentActivityEnded();
 			// Last subagent finished — arm Thinking before the parent streams again.
 			if (!isSubagentActivityActive() && !isLatestSubagentRunning()) {
-				sync_thinking_wait_ui();
+				reconcile_thinking_wait_ui();
 			} else {
 				refresh_thinking_status();
 			}
 			return;
 		}
-		sync_thinking_wait_ui();
+		reconcile_thinking_wait_ui();
 	});
 
 	pi.registerCommand("welcome", {
@@ -2707,19 +2743,12 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		clearMarkdownRenderCache();
 		logo_settled_by_user_message = false;
 		stopLogoAnimation();
+		drop_logo_tick();
 		shutdown_gradient_clock();
 		unbind_thinking_status_hosts();
-		set_thinking_status_render_request(undefined);
-		thinkingActive = false;
-		setAgentRunPending(false);
-		setUserTurnCommitted(false);
-		resetToolExecutionInFlight();
-		thinkingHeaderSuppressed = false;
-		assistantThinkingHostReady = false;
-		turnStartedAt = 0;
-		thinkingPassStartedAt = 0;
+		thinking_status_render_pending = false;
+		reset_thinking_header_session_state();
 		setShellMode(false);
-		reset_scroll_review_state();
 		setLatestSubagentRunning(false);
 		resetSubagentActivity();
 		setToolGroupActive(false);
@@ -2742,10 +2771,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		if (shellInputUnsubscribe) {
 			shellInputUnsubscribe();
 			shellInputUnsubscribe = undefined;
-		}
-		if (scrollReviewInputUnsubscribe) {
-			scrollReviewInputUnsubscribe();
-			scrollReviewInputUnsubscribe = undefined;
 		}
 		getShellEditor = undefined;
 	});

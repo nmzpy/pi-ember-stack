@@ -1,12 +1,13 @@
 import { Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { parseStreamingJson } from "@earendil-works/pi-ai/compat";
 import * as Diff from "diff";
-import { patch_files_from_input, format_patch_error_row, patch_file_errors_by_path, patch_has_file_errors, type ApplyPatchDetails, type PatchFileRow } from "../pi-ember-applypatch/display.ts";
+import { patch_files_from_input, format_patch_error_row, patch_file_errors_by_path, patch_has_file_errors, compact_patch_failure_reason, type ApplyPatchDetails, type PatchFileRow } from "../pi-ember-applypatch/display.ts";
 import { BULLET, CompactGroupText } from "./compact-text.ts";
 import {
 	MUTED_GROUP_GRADIENT_PRESET,
 	requestTuiRender,
 	format_thinking_pass_elapsed_suffix,
+	reset_thinking_pass_timer,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
@@ -16,6 +17,27 @@ import { format_in_group_thinking_row } from "../pi-ember-ui/thinking-status-ren
 import { bashGrepInfo } from "./bash-grep.ts";
 /** Delay folding prior tool-wave children during rapid parallel/sequential tool bursts. */
 export const GROUP_CHILD_FOLD_DEBOUNCE_MS = 500;
+
+function stable_serialize(value: unknown): string {
+	if (value === null || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(stable_serialize).join(",")}]`;
+	const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+		a.localeCompare(b),
+	);
+	return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stable_serialize(entry)}`).join(",")}}`;
+}
+
+/** Stable tool name + args key for duplicate-call detection within a group wave. */
+function compact_call_signature(name: string, args: ToolArgs): string {
+	return `${name}:${stable_serialize(args)}`;
+}
+
+function is_repeat_visible_group_call(group: DiscoveryGroup, name: string, args: ToolArgs): boolean {
+	const signature = compact_call_signature(name, args);
+	return groupVisibleChildren(group).some(
+		(member) => compact_call_signature(member.name, member.args) === signature,
+	);
+}
 
 /** Minimal theme shape used by compact rendering: fg(tag, text) and bold(text). */
 interface ThemeLike {
@@ -59,6 +81,9 @@ const DISCOVERY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const GROUPABLE_TOOLS = new Set([...DISCOVERY_TOOLS, "edit", "write", "bash", "apply_patch"]);
 /** Single group key for all groupable tools in one work burst — SSOT. */
 export const WORK_GROUP_KEY = "__work__";
+/** Non-groupable tools that render in the transcript but must not hard-split
+ *  the unified work bundle (e.g. `todo` — see pi-ember-todo). */
+export const WORK_GROUP_SOFT_BOUNDARY_TOOLS = new Set(["todo"]);
 
 /** Exploring-style child tree gutter — SSOT for compact groups and subagents. */
 export const TREE_BRANCH_PIPE = "  │ ";
@@ -126,9 +151,12 @@ export type DiscoveryGroup = {
 	key?: string;
 	/**
 	 * The record whose component renders the group header. Set once at
-	 * group creation to the first member and never changed.
+	 * group creation to the first member and never changed — the transcript
+	 * anchor must not migrate to later tool-call slots (contrast pi-ember-todo).
 	 */
 	renderOwner?: CompactCall;
+	/** Same as renderOwner — explicit SSOT for transcript vertical anchor. */
+	anchorOwner?: CompactCall;
 	hasNonDiscovery?: boolean;
 	/**
 	 * Whether the agent has demonstrably moved on from this group (emitted
@@ -141,11 +169,14 @@ export type DiscoveryGroup = {
 	settled?: boolean;
 	/** Set when a hard boundary splits the group — never reopen across this row. */
 	hardExited?: boolean;
+	/** After a soft transcript boundary (e.g. `todo`), migrate the visual anchor
+	 *  to the next tool wave so the block renders below the intervening row. */
+	migrateAnchorOnNextWave?: boolean;
 	/**
 	 * Index into `records` before which completed members are folded into the
 	 * header summary. Child rows only show `records.slice(childAbsorbBefore)`.
-	 * Advanced by {@link fold_group_child_rows} (thinking stream, tool-wave
-	 * reopen, turn boundaries, or a hard transcript boundary).
+	 * Advanced by {@link CompactRenderer.appendToGroup} on a genuinely new tool
+	 * wave only (not thinking, todo soft boundaries, or repeated same-signature calls).
 	 */
 	childAbsorbBefore?: number;
 	/**
@@ -328,6 +359,18 @@ function diffStats(result: ToolResult | undefined): { additions: number; removal
 		if (line.startsWith("-") && !line.startsWith("---")) removals++;
 	}
 	return { additions, removals };
+}
+
+/** Edit +N -N counts — SSOT for header aggregate, child rows, and standalone rows. */
+function edit_diff_counts(
+	args: ToolArgs,
+	result: ToolResult | undefined,
+	completed: boolean,
+): { additions: number; removals: number } | undefined {
+	if (!completed) return streamingEditStats(args);
+	const from_diff = diffStats(result);
+	if (from_diff.additions > 0 || from_diff.removals > 0) return from_diff;
+	return streamingEditStats(args);
 }
 
 /**
@@ -520,13 +563,21 @@ function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string 
 	const { name, args, result } = record;
 	const completed = record._completed === true;
 	if (name === "apply_patch") {
-		const details = result?.details as { parseError?: string } | undefined;
+		const details = result?.details as ApplyPatchDetails | undefined;
 		if (details?.parseError) {
-			return format_patch_error_row(
-				result?.details as Parameters<typeof format_patch_error_row>[0],
-				theme,
-				record.isError,
-			);
+			return format_patch_error_row(details, theme, record.isError);
+		}
+		if (details && !details.ok && details.results.some((r) => r.status === "error")) {
+			const files = patch_files_for_record(record);
+			const header = apply_patch_header_text(record, files, true);
+			const stats = formatEditStatsFromCounts(apply_patch_total_stats(files), theme, true, false);
+			const failure_reason = compact_patch_failure_reason(details);
+			let row = `${theme.fg("error", BULLET)}${theme.fg("muted", theme.bold(header))}`;
+			if (stats) row += paint_compact_tool(theme, "  ", true) + stats;
+			if (failure_reason) {
+				row += paint_compact_tool(theme, "  ", true) + theme.fg("error", failure_reason);
+			}
+			return row;
 		}
 		return format_apply_patch_block(record, theme);
 	}
@@ -546,7 +597,11 @@ function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string 
 	}
 	if (!completed || result === undefined) return prefix;
 	if (name === "edit") {
-		return prefix + paint_compact_tool(theme, "  ", true) + formatEditStats(result, theme);
+		const counts = edit_diff_counts(args, result, true);
+		if (!counts) return prefix;
+		return (
+			prefix + paint_compact_tool(theme, "  ", true) + formatEditStatsFromCounts(counts, theme)
+		);
 	}
 	if (name === "write") {
 		const final = streamingWriteStats(args);
@@ -560,11 +615,6 @@ function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string 
 		return prefix + formatBashResultLine(result, theme, record.isError);
 	}
 	return prefix;
-}
-
-function formatEditStats(result: ToolResult | undefined, theme: ThemeLike): string {
-	const { additions, removals } = diffStats(result);
-	return formatEditStatsFromCounts({ additions, removals }, theme);
 }
 
 function formatEditStatsFromCounts(
@@ -663,14 +713,34 @@ function work_plural(count: number, singular: string, plural = `${singular}s`): 
 }
 
 /** Aggregate edit/write/patch diff totals for the unified work header. */
+function is_diff_record(record: CompactCall): boolean {
+	return record.name === "edit" || record.name === "write" || record.name === "apply_patch";
+}
+
+/** Aggregate edit/write/patch diff totals for the unified work header.
+ *  Only counts records that are not the single visible lingering diff tool,
+ *  because its child row already displays +N -N inline. Once a new tool wave
+ *  folds it or another tool joins, include it in the header total. */
 function work_header_diff_stats(group: DiscoveryGroup): { additions: number; removals: number } {
+	const completed = completedRecords(group);
+	const visible = groupVisibleChildren(group);
+	// If the only completed diff record is still visible as the last child row,
+	// suppress its stats from the header to avoid duplicating the inline +N -N.
+	const last_visible = visible[0];
+	const last_visible_diff =
+		last_visible && is_diff_record(last_visible) && last_visible._completed
+			? last_visible
+			: undefined;
 	let additions = 0;
 	let removals = 0;
-	for (const record of completedRecords(group)) {
+	for (const record of completed) {
+		if (last_visible_diff && record.id === last_visible_diff.id) continue;
 		if (record.name === "edit") {
-			const stats = diffStats(record.result);
-			additions += stats.additions;
-			removals += stats.removals;
+			const counts = edit_diff_counts(record.args, record.result, true);
+			if (counts) {
+				additions += counts.additions;
+				removals += counts.removals;
+			}
 		} else if (record.name === "write") {
 			const stats = streamingWriteStats(record.args);
 			additions += stats?.additions ?? 0;
@@ -877,9 +947,11 @@ function groupHeaderLabel(group: DiscoveryGroup, theme: ThemeLike): string {
 		let additions = 0;
 		let removals = 0;
 		for (const r of completed) {
-			const stats = diffStats(r.result);
-			additions += stats.additions;
-			removals += stats.removals;
+			const counts = edit_diff_counts(r.args, r.result, true);
+			if (counts) {
+				additions += counts.additions;
+				removals += counts.removals;
+			}
 		}
 		const stats = formatEditStatsFromCounts({ additions, removals }, theme);
 		if (stats) suffixes.push(stats);
@@ -968,28 +1040,37 @@ function normalize_patch_display_path(file_path: string): string {
 	return file_path.replace(/\\/g, "/").replace(/\/+$/, "") || ".";
 }
 
+function apply_patch_total_stats(files: PatchFileRow[]): { additions: number; removals: number } {
+	let additions = 0;
+	let removals = 0;
+	for (const file of files) {
+		additions += file.additions;
+		removals += file.removals;
+	}
+	return { additions, removals };
+}
+
+function apply_patch_header_text(
+	record: CompactCall,
+	files: PatchFileRow[],
+	completed: boolean,
+): string {
+	const n = files.length;
+	const verb = completed ? "Patched" : "Patching";
+	const header = n > 1 ? `${verb} ${n} files` : n === 1 ? `${verb} 1 file` : verb;
+	return header;
+}
+
+/** Standalone apply_patch row — mirrors edit/write: one row with +N -N, no child tree. */
 function format_apply_patch_block(record: CompactCall, theme: ThemeLike): string {
 	const files = patch_files_for_record(record);
-	const group = record.group;
-	const n = files.length;
-	const bullet = apply_patch_bullet(record, group, theme);
-	const file_errors = patch_file_errors_by_path(record.result?.details as ApplyPatchDetails | undefined);
-	const headerVerb = apply_patch_header_verb(record, group);
-	const header =
-		n > 0
-			? `${headerVerb} ${n} file${n === 1 ? "" : "s"}`
-			: headerVerb;
-	const lines = [`${bullet}${theme.fg("muted", theme.bold(header))}`];
-	const children = files.length > 0 ? files : [{ path: ".", additions: 0, removals: 0 }];
-	for (const [index, file] of children.entries()) {
-		const prefix = index === children.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
-		const file_error = file_errors.get(normalize_patch_display_path(file.path));
-		lines.push(
-			theme.fg("dim", prefix) +
-				format_apply_patch_file_row(file, theme, file_error, record._completed === true),
-		);
-	}
-	return lines.join("\n");
+	const completed = record._completed === true;
+	const bullet = apply_patch_bullet(record, undefined, theme);
+	const header = apply_patch_header_text(record, files, completed);
+	let row = `${bullet}${theme.fg("muted", theme.bold(header))}`;
+	const stats = formatEditStatsFromCounts(apply_patch_total_stats(files), theme, true, false);
+	if (stats) row += paint_compact_tool(theme, "  ", completed) + stats;
+	return row;
 }
 
 function format_patch_group(group: DiscoveryGroup, theme: ThemeLike): string {
@@ -1030,8 +1111,16 @@ export function selectGroupVisibleChildren<T>(
 }
 
 function groupVisibleChildren(group: DiscoveryGroup): CompactCall[] {
-	if (group.thinkingChild && isThinkingBlocksHidden()) return [];
 	return selectGroupVisibleChildren(group.records, group.childAbsorbBefore ?? 0);
+}
+
+/** Whether the group still needs the shared 20 FPS gradient tick. */
+export function group_needs_gradient_tick(group: DiscoveryGroup): boolean {
+	if (group.thinkingChild && isThinkingBlocksHidden()) return true;
+	const visible = groupVisibleChildren(group);
+	if (visible.some((record) => !record._completed)) return true;
+	if (!group.settled && group.records.some((record) => !record._completed)) return true;
+	return false;
 }
 
 /** Errors in folded/absorbed members are historical — only the visible wave is active. */
@@ -1056,14 +1145,15 @@ function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
 	}
 	const headerText = groupHeaderLabel(group, theme);
 	const lines = [groupBulletColor(group, theme) + headerText];
-	if (group.thinkingChild && isThinkingBlocksHidden()) {
-		lines.push(theme.fg("dim", TREE_BRANCH_LAST) + formatGroupThinkingChildRow(theme));
-		return lines.join("\n");
-	}
 	const children = groupVisibleChildren(group);
+	const show_thinking = group.thinkingChild && isThinkingBlocksHidden();
 	for (const [index, record] of children.entries()) {
-		const prefix = index === children.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
+		const is_last_child = index === children.length - 1 && !show_thinking;
+		const prefix = is_last_child ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
 		lines.push(theme.fg("dim", prefix) + formatGroupChildRow(record, theme));
+	}
+	if (show_thinking) {
+		lines.push(theme.fg("dim", TREE_BRANCH_LAST) + formatGroupThinkingChildRow(theme));
 	}
 	return lines.join("\n");
 }
@@ -1091,9 +1181,7 @@ export function formatGroupChildEditWriteStats(
 		stats = formatEditStatsFromCounts({ additions, removals }, theme, removals > 0, true);
 	} else if (completed) {
 		if (name === "edit") {
-			const from_diff = diffStats(result);
-			const counts =
-				from_diff.additions > 0 || from_diff.removals > 0 ? from_diff : streamingEditStats(args);
+			const counts = edit_diff_counts(args, result, true);
 			if (counts) stats = formatEditStatsFromCounts(counts, theme, true, true);
 		} else {
 			stats = formatEditStatsFromCounts(
@@ -1156,27 +1244,12 @@ export class CompactRenderer {
 	private reopenGroupKey: string | undefined;
 
 	beginTurn(): void {
-		this.flush_turn_child_lane();
+		// Child rows linger through turn_end; fold only on thinking stream,
+		// tool-wave reopen (appendToGroup), or hard boundaries.
 	}
 
 	endTurn(_thinkingHidden?: boolean, _message?: unknown): void {
-		this.flush_turn_child_lane();
-	}
-
-	/** Fold the current turn's tool/thinking child rows into the header (SSOT). */
-	private flush_turn_child_lane(): void {
-		const group =
-			this.resolveLiveGroup() ??
-			(this.reopenGroupKey ? this.findReopenableGroup(this.reopenGroupKey) : undefined);
-		if (!group || group.records.length === 0) return;
-		const has_tool_children = groupVisibleChildren(group).length > 0;
-		const has_thinking_lane = group.thinkingChild && isThinkingBlocksHidden();
-		if (!has_tool_children && !has_thinking_lane) return;
-		fold_group_child_rows(group);
-		group.thinkingChild = false;
-		this.settleGroup(group);
-		this.syncGroupTick(group);
-		this.scheduleGroupInvalidation(group);
+		// Same as beginTurn — do not flush the tool lane at Pi turn boundaries.
 	}
 
 	/**
@@ -1188,8 +1261,10 @@ export class CompactRenderer {
 	 * Enter thinking lane: real thinking streams (`noteThinking()`).
 	 * Leave thinking lane:
 	 *   - same-key `tool_call` → `appendToGroup` (reopen tool lane);
-	 *   - visible assistant text, user message, or non-groupable tool
+	 *   - visible assistant text, user message, or hard non-groupable tool
 	 *     (`noteInterveningToolCall`) → `hardExitGroup()` (never reopen in place);
+	 *   - soft-boundary tools (`noteSoftInterveningToolCall`, e.g. `todo`) →
+	 *     settle header-only, keep reopenable for the next same-key batch;
 	 *   - `agent_settled` → `clearGroupThinkingChild()` (header-only, keep
 	 *     `currentGroup` so a later same-key batch can still reopen).
 	 */
@@ -1241,10 +1316,31 @@ export class CompactRenderer {
 		return candidate;
 	}
 
-	/** Hard boundary: non-groupable tool (subagent, todo, quiz, …) appeared
+	/** Hard boundary: non-groupable tool (subagent, quiz, …) appeared
 	 *  chronologically after the work group — freeze header and never reopen. */
 	noteInterveningToolCall(): void {
 		this.hardExitGroup();
+	}
+
+	/** Soft boundary: transcript tools that must not spawn a fresh work header
+	 *  after they complete (SSOT: `WORK_GROUP_SOFT_BOUNDARY_TOOLS`). Settles
+	 *  to header-only and keeps `reopenGroupKey` so the next groupable call
+	 *  reopens the same bundle (Thinking lane when blocks are hidden). */
+	noteSoftInterveningToolCall(): void {
+		this.cancelDebouncedChildFold();
+		let group = this.resolveLiveGroup();
+		if (!group && this.reopenGroupKey) {
+			group = this.findReopenableGroup(this.reopenGroupKey);
+			if (group) this.currentGroup = group;
+		}
+		if (!group || group.records.length < 1) return;
+		this.settleGroups();
+		group.thinkingChild = false;
+		if (group.key) this.reopenGroupKey = group.key;
+		group.migrateAnchorOnNextWave = true;
+		this.currentGroup = group;
+		this.refreshGroupInPlace(group);
+		this.syncGroupTick(group);
 	}
 
 	/** Hard boundary: visible assistant text (or visible thinking). Freeze
@@ -1258,8 +1354,22 @@ export class CompactRenderer {
 		this.hardExitGroup();
 	}
 
-	/** Soft settle for hidden thinking: past-tense header + in-group Thinking
-	 *  child replaces tool rows until the next tool call reopens the tool lane. */
+	/** Hard boundary when thinking is visible in the transcript: freeze the work
+	 *  group header and spawn a fresh group for the next tool wave downstream. */
+	noteVisibleThinking(): void {
+		this.cancelDebouncedChildFold();
+		let group = this.resolveLiveGroup();
+		if (!group && this.reopenGroupKey) {
+			group = this.findReopenableGroup(this.reopenGroupKey);
+			if (group) this.currentGroup = group;
+		}
+		if (!group || group.records.length < 1) return;
+		if (group.records.some((r) => !r._completed)) return;
+		this.hardExitGroup();
+	}
+
+	/** Soft settle for hidden thinking: past-tense header + in-group `└ Thinking`
+	 *  appended after lingering tool rows until the next tool call reopens the lane. */
 	noteThinking(): void {
 		this.cancelDebouncedChildFold();
 		let group = this.resolveLiveGroup();
@@ -1270,15 +1380,18 @@ export class CompactRenderer {
 		this.settleGroups();
 		if (!group || group.records.length < 1) return;
 		if (group.records.some((r) => !r._completed)) return;
+		if (group.migrateAnchorOnNextWave) return;
 		this.currentGroup = group;
-		fold_group_child_rows(group);
 		if (isThinkingBlocksHidden()) {
+			const entering_thinking_lane = !group.thinkingChild;
 			group.thinkingChild = true;
 			group.settled = true;
+			if (entering_thinking_lane) {
+				reset_thinking_pass_timer();
+			}
 		}
 		this.reopenGroupKey = group.key;
-		this.refreshGroupVisual(group);
-		this.scheduleGroupInvalidation(group);
+		this.refreshGroupInPlace(group);
 		this.syncGroupTick(group);
 	}
 
@@ -1353,10 +1466,10 @@ export class CompactRenderer {
 		return group?.thinkingChild === true && isThinkingBlocksHidden();
 	}
 
-	/** Whether the live group still shows lingering tool child rows (not the thinking lane). */
+	/** Whether the live group still shows lingering tool child rows. */
 	hasVisibleGroupChildren(): boolean {
 		const group = this.resolveLiveGroup();
-		if (!group || (group.thinkingChild && isThinkingBlocksHidden())) return false;
+		if (!group) return false;
 		return groupVisibleChildren(group).length > 0;
 	}
 
@@ -1369,6 +1482,24 @@ export class CompactRenderer {
 		group.callText = callText;
 		set_compact_call_text(group, callText, formatGroup(group, this.lastTheme));
 		requestTuiRender();
+	}
+
+	/** Shrink/fold transitions: repaint in place without invalidating the anchor
+	 *  owner — invalidation can re-anchor the block at the transcript tail. */
+	private refreshGroupInPlace(group: DiscoveryGroup | undefined): void {
+		this.refreshGroupVisual(group);
+		if (group) group.pendingShrink = false;
+	}
+
+	private group_transcript_anchor(group: DiscoveryGroup): CompactCall | undefined {
+		if (!group.anchorOwner) {
+			group.anchorOwner = group.renderOwner ?? group.records[0];
+		}
+		return group.anchorOwner ?? group.renderOwner ?? group.records[0];
+	}
+
+	private should_schedule_group_shrink_invalidation(group: DiscoveryGroup): boolean {
+		return Boolean(group.pendingShrink && !(group.thinkingChild && isThinkingBlocksHidden()));
 	}
 
 	/** Settle a single group so its label flips to past tense. No-op if
@@ -1396,37 +1527,96 @@ export class CompactRenderer {
 		this.groupTickGroup = group;
 		if (this.groupTickCb) return;
 		this.groupTickCb = (): void => {
-			this.refreshActiveGroupText();
+			if (!this.refreshActiveGroupText()) return;
+			requestTuiRender();
 		};
 		subscribeGradientTick(this.groupTickCb);
 	}
 
-	private refreshActiveGroupText(): void {
+	private refreshActiveGroupText(): boolean {
 		const group = this.groupTickGroup;
 		const theme = this.lastTheme;
-		if (!group?.callText || !theme) return;
-		set_compact_call_text(group, group.callText, formatGroup(group, theme));
+		if (!group?.callText || !theme) return false;
+		const next = formatGroup(group, theme);
+		if (group.callText.text === next) return false;
+		set_compact_call_text(group, group.callText, next);
+		return true;
 	}
 
 	/** Keep the gradient tick subscribed while visible child rows render
 	 *  (runners and lingering completed children). Settled groups are
 	 *  header-only and static. */
 	private syncGroupTick(group: DiscoveryGroup): void {
-		if (group.thinkingChild && isThinkingBlocksHidden()) {
-			this.subscribeGroupTick(group);
-			return;
-		}
-		const has_patch_children =
-			!is_work_group(group) &&
-			group.type === "patching" &&
-			!group.settled &&
-			patch_files_in_group(group).length > 0;
-		const visible_children = groupVisibleChildren(group);
-		if (visible_children.length > 0 || has_patch_children) {
+		if (group_needs_gradient_tick(group)) {
 			this.subscribeGroupTick(group);
 			return;
 		}
 		this.unsubscribeGroupTick();
+	}
+
+	/** Re-evaluate gradient tick subscription after agent settle or transcript rebuild. */
+	resyncGroupGradientTick(): void {
+		const group = this.currentGroup;
+		if (!group) {
+			this.unsubscribeGroupTick();
+			return;
+		}
+		this.syncGroupTick(group);
+	}
+
+	/** Repaint work groups after Ctrl+T without folding lingering child rows. */
+	repaintAfterThinkingBlocksToggle(blocks_hidden: boolean, restore_thinking_lane = false): void {
+		this.cancelDebouncedChildFold();
+		const seen = new Set<DiscoveryGroup>();
+		for (const record of this.calls.values()) {
+			const group = record.group;
+			if (!group || seen.has(group)) continue;
+			seen.add(group);
+			if (!blocks_hidden && group.thinkingChild) {
+				group.thinkingChild = false;
+				if (!group.settled) group.settled = true;
+			}
+		}
+		if (blocks_hidden && restore_thinking_lane) {
+			this.restoreInGroupThinkingLaneIfSettled();
+		}
+		this.repaintAllGroupVisuals();
+		this.resyncGroupGradientTick();
+	}
+
+	/** Re-arm in-group `└ Thinking` after hiding blocks during an active wait. */
+	restoreInGroupThinkingLaneIfSettled(): void {
+		if (!isThinkingBlocksHidden()) return;
+		let group = this.resolveLiveGroup();
+		if (!group && this.reopenGroupKey) {
+			group = this.findReopenableGroup(this.reopenGroupKey);
+			if (group) this.currentGroup = group;
+		}
+		if (!group || group.hardExited || group.migrateAnchorOnNextWave) return;
+		if (group.records.length < 1 || group.records.some((record) => !record._completed)) return;
+		if (group.thinkingChild) return;
+		if (!group.settled && groupVisibleChildren(group).length === 0) return;
+		group.thinkingChild = true;
+		group.settled = true;
+		this.currentGroup = group;
+		this.reopenGroupKey = group.key;
+		this.refreshGroupInPlace(group);
+		this.syncGroupTick(group);
+	}
+
+	private repaintAllGroupVisuals(): void {
+		const theme = this.lastTheme;
+		if (!theme) return;
+		const seen = new Set<DiscoveryGroup>();
+		for (const record of this.calls.values()) {
+			const group = record.group;
+			if (!group || group.records.length <= 1 || seen.has(group)) continue;
+			seen.add(group);
+			const callText = group.callText ?? group.renderOwner?.callText;
+			if (!callText) continue;
+			group.callText = callText;
+			set_compact_call_text(group, callText, formatGroup(group, theme));
+		}
 	}
 
 	/** Unsubscribe the group tick callback if one is active. */
@@ -1485,17 +1675,36 @@ export class CompactRenderer {
 			this.childFoldAbsorbBefore = 0;
 			if (!pending || pending !== group) return;
 			pending.childAbsorbBefore = Math.max(pending.childAbsorbBefore ?? 0, absorb);
-			this.scheduleGroupInvalidation(pending);
+			this.refreshGroupInPlace(pending);
 		}, GROUP_CHILD_FOLD_DEBOUNCE_MS);
 	}
 
+	private migrate_group_anchor(group: DiscoveryGroup, record: CompactCall): void {
+		const prev = this.group_transcript_anchor(group);
+		group.renderOwner = record;
+		group.anchorOwner = record;
+		group.migrateAnchorOnNextWave = false;
+		if (prev && prev !== record) prev.invalidate?.();
+	}
+
 	private appendToGroup(group: DiscoveryGroup, record: CompactCall): void {
+		if (group.migrateAnchorOnNextWave) {
+			this.migrate_group_anchor(group, record);
+		}
 		for (const member of group.records) member.group = group;
 		const prior_all_done =
 			group.records.length > 0 && group.records.every((member) => member._completed);
 		const has_visible_children = groupVisibleChildren(group).length > 0;
-		// New tool wave: absorb the prior completed turn into the header summary.
-		if (has_visible_children && (group.settled || prior_all_done)) {
+		const reopening_from_thinking = group.thinkingChild;
+		const repeats_visible_child = is_repeat_visible_group_call(group, record.name, record.args);
+		// New tool wave only: absorb prior completed rows when every prior member
+		// is done or we are leaving the thinking lane. Skip todo-style soft
+		// boundaries and repeated same-signature calls — those keep lingering.
+		if (
+			has_visible_children &&
+			!repeats_visible_child &&
+			(prior_all_done || reopening_from_thinking)
+		) {
 			this.scheduleDebouncedChildFold(group, group.records.length);
 		} else if (group.records.length === 0 || group.records.every((r) => r._completed)) {
 			this.cancelDebouncedChildFold();
@@ -1504,6 +1713,8 @@ export class CompactRenderer {
 		group.settled = false;
 		group.records.push(record);
 		record.group = group;
+		// Transcript anchor stays on the first member unless a soft boundary
+		// (todo) requested migration on the next tool wave.
 		this.currentGroup = group;
 		if (group.key) this.reopenGroupKey = group.key;
 		this.scheduleGroupInvalidation(group);
@@ -1513,6 +1724,7 @@ export class CompactRenderer {
 		const group: DiscoveryGroup = {
 			records: [record],
 			renderOwner: record,
+			anchorOwner: record,
 			type: key === WORK_GROUP_KEY ? "work" : "discovery",
 			key,
 			childAbsorbBefore: 0,
@@ -1573,8 +1785,25 @@ export class CompactRenderer {
 		return record;
 	}
 
+	private refreshRecordGroupHeader(record: CompactCall): void {
+		const group = record.group;
+		if (!group || group.records.length <= 1 || !group.callText || !this.lastTheme) return;
+		if (record.name !== "edit" && record.name !== "write" && record.name !== "apply_patch") return;
+		set_compact_call_text(group, group.callText, formatGroup(group, this.lastTheme));
+	}
+
 	setResult(record: CompactCall, result: ToolResult, isError: boolean): void {
-		if (record._completed && record.result === result && record.isError === isError) return;
+		const prev_diff = typeof record.result?.details?.diff === "string" ? record.result.details.diff : "";
+		const next_diff = typeof result?.details?.diff === "string" ? result.details.diff : "";
+		const unchanged_snapshot =
+			record._completed &&
+			record.result === result &&
+			record.isError === isError &&
+			prev_diff === next_diff;
+		if (unchanged_snapshot) {
+			this.refreshRecordGroupHeader(record);
+			return;
+		}
 		record.isError = isError;
 		record._completed = true;
 		record.result = result;
@@ -1610,8 +1839,9 @@ export class CompactRenderer {
 	): Component {
 		this.lastTheme = theme;
 		const record = this.registerCall(name, context.toolCallId, args, context.invalidate);
-		if (record.group && record.group.records.length > 1) {
-			if (record.group.renderOwner !== record) return new Text("", 0, 0);
+		const group = record.group;
+		if (group && group.records.length > 1) {
+			if (this.group_transcript_anchor(group) !== record) return new Text("", 0, 0);
 			const callText =
 				context.state.callText instanceof CompactGroupText
 					? context.state.callText
@@ -1621,10 +1851,12 @@ export class CompactRenderer {
 			// component on every render. On Pi rebuilds (thinking-toggle,
 			// compaction, settings) context.state is fresh, so a new component is
 			// created and the group handle is repointed to the live owner.
-			record.group.callText = callText;
-			set_compact_call_text(record.group, callText, formatGroup(record.group, theme));
-			if (record.group.pendingShrink) this.scheduleGroupInvalidation(record.group);
-			this.syncGroupTick(record.group);
+			group.callText = callText;
+			set_compact_call_text(group, callText, formatGroup(group, theme));
+			if (this.should_schedule_group_shrink_invalidation(group)) {
+				this.scheduleGroupInvalidation(group);
+			}
+			this.syncGroupTick(group);
 			return callText;
 		}
 		const callText =
@@ -1699,10 +1931,12 @@ export class CompactRenderer {
 			const group_text = formatGroup(record.group, theme);
 			if (record.group.callText) {
 				set_compact_call_text(record.group, record.group.callText, group_text);
-				if (record.group.pendingShrink) this.scheduleGroupInvalidation(record.group);
+				if (this.should_schedule_group_shrink_invalidation(record.group)) {
+					this.scheduleGroupInvalidation(record.group);
+				}
 			}
 			this.syncGroupTick(record.group);
-			if (record.group.renderOwner !== record) return new Text("", 0, 0);
+			if (this.group_transcript_anchor(record.group) !== record) return new Text("", 0, 0);
 			// When the group is collapsed (settled + thinking hidden), hide the
 			// per-member error row too — the header bullet already turns red to
 			// signal the failure. Reuses the same collapse gate as formatGroup.

@@ -21,11 +21,12 @@ import {
 	chatboxBorderColor,
 	MUTED_GROUP_GRADIENT_PRESET,
 	renderLiveGradient,
+	requestLiveTuiRender,
 	requestTuiRender,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
-import { setQuizActive } from "../pi-ember-ui/mode-colors.ts";
+import { isQuizActive, setQuizActive } from "../pi-ember-ui/mode-colors.ts";
 import { BULLET, statusBulletColor } from "../pi-compact-tools/renderer.ts";
 
 export interface QuizOption {
@@ -312,7 +313,7 @@ export async function askQuiz(
 				selectList: {
 					selectedPrefix: (t: string) => theme.fg("text", t),
 					selectedText: (t: string) => theme.fg("text", t),
-					description: (t: string) => theme.fg("muted", t),
+					description: (t: string) => theme.fg("dim", t),
 					scrollInfo: (t: string) => theme.fg("dim", t),
 					noMatch: (t: string) => theme.fg("warning", t),
 				},
@@ -343,7 +344,7 @@ export async function askQuiz(
 			function refresh(): void {
 				cachedLines = undefined;
 				cachedWidth = undefined;
-				_tui.requestRender();
+				requestLiveTuiRender(_tui);
 			}
 
 			function addWrapped(lines: string[], text: string, width: number): void {
@@ -469,7 +470,7 @@ export async function askQuiz(
 						addWrappedWithPrefix(
 							lines,
 							"     ",
-							theme.fg(selected ? "muted" : "dim", option.description),
+							theme.fg(selected ? "text" : "dim", option.description),
 							renderWidth,
 						);
 					}

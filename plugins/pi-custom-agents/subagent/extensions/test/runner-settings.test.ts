@@ -9,9 +9,9 @@ import {
 const SUBAGENT_EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 describe("subagent session settings", () => {
-	test("build_subagent_settings enables compaction and disables retry", () => {
+	test("build_subagent_settings disables auto-compaction and disables retry", () => {
 		const settings = build_subagent_settings();
-		expect(settings.compaction?.enabled).toBe(true);
+		expect(settings.compaction?.enabled).toBe(false);
 		expect(settings.retry?.enabled).toBe(false);
 	});
 

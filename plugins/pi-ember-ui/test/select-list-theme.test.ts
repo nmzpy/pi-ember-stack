@@ -1,9 +1,14 @@
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { Theme } from "@earendil-works/pi-coding-agent";
 import {
+	bind_select_list_theme_resolver,
 	buildSelectListTheme,
 	buildSettingsListTheme,
 	format_selector_option_row,
+	format_selector_option_row_with_description,
+	install_select_list_theme_patches,
 } from "../select-list-theme.ts";
 import { buildThemeBgColors, buildThemeFgColors } from "../mode-colors.ts";
 
@@ -23,9 +28,14 @@ describe("select list theme SSOT", () => {
 		const list = buildSelectListTheme(theme);
 		const selected = list.selectedText("→ settings");
 		const unselected = list.unselectedText("  model");
+		const selected_desc = list.selectedDescription("hint");
+		const unselected_desc = list.description("hint");
 		expect(selected).toContain("\x1b[");
 		expect(unselected).toContain("\x1b[");
 		expect(selected).not.toBe(unselected);
+		expect(selected_desc).toBe(theme.fg("text", "hint"));
+		expect(unselected_desc).toBe(theme.fg("dim", "hint"));
+		expect(selected_desc).not.toBe(unselected_desc);
 	});
 
 	test("format_selector_option_row matches select list tokens", () => {
@@ -36,6 +46,28 @@ describe("select list theme SSOT", () => {
 		expect(off).toBe(buildSelectListTheme(theme).unselectedText("  Scout"));
 	});
 
+	test("format_selector_option_row_with_description uses text for selected and dim for unselected", () => {
+		const theme = make_theme();
+		const on = format_selector_option_row_with_description(
+			theme,
+			"Coder",
+			true,
+			"devin/swe-1-7-medium",
+		);
+		const off = format_selector_option_row_with_description(
+			theme,
+			"Scout",
+			false,
+			"inherits parent",
+		);
+		expect(on).toBe(
+			`${theme.fg("text", "→ Coder")} ${theme.fg("text", "devin/swe-1-7-medium")}`,
+		);
+		expect(off).toBe(
+			`${theme.fg("dim", "  Scout")} ${theme.fg("dim", "inherits parent")}`,
+		);
+	});
+
 	test("buildSettingsListTheme brightens only the selected row", () => {
 		const theme = make_theme();
 		const settings = buildSettingsListTheme(theme);
@@ -43,5 +75,51 @@ describe("select list theme SSOT", () => {
 		const off = settings.label("Theme", false);
 		expect(on).not.toBe(off);
 		expect(settings.cursor).toContain("→");
+	});
+
+	test("extension selector updateList paints selected rows with text token", () => {
+		const theme = make_theme();
+		bind_select_list_theme_resolver(() => theme);
+		install_select_list_theme_patches(() => theme);
+
+		const req = createRequire(import.meta.url);
+		const dist_dir = dirname(req.resolve("@earendil-works/pi-coding-agent/dist/index.js"));
+		const { ExtensionSelectorComponent } = req(
+			join(dist_dir, "modes/interactive/components/extension-selector.js"),
+		) as {
+			ExtensionSelectorComponent: {
+				prototype: {
+					updateList: () => void;
+					listContainer: { clear: () => void; addChild: (component: unknown) => void };
+					options: string[];
+					selectedIndex: number;
+				};
+			};
+		};
+
+		const rows: string[] = [];
+		const instance = Object.create(ExtensionSelectorComponent.prototype) as {
+			updateList: () => void;
+			listContainer: { clear: () => void; addChild: (component: unknown) => void };
+			options: string[];
+			selectedIndex: number;
+		};
+		instance.listContainer = {
+			clear: () => {
+				rows.length = 0;
+			},
+			addChild: (component: unknown) => {
+				const row = (component as { render: (width: number) => string[] }).render(80)[1] ?? "";
+				rows.push(stripAnsi(row.trim()));
+			},
+		};
+		instance.options = ["Coder", "Scout"];
+		instance.selectedIndex = 1;
+		instance.updateList();
+
+		expect(rows[0]).toBe(stripAnsi(format_selector_option_row(theme, "Coder", false)));
+		expect(rows[1]).toBe(stripAnsi(format_selector_option_row(theme, "Scout", true)));
+		expect(rows[1]).toContain("Scout");
+		expect(rows[0]).toContain("Coder");
 	});
 });

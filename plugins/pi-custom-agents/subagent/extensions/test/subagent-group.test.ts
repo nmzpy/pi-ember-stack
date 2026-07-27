@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { getSubagentGroupRenderer } from "../subagent-group.ts";
+import { getSubagentGroupRenderer, has_live_nested_preview, should_keep_existing_subagent_results } from "../subagent-group.ts";
 
 function makeResult(agent: string, exitCode: number) {
 	return {
@@ -63,5 +63,25 @@ describe("SubagentGroupRenderer", () => {
 		renderer.register("a", { agent: "Coder", task: "one" }, []);
 
 		expect(renderer.getRecord("a")?.results).toEqual(results);
+	});
+
+	test("register keeps live nested preview over stale context.state snapshot", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		const live = [
+			{
+				...makeResult("Coder A", -1),
+				isThinking: true,
+				reasoning: true,
+			},
+		];
+		const stale = [makeResult("Coder A", -1)];
+		renderer.register("a", { agent: "Coder", task: "one" }, live);
+		renderer.register("a", { agent: "Coder", task: "one" }, stale);
+
+		expect(renderer.getRecord("a")?.results).toEqual(live);
+		expect(has_live_nested_preview(renderer.getRecord("a")?.results ?? [])).toBe(true);
+		expect(should_keep_existing_subagent_results(live, stale)).toBe(true);
 	});
 });

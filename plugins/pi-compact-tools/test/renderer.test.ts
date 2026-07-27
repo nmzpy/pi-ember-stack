@@ -5,10 +5,17 @@ import {
 } from "../../pi-ember-ui/assistant-stream-boundary.ts";
 import { CompactRenderer, formatCallBody, strip_bash_command_preview, GROUP_CHILD_FOLD_DEBOUNCE_MS } from "../renderer.ts";
 import {
+	deactivate_gradient,
+	dispatch_gradient_tick,
+	set_gradient_render_request,
+} from "../../pi-ember-ui/gradient.ts";
+import {
 	resetToolExecutionInFlight,
 	setAgentRunPending,
 	setThinkingBlocksHidden,
 	setTurnToolTranscriptActive,
+	begin_work_group_boundary_suppression,
+	end_work_group_boundary_suppression,
 } from "../../pi-ember-ui/mode-colors.ts";
 
 function stripAnsi(s: string): string {
@@ -322,7 +329,7 @@ describe("CompactRenderer group child visibility", () => {
 		expect(row).not.toContain("b.ts");
 	});
 
-	test("beginTurn folds lingering completed children into the header", () => {
+	test("beginTurn keeps lingering tool children until thinking or tool-wave reopen", async () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -352,9 +359,52 @@ describe("CompactRenderer group child visibility", () => {
 		r.settleAllGroups();
 		r.beginTurn();
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Explored");
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("b.ts");
+
+		const wave_ctx = makeContext("noop-turn3", {}) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, wave_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("b.ts");
+		await flush_group_child_fold_debounce();
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).not.toContain("b.ts");
+	});
+
+	test("endTurn keeps completed tool children visible until thinking folds them", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("end-turn1", owner_state) as any;
+		const child_ctx = makeContext("end-turn2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		r.endTurn();
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("b.ts");
+		expect(row).not.toContain("Thinking");
 	});
 
 	test("parallel burst keeps prior children visible for debounce window", async () => {
@@ -470,7 +520,7 @@ describe("CompactRenderer group child visibility", () => {
 		expect(r.hasGroupThinkingChild()).toBe(false);
 	});
 
-	test("completed tools stay visible until thinking stream folds them", () => {
+	test("completed tools stay visible through thinking stream", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -507,7 +557,7 @@ describe("CompactRenderer group child visibility", () => {
 		r.noteThinking();
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
+		expect(row).toContain("Search");
 	});
 
 	test("hasActiveGroups is false when only lingering completed children remain", () => {
@@ -543,7 +593,84 @@ describe("CompactRenderer group child visibility", () => {
 		expect(r.hasReopenableGroup()).toBe(true);
 	});
 
-	test("noteThinking replaces tool rows with in-group Thinking child", () => {
+	test("resyncGroupGradientTick stops 20 FPS renders for settled lingering children", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("tick-linger-1", owner_state) as any;
+		const child_ctx = makeContext("tick-linger-2", {}) as any;
+		const render_calls: number[] = [];
+		set_gradient_render_request(() => render_calls.push(1));
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		r.resyncGroupGradientTick();
+		try {
+			dispatch_gradient_tick();
+			expect(render_calls.length).toBe(0);
+		} finally {
+			set_gradient_render_request(undefined);
+			deactivate_gradient("thinking");
+		}
+	});
+
+	test("noteThinking collapses on the anchor owner slot not the latest member", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const mid_state: Record<string, any> = {};
+		const latest_state: Record<string, any> = {};
+		const owner_ctx = makeContext("anchor-1", owner_state) as any;
+		const mid_ctx = makeContext("anchor-2", mid_state) as any;
+		const latest_ctx = makeContext("anchor-3", latest_state) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, mid_ctx);
+		r.renderCall("read", { path: "c.ts" }, theme, latest_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		for (const [ctx, path] of [
+			[owner_ctx, "a.ts"],
+			[mid_ctx, "b.ts"],
+			[latest_ctx, "c.ts"],
+		] as const) {
+			r.renderResult(
+				"read",
+				{ path },
+				{ content: [{ type: "text", text: path }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...ctx, isError: false },
+			);
+		}
+
+		r.noteThinking();
+		expect(stripAnsi((owner_state.callText as any).text)).toContain("Thinking");
+		expect(mid_state.callText).toBeUndefined();
+		expect(latest_state.callText).toBeUndefined();
+		expect(r.renderCall("read", { path: "b.ts" }, theme, mid_ctx).render(80)).toHaveLength(0);
+		expect(r.renderCall("read", { path: "c.ts" }, theme, latest_ctx).render(80)).toHaveLength(0);
+	});
+
+	test("noteThinking appends in-group Thinking after lingering tool rows", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -575,8 +702,8 @@ describe("CompactRenderer group child visibility", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("a.ts");
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("a.ts");
+		expect(row).toContain("b.ts");
 		expect(r.hasGroupThinkingChild()).toBe(true);
 
 		const baby_ctx = makeContext("s3", {}) as any;
@@ -626,7 +753,7 @@ describe("CompactRenderer group child visibility", () => {
 });
 
 describe("CompactRenderer thinking collapse", () => {
-	test("noteThinking soft-settles header and replaces tool rows with Thinking child", () => {
+	test("noteThinking soft-settles header and appends Thinking after tool rows", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -658,8 +785,8 @@ describe("CompactRenderer thinking collapse", () => {
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("Search");
+		expect(row).toContain("b.ts");
 		expect(r.hasGroupThinkingChild()).toBe(true);
 	});
 
@@ -694,7 +821,7 @@ describe("CompactRenderer thinking collapse", () => {
 		r.noteThinking();
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
+		expect(row).toContain("Search");
 
 		r.noteVisibleText();
 		row = stripAnsi((owner_state.callText as any).text);
@@ -814,8 +941,8 @@ describe("CompactRenderer thinking collapse", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("Search");
+		expect(row).toContain("b.ts");
 
 		const baby_state: Record<string, any> = {};
 		const baby_ctx = makeContext("soft3", baby_state) as any;
@@ -1015,7 +1142,7 @@ describe("CompactRenderer thinking collapse", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
+		expect(row).toContain("Search");
 		expect(r.hasActiveGroups()).toBe(true);
 		expect(r.hasGroupThinkingChild()).toBe(true);
 
@@ -1203,8 +1330,8 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(r.hasGroupThinkingChild()).toBe(true);
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("Search");
+		expect(row).toContain("b.ts");
 	});
 
 	test("noteInterveningToolCall hard-exits so later exploration starts a fresh group", () => {
@@ -1256,6 +1383,123 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(fresh_row).toContain("c.ts");
 		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
 		expect(stripAnsi((owner_state.callText as any).text).toLowerCase()).toContain("explored");
+	});
+
+	test("noteSoftInterveningToolCall keeps work group reopenable after todo", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("todo-soft-1", owner_state) as any;
+		const child_ctx = makeContext("todo-soft-2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		const before_todo = stripAnsi((owner_state.callText as any).text);
+		expect(before_todo.toLowerCase()).toContain("explored");
+
+		r.noteSoftInterveningToolCall();
+		const after_todo = stripAnsi((owner_state.callText as any).text);
+		expect(after_todo).toContain("b.ts");
+
+		const after_state: Record<string, any> = {};
+		const after_ctx = makeContext("todo-soft-3", after_state) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, after_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		const after_row = stripAnsi((after_state.callText as any).text);
+		expect(after_row).toContain("c.ts");
+		expect(after_row.toLowerCase()).toContain("explored");
+		expect(stripAnsi((owner_state.callText as any).text ?? "")).not.toContain("c.ts");
+	});
+
+	test("repeat same-signature tool call keeps prior children lingering", async () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("repeat-owner", owner_state) as any;
+		const child_ctx = makeContext("repeat-child", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		const repeat_ctx = makeContext("repeat-same", {}) as any;
+		r.renderCall("read", { path: "a.ts" }, theme, repeat_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("b.ts");
+
+		await flush_group_child_fold_debounce();
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("b.ts");
+	});
+
+	test("noteSoftInterveningToolCall then thinking paints in-group Thinking when blocks hidden", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("todo-think-1", owner_state) as any;
+
+		r.renderCall("edit", { path: "a.ts", oldText: "x", newText: "y" }, theme, owner_ctx);
+		r.renderResult(
+			"edit",
+			{ path: "a.ts", oldText: "x", newText: "y" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+1 -1" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		r.noteSoftInterveningToolCall();
+		r.noteThinking();
+
+		expect(stripAnsi((owner_state.callText as any).text ?? "")).not.toContain("Thinking");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+
+		const after_state: Record<string, any> = {};
+		const after_ctx = makeContext("todo-think-2", after_state) as any;
+		r.renderCall("read", { path: "b.ts" }, theme, after_ctx);
+		r.noteThinking();
+
+		const row = stripAnsi((after_state.callText as any).text);
+		expect(row).toContain("Thinking");
+		expect(r.hasGroupThinkingChild()).toBe(true);
 	});
 
 	test("same-key call reopens settled group instead of spawning a second header", () => {
@@ -1343,9 +1587,8 @@ describe("CompactRenderer apply_patch failures", () => {
 
 		const row = stripAnsi((state.callText as any).text);
 		expect(row).toContain("Patched 1 file");
-		expect(row).toContain("gui/utils/config_utils.py");
-		expect(row).toContain("Invalid Context: @@ -33,8 +33,10 @@");
 		expect(row).toContain("[error:• ]");
+		expect(row).toContain("Invalid Context");
 		expect(row).not.toContain("0/1 ok");
 	});
 });
@@ -1457,6 +1700,121 @@ describe("unified work header", () => {
 		const header = stripAnsi(formatUnifiedWorkHeader(group, theme));
 		expect(header).toContain("+279");
 		expect(header).not.toContain("-0");
+	});
+
+	test("falls back to edit args when details.diff is missing", async () => {
+		const { formatUnifiedWorkHeader } = await import("../renderer.ts");
+		const theme = makeTheme() as any;
+		const group = {
+			records: [
+				{
+					name: "read",
+					args: { path: "a.ts" },
+					_completed: true,
+					isError: false,
+				},
+				{
+					name: "edit",
+					args: { file_path: "c.ts", oldText: "a\nc", newText: "a\nb\nd" },
+					_completed: true,
+					isError: false,
+					result: { content: [{ type: "text", text: "ok" }] },
+				},
+				{
+					name: "bash",
+					args: { command: "npm test" },
+					_completed: true,
+					isError: false,
+				},
+			],
+			type: "work",
+			key: "__work__",
+		} as any;
+		const header = stripAnsi(formatUnifiedWorkHeader(group, theme));
+		expect(header).toContain("Edited 1 file");
+		expect(header).toContain("+2");
+		expect(header).toContain("-1");
+	});
+
+	test("first completed edit paints header diff before a second edit", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("edit-header-owner", owner_state) as any;
+		const edit_ctx = makeContext("edit-header-edit", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, makeContext("edit-header-grep", {}) as any);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...makeContext("edit-header-grep", {}), isError: false },
+		);
+		r.renderCall("edit", { file_path: "c.ts", oldText: "a\nc", newText: "a\nb\nd" }, theme, edit_ctx);
+		r.renderResult(
+			"edit",
+			{ file_path: "c.ts", oldText: "a\nc", newText: "a\nb\nd" },
+			{ content: [{ type: "text", text: "ok" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...edit_ctx, isError: false },
+		);
+
+		const header = stripAnsi((owner_state.callText as any).text);
+		expect(header).toContain("Edited 1 file");
+		expect(header).toContain("+2");
+		expect(header).toContain("-1");
+	});
+
+	test("late details.diff enrichment refreshes grouped header on duplicate renderResult", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("late-diff-owner", owner_state) as any;
+		const edit_ctx = makeContext("late-diff-edit", {}) as any;
+		const edit_args = { file_path: "c.ts" };
+		const result: { content: Array<{ type: string; text: string }>; details?: { diff: string } } = {
+			content: [{ type: "text", text: "ok" }],
+		};
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("edit", edit_args, theme, edit_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"edit",
+			edit_args,
+			result,
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...edit_ctx, isError: false },
+		);
+		let header = stripAnsi((owner_state.callText as any).text);
+		expect(header).not.toContain("+2");
+
+		result.details = { diff: "+\n+\n-" };
+		r.renderResult(
+			"edit",
+			edit_args,
+			result,
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...edit_ctx, isError: false },
+		);
+		header = stripAnsi((owner_state.callText as any).text);
+		expect(header).toContain("+2");
+		expect(header).toContain("-1");
 	});
 
 	test("folded bash failure clears active error from work group header", async () => {
@@ -1880,11 +2238,11 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Thinking");
-		expect(row).not.toContain("Search");
+		expect(row).toContain("Search");
 		expect(r.hasGroupThinkingChild()).toBe(true);
 	});
 
-	test("thinking_delta with blocks visible does not hardExit", () => {
+	test("thinking_delta with blocks visible hard-exits for a fresh downstream group", () => {
 		setThinkingBlocksHidden(false);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -1898,15 +2256,84 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
 
 		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
-		expect(r.hasReopenableGroup()).toBe(true);
+		expect(r.hasReopenableGroup()).toBe(false);
+		expect(r.hasActiveGroups()).toBe(false);
 
-		const baby_ctx = makeContext("ir-think3", {}) as any;
-		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, baby_ctx);
-		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Searching");
-		expect(row).not.toMatch(/explored[\s\S]*explored/i);
+		const fresh_owner_state: Record<string, any> = {};
+		const fresh_owner_ctx = makeContext("ir-think3", fresh_owner_state) as any;
+		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, fresh_owner_ctx);
+		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
+		expect(stripAnsi((fresh_owner_state.callText as any).text)).toContain("c.ts");
 	});
+
+	test("thinking block toggle preserves lingering children through visible-thinking replay", () => {
+		setThinkingBlocksHidden(true);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("toggle-child1", owner_state) as any;
+		const child_ctx = makeContext("toggle-child2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
+		expect(stripAnsi((owner_state.callText as any).text)).toContain("Search");
+
+		begin_work_group_boundary_suppression();
+		setThinkingBlocksHidden(false);
+		r.repaintAfterThinkingBlocksToggle(false);
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Search");
+		expect(row).not.toContain("Thinking");
+		end_work_group_boundary_suppression();
+
+		begin_work_group_boundary_suppression();
+		setThinkingBlocksHidden(true);
+		r.repaintAfterThinkingBlocksToggle(true, true);
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Search");
+		expect(row).toContain("Thinking");
+		end_work_group_boundary_suppression();
+	});
+
+	test("thinking block toggle rebuild keeps lingering children", () => {
+		setThinkingBlocksHidden(true);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("toggle-rebuild1", owner_state) as any;
+		const child_ctx = makeContext("toggle-rebuild2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
+
+		const fresh_owner_state: Record<string, any> = {};
+		const fresh_owner_ctx = makeContext("toggle-rebuild1", fresh_owner_state) as any;
+		const fresh_child_ctx = makeContext("toggle-rebuild2", {}) as any;
+		r.renderCall("read", { path: "a.ts" }, theme, fresh_owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, fresh_child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, fresh_owner_ctx);
+
+		begin_work_group_boundary_suppression();
+		r.repaintAfterThinkingBlocksToggle(false);
+		let row = stripAnsi((fresh_owner_state.callText as any).text);
+		expect(row).toContain("Search");
+		r.repaintAfterThinkingBlocksToggle(true, true);
+		row = stripAnsi((fresh_owner_state.callText as any).text);
+		expect(row).toContain("Search");
+		expect(row).toContain("Thinking");
+		end_work_group_boundary_suppression();
+	});
+
 	test("noteUserMessage hard-exits the group", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();

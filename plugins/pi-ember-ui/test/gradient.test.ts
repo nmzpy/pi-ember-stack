@@ -360,7 +360,7 @@ describe("gradient engine", () => {
 		shutdown_gradient_clock();
 	});
 
-	test("dispatch: requests one native render after subscriber state updates", () => {
+	test("dispatch: does not render when only active_reasons are set", () => {
 		shutdown_gradient_clock();
 		let render_calls = 0;
 		set_gradient_render_request(() => {
@@ -368,8 +368,26 @@ describe("gradient engine", () => {
 		});
 		activate_gradient("thinking");
 		dispatch_gradient_tick();
-		expect(render_calls).toBe(1);
+		expect(render_calls).toBe(0);
 		deactivate_gradient("thinking");
+		shutdown_gradient_clock();
+	});
+
+	test("dispatch: subscriber callback runs without blanket render_request", () => {
+		shutdown_gradient_clock();
+		let render_calls = 0;
+		set_gradient_render_request(() => {
+			render_calls++;
+		});
+		let tick_calls = 0;
+		const cb = (): void => {
+			tick_calls++;
+		};
+		subscribe_gradient_tick(cb);
+		dispatch_gradient_tick();
+		expect(tick_calls).toBe(1);
+		expect(render_calls).toBe(0);
+		unsubscribe_gradient_tick(cb);
 		shutdown_gradient_clock();
 	});
 });

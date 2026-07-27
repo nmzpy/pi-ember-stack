@@ -35,6 +35,40 @@ import {
 	setQuizActive,
 } from "./mode-colors.ts";
 import { resolve_select_list_theme } from "./select-list-theme.ts";
+import { find_exact_model_reference } from "./model-reference.ts";
+
+export const MODEL_COMMAND_PREFIX = "/model";
+
+/** Strip slash-command prefix and display-only suffixes from picker filter text. */
+export function normalize_picker_filter(text: string): string {
+	let trimmed = text.trim();
+	if (trimmed === MODEL_COMMAND_PREFIX) return "";
+	if (trimmed.startsWith(`${MODEL_COMMAND_PREFIX} `)) {
+		trimmed = trimmed.slice(MODEL_COMMAND_PREFIX.length).trim();
+	} else if (
+		trimmed.startsWith(MODEL_COMMAND_PREFIX) &&
+		trimmed.length > MODEL_COMMAND_PREFIX.length
+	) {
+		trimmed = trimmed.slice(MODEL_COMMAND_PREFIX.length).trim();
+	}
+	return trimmed.replace(/\s*\(current\)\s*$/i, "").trim();
+}
+
+/** Search term after `/model` when the editor still holds the slash command. */
+export function extract_model_command_search(text: string): string | null {
+	const trimmed = text.trim();
+	if (!trimmed.startsWith(MODEL_COMMAND_PREFIX)) return null;
+	if (trimmed === MODEL_COMMAND_PREFIX) return "";
+	return normalize_picker_filter(trimmed);
+}
+
+/** True once the user is typing a model filter after `/model`. */
+export function should_route_model_slash_to_picker(text: string): boolean {
+	const trimmed = text.trim();
+	return (
+		trimmed.startsWith(MODEL_COMMAND_PREFIX) && trimmed.length > MODEL_COMMAND_PREFIX.length
+	);
+}
 
 export interface ModelSelectorResult {
 	provider: string;
@@ -45,6 +79,13 @@ export interface ModelSelectorResult {
 
 export interface OpenModelPickerOptions {
 	initialSearch?: string;
+	/** Override ctx.model when picking for subagents or other non-live contexts. */
+	currentModel?: {
+		provider: string;
+		id: string;
+		name?: string;
+		thinkingLevel?: string;
+	};
 	onConfirm?: (result: ModelSelectorResult) => void;
 	onCancel?: () => void;
 }
@@ -126,6 +167,7 @@ type PickerState = {
 	scrollOffset: number;
 	effort: EffortSliderPoint | undefined;
 	effortExpanded: boolean;
+	lastFilter?: string;
 	currentInfo:
 		| {
 				provider: string;
@@ -143,15 +185,65 @@ let confirm_handler: ((result: ModelSelectorResult) => void) | null = null;
 let cancel_handler: (() => void) | null = null;
 
 function family_search_text(family: ModelFamily): string {
+	const variant_parts = Object.values(family.variants)
+		.filter(Boolean)
+		.flatMap((model) => [
+			model?.id ?? "",
+			model?.name ?? "",
+			`${family.provider}/${model?.id ?? ""}`,
+		]);
 	return [
 		family.displayName,
 		family.provider,
 		family.familyKey,
 		family.baseModel.id,
-		...Object.values(family.variants)
-			.filter(Boolean)
-			.map((m) => `${m?.id ?? ""} ${m?.name ?? ""}`),
+		family.baseModel.name ?? "",
+		`${family.provider}/${family.baseModel.id}`,
+		...variant_parts,
 	].join(" ");
+}
+
+function resolve_picker_open_state(
+	families: ModelFamily[],
+	models: FamilyModel[],
+	raw_search: string,
+	current_info: PickerState["currentInfo"],
+): { editor_filter: string; family_index: number } {
+	const filter = normalize_picker_filter(raw_search);
+	if (!filter) {
+		const current_idx = families.findIndex((family) =>
+			family_contains_model(family, current_info?.provider, current_info?.id),
+		);
+		return { editor_filter: "", family_index: current_idx >= 0 ? 0 : 0 };
+	}
+
+	const exact = find_exact_model_reference(filter, models);
+	if (exact) {
+		const exact_idx = families.findIndex((family) =>
+			family_contains_model(family, exact.provider, exact.id),
+		);
+		if (exact_idx >= 0) {
+			return { editor_filter: "", family_index: exact_idx };
+		}
+	}
+
+	const display_idx = families.findIndex(
+		(family) => family.displayName.toLowerCase() === filter.toLowerCase(),
+	);
+	if (display_idx >= 0) {
+		return { editor_filter: "", family_index: display_idx };
+	}
+
+	const filtered = fuzzyFilter(families, filter, family_search_text);
+	if (filtered.length > 0) {
+		const primary_idx = families.indexOf(filtered[0]);
+		return {
+			editor_filter: filter,
+			family_index: primary_idx >= 0 ? primary_idx : 0,
+		};
+	}
+
+	return { editor_filter: filter, family_index: 0 };
 }
 
 function is_confirm_key(data: string): boolean {
@@ -160,8 +252,39 @@ function is_confirm_key(data: string): boolean {
 	return kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.input.submit");
 }
 
+/** SSOT: picker-owned keys — same bindings Pi uses for SelectList navigation. */
+function is_picker_select_up(data: string): boolean {
+	const kb = getKeybindings();
+	return matchesKey(data, Key.up) || kb.matches(data, "tui.select.up");
+}
+
+function is_picker_select_down(data: string): boolean {
+	const kb = getKeybindings();
+	return matchesKey(data, Key.down) || kb.matches(data, "tui.select.down");
+}
+
+function is_picker_select_left(data: string): boolean {
+	const kb = getKeybindings();
+	return matchesKey(data, Key.left) || kb.matches(data, "tui.editor.cursorLeft");
+}
+
+function is_picker_select_right(data: string): boolean {
+	const kb = getKeybindings();
+	return matchesKey(data, Key.right) || kb.matches(data, "tui.editor.cursorRight");
+}
+
+function is_picker_navigation_key(data: string): boolean {
+	return (
+		is_picker_select_up(data) ||
+		is_picker_select_down(data) ||
+		is_picker_select_left(data) ||
+		is_picker_select_right(data) ||
+		is_confirm_key(data)
+	);
+}
+
 function filter_from_editor(editor: { getText?: () => string }): string {
-	return editor.getText?.()?.trim() ?? "";
+	return normalize_picker_filter(editor.getText?.() ?? "");
 }
 
 function filtered_families(state: PickerState, filter: string): ModelFamily[] {
@@ -169,8 +292,22 @@ function filtered_families(state: PickerState, filter: string): ModelFamily[] {
 	return fuzzyFilter(state.families, filter, family_search_text);
 }
 
-function selected_family(state: PickerState, filter: string): ModelFamily | undefined {
+/** Pin the live/current family to the top when the filter is empty. */
+function display_families(state: PickerState, filter: string): ModelFamily[] {
 	const list = filtered_families(state, filter);
+	if (filter || !state.currentInfo) return list;
+	const current_idx = list.findIndex((family) =>
+		family_contains_model(family, state.currentInfo?.provider, state.currentInfo?.id),
+	);
+	if (current_idx <= 0) return list;
+	const reordered = [...list];
+	const [current] = reordered.splice(current_idx, 1);
+	reordered.unshift(current);
+	return reordered;
+}
+
+function selected_family(state: PickerState, filter: string): ModelFamily | undefined {
+	const list = display_families(state, filter);
 	if (list.length === 0) return undefined;
 	state.familyIndex = Math.max(0, Math.min(state.familyIndex, list.length - 1));
 	return list[state.familyIndex];
@@ -211,6 +348,16 @@ export function is_model_picker_active(): boolean {
 
 export function is_model_picker_editor(editor: unknown): boolean {
 	return picker_active && editor === bound_editor;
+}
+
+export function bind_picker_editor(editor: unknown): void {
+	if (picker_active) bound_editor = editor;
+}
+
+export function consumes_picker_key(data: string): boolean {
+	if (isKeyRelease(data)) return true;
+	if (matchesKey(data, Key.escape)) return true;
+	return is_picker_navigation_key(data);
 }
 
 export function close_model_picker(editor?: { setText?: (t: string) => void }): void {
@@ -256,9 +403,11 @@ export function open_model_picker_in_editor(
 		return;
 	}
 
-	const currentModel = ctx.model as FamilyModel | undefined;
+	const currentModel = options?.currentModel ?? (ctx.model as FamilyModel | undefined);
 	const currentThinking =
-		(_pi as { getThinkingLevel?: () => string }).getThinkingLevel?.() ?? "off";
+		options?.currentModel?.thinkingLevel ??
+		(_pi as { getThinkingLevel?: () => string }).getThinkingLevel?.() ??
+		"off";
 	const currentInfo = currentModel
 		? {
 				provider: currentModel.provider,
@@ -268,19 +417,20 @@ export function open_model_picker_in_editor(
 			}
 		: undefined;
 
-	const list = options?.initialSearch?.trim()
-		? fuzzyFilter(families, options.initialSearch.trim(), family_search_text)
-		: families;
-	const curIdx = list.findIndex((f) =>
-		family_contains_model(f, currentInfo?.provider, currentInfo?.id),
+	const open_state = resolve_picker_open_state(
+		families,
+		models,
+		options?.initialSearch ?? "",
+		currentInfo,
 	);
 
 	picker_state = {
 		families,
-		familyIndex: curIdx >= 0 ? curIdx : 0,
+		familyIndex: open_state.family_index,
 		scrollOffset: 0,
 		effort: undefined,
 		effortExpanded: false,
+		lastFilter: open_state.editor_filter,
 		currentInfo,
 	};
 	picker_active = true;
@@ -290,45 +440,76 @@ export function open_model_picker_in_editor(
 
 	setQuizActive(true);
 	editor.cancelAutocomplete?.();
-	editor.setText?.(options?.initialSearch?.trim() ?? "");
+	editor.setText?.(open_state.editor_filter);
 	editor.tui?.requestRender?.();
 }
 
-function render_effort_slider(
+function push_line(lines: string[], text: string, width: number): void {
+	lines.push(visibleWidth(text) > width ? truncateToWidth(text, width) : text);
+}
+
+function compose_row_with_right_suffix(prefix: string, suffix: string, width: number): string {
+	if (!suffix) {
+		return visibleWidth(prefix) > width ? truncateToWidth(prefix, width) : prefix;
+	}
+	const prefix_width = visibleWidth(prefix);
+	const suffix_width = visibleWidth(suffix);
+	if (prefix_width + 1 + suffix_width <= width) {
+		const gap = width - prefix_width - suffix_width;
+		return `${prefix}${" ".repeat(Math.max(1, gap))}${suffix}`;
+	}
+	const max_prefix = Math.max(0, width - suffix_width - 1);
+	const truncated_prefix = max_prefix > 0 ? truncateToWidth(prefix, max_prefix) : "";
+	const gap = Math.max(1, width - visibleWidth(truncated_prefix) - suffix_width);
+	const row = `${truncated_prefix}${" ".repeat(gap)}${suffix}`;
+	return visibleWidth(row) > width ? truncateToWidth(row, width) : row;
+}
+
+function format_effort_slider_inline(
 	theme: Theme,
 	efforts: EffortSliderPoint[],
 	selected: EffortSliderPoint,
-	width: number,
-	indent = " ",
-): string[] {
-	const selectedIdx = Math.max(0, efforts.indexOf(selected));
-	const lines: string[] = [];
+	dimmed: boolean,
+): string {
+	const selected_idx = Math.max(0, efforts.indexOf(selected));
 	const left = theme.fg("dim", "<");
 	const right = theme.fg("dim", ">");
 	const parts: string[] = [];
 	for (let i = 0; i < efforts.length; i++) {
 		const point = efforts[i];
-		parts.push(
-			paint_effort_point(
-				theme,
-				point,
-				i === selectedIdx,
-				format_effort_display_label(point),
-				efforts,
-			),
-		);
+		const active = i === selected_idx;
+		const label = format_effort_display_label(point);
+		if (dimmed) {
+			parts.push(theme.fg("dim", label));
+		} else {
+			parts.push(paint_effort_point(theme, point, active, label, efforts));
+		}
 		if (i < efforts.length - 1) {
 			parts.push(theme.fg("dim", " ── "));
 		}
 	}
-	const row = `${indent}${theme.fg("dim", "Effort")}  ${left} ${parts.join("")} ${right}`;
-	lines.push(visibleWidth(row) > width ? truncateToWidth(row, width) : row);
-	lines.push("");
-	return lines;
+	return `${left} ${parts.join("")} ${right}`;
 }
 
-function push_line(lines: string[], text: string, width: number): void {
-	lines.push(visibleWidth(text) > width ? truncateToWidth(text, width) : text);
+function effort_for_family_row(
+	state: PickerState,
+	family: ModelFamily,
+	selected: boolean,
+): EffortSliderPoint | undefined {
+	if (family.efforts.length < 2) return undefined;
+	if (selected) {
+		const point =
+			state.effort && family.efforts.includes(state.effort)
+				? state.effort
+				: (nearest_effort(family.efforts, "medium") ?? family.efforts[0]);
+		state.effort = point;
+		return point;
+	}
+	return (
+		initial_effort_for_family(family, state.currentInfo) ??
+		nearest_effort(family.efforts, "medium") ??
+		family.efforts[0]
+	);
 }
 
 /** Model rows only — no title, no chatbox rules (shell injects sep + gutter). */
@@ -339,7 +520,7 @@ export function render_model_picker_rows(width: number): string[] {
 	const state = picker_state;
 	const theme = resolve_select_list_theme();
 	const filter = filter_from_editor(editor);
-	const list = filtered_families(state, filter);
+	const list = display_families(state, filter);
 	ensure_visible(state, list.length);
 
 	const renderWidth = Math.max(1, width);
@@ -361,33 +542,19 @@ export function render_model_picker_rows(width: number): string[] {
 		);
 		const suffix = isCurrent ? " (current)" : "";
 		const label = `${family.displayName}${suffix}`;
-		const providerHint = theme.fg("dim", ` ${family.provider}`);
+		const providerHint = ` ${family.provider}`;
+		let row: string;
 		if (selected) {
-			push_line(
-				lines,
-				`${colorize(ORANGE, ">")} ${colorize(ORANGE, label)}${providerHint}`,
-				renderWidth,
-			);
+			const effort_point = effort_for_family_row(state, family, true);
+			const effort_suffix =
+				effort_point !== undefined
+					? ` ${format_effort_slider_inline(theme, family.efforts, effort_point, false)}`
+					: "";
+			row = `${theme.fg("text", ">")} ${theme.fg("text", label)}${theme.fg("text", providerHint)}${effort_suffix}`;
 		} else {
-			push_line(lines, `  ${theme.fg("dim", label)}${providerHint}`, renderWidth);
+			row = `  ${theme.fg("dim", label)}${theme.fg("dim", providerHint)}`;
 		}
-
-		if (selected && state.effortExpanded && family.efforts.length >= 2) {
-			const selectedEffort =
-				state.effort && family.efforts.includes(state.effort)
-					? state.effort
-					: (nearest_effort(family.efforts, "medium") ?? family.efforts[0]);
-			state.effort = selectedEffort;
-			for (const row of render_effort_slider(
-				theme,
-				family.efforts,
-				selectedEffort,
-				renderWidth,
-				" ",
-			)) {
-				lines.push(row);
-			}
-		}
+		push_line(lines, row, renderWidth);
 	}
 
 	if (list.length > MAX_VISIBLE_FAMILIES) {
@@ -406,6 +573,9 @@ function confirm_selection(editor: { setText?: (t: string) => void }): void {
 	const filter = filter_from_editor(editor as { getText?: () => string });
 	const family = selected_family(picker_state, filter);
 	if (!family) return;
+	if (!picker_state.effort && family.efforts.length >= 2) {
+		seed_effort_for(picker_state, family);
+	}
 	const selection = resolve_family_selection(family, picker_state.effort);
 	finish_confirm(editor, {
 		provider: selection.model.provider,
@@ -415,33 +585,25 @@ function confirm_selection(editor: { setText?: (t: string) => void }): void {
 	});
 }
 
-function expand_effort_or_confirm(editor: {
-	setText?: (t: string) => void;
-	tui?: { requestRender?: (force?: boolean) => void };
-}): void {
-	if (!picker_state) return;
-	const filter = filter_from_editor(editor as { getText?: () => string });
-	const family = selected_family(picker_state, filter);
-	if (!family) return;
-	if (family.efforts.length >= 2 && !picker_state.effortExpanded) {
-		picker_state.effortExpanded = true;
-		seed_effort_for(picker_state, family);
-		request_picker_render(editor);
-		return;
-	}
-	confirm_selection(editor);
-}
-
 function request_picker_render(editor: { tui?: { requestRender?: () => void } }): void {
 	editor.tui?.requestRender?.();
 }
 
 /** Call after editor text changes so the filter list stays in sync. */
 export function on_model_picker_filter_changed(
-	editor: { getText?: () => string; tui?: { requestRender?: (force?: boolean) => void } },
+	editor: { getText?: () => string; setText?: (t: string) => void; tui?: { requestRender?: (force?: boolean) => void } },
 ): void {
-	if (!picker_active || !picker_state || editor !== bound_editor) return;
-	reset_selection_on_filter_change(picker_state);
+	if (!picker_active || !picker_state) return;
+	bind_picker_editor(editor);
+	const normalized = normalize_picker_filter(editor.getText?.() ?? "");
+	if ((editor.getText?.() ?? "") !== normalized) {
+		editor.setText?.(normalized);
+	}
+	const prev_filter = picker_state.lastFilter ?? "";
+	if (normalized !== prev_filter) {
+		reset_selection_on_filter_change(picker_state);
+		picker_state.lastFilter = normalized;
+	}
 	request_picker_render(editor);
 }
 
@@ -454,57 +616,57 @@ export function handle_model_picker_input(
 		tui?: { requestRender?: (force?: boolean) => void };
 	},
 ): boolean {
-	if (!picker_active || !picker_state || editor !== bound_editor) return false;
+	if (!picker_active || !picker_state) return false;
+	bind_picker_editor(editor);
 
 	if (isKeyRelease(data)) return true;
 
 	if (matchesKey(data, Key.escape)) {
-		if (picker_state.effortExpanded) {
-			picker_state.effortExpanded = false;
-			picker_state.effort = undefined;
-			request_picker_render(editor);
-			return true;
-		}
 		finish_cancel(editor);
 		return true;
 	}
 
 	if (is_confirm_key(data)) {
-		expand_effort_or_confirm(editor);
+		confirm_selection(editor);
 		return true;
 	}
 
 	const filter = filter_from_editor(editor);
-	const list = filtered_families(picker_state, filter);
+	const list = display_families(picker_state, filter);
 
-	if (matchesKey(data, Key.up)) {
+	if (is_picker_select_up(data)) {
 		if (list.length === 0) return true;
 		const next = Math.max(0, picker_state.familyIndex - 1);
 		if (next !== picker_state.familyIndex) {
 			picker_state.familyIndex = next;
-			picker_state.effortExpanded = false;
 			picker_state.effort = undefined;
+			ensure_visible(picker_state, list.length);
 			request_picker_render(editor);
 		}
 		return true;
 	}
 
-	if (matchesKey(data, Key.down)) {
+	if (is_picker_select_down(data)) {
 		if (list.length === 0) return true;
 		const next = Math.min(list.length - 1, picker_state.familyIndex + 1);
 		if (next !== picker_state.familyIndex) {
 			picker_state.familyIndex = next;
-			picker_state.effortExpanded = false;
 			picker_state.effort = undefined;
+			ensure_visible(picker_state, list.length);
 			request_picker_render(editor);
 		}
 		return true;
 	}
 
 	const family = list[picker_state.familyIndex];
-	if (picker_state.effortExpanded && family && family.efforts.length >= 2) {
-		const idx = Math.max(0, family.efforts.indexOf(picker_state.effort ?? family.efforts[0]));
-		if (matchesKey(data, Key.left)) {
+	if (family && family.efforts.length >= 2) {
+		const current =
+			picker_state.effort && family.efforts.includes(picker_state.effort)
+				? picker_state.effort
+				: (nearest_effort(family.efforts, "medium") ?? family.efforts[0]);
+		picker_state.effort = current;
+		const idx = Math.max(0, family.efforts.indexOf(current));
+		if (is_picker_select_left(data)) {
 			const next = Math.max(0, idx - 1);
 			if (next !== idx) {
 				picker_state.effort = family.efforts[next];
@@ -512,7 +674,7 @@ export function handle_model_picker_input(
 			}
 			return true;
 		}
-		if (matchesKey(data, Key.right)) {
+		if (is_picker_select_right(data)) {
 			const next = Math.min(family.efforts.length - 1, idx + 1);
 			if (next !== idx) {
 				picker_state.effort = family.efforts[next];
@@ -523,13 +685,7 @@ export function handle_model_picker_input(
 	}
 
 	// Block editor navigation while the picker owns ↑↓←→ / Enter / Esc.
-	if (
-		matchesKey(data, Key.left) ||
-		matchesKey(data, Key.right) ||
-		matchesKey(data, Key.up) ||
-		matchesKey(data, Key.down) ||
-		is_confirm_key(data)
-	) {
+	if (is_picker_navigation_key(data)) {
 		return true;
 	}
 
@@ -541,4 +697,12 @@ export const __test_only = {
 	effort_point_opacity,
 	EFFORT_OPACITY_FOUR,
 	EFFORT_OPACITY_THREE,
+	is_picker_select_up,
+	is_picker_select_down,
+	handle_model_picker_input,
+	open_model_picker_in_editor,
+	close_model_picker,
+	is_model_picker_active,
+	normalize_picker_filter,
+	resolve_picker_open_state,
 };

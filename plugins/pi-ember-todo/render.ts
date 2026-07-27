@@ -8,10 +8,11 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, Spacer } from "@earendil-works/pi-tui";
 import { BULLET, CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { statusBulletColor } from "../pi-compact-tools/renderer.ts";
-import { flatten_todo_timeline, todo_group_boundary_before } from "./timeline.ts";
+import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
+import { flatten_todo_timeline, todo_group_boundary_before, branch_entries_after_last_compaction } from "./timeline.ts";
 
 type TaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 
@@ -233,6 +234,7 @@ export class TodoRenderer {
 		context: ToolRenderContext,
 		error?: string,
 	): Component {
+		getSharedRenderer().noteSoftInterveningToolCall();
 		const record = this.registerCall(context.toolCallId);
 		record.invalidate = context.invalidate;
 		const group = this.groupFor(record);
@@ -241,7 +243,10 @@ export class TodoRenderer {
 			return new Text("", 0, 0);
 		}
 
-		return this.bind_call_text(group, theme, context, tasks, error);
+		this.bind_call_text(group, theme, context, tasks, error);
+		// One blank line below the todo block so the next transcript row
+		// (e.g. gradient Thinking header) does not sit flush against it.
+		return new Spacer(1);
 	}
 
 	renderResult(
@@ -261,7 +266,9 @@ export class TodoRenderer {
 				return new Text("", 0, 0);
 			}
 		}
-		return new Text("", 0, 0);
+		// One blank line below the todo block so the next transcript row
+		// (e.g. gradient Thinking header) does not sit flush against it.
+		return new Spacer(1);
 	}
 }
 
@@ -277,8 +284,9 @@ export function seed_todo_renderer_from_branch(
 	branch: SessionEntry[],
 	renderer: TodoRenderer,
 ): void {
+	const active_branch = branch_entries_after_last_compaction(branch);
 	const result_by_id = new Map<string, { tasks: TranscriptTask[]; error?: string }>();
-	for (const entry of branch) {
+	for (const entry of active_branch) {
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
 		if (msg?.role !== "toolResult" || msg.toolName !== "todo") continue;
@@ -288,7 +296,7 @@ export function seed_todo_renderer_from_branch(
 		result_by_id.set(id, { tasks: details.tasks, error: details.error });
 	}
 
-	const timeline = flatten_todo_timeline(branch);
+	const timeline = flatten_todo_timeline(active_branch);
 	for (const entry of timeline) {
 		if (entry.kind !== "tool" || entry.name !== "todo") continue;
 		if (todo_group_boundary_before(timeline, entry.id)) {

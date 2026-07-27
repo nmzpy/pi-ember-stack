@@ -216,6 +216,58 @@ describe("subagent elapsed time", () => {
 		expect(stripAnsi(out)).toContain("Coder B");
 		expect(stripAnsi(out)).toContain("Coder C");
 	});
+
+	test("grouped second running agent shows thinking after first completes", () => {
+		const theme = makeTheme() as any;
+		const completed = makeResult("Coder A", 0);
+		const thinking = makeRunning("Scout B", { isThinking: true, reasoning: true });
+		const members = [
+			{
+				args: { agent: "Coder", task: "a" },
+				results: [completed],
+				displayName: "Coder A",
+				terminal: true,
+				toolCallId: "call-a",
+			},
+			{
+				args: { agent: "Scout", task: "b" },
+				results: [thinking],
+				displayName: "Scout B",
+				terminal: false,
+				toolCallId: "call-b",
+			},
+		];
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, members[0].results, theme, 5000, members);
+		expect(stripAnsi(out)).toContain("Coder A");
+		expect(stripAnsi(out)).toContain("Scout B");
+		expect(stripAnsi(out)).toContain("Thinking");
+	});
+
+	test("grouped second running agent shows nested tool row", () => {
+		const theme = makeTheme() as any;
+		const completed = makeResult("Coder A", 0);
+		const withTool = makeRunning("Scout B", { isThinking: false, reasoning: true });
+		withTool.latestToolCall = { name: "read", args: { path: "src/foo.ts" } };
+		const members = [
+			{
+				args: { agent: "Coder", task: "a" },
+				results: [completed],
+				displayName: "Coder A",
+				terminal: true,
+				toolCallId: "call-a",
+			},
+			{
+				args: { agent: "Scout", task: "b" },
+				results: [withTool],
+				displayName: "Scout B",
+				terminal: false,
+				toolCallId: "call-b",
+			},
+		];
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, members[0].results, theme, undefined, members);
+		expect(stripAnsi(out)).toContain("Reading");
+		expect(stripAnsi(out)).toContain("src/foo.ts");
+	});
 });
 
 describe("renderSubagentLayout (string)", () => {

@@ -10,7 +10,6 @@ import {
 	DIM_COLOR,
 	getActiveModeColor,
 	hexToRgbTriplet,
-	isScrollReviewActive,
 	MUTED_COLOR,
 	TEXT_COLOR,
 } from "./mode-colors.ts";
@@ -332,9 +331,6 @@ export function dispatch_gradient_tick(): void {
 			/* best effort — same contract as before */
 		}
 	}
-	if (!isScrollReviewActive() && (active_reasons.size > 0 || tick_subscribers.size > 0)) {
-		render_request?.();
-	}
 }
 
 function maybe_start_clock(): void {
@@ -373,6 +369,17 @@ export function subscribe_gradient_tick(cb: () => void): void {
 /** Unsubscribe from gradient tick events. */
 export function unsubscribe_gradient_tick(cb: () => void): void {
 	tick_subscribers.delete(cb);
+	maybe_stop_clock();
+}
+
+/** Whether the gradient clock has no animation reasons or tick subscribers. */
+export function gradient_clock_is_idle(): boolean {
+	return active_reasons.size === 0 && tick_subscribers.size === 0;
+}
+
+/** Safety floor: clear animation reasons and stop the clock when idle. */
+export function stop_all_gradient_animation(): void {
+	active_reasons.clear();
 	maybe_stop_clock();
 }
 

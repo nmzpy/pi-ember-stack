@@ -90,20 +90,6 @@ export function setQuizActive(active: boolean): void {
 	(globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] = active;
 }
 
-/** Scroll-review flag stored on `globalThis` via `Symbol.for` so it survives
- *  jiti module duplication. While active the user is reading terminal
- *  scrollback — live renders, gradient ticks, and cursor blink pause until
- *  follow mode resumes (`resume_scroll_follow_from_editor`). */
-const SCROLL_REVIEW_ACTIVE_KEY = Symbol.for("pi-ember-ui:scroll-review-active");
-
-export function isScrollReviewActive(): boolean {
-	return (globalThis as GlobalThis)[SCROLL_REVIEW_ACTIVE_KEY] === true;
-}
-
-export function setScrollReviewActive(active: boolean): void {
-	(globalThis as GlobalThis)[SCROLL_REVIEW_ACTIVE_KEY] = active;
-}
-
 /** Whether tool rows have appeared in the current turn. Set on `tool_call` /
  *  Cursor tool updates; cleared on visible user `message_start` and
  *  `session_shutdown`. Switches the Thinking host from the in-message bubble
@@ -118,39 +104,51 @@ export function setTurnToolTranscriptActive(active: boolean): void {
 	(globalThis as GlobalThis)[TURN_TOOL_TRANSCRIPT_ACTIVE_KEY] = active;
 }
 
-let agentRunPending = false;
+/** Agent-run pending flag — globalThis so jiti module duplication cannot desync wait state. */
+const AGENT_RUN_PENDING_KEY = Symbol.for("pi-ember-ui:agent-run-pending");
+const USER_TURN_COMMITTED_KEY = Symbol.for("pi-ember-ui:user-turn-committed");
+const USER_TURN_ANCHOR_TIMESTAMP_KEY = Symbol.for("pi-ember-ui:user-turn-anchor-timestamp");
+const TOOL_EXECUTION_IN_FLIGHT_KEY = Symbol.for("pi-ember-ui:tool-execution-in-flight");
 
 /** Whether Pi may still auto-retry, compact, or continue follow-ups this turn. */
 export function isAgentRunPending(): boolean {
-	return agentRunPending;
+	return (globalThis as GlobalThis)[AGENT_RUN_PENDING_KEY] === true;
 }
 
 export function setAgentRunPending(active: boolean): void {
-	agentRunPending = active;
+	(globalThis as GlobalThis)[AGENT_RUN_PENDING_KEY] = active;
 }
 
 /** Set on visible user `message_start`; cleared on `agent_settled` / `session_shutdown`. */
-let userTurnCommitted = false;
-/** Visible user message timestamp for the active turn — excludes pre-turn assistant hosts. */
-let userTurnAnchorTimestamp: number | undefined;
 
 export function isCurrentTurnAssistantTimestamp(timestamp: number | undefined): boolean {
 	if (timestamp === undefined) return false;
-	if (userTurnAnchorTimestamp === undefined) return true;
-	return timestamp >= userTurnAnchorTimestamp;
+	const anchor = (globalThis as GlobalThis)[USER_TURN_ANCHOR_TIMESTAMP_KEY] as
+		| number
+		| undefined;
+	if (anchor === undefined) {
+		// Without an anchor, only assistants from an active turn qualify — never
+		// historical bubbles after session load / resume.
+		return isUserTurnCommitted() || isAgentRunPending();
+	}
+	return timestamp >= anchor;
 }
 
 export function setUserTurnAnchorTimestamp(timestamp: number | undefined): void {
-	userTurnAnchorTimestamp = timestamp;
+	if (timestamp === undefined) {
+		delete (globalThis as GlobalThis)[USER_TURN_ANCHOR_TIMESTAMP_KEY];
+	} else {
+		(globalThis as GlobalThis)[USER_TURN_ANCHOR_TIMESTAMP_KEY] = timestamp;
+	}
 }
 
 export function isUserTurnCommitted(): boolean {
-	return userTurnCommitted;
+	return (globalThis as GlobalThis)[USER_TURN_COMMITTED_KEY] === true;
 }
 
 export function setUserTurnCommitted(active: boolean): void {
-	userTurnCommitted = active;
-	if (!active) userTurnAnchorTimestamp = undefined;
+	(globalThis as GlobalThis)[USER_TURN_COMMITTED_KEY] = active;
+	if (!active) setUserTurnAnchorTimestamp(undefined);
 }
 
 /**
@@ -162,38 +160,41 @@ export function setUserTurnCommitted(active: boolean): void {
  * `agent_settled` clears the user flag before the next `agent_start`.
  */
 export function is_agent_thinking_wait(thinkingActive = false): boolean {
-	if (!agentRunPending && !thinkingActive) return false;
-	if (!userTurnCommitted && !agentRunPending) return false;
-	if (toolExecutionInFlight > 0) return false;
+	if (!isAgentRunPending() && !thinkingActive) return false;
+	if (!isUserTurnCommitted() && !isAgentRunPending()) return false;
+	if (isToolExecutionInFlight()) return false;
 	if (latestSubagentRunningFlag || subagentActivityActive) return false;
 	if (isSubagentDelegatingActive()) return false;
 	if ((globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] === true) return false;
 	return true;
 }
 
-let toolExecutionInFlight = 0;
+function tool_execution_in_flight_count(): number {
+	const value = (globalThis as GlobalThis)[TOOL_EXECUTION_IN_FLIGHT_KEY];
+	return typeof value === "number" && value > 0 ? value : 0;
+}
 
 export function isToolExecutionInFlight(): boolean {
-	return toolExecutionInFlight > 0;
+	return tool_execution_in_flight_count() > 0;
 }
 
 export function markToolExecutionStarted(): void {
-	toolExecutionInFlight += 1;
+	const g = globalThis as GlobalThis;
+	g[TOOL_EXECUTION_IN_FLIGHT_KEY] = tool_execution_in_flight_count() + 1;
 }
 
 export function markToolExecutionEnded(): void {
-	toolExecutionInFlight = Math.max(0, toolExecutionInFlight - 1);
+	const g = globalThis as GlobalThis;
+	g[TOOL_EXECUTION_IN_FLIGHT_KEY] = Math.max(0, tool_execution_in_flight_count() - 1);
 }
 
 export function resetToolExecutionInFlight(): void {
-	toolExecutionInFlight = 0;
+	delete (globalThis as GlobalThis)[TOOL_EXECUTION_IN_FLIGHT_KEY];
 }
 
 /** Between tool batches while the agent is still working (OpenAI/Codex planning text). */
 export function isInterRunGap(): boolean {
-	return (
-		agentRunPending && !isToolExecutionInFlight() && isTurnToolTranscriptActive()
-	);
+	return isAgentRunPending() && !isToolExecutionInFlight() && isTurnToolTranscriptActive();
 }
 
 let latestSubagentRunningFlag = false;
@@ -319,6 +320,21 @@ export function setThinkingBlocksHidden(hidden: boolean): void {
 	const prev = thinkingBlocksHidden;
 	thinkingBlocksHidden = hidden;
 	if (prev !== hidden) thinkingBlocksVisibilityListener?.(hidden);
+}
+
+let work_group_boundary_suppression_depth = 0;
+
+/** Suppress compact work-group stream boundaries during Ctrl+T rebuild replay. */
+export function begin_work_group_boundary_suppression(): void {
+	work_group_boundary_suppression_depth++;
+}
+
+export function end_work_group_boundary_suppression(): void {
+	work_group_boundary_suppression_depth = Math.max(0, work_group_boundary_suppression_depth - 1);
+}
+
+export function is_work_group_boundary_suppressed(): boolean {
+	return work_group_boundary_suppression_depth > 0;
 }
 
 let planAutoContinuing = false;

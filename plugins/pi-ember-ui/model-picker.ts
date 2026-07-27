@@ -12,8 +12,6 @@ import {
 	Editor,
 	fuzzyFilter,
 	getKeybindings,
-	Key,
-	matchesKey,
 	SelectList,
 } from "@earendil-works/pi-tui";
 import {
@@ -27,19 +25,32 @@ import {
 	model_identity_from_user_selection,
 } from "../pi-custom-agents/mode-models.ts";
 import {
+	bind_picker_editor,
 	close_model_picker,
+	consumes_picker_key,
+	extract_model_command_search,
 	handle_model_picker_input,
 	is_model_picker_active,
+	normalize_picker_filter,
 	on_model_picker_filter_changed,
 	open_model_picker_in_editor,
+	should_route_model_slash_to_picker,
 } from "./model-selector.ts";
 import type { EffortSliderPoint } from "./model-variants.ts";
+import { format_model_effort_suffix } from "./model-variants.ts";
 import { buildSelectListTheme, resolve_select_list_theme } from "./select-list-theme.ts";
 import {
 	get_switch_session_fn,
 	install_command_context_capture,
 	resolve_switch_session_fn,
 } from "./command-context-capture.ts";
+import { find_exact_model_reference } from "./model-reference.ts";
+
+export { find_exact_model_reference } from "./model-reference.ts";
+export {
+	extract_model_command_search,
+	should_route_model_slash_to_picker,
+} from "./model-selector.ts";
 
 /** Same layout Pi uses for slash-command autocomplete rows. */
 const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
@@ -88,39 +99,6 @@ let native_editor_submit_value: ((this: Editor) => void) | undefined;
 let session_cache: SessionInfo[] | null = null;
 let session_cache_at = 0;
 let session_cache_loading: Promise<SessionInfo[]> | null = null;
-
-/** Mirrors pi-coding-agent `findExactModelReferenceMatch` for /model submit handling. */
-export function find_exact_model_reference<T extends { provider: string; id: string; name?: string }>(
-	modelReference: string,
-	availableModels: T[],
-): T | undefined {
-	const trimmedReference = modelReference.trim();
-	if (!trimmedReference) return undefined;
-	const normalizedReference = trimmedReference.toLowerCase();
-	const canonicalMatches = availableModels.filter(
-		(model) => `${model.provider}/${model.id}`.toLowerCase() === normalizedReference,
-	);
-	if (canonicalMatches.length === 1) return canonicalMatches[0];
-	if (canonicalMatches.length > 1) return undefined;
-	const slashIndex = trimmedReference.indexOf("/");
-	if (slashIndex !== -1) {
-		const provider = trimmedReference.substring(0, slashIndex).trim();
-		const modelId = trimmedReference.substring(slashIndex + 1).trim();
-		if (provider && modelId) {
-			const providerMatches = availableModels.filter(
-				(model) =>
-					model.provider.toLowerCase() === provider.toLowerCase() &&
-					model.id.toLowerCase() === modelId.toLowerCase(),
-			);
-			if (providerMatches.length === 1) return providerMatches[0];
-			if (providerMatches.length > 1) return undefined;
-		}
-	}
-	const idMatches = availableModels.filter(
-		(model) => model.id.toLowerCase() === normalizedReference,
-	);
-	return idMatches.length === 1 ? idMatches[0] : undefined;
-}
 
 export function cancel_pending_model_pick(): void {
 	if (!pending_pick) return;
@@ -210,7 +188,10 @@ async function apply_model_selection(
 				syncThinkingLevelToPi: selection.syncThinkingLevelToPi,
 			});
 		}
-		const effortHint = selection.thinkingLevel ? ` · ${selection.thinkingLevel}` : "";
+		const effortHint = format_model_effort_suffix(
+			{ id: model.id, name: model.name },
+			selection.thinkingLevel,
+		);
 		ctx.ui.notify(`Model: ${model.id}${effortHint} • ${model.provider}`, "info");
 		return true;
 	} catch (err) {
@@ -240,16 +221,29 @@ function resolve_pending_pick(searchTerm: string): ModelPickResult {
 	return model ? { provider: model.provider, id: model.id } : undefined;
 }
 
+export type PickModelInEditorOptions = {
+	initialSearch?: string;
+	currentModel?: {
+		provider: string;
+		id: string;
+		name?: string;
+		thinkingLevel?: string;
+	};
+};
+
 /** Open the in-editor Switch Model list (chatbox stays; models grow below). */
-function open_model_selector_ui(editor: any, initialSearch = ""): void {
+function open_model_selector_ui(editor: any, options: string | PickModelInEditorOptions = ""): void {
 	if (!model_picker_ctx || !model_picker_pi) return;
 	const ctx = model_picker_ctx;
 	const pi = model_picker_pi;
+	const normalized =
+		typeof options === "string" ? { initialSearch: options } : (options ?? {});
 	live_editor = editor;
 	model_selector_busy = true;
 
 	open_model_picker_in_editor(editor, ctx, pi, {
-		initialSearch,
+		initialSearch: normalized.initialSearch ?? "",
+		currentModel: normalized.currentModel,
 		onConfirm: async (selected) => {
 			model_selector_busy = false;
 			finalize_editor_input_after(live_editor);
@@ -281,24 +275,24 @@ function open_model_selector_ui(editor: any, initialSearch = ""): void {
  * Open the in-editor model picker on the next microtask so slash autocomplete
  * can collapse first. Editor text is cleared so the user can type a filter freely.
  */
-function prepare_and_schedule_model_selector(editor: any, initialSearch = ""): void {
-	if (model_selector_busy || is_model_picker_active()) return;
-	live_editor = editor;
-	editor?.cancelAutocomplete?.();
-	reset_slash_command_tracking();
-	if (!model_picker_ctx || !model_picker_pi) {
-		model_picker_ctx?.ui?.notify?.("Model picker is not ready yet.", "error");
+/**
+ * Route `/model` typing into the single in-editor family picker and keep Pi's
+ * argument autocomplete suppressed.
+ */
+function route_model_slash_input(editor: any): void {
+	const trimmed = editor.getText?.()?.trim() ?? "";
+	if (is_model_picker_active()) {
+		bind_picker_editor(editor);
+		const normalized = normalize_picker_filter(trimmed);
+		if (trimmed !== normalized) {
+			editor.setText?.(normalized);
+		}
+		on_model_picker_filter_changed(editor);
 		return;
 	}
-	let seed = initialSearch;
-	const text = editor?.getText?.()?.trim() ?? "";
-	if (text.startsWith(`${MODEL_PREFIX} `)) {
-		seed = text.slice(MODEL_PREFIX.length).trim();
-	}
-	queueMicrotask(() => {
-		if (model_selector_busy || is_model_picker_active()) return;
-		open_model_selector_ui(editor, seed);
-	});
+	if (!should_open_model_picker_while_typing(trimmed)) return;
+	editor.cancelAutocomplete?.();
+	open_model_picker_from_slash(editor, normalize_picker_filter(trimmed));
 }
 
 function clear_editor_without_submit(editor: any): void {
@@ -308,7 +302,37 @@ function clear_editor_without_submit(editor: any): void {
 }
 
 function is_model_command_text(text: string): boolean {
-	return text === MODEL_PREFIX || text.startsWith(`${MODEL_PREFIX} `);
+	return extract_model_command_search(text) !== null;
+}
+
+function should_open_model_picker_while_typing(text: string): boolean {
+	return should_route_model_slash_to_picker(text);
+}
+
+/** Open the in-editor picker immediately (no microtask — avoids arrow-key races). */
+function open_model_picker_from_slash(editor: any, initialSearch = ""): void {
+	if (is_model_picker_active()) return;
+	live_editor = editor;
+	editor?.cancelAutocomplete?.();
+	reset_slash_command_tracking();
+	if (!model_picker_ctx || !model_picker_pi) {
+		model_picker_ctx?.ui?.notify?.("Model picker is not ready yet.", "error");
+		return;
+	}
+	let seed = normalize_picker_filter(initialSearch);
+	const text = editor?.getText?.()?.trim() ?? "";
+	const from_slash = extract_model_command_search(text);
+	if (from_slash !== null) {
+		seed = from_slash;
+	}
+	open_model_selector_ui(editor, seed);
+}
+
+/**
+ * @deprecated Alias — opens synchronously; kept for call-site clarity.
+ */
+function prepare_and_schedule_model_selector(editor: any, initialSearch = ""): void {
+	open_model_picker_from_slash(editor, initialSearch);
 }
 
 function is_resume_command_text(text: string): boolean {
@@ -316,8 +340,9 @@ function is_resume_command_text(text: string): boolean {
 }
 
 /**
- * Shared /model routing: Switch Model chatbox UI for bare `/model`; exact
- * `provider/id` still applies immediately. Bypasses Pi's ModelSelectorComponent.
+ * Shared /model routing: always use the in-editor family picker (SSOT). Exact
+ * `provider/id` still applies immediately on submit. Never fall through to Pi's
+ * ModelSelectorComponent overlay or argument autocomplete list.
  */
 function handle_model_command_text(editor: any, text: string): boolean {
 	if (!is_model_command_text(text)) return false;
@@ -327,8 +352,9 @@ function handle_model_command_text(editor: any, text: string): boolean {
 		return true;
 	}
 
-	const searchTerm = text.slice(MODEL_PREFIX.length).trim();
-	if (text === MODEL_PREFIX || !searchTerm) {
+	const trimmed = text.trim();
+	const searchTerm = extract_model_command_search(trimmed) ?? "";
+	if (trimmed === MODEL_PREFIX || !searchTerm) {
 		prepare_and_schedule_model_selector(editor);
 		return true;
 	}
@@ -351,11 +377,8 @@ function handle_model_command_text(editor: any, text: string): boolean {
 		}
 	}
 
-	// Fall through to Pi's original submitValue → onSubmit → handleModelCommand.
-	// Pi's handler awaits modelRuntime.refresh() before searching, so it resolves
-	// models that aren't in the synchronous getAvailable() snapshot (newly
-	// refreshed catalogs, scoped models, OAuth providers).
-	return false;
+	prepare_and_schedule_model_selector(editor, searchTerm);
+	return true;
 }
 
 /**
@@ -499,32 +522,42 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 		editor[NATIVE_SUBMIT_KEY] = original_submit_value;
 		editor.submitValue = (): void => {
 			if (is_model_picker_active()) return;
-			if (model_selector_busy) return;
 			const trimmed = (editor.getText?.() ?? "").trim();
 			if (handle_slash_override_text(editor, trimmed)) return;
 			original_submit_value();
 		};
 	}
 
+	const original_request_autocomplete = editor.requestAutocomplete?.bind(editor);
+	if (typeof original_request_autocomplete === "function") {
+		editor.requestAutocomplete = (opts?: { force?: boolean; explicitTab?: boolean }) => {
+			const trimmed = editor.getText?.()?.trim() ?? "";
+			if (is_model_picker_active() || is_model_command_text(trimmed)) {
+				editor.cancelAutocomplete?.();
+				route_model_slash_input(editor);
+				return;
+			}
+			return original_request_autocomplete(opts);
+		};
+	}
+
 	const original_handle_input = editor.handleInput.bind(editor);
 	editor.handleInput = (data: string): void => {
 		if (is_model_picker_active()) {
+			bind_picker_editor(editor);
 			const filterBefore = editor.getText?.() ?? "";
 			if (handle_model_picker_input(data, editor)) {
 				finalize_editor_input_after(editor);
 				return;
 			}
-			const wasNav =
-				matchesKey(data, Key.up) ||
-				matchesKey(data, Key.down) ||
-				matchesKey(data, Key.left) ||
-				matchesKey(data, Key.right);
-			if (!wasNav) {
-				original_handle_input(data);
-				const filterAfter = editor.getText?.() ?? "";
-				if (filterAfter !== filterBefore) {
-					on_model_picker_filter_changed(editor);
-				}
+			if (consumes_picker_key(data)) {
+				finalize_editor_input_after(editor);
+				return;
+			}
+			original_handle_input(data);
+			const filterAfter = editor.getText?.() ?? "";
+			if (filterAfter !== filterBefore) {
+				on_model_picker_filter_changed(editor);
 			}
 			finalize_editor_input_after(editor);
 			return;
@@ -538,7 +571,12 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 		const is_confirm = kb.matches(data, "tui.select.confirm");
 		const is_submit = kb.matches(data, "tui.input.submit");
 		const is_tab = kb.matches(data, "tui.input.tab");
+		const trimmed_before = editor.getText?.()?.trim() ?? "";
+		if (is_model_command_text(trimmed_before)) {
+			editor.cancelAutocomplete?.();
+		}
 		original_handle_input(data);
+		route_model_slash_input(editor);
 		// Pi only falls through to submit for command-name completions with
 		// Enter (prefix starts with "/"). Tab always applies the completion and
 		// returns, leaving "/cmd value" in the editor. Commit any remaining
@@ -736,6 +774,14 @@ function install_model_picker_prototype_patches(): void {
 			prefix: string,
 			items: any[],
 		) {
+			const text = this.getText?.()?.trim() ?? "";
+			if (is_model_picker_active() || is_model_command_text(text)) {
+				return new SelectList(
+					[],
+					AUTOCOMPLETE_MAX_VISIBLE,
+					buildSelectListTheme(resolve_select_list_theme()),
+				);
+			}
 			const slashMode =
 				prefix.startsWith("/") || this.getText?.().trimStart().startsWith("/") === true;
 			const layout = slashMode ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
@@ -752,6 +798,7 @@ function install_model_picker_prototype_patches(): void {
 	if (typeof originalSubmitValue === "function") {
 		native_editor_submit_value = originalSubmitValue;
 		editorProto.submitValue = function submitValueSlashOverridePatched(this: Editor): void {
+			if (is_model_picker_active()) return;
 			const trimmed = this.getText().trim();
 			if (handle_slash_override_text(this, trimmed)) return;
 			originalSubmitValue.call(this);
@@ -799,6 +846,55 @@ export function install_model_picker_patches(): void {
 	install_model_picker_prototype_patches();
 }
 
+let model_picker_input_unsubscribe: (() => void) | undefined;
+
+type PickerTui = {
+	addInputListener?: (
+		listener: (data: string) => { consume?: boolean; data?: string } | undefined,
+	) => () => void;
+	focusedComponent?: {
+		getText?: () => string;
+		setText?: (text: string) => void;
+		tui?: { requestRender?: () => void };
+	};
+};
+
+/**
+ * TUI-level arrow/enter capture for the model picker. Pi can replace the live
+ * editor instance; this listener persists and runs before focusedComponent.
+ */
+export function install_model_picker_input_listener(
+	get_tui: () => PickerTui | undefined,
+): void {
+	model_picker_input_unsubscribe?.();
+	const tui = get_tui();
+	if (!tui?.addInputListener) return;
+
+	model_picker_input_unsubscribe = tui.addInputListener((data) => {
+		if (!is_model_picker_active()) return undefined;
+		const focused = tui.focusedComponent;
+		if (!focused?.getText) return undefined;
+
+		live_editor = focused;
+		bind_picker_editor(focused);
+
+		if (handle_model_picker_input(data, focused)) {
+			finalize_editor_input_after(focused);
+			return { consume: true };
+		}
+		if (consumes_picker_key(data)) {
+			finalize_editor_input_after(focused);
+			return { consume: true };
+		}
+		return undefined;
+	});
+}
+
+export function uninstall_model_picker_input_listener(): void {
+	model_picker_input_unsubscribe?.();
+	model_picker_input_unsubscribe = undefined;
+}
+
 /** Bind per-session ctx used by /model and /resume routing and pending picks. */
 export function bind_model_picker_session(ctx: any, pi: ExtensionAPI): void {
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
@@ -814,6 +910,7 @@ export function bind_model_picker_session(ctx: any, pi: ExtensionAPI): void {
 export function reset_model_picker_session(): void {
 	cancel_pending_model_pick();
 	close_model_picker(live_editor);
+	uninstall_model_picker_input_listener();
 	model_selector_busy = false;
 	model_picker_ctx = undefined;
 	model_picker_pi = undefined;
@@ -831,7 +928,7 @@ export function reset_model_picker_session(): void {
 export async function pick_model_in_editor(
 	ctx: any,
 	pi: ExtensionAPI,
-	initialSearch = "",
+	options: string | PickModelInEditorOptions = "",
 ): Promise<ModelPickResult> {
 	if (!ctx.hasUI || ctx.mode !== "tui") return undefined;
 	if (!live_editor) {
@@ -840,8 +937,10 @@ export async function pick_model_in_editor(
 	}
 	model_picker_ctx = ctx;
 	model_picker_pi = pi;
+	const normalized =
+		typeof options === "string" ? { initialSearch: options } : (options ?? {});
 	return new Promise((resolve) => {
 		pending_pick = { resolve };
-		open_model_selector_ui(live_editor, initialSearch);
+		open_model_selector_ui(live_editor, normalized);
 	});
 }

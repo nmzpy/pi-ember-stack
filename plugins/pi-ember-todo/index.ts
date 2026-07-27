@@ -13,10 +13,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { coerce_id, prepare_todo_arguments } from "./normalize.ts";
 import { getSharedTodoRenderer, seed_todo_renderer_from_branch } from "./render.ts";
-import { flatten_todo_timeline, todo_group_boundary_before } from "./timeline.ts";
+import { flatten_todo_timeline, todo_group_boundary_before, branch_entries_after_last_compaction, branch_had_compaction, is_post_compaction_todo_call } from "./timeline.ts";
 
 /**
  * String enum as `{ type: "string", enum: [...] }` (provider-safe + TypeBox
@@ -139,10 +140,15 @@ let active_render_ctx: ExtensionContext | undefined;
 
 function settle_todo_group_before_render(ctx: ExtensionContext, tool_call_id: string): void {
 	const branch = ctx.sessionManager.getBranch() ?? [];
-	const timeline = flatten_todo_timeline(branch);
+	const timeline = flatten_todo_timeline(branch_entries_after_last_compaction(branch));
 	if (todo_group_boundary_before(timeline, tool_call_id)) {
 		getSharedTodoRenderer().settleGroup();
 	}
+}
+
+function should_paint_todo_row(ctx: ExtensionContext, tool_call_id: string): boolean {
+	const branch = ctx.sessionManager.getBranch() ?? [];
+	return is_post_compaction_todo_call(branch, tool_call_id);
 }
 
 // Replay cache: avoid rescanning the entire branch message history on every
@@ -153,6 +159,8 @@ const replay_cache = new Map<string, { len: number; tail: unknown; state: TaskSt
 
 // Test seam: how many times replay_from_branch actually recomputed state.
 let replay_compute_count = 0;
+/** Set on `session_before_compact`; cleared after `session_compact` reset. */
+let pending_compact_reset = false;
 
 // Disk persistence: survive agent/session restarts. The branch message
 // history remains the source of truth; this is a fallback when history isn't
@@ -247,7 +255,7 @@ const get_session_state = (id: string): TaskState => sessions.get(id) ?? fresh_s
 // Reconstruct tasks state from session messages history.
 export function replay_from_branch(ctx: ExtensionContext): TaskState {
 	const id = session_id(ctx);
-	const branch = ctx.sessionManager.getBranch();
+	const branch = branch_entries_after_last_compaction(ctx.sessionManager.getBranch());
 	const len = branch.length;
 	const tail = len > 0 ? branch[len - 1] : undefined;
 	const cached = replay_cache.get(id);
@@ -624,6 +632,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		promptSnippet: "Manage a task list to track multi-step progress",
 		promptGuidelines: [
 			"Use `todo` for complex work with 3+ steps.",
+			"`update`, `get`, and `delete` require numeric `id` — run `list` first or use the id returned by `create`.",
 			"Call `todo.<action>` (dotted form) when preferred: `todo.create`, `todo.update`, `todo.list`, `todo.get`, `todo.delete`, `todo.clear`, `todo.batch`. The `action` field is auto-derived from the dotted name.",
 			"Batch `todo` updates with other tool calls — do not make `todo` the only tool in a turn unless the user asked about task status.",
 			"Mark a task `in_progress` before beginning, and `completed` immediately when done.",
@@ -665,6 +674,9 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		},
 
 		renderCall(_args: TodoParams, theme: Theme, context: ToolRenderContext) {
+			if (active_render_ctx && !should_paint_todo_row(active_render_ctx, context.toolCallId)) {
+				return new Text("", 0, 0);
+			}
 			if (active_render_ctx) {
 				settle_todo_group_before_render(active_render_ctx, context.toolCallId);
 			}
@@ -677,6 +689,9 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			theme: Theme,
 			context: ToolRenderContext,
 		) {
+			if (active_render_ctx && !should_paint_todo_row(active_render_ctx, context.toolCallId)) {
+				return new Text("", 0, 0);
+			}
 			const details = result.details as TaskDetails | undefined;
 			const tasks = details?.tasks ?? [];
 			return todo_renderer.renderResult(tasks, theme, context, details?.error);
@@ -732,7 +747,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 	});
 
 	const branch_has_todo_history = (ctx: ExtensionContext): boolean => {
-		const branch = ctx.sessionManager.getBranch() ?? [];
+		const branch = branch_entries_after_last_compaction(ctx.sessionManager.getBranch() ?? []);
 		return branch.some(
 			(e: SessionEntry) => {
 				if (e.type !== "message") return false;
@@ -741,14 +756,15 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		);
 	};
 
-	/** Resolve state for compact/tree: branch wins when it has todo results; else keep live/disk. */
+	/** Resolve state for compact/tree: post-compact branch wins when it has todo results. */
 	const resolve_state_for_refresh = (ctx: ExtensionContext): TaskState => {
 		const id = session_id(ctx);
-		if (branch_has_todo_history(ctx)) {
+		const branch = ctx.sessionManager.getBranch() ?? [];
+		if (branch_had_compaction(branch) || branch_has_todo_history(ctx)) {
 			return replay_from_branch(ctx);
 		}
 		// No todo tool results on the branch yet. Do not clobber in-memory progress
-		// with an empty replay (that was wiping tasks on compact).
+		// with an empty replay mid-turn; compaction resets via post-compact replay slice.
 		if (sessions.has(id)) return sessions.get(id) as TaskState;
 		return restore_session_state(id) ?? fresh_state();
 	};
@@ -787,7 +803,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			active_render_session = id;
 			const branch = ctx.sessionManager.getBranch() ?? [];
 			seed_todo_renderer_from_branch(branch, todo_renderer);
-			if (branch_has_todo_history(ctx)) {
+			if (branch_had_compaction(branch) || branch_has_todo_history(ctx)) {
 				sessions.set(id, replay_from_branch(ctx));
 			} else {
 				// Restart recovery: disk fallback when message history has no todo results.
@@ -805,7 +821,28 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_compact", async (_event, ctx) => replay_and_refresh(ctx));
+	pi.on("session_before_compact", async () => {
+		pending_compact_reset = true;
+	});
+
+	pi.on("session_compact", async (_event, ctx) => {
+		try {
+			const id = session_id(ctx);
+			replay_cache.delete(id);
+			const branch = ctx.sessionManager.getBranch() ?? [];
+			let state = replay_from_branch(ctx);
+			if (pending_compact_reset && !branch_had_compaction(branch)) {
+				state = fresh_state();
+			}
+			pending_compact_reset = false;
+			sessions.set(id, state);
+			save_session_state(id, state);
+			todo_renderer.resetForSession();
+			seed_todo_renderer_from_branch(branch, todo_renderer);
+		} catch (e) {
+			if (!/stale after session replacement/.test(String(e))) throw e;
+		}
+	});
 	pi.on("session_tree", async (_event, ctx) => replay_and_refresh(ctx));
 
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -832,6 +869,7 @@ export function __reset_state(): void {
 	sessions.clear();
 	replay_cache.clear();
 	replay_compute_count = 0;
+	pending_compact_reset = false;
 	if (active_render_session) {
 		try {
 			unlinkSync(persist_path(active_render_session));

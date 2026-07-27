@@ -233,9 +233,17 @@
   `gradient.ts` advances a phase computed from elapsed monotonic time
   (`performance.now()`), not incremental frame steps — so lag catches up
   instead of slowing the animation. Each tick updates component state through
-  stable subscribers and issues at most one public Pi render request. It never
-  writes terminal rows, mutates differential state, or schedules a parallel
-  renderer. Structural changes (show/hide Thinking, group settle/collapse,
+  stable subscribers; each subscriber owns its own `requestTuiRender()` /
+  `invalidate()` — the clock never issues a blanket render after every tick. It
+  never writes terminal rows, mutates differential state, or schedules a
+  parallel renderer. When the agent is settled and no gradient animation is
+  visible, the clock must stop entirely — zero periodic `requestRender` calls.
+  **Binding a Thinking host (`bind_thinking_widget_host`) must not subscribe the
+  clock** — only `sync_thinking_gradient_clock()` → `sync_thinking_status_tick()`
+  may subscribe/unsubscribe. Trackpad scroll uses terminal scrollback; Ember
+  must not intercept scroll input or repaint the live viewport while the user
+  reads history. Do not re-anchor on slash/autocomplete exit or idle lifecycle
+  events. Structural changes (show/hide Thinking, group settle/collapse,
   mode switch) update the component tree and use the same normal native
   request. Off-screen startup visuals are static. The
   sweep cycle is `GRADIENT_DURATION_MS` = 1600 ms (20%
@@ -285,37 +293,44 @@
   It is suppressed when a quiz overlay is active, when a compact tool group
   has a **running** member (`isToolGroupActive()` — lingering completed
   children alone no longer suppress), when the latest tool call is a running
-  subagent, when thinking blocks are visible **after tools have appeared
-  this turn** (unless the model is actively streaming thinking/reasoning —
-  `thinkingActive` keeps the gradient header visible), or when in-group
-  `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). Bare
+  subagent, when thinking blocks are **visible** (`!isThinkingBlocksHidden()` —
+  the transcript owns reasoning; external header is always suppressed), or when
+  in-group `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). Nested
+  subagent `└ Thinking` rows are separate (`render.ts`) and still paint while
+  blocks are visible. Bare
   `text_start` and empty `text_delta` never suppress via
   `should_suppress_thinking_header_for_stream_event()`. The SSOT wait predicate `is_agent_thinking_wait()` in
   `mode-colors.ts` (requires `agentRunPending` or active thinking stream, and
   `userTurnCommitted` when not `agentRunPending` — so compact-and-continue
   sub-runs still qualify after `agent_settled` clears the user flag; no
   tool/subagent in flight) gates all Thinking hosts;
-  `sync_thinking_wait_ui()` in `thinking-wait.ts` arms only the external
-  in-message / above-editor host via `arm_pre_token_thinking_status()` — it
-  never folds compact child rows. In-group `└ Thinking` (and
-  `fold_group_child_rows()`) happens only via `noteThinking()` on a real
+  `reconcile_thinking_wait_ui()` in `thinking-wait.ts` is the single arming
+  SSOT — it optionally runs `clear_stale_thinking_wait_blockers()` (resets
+  leaked `toolExecutionInFlight`, resyncs subagent flags from the session
+  branch, clears stale in-group Thinking lane + header suppression) then arms
+  the external in-message / above-editor host via
+  `arm_pre_token_thinking_status()` — it never folds compact child rows.
+  `clear_blockers` runs on visible user `message_start`, `session_compact`,
+  and `compaction_end` transcript rebuild (`reconcile_thinking_after_transcript_rebuild()`).
+  In-group `└ Thinking` is painted via `noteThinking()` on a real
   thinking stream (`message_update` → `apply_assistant_stream_boundary` in
-  `assistant-stream-boundary.ts`, SSOT). Inter-run planning `text_delta` arms
-  Thinking via `sync_thinking_wait_ui()` without folding children.
+  `assistant-stream-boundary.ts`, SSOT) — it appends after lingering tool rows
+  without folding them. Inter-run planning `text_delta` arms
+  Thinking via `reconcile_thinking_wait_ui()` without folding children.
   When the last subagent finishes (`tool_execution_end` for `subagent` with no
-  remaining subagent activity), `arm_pre_token_thinking_status()` runs so the
+  remaining subagent activity), `reconcile_thinking_wait_ui()` runs so the
   parent-agent inter-run gap shows gradient `Thinking` before the model streams
   again — same post-tool feedback as other tools.
   The **pre-tool gap** (`is_pre_tool_thinking_gap()` — `agentRunPending` and
-  no tool rows yet) always shows gradient `Thinking` as send feedback, even
-  when thinking blocks are visible and even if stale in-group flags from the
-  prior turn have not cleared yet. `assistantThinkingHostReady` is set on
+  no tool rows yet) shows gradient `Thinking` as send feedback when thinking
+  blocks are hidden; when blocks are visible the transcript owns reasoning and
+  the external header stays off. `assistantThinkingHostReady` is set on
   assistant `message_start` (and on `updateContent` only for current-turn
   assistants via `userTurnAnchorTimestamp`) so the in-message host can paint
   immediately without stale pre-compaction bubbles hijacking the slot.
-  `session_compact` clears stale group-thinking flags, resets header
-  suppression, and re-arms Thinking when the user turn or agent run is still
-  active.   `agent_start` sets
+  `session_compact` and `compaction_end` clear stale wait blockers and
+  re-arm Thinking when the user turn or agent run is still active.
+  `agent_start` sets
   `agentRunPending` and activates the thinking gradient so Thinking appears
   immediately before model tokens. External Thinking hosts use the same
   gradient-tick pattern as compact tool verbs: `refresh_thinking_status_text()`
@@ -324,6 +339,9 @@
   message body is render-cached between ticks so markdown is not rebuilt at
   20 FPS. The `agentRunPending` flag (SSOT in
   `pi-ember-ui/mode-colors.ts` via `isAgentRunPending()`/`setAgentRunPending()`,
+  stored on `globalThis` via `Symbol.for` so jiti module duplication cannot
+  desync wait state — same pattern as `userTurnCommitted`,
+  `userTurnAnchorTimestamp`, and `toolExecutionInFlight`;
   never duplicated) bridges the inter-run gap:
   `agent_end` fires between each low-level run, but Pi may auto-retry,
   auto-compact and retry, or continue with queued follow-ups — only
@@ -335,13 +353,13 @@
   tools are idle and the SSOT wait predicate holds, the in-message component or
   above-editor widget shows gradient `Thinking` and lingering tool child rows
   stay visible. When a thinking or inter-run planning stream arrives (blocks
-  hidden), `noteThinking()` paints in-group `└ Thinking`, folds children into
-  the work header, and suppresses the external widget.
+  hidden), `noteThinking()` appends in-group `└ Thinking` after lingering tool
+  rows and suppresses the external widget.
   `resolve_thinking_status_host()` prefers in-message whenever
   `assistantThinkingHostReady`, not only during the pre-tool gap. Child rows
-  are folded only via `fold_group_child_rows()` (thinking stream,
-  tool-wave reopen in `appendToGroup`, visible assistant text, or user message)
-  — never on bare `tool_execution_end` / tool success or Pi `turn_start`. Same-key batches reopen the latest
+  are folded only via `fold_group_child_rows()` on a genuinely new tool wave
+  (`appendToGroup`) or a hard boundary — never on thinking, todo, bare
+  `tool_execution_end` / tool success, or Pi `turn_start`. Same-key batches reopen the latest
   settled group (`findReopenableGroup`) instead of spawning another
   `Explored`/`Edited`/… header. Each Thinking pass resets
   `thinkingPassStartedAt` and shows a dim live elapsed suffix after 1s (widget +
@@ -382,8 +400,10 @@
   **soft** boundary: inter-run planning `text_delta` arms Thinking without
   folding; inter-run non-planning text uses `noteVisibleText()`. **Final answer text**
   (`text_delta` outside the inter-run gap) remains a hard boundary
-  (`noteVisibleText()`). `thinking_delta` with blocks visible does not mutate
-  groups. The
+  (`noteVisibleText()`). **`thinking_delta` with blocks visible** hard-exits the
+  work group (`noteVisibleThinking()`) so the next tool wave spawns a fresh
+  header downstream; hidden blocks use in-group `└ Thinking` via `noteThinking()`.
+  The
   `isToolGroupActive`/`setToolGroupActive` flag
   lives in `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools`
   lifecycle handlers (`tool_call`, `tool_execution_end`, `turn_end`,
@@ -600,22 +620,36 @@ field. Keep that mechanism aligned with the actual plugin folders.
     OpenAI/Codex narration between tool batches) is a soft boundary — groups
     stay reopenable; never `hardExitGroup()`. **Final answer text**
     (`text_delta` after the agent is no longer pending / outside the inter-run
-    gap), user message, different group key, or non-groupable tool →
-    `hardExitGroup()` (header-only, drop reopen, `hardExited` set); same-key
+    gap), user message, different group key, or hard non-groupable tool
+    (`subagent`, `quiz`, … via `noteInterveningToolCall`) →
+    `hardExitGroup()` (header-only, drop reopen, `hardExited` set);
+    **`todo`** is a soft boundary (`WORK_GROUP_SOFT_BOUNDARY_TOOLS` /
+    `noteSoftInterveningToolCall` in `renderer.ts`) — settles the work
+    header without `hardExited` and **without** folding child rows (linger
+    until thinking or a genuinely new tool wave); the
+    transcript anchor **migrates** to the first post-`todo` groupable call
+    (`migrateAnchorOnNextWave` on `appendToGroup`) so the unified header and
+    Thinking lane render **below** the todo row, not above it; in-group
+    `└ Thinking` is suppressed until that migration runs; same-key
     `tool_call` → reopen tool lane (recovers frozen group via
     `findReopenableGroup` if `currentGroup` was lost without a hard exit);
     `agent_settled` → collapse thinking lane (header-only, keep reopen pointer).
-    `thinking_delta` with blocks visible does not mutate groups. Hard
+    `thinking_delta` with blocks visible hard-exits via `noteVisibleThinking()`
+    so the next same-key batch spawns a fresh header downstream; hidden blocks
+    use in-group `└ Thinking` via `noteThinking()`. Hard
     group splits on visible text use non-empty `text_delta` only — bare
     `text_start` must not split.
   - **Running / lingering children:** Under the unified work header
     (`• Edited N files, explored M files, … +N -N`), every member in the
     current Pi turn renders as a `├`/`└` child row (`childAbsorbBefore` = 0
     until fold). Sequential tool calls in the same turn stay listed through
-    `turn_end`. Prior rows fold on a **thinking stream** (`noteThinking()`),
-    **tool-wave reopen** (`appendToGroup` on a settled group with visible
-    children), or a **hard boundary** (`noteUserMessage`, `noteVisibleText`).
-    `noteThinking()` paints in-group `└ Thinking` and suppresses the external
+    `turn_end`. Prior rows fold only on a **genuinely new tool wave**
+    (`appendToGroup` when all prior members are complete and the incoming call
+    is not a repeat of a visible same-signature call), or a **hard boundary**
+    (`noteUserMessage`, `noteVisibleText`). Soft boundaries (`todo`) and thinking
+    streams settle the header and may paint in-group `└ Thinking`, but they do
+    **not** absorb lingering children. `noteThinking()` appends in-group
+    `└ Thinking` after lingering tool rows and suppresses the external
     widget. A later tool call reopens the tool lane with only the new wave
     visible (prior wave absorbed on reopen). Hard boundaries still clear children.
   - **Group child gradient tick:** While visible child rows render, the
@@ -822,8 +856,9 @@ field. Keep that mechanism aligned with the actual plugin folders.
   resume argument picker. Directory completions ending in `/` or `"/` are
   skipped so path expansion can continue. Without `pi-ember-ui`, Pi's
   built-in overlay selectors still work. `/subagent-model` reuses
-  `pickModelInEditor()`; when the Effort slider returns a thinking level it
-  is written to agent frontmatter and the extra thinking menu is skipped.
+  `pickModelInEditor()` with the same Effort slider as `/model`; picker
+  effort is SSOT for subagent `thinking:` frontmatter (no separate
+  thinking-level select menu).
  - **Structural UI updates:** Slash/autocomplete collapse, thinking-block
    toggles, and compact-group settling update Pi's component tree and issue a
    normal public render request after the mutation. No Ember helper renders
@@ -1167,10 +1202,19 @@ field. Keep that mechanism aligned with the actual plugin folders.
   header with tree child rows at the **latest** todo's transcript position;
   earlier todo slots in the burst collapse to zero height. The live block
   updates via shared `CompactGroupText` on `record.group` (rebuild-safe).
-  Only a **user message** starts a fresh group — edits/grep/bash between todo
-  calls do not split the group (`timeline.ts` boundary on rebuild;
-  `message_start` user settle live). `render.ts` owns grouping; never settle
-  todo groups on non-todo `tool_call`.
+  Only a **user message** or **compaction** starts a fresh todo group — edits/grep/bash
+  between todo calls do not split the group (`timeline.ts` boundary on rebuild;
+  `message_start` user settle live; `session_compact` resets renderer + replays
+  post-compact state only (pre-compaction todo rows collapse to zero height;
+  `seed_todo_renderer_from_branch` and `is_post_compaction_todo_call` use the
+  post-compact branch slice). `todo` does not hard-split the unified
+  work bundle either — `pi-compact-tools` `noteSoftInterveningToolCall()`
+  (`WORK_GROUP_SOFT_BOUNDARY_TOOLS`) keeps the `__work__` header reopenable
+  after a todo row and migrates the work header below the todo on the next
+  groupable wave; `renderCall` also invokes it on rebuild (ctrl+t / compaction)
+  so chronological placement survives Pi component rebuilds. `render.ts` owns
+  todo grouping; never settle todo groups
+  on non-todo `tool_call`.
 - The visible block always shows the latest task snapshot from the group
   (`latest_group_snapshot`); historical todo tool slots in the same burst stay
   collapsed, not duplicated.

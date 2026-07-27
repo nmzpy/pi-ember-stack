@@ -16,13 +16,13 @@ import { sync_compact_group_flags } from "./group-flags.ts";
 import {
 	CompactRenderer,
 	GROUPABLE_TOOLS,
+	WORK_GROUP_SOFT_BOUNDARY_TOOLS,
 	type ToolRenderContext,
 	type ToolRenderResultOptions,
 } from "./renderer.ts";
 import { getSharedRenderer } from "./shared-renderer.ts";
 import {
 	isThinkingBlocksHidden,
-	set_thinking_blocks_visibility_listener,
 	setGroupReopenableActive,
 	setToolGroupActive,
 	setGroupThinkingChildActive,
@@ -99,7 +99,6 @@ export default function piCompactToolsPlugin(
 	pi.on("session_shutdown", () => {
 		unsubscribe_theme_refresh?.();
 		unsubscribe_theme_refresh = undefined;
-		set_thinking_blocks_visibility_listener(undefined);
 	});
 	pi.on("turn_start", () => {
 		renderer.beginTurn();
@@ -118,6 +117,7 @@ export default function piCompactToolsPlugin(
 	});
 	pi.on("agent_settled", () => {
 		renderer.clearGroupThinkingChild();
+		renderer.resyncGroupGradientTick();
 		sync_compact_group_flags(renderer);
 	});
 	pi.on("message_start", (event: any) => {
@@ -132,14 +132,16 @@ export default function piCompactToolsPlugin(
 		if (is_groupable) {
 			setTurnToolTranscriptActive(true);
 			renderer.registerCall(event.toolName, event.toolCallId, event.input);
+		} else if (WORK_GROUP_SOFT_BOUNDARY_TOOLS.has(event.toolName)) {
+			renderer.noteSoftInterveningToolCall();
 		} else {
 			renderer.noteInterveningToolCall();
 		}
 		sync_compact_group_flags(renderer);
 	});
 	// Completed group members may flip the group-active flag; child-row fold
-	// happens on thinking stream, turn boundaries, visible assistant text, user
-	// message, or the next tool wave (appendToGroup reopen).
+	// happens on thinking stream, visible assistant text, user message, or the
+	// next tool wave (appendToGroup reopen) — not on Pi turn_start/turn_end.
 	pi.on("tool_execution_end", () => {
 		sync_compact_group_flags(renderer);
 	});
@@ -152,11 +154,6 @@ export default function piCompactToolsPlugin(
 		setToolGroupActive(false);
 		setGroupThinkingChildActive(false);
 		setGroupReopenableActive(false);
-		set_thinking_blocks_visibility_listener((hidden) => {
-			if (hidden) return;
-			renderer.clearGroupThinkingChild();
-			sync_compact_group_flags(renderer);
-		});
 		syncThinkingGradientClock();
 	});
 	const excluded = new Set(opts?.excludeTools ?? []);

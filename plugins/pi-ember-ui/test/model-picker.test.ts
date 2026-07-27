@@ -7,6 +7,8 @@ import {
 	bind_live_editor_for_tests,
 	set_native_editor_submit_value_for_tests,
 	should_auto_submit_slash_text,
+	extract_model_command_search,
+	should_route_model_slash_to_picker,
 } from "../model-picker.ts";
 
 const MODELS = [
@@ -45,6 +47,30 @@ describe("find_exact_model_reference", () => {
 
 	test("matches unique bare id", () => {
 		expect(find_exact_model_reference("grok-4.5", MODELS)?.provider).toBe("xai");
+	});
+});
+
+describe("model slash routing", () => {
+	test("extract_model_command_search parses bare and filtered commands", () => {
+		expect(extract_model_command_search("/model")).toBe("");
+		expect(extract_model_command_search("/model ")).toBe("");
+		expect(extract_model_command_search("/model claude")).toBe("claude");
+		expect(extract_model_command_search("  /model grok  ")).toBe("grok");
+		expect(extract_model_command_search("/resume foo")).toBeNull();
+	});
+
+	test("should_route_model_slash_to_picker only after filter characters", () => {
+		expect(should_route_model_slash_to_picker("/model")).toBe(false);
+		expect(should_route_model_slash_to_picker("/model ")).toBe(true);
+		expect(should_route_model_slash_to_picker("/model claude")).toBe(true);
+		expect(should_route_model_slash_to_picker("/modelclaude")).toBe(true);
+	});
+
+	test("extract_model_command_search strips /model prefix for picker filter", () => {
+		expect(extract_model_command_search("/model anthropic/claude-sonnet-4")).toBe(
+			"anthropic/claude-sonnet-4",
+		);
+		expect(extract_model_command_search("/modelclaude")).toBe("claude");
 	});
 });
 

@@ -35,6 +35,8 @@ import {
 	setPlanAutoContinuing,
 	setShellMode,
 } from "../pi-ember-ui/mode-colors.ts";
+import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
+import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
 import {
 	cancelPendingModelPick,
 	consumePendingShellSubmitEnter,
@@ -48,7 +50,6 @@ import {
 	syncShellModeFromEditorText,
 	requestTuiRender,
 	resetSlashCommandTracking,
-	resumeScrollFollowFromEditor,
 	scheduleFooterStats,
 	setModeLabelResolver,
 	setFooterThinkingLevel,
@@ -257,6 +258,51 @@ const SUBAGENT_FILES: Record<string, string> = {
 	coder: path.join(SOURCE_ROOT, "subagent", "agents", "coder.md"),
 	scout: path.join(SOURCE_ROOT, "subagent", "agents", "scout.md"),
 };
+
+const SUBAGENT_AGENT_KEYS = ["coder", "scout"] as const;
+type SubagentAgentKey = (typeof SUBAGENT_AGENT_KEYS)[number];
+
+let last_subagent_model_agent: SubagentAgentKey = "coder";
+
+function subagent_agent_label(key: SubagentAgentKey): string {
+	return key === "coder" ? "Coder" : "Scout";
+}
+
+function read_subagent_frontmatter_value(filePath: string, field: string): string | undefined {
+	const content = fs.readFileSync(filePath, "utf-8");
+	const match = content.match(new RegExp(`^${field}:\\s*(.+)$`, "m"));
+	return match ? match[1].trim() : undefined;
+}
+
+function parse_configured_model_ref(
+	model_ref: string | undefined,
+): { provider: string; id: string } | undefined {
+	if (!model_ref || model_ref === "inherits parent") return undefined;
+	const slash = model_ref.indexOf("/");
+	if (slash <= 0) return undefined;
+	return {
+		provider: model_ref.slice(0, slash),
+		id: model_ref.slice(slash + 1),
+	};
+}
+
+function build_subagent_selector_options(): Array<{ label: string; description: string }> {
+	const options = SUBAGENT_AGENT_KEYS.map((key) => {
+		const filePath = SUBAGENT_FILES[key];
+		const model = read_subagent_frontmatter_value(filePath, "model") ?? "inherits parent";
+		return {
+			key,
+			label: subagent_agent_label(key),
+			description: model,
+		};
+	});
+	options.sort((a, b) => {
+		if (a.key === last_subagent_model_agent) return -1;
+		if (b.key === last_subagent_model_agent) return 1;
+		return a.label.localeCompare(b.label);
+	});
+	return options.map(({ label, description }) => ({ label, description }));
+}
 
 const PARALLEL_TOOL_CALL_GUIDANCE = `
 
@@ -840,7 +886,6 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		handler: cycleMode,
 	});
 
-	const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 	let thinking_editor_installed = false;
 
 	const install_thinking_editor = (ctx: any): void => {
@@ -858,7 +903,6 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			wrapEditorRenderForShell(editor);
 			const original_handle_input = editor.handleInput.bind(editor);
 			editor.handleInput = (data: string): void => {
-				resumeScrollFollowFromEditor(editor);
 				prepare_app_clear_input(data, editor);
 				const shellResult = processShellInput(data, editor);
 				if (shellResult?.consume) {
@@ -932,9 +976,20 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				ctx.ui.notify("subagent-model requires interactive UI.", "error");
 				return;
 			}
-			const agentChoice = await ctx.ui.select("Subagent to configure", ["Coder", "Scout"]);
+			const selector_options = build_subagent_selector_options();
+			set_extension_selector_options(selector_options);
+			let agentChoice: string | undefined;
+			try {
+				agentChoice = await ctx.ui.select(
+					"Subagent to configure",
+					selector_options.map((option) => option.label),
+				);
+			} finally {
+				set_extension_selector_options(undefined);
+			}
 			if (!agentChoice) return;
-			const agentKey = agentChoice.toLowerCase();
+			const agentKey = agentChoice.toLowerCase() as SubagentAgentKey;
+			last_subagent_model_agent = agentKey;
 			const filePath = SUBAGENT_FILES[agentKey];
 			if (!filePath || !fs.existsSync(filePath)) {
 				ctx.ui.notify(`Agent file not found: ${filePath ?? agentKey}`, "error");
@@ -943,8 +998,19 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			let currentContent = fs.readFileSync(filePath, "utf-8");
 			const currentModelMatch = currentContent.match(/^model:\s*(.+)$/m);
 			const currentModel = currentModelMatch ? currentModelMatch[1].trim() : "inherits parent";
-			ctx.ui.notify(`Pick a model for ${agentChoice} subagent (current: ${currentModel})`, "info");
-			const picked = await pickModelInEditor(ctx, pi);
+			const currentThinkingMatch = currentContent.match(/^thinking:\s*(.+)$/m);
+			const currentThinking = currentThinkingMatch ? currentThinkingMatch[1].trim() : "off";
+			const configured_model = parse_configured_model_ref(currentModel);
+			const parent_model = ctx.model as { provider?: string; id?: string } | undefined;
+			const picked = await pickModelInEditor(ctx, pi, {
+				currentModel: {
+					...(configured_model ?? {
+						provider: parent_model?.provider ?? "",
+						id: parent_model?.id ?? "",
+					}),
+					thinkingLevel: currentThinking,
+				},
+			});
 			if (!picked) return;
 			const modelValue = `${picked.provider}/${picked.id}`;
 			if (currentModelMatch) {
@@ -952,31 +1018,17 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			} else {
 				currentContent = currentContent.replace(/^(---\n)/, `$1model: ${modelValue}\n`);
 			}
-			const currentThinkingMatch = currentContent.match(/^thinking:\s*(.+)$/m);
-			const currentThinking = currentThinkingMatch ? currentThinkingMatch[1].trim() : "off";
-
-			// Effort slider already chose a thinking level — persist it and skip the menu.
-			const thinkingChoice =
-				picked.thinkingLevel ??
-				(await ctx.ui.select(
-					`Thinking level for ${agentChoice} (current: ${currentThinking})`,
-					THINKING_LEVELS,
-				));
-			if (!thinkingChoice) {
-				fs.writeFileSync(filePath, currentContent, "utf-8");
-				ctx.ui.notify(
-					`${agentChoice} subagent model set to ${modelValue}. Will use on next spawn.`,
-				);
-				return;
-			}
+			// Effort slider in the model picker is SSOT — never fall back to ctx.ui.select.
+			const thinkingChoice = picked.thinkingLevel ?? currentThinking;
 			if (currentThinkingMatch) {
 				currentContent = currentContent.replace(/^thinking:\s*.+$/m, `thinking: ${thinkingChoice}`);
-			} else {
+			} else if (thinkingChoice !== "off") {
 				currentContent = currentContent.replace(/^(---\n)/, `$1thinking: ${thinkingChoice}\n`);
 			}
 			fs.writeFileSync(filePath, currentContent, "utf-8");
+			const effortHint = format_model_effort_suffix({ id: picked.id }, picked.thinkingLevel);
 			ctx.ui.notify(
-				`${agentChoice} subagent: model=${modelValue}, thinking=${thinkingChoice}. Will use on next spawn.`,
+				`${agentChoice} subagent: ${modelValue}${effortHint}. Will use on next spawn.`,
 			);
 		},
 	});

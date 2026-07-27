@@ -353,4 +353,39 @@ describe("todo transcript render", () => {
 		expect(owner.render(120)).toHaveLength(3);
 		expect(renderer.renderCall([], mock_theme, { toolCallId: "todo-a", invalidate: () => {}, state: {} }).render(80)).toHaveLength(0);
 	});
+
+	test("seed from branch ignores pre-compaction todo snapshots", () => {
+		const renderer = new TodoRenderer();
+		const branch = [
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "todo-old", name: "todo" }],
+				},
+			},
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "todo-old",
+					toolName: "todo",
+					details: {
+						tasks: [
+							{ id: 1, subject: "Old task", status: "completed" },
+							{ id: 2, subject: "Also old", status: "pending" },
+						],
+					},
+				},
+			},
+			{ type: "compaction", firstKeptEntryId: "todo-old" },
+		] as never;
+
+		renderer.resetForSession();
+		seed_todo_renderer_from_branch(branch, renderer);
+
+		expect(
+			renderer.renderCall([], mock_theme, { toolCallId: "todo-old", invalidate: () => {}, state: {} }).render(80),
+		).toHaveLength(0);
+	});
 });

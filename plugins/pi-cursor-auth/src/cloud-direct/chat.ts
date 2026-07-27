@@ -442,7 +442,8 @@ function process_server_message(
 }
 
 export async function* stream_agent_events(req: CursorChatRequest): AsyncGenerator<CursorChatEvent> {
-	for (let attempt = 0; attempt < 2; attempt++) {
+	const max_attempts = 3;
+	for (let attempt = 0; attempt < max_attempts; attempt++) {
 		if (attempt > 0) {
 			reset_conversation_after_blob_error(req.session_key);
 		}
@@ -452,7 +453,7 @@ export async function* stream_agent_events(req: CursorChatRequest): AsyncGenerat
 			return;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (attempt === 0 && is_conversation_recovery_error(message)) {
+			if (attempt < max_attempts - 1 && is_conversation_recovery_error(message)) {
 				continue;
 			}
 			throw error;
@@ -622,9 +623,14 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 				update_conversation_checkpoint(req.session_key, pending_checkpoint, payload.blob_store);
 			}
 			persist_blob_store(req.session_key, payload.blob_store);
-		} else if (!had_checkpoint_at_start) {
-			// A failed first turn can poison the server-side conversation id; rotate before retry.
-			reset_conversation_after_blob_error(req.session_key);
+		} else {
+			const failure_message = trailer_error?.display_message ?? stream_error?.message ?? "";
+			if (
+				is_conversation_recovery_error(failure_message) ||
+				(!had_checkpoint_at_start && (trailer_error || bridge_exit_code !== 0))
+			) {
+				reset_conversation_after_blob_error(req.session_key);
+			}
 		}
 		bridge.end();
 	}

@@ -75,7 +75,7 @@ interface CustomUi {
 }
 
 import { getSharedRenderer } from "../../../pi-compact-tools/index.ts";
-import { subscribeGradientTick, unsubscribeGradientTick } from "../../../pi-ember-ui/index.ts";
+import { subscribeGradientTick, unsubscribeGradientTick, requestTuiRender } from "../../../pi-ember-ui/index.ts";
 import { buildSelectListTheme } from "../../../pi-ember-ui/select-list-theme.ts";
 import {
 	clearSubagentDelegating,
@@ -100,7 +100,7 @@ import {
 	shouldShowSubagentDelegating,
 	renderSubagentExpanded,
 } from "./render.ts";
-import { getSubagentGroupRenderer, type SubagentArgs, seed_subagent_renderer_from_branch } from "./subagent-group.ts";
+import { getSubagentGroupRenderer, type SubagentArgs, type SubagentCallRecord, isSingleModeSubagentArgs, seed_subagent_renderer_from_branch } from "./subagent-group.ts";
 import {
 	agent_tool_result_content,
 	DEFAULT_SUBAGENT_TIMEOUT_MS,
@@ -204,7 +204,6 @@ function subscribeTick(
 function unsubscribeTick(toolCallId: string): void {
 	const record = subagentTickRecords.get(toolCallId);
 	if (!record) return;
-	markSubagentTerminal(toolCallId);
 	unsubscribeGradientTick(record.callback);
 	subagentTickRecords.delete(toolCallId);
 }
@@ -216,8 +215,68 @@ function clearAllTickRecords(): void {
 	subagentTickRecords.clear();
 }
 
+function is_subagent_member_running(member: SubagentCallRecord): boolean {
+	const terminal = isSubagentToolTerminal(member.toolCallId);
+	if (terminal) return false;
+	return (
+		shouldShowSubagentDelegating(member.results, terminal) ||
+		anySubagentRunning(member.args, member.results, terminal)
+	);
+}
+
+function any_batch_member_running(batch: SubagentCallRecord[]): boolean {
+	return batch.some(is_subagent_member_running);
+}
+
+function batch_owner(batch: SubagentCallRecord[]): SubagentCallRecord | undefined {
+	return batch[0];
+}
+
+function note_subagent_live_partial(toolCallId: string, partial: SubAgentResult): void {
+	if (partial.isThinking) {
+		arm_subagent_thinking_pass(toolCallId);
+	} else {
+		clear_subagent_thinking_pass(toolCallId);
+	}
+	if (partial.latestToolCall) {
+		clear_subagent_thinking_pass(toolCallId);
+	}
+	const group_renderer = getSubagentGroupRenderer();
+	const record = group_renderer.getRecord(toolCallId);
+	if (record && isSingleModeSubagentArgs(record.args)) {
+		group_renderer.register(toolCallId, record.args, [partial], record.invalidate);
+	}
+	batch_owner(group_renderer.getBatch(toolCallId))?.invalidate?.();
+}
+
+function map_grouped_members(batch: SubagentCallRecord[]) {
+	return batch.map((member) => ({
+		args: member.args,
+		results: member.results,
+		displayName: member.displayName,
+		terminal: isSubagentToolTerminal(member.toolCallId),
+		toolCallId: member.toolCallId,
+	}));
+}
+
+function sync_owner_gradient_tick(
+	owner: SubagentCallRecord,
+	batch_running: boolean,
+	theme: CustomFactoryTheme,
+	invalidate: () => void,
+): void {
+	if (batch_running) {
+		subscribeTick(owner.toolCallId, owner.args, owner.results, theme, invalidate);
+	} else {
+		updateTickRecord(owner.toolCallId, owner.args, owner.results, theme, invalidate);
+		unsubscribeTick(owner.toolCallId);
+	}
+}
+
 import {
+	arm_subagent_thinking_pass,
 	clearSubagentTiming,
+	clear_subagent_thinking_pass,
 	getGroupElapsedMs,
 	getSubagentElapsedMs,
 	isSubagentToolTerminal,
@@ -416,7 +475,13 @@ export default function (pi: ExtensionAPI) {
 		) {
 			clearSubagentDelegating(event.toolCallId);
 			markSubagentTerminal(event.toolCallId);
-			unsubscribeTick(event.toolCallId);
+			clear_subagent_thinking_pass(event.toolCallId);
+			const batch = getSubagentGroupRenderer().getBatch(event.toolCallId);
+			if (!any_batch_member_running(batch)) {
+				const owner = batch_owner(batch);
+				if (owner) unsubscribeTick(owner.toolCallId);
+			}
+			batch_owner(batch)?.invalidate?.();
 		}
 	});
 
@@ -582,7 +647,9 @@ export default function (pi: ExtensionAPI) {
 		context: { toolCallId: string; invalidate: () => void; state: Record<string, unknown> },
 	): Component {
 		const group_renderer = getSubagentGroupRenderer();
-		const state_results = (context.state.results as SubAgentResult[] | undefined) ?? [];
+		const cached_record = group_renderer.getRecord(context.toolCallId);
+		const state_results =
+			(context.state.results as SubAgentResult[] | undefined) ?? cached_record?.results ?? [];
 		const record = group_renderer.register(
 			context.toolCallId,
 			args,
@@ -590,7 +657,11 @@ export default function (pi: ExtensionAPI) {
 			context.invalidate,
 		);
 		const results = record.results;
-		const terminal = isSubagentToolTerminal(context.toolCallId);
+		const batch = group_renderer.getBatch(context.toolCallId);
+		const owner = batch_owner(batch);
+		const batch_running = any_batch_member_running(batch);
+		const owner_tool_call_id = owner?.toolCallId ?? context.toolCallId;
+		const terminal = isSubagentToolTerminal(owner_tool_call_id);
 
 		if (!terminal && shouldShowSubagentDelegating(results, terminal)) {
 			noteSubagentDelegating(context.toolCallId);
@@ -599,6 +670,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (!group_renderer.isOwner(context.toolCallId)) {
+			if (owner && batch_running) {
+				sync_owner_gradient_tick(owner, true, theme, owner.invalidate ?? context.invalidate);
+				owner.invalidate?.();
+			}
 			return new Text("", 0, 0);
 		}
 
@@ -609,17 +684,11 @@ export default function (pi: ExtensionAPI) {
 		}
 		(shell as Container).clear();
 
-		const batch = group_renderer.getBatch(context.toolCallId);
 		const grouped_members = group_renderer.shouldUseGroupLayout(context.toolCallId)
-			? batch.map((member) => ({
-					args: member.args,
-					results: member.results,
-					displayName: member.displayName,
-					terminal: isSubagentToolTerminal(member.toolCallId),
-				}))
+			? map_grouped_members(batch)
 			: undefined;
-		if (!terminal) {
-			markSubagentRunning(context.toolCallId);
+		if (batch_running) {
+			markSubagentRunning(owner_tool_call_id);
 		}
 		const elapsedMs = grouped_members
 			? getGroupElapsedMs(batch)
@@ -630,22 +699,14 @@ export default function (pi: ExtensionAPI) {
 			theme,
 			elapsedMs,
 			grouped_members,
-			terminal,
+			!batch_running && terminal,
+			context.toolCallId,
 		);
 		context.state.layout = layout;
 		(shell as Container).addChild(layout);
 
-		const running =
-			!terminal &&
-			(shouldShowSubagentDelegating(results, terminal) ||
-				anySubagentRunning(args, results, terminal));
-		if (running) {
-			subscribeTick(context.toolCallId, args, results, theme, context.invalidate);
-		} else {
-			updateTickRecord(context.toolCallId, args, results, theme, context.invalidate);
-			if (terminal) {
-				unsubscribeTick(context.toolCallId);
-			}
+		if (owner) {
+			sync_owner_gradient_tick(owner, batch_running, theme, context.invalidate);
 		}
 		return shell as Container;
 	}
@@ -667,41 +728,33 @@ export default function (pi: ExtensionAPI) {
 		context.state.results = results;
 		group_renderer.register(context.toolCallId, context.args, results, context.invalidate);
 
+		const batch = group_renderer.getBatch(context.toolCallId);
+		const owner = batch_owner(batch);
+		const batch_running = any_batch_member_running(batch);
+
 		if (!group_renderer.isOwner(context.toolCallId)) {
-			const owner = group_renderer.getBatch(context.toolCallId)[0];
+			if (owner && batch_running) {
+				sync_owner_gradient_tick(owner, true, theme, owner.invalidate ?? context.invalidate);
+			}
 			owner?.invalidate?.();
 			return new Text("", 0, 0);
 		}
 
-		let terminal = isSubagentToolTerminal(context.toolCallId);
-		const isRunning = details
-			? !terminal &&
-				(shouldShowSubagentDelegating(results, terminal) ||
-					anySubagentRunning(context.args, results, terminal))
-			: false;
-		if (!terminal) {
-			markSubagentRunning(context.toolCallId);
-		}
+		const owner_tool_call_id = owner?.toolCallId ?? context.toolCallId;
+		let terminal = isSubagentToolTerminal(owner_tool_call_id);
+		const isRunning = batch_running;
 		if (!isRunning) {
 			markSubagentTerminal(context.toolCallId);
 		}
-		terminal = isSubagentToolTerminal(context.toolCallId);
-		const batch = group_renderer.getBatch(context.toolCallId);
+		terminal = isSubagentToolTerminal(owner_tool_call_id);
 		const grouped_members = group_renderer.shouldUseGroupLayout(context.toolCallId)
-			? batch.map((member) => ({
-					args: member.args,
-					results: member.results,
-					displayName: member.displayName,
-					terminal: isSubagentToolTerminal(member.toolCallId),
-				}))
+			? map_grouped_members(batch)
 			: undefined;
 		const elapsedMs = grouped_members
 			? getGroupElapsedMs(batch)
 			: getSubagentElapsedMs(context.toolCallId);
-		if (!isRunning) {
-			unsubscribeTick(context.toolCallId);
-		} else {
-			subscribeTick(context.toolCallId, context.args, results, theme, context.invalidate);
+		if (owner) {
+			sync_owner_gradient_tick(owner, isRunning, theme, context.invalidate);
 		}
 		if (!details) {
 			const outputBlock = result.content.find((item) => item.type === "text");
@@ -718,7 +771,8 @@ export default function (pi: ExtensionAPI) {
 				theme,
 				elapsedMs,
 				grouped_members,
-				terminal,
+				!isRunning && terminal,
+				context.toolCallId,
 			);
 			context.state.layout = layout;
 			shell.addChild(layout);
@@ -747,7 +801,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use subagent to delegate work that would flood the main context with search results or file contents.",
 			"Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}).",
-			"Bundled agents: Scout (fast recon), Coder (implementation).",
+			"Bundled agents: Scout (fast recon), Coder (implementation). Coder has `todo`: update/get/delete need numeric `id` from `todo list` or `create`.",
 			"Agent names are case-insensitive and surrounding whitespace is ignored.",
 			"Use /subagent to list all available agents or /subagent <name> for agent details.",
 		],
@@ -997,6 +1051,7 @@ export default function (pi: ExtensionAPI) {
 						(partial) => threadStore.updateThread(thread.id, { result: partial }),
 						stepDisplayName,
 						(partial) => {
+							note_subagent_live_partial(_toolCallId, partial);
 							threadStore.updateThread(thread.id, { result: partial });
 							results[i] = partial;
 							if (onUpdate) {
@@ -1202,6 +1257,7 @@ export default function (pi: ExtensionAPI) {
 							(partial) => threadStore.updateThread(parallelThreads[index].id, { result: partial }),
 							parallelDisplayNames[index],
 							(partial) => {
+								note_subagent_live_partial(_toolCallId, partial);
 								threadStore.updateThread(parallelThreads[index].id, { result: partial });
 								allResults[index] = partial;
 								emitParallelUpdate();
@@ -1290,6 +1346,7 @@ export default function (pi: ExtensionAPI) {
 					(partial) => threadStore.updateThread(thread.id, { result: partial }),
 					displayName,
 					(partial) => {
+						note_subagent_live_partial(_toolCallId, partial);
 						threadStore.updateThread(thread.id, { result: partial });
 						if (onUpdate) {
 							onUpdate({
@@ -1484,6 +1541,7 @@ export default function (pi: ExtensionAPI) {
 				thinkingLevel: agent.thinking,
 				onMessage: (partial) => threadStore.updateThread(thread.id, { result: partial }),
 				onToolCall: (partial) => {
+					note_subagent_live_partial(_toolCallId, partial);
 					threadStore.updateThread(thread.id, { result: partial });
 					onUpdate?.({
 						content: agent_tool_result_content(partial),
@@ -1648,7 +1706,7 @@ export default function (pi: ExtensionAPI) {
 					invalidate: () => container.invalidate(),
 					handleInput: (data: string) => {
 						selectList.handleInput(data);
-						tui.requestRender();
+						requestTuiRender();
 					},
 				};
 			},
@@ -1702,7 +1760,7 @@ export default function (pi: ExtensionAPI) {
 							if (currentIndex > 0) {
 								currentIndex--;
 								viewer.setThread(current[currentIndex], makeCallbacks());
-								tui.requestRender();
+								requestTuiRender();
 							}
 						},
 						onNext: () => {
@@ -1710,7 +1768,7 @@ export default function (pi: ExtensionAPI) {
 							if (currentIndex < current.length - 1) {
 								currentIndex++;
 								viewer.setThread(current[currentIndex], makeCallbacks());
-								tui.requestRender();
+								requestTuiRender();
 							}
 						},
 						hasPrev: currentIndex > 0,
@@ -1745,7 +1803,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					currentIndex = Math.min(currentIndex, current.length - 1);
 					viewer.setThread(current[currentIndex], makeCallbacks());
-					tui.requestRender();
+					requestTuiRender();
 				});
 
 				return {
@@ -1763,7 +1821,7 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 						viewer.handleInput(data);
-						tui.requestRender();
+						requestTuiRender();
 					},
 					dispose: () => {
 						cleanup();
@@ -1785,7 +1843,7 @@ export default function (pi: ExtensionAPI) {
 					if (idx >= 0) {
 						currentIndex = idx;
 						viewer.setThread(getThreads()[currentIndex], makeCallbacks());
-						tui.requestRender();
+						requestTuiRender();
 					}
 				}
 			},

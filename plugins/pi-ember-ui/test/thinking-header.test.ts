@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import {
 	arm_pre_token_thinking_status,
 	arm_thinking_stream_status,
+	clear_stale_thinking_wait_blockers,
 	compact_thinking_lane_owns_status,
 	is_in_message_thinking_status_target,
 	lingering_tool_children_visible_for_tests,
@@ -13,8 +14,10 @@ import {
 	thinking_status_should_show,
 } from "../index.ts";
 import {
-	activate_gradient,
-	deactivate_gradient,
+	bind_thinking_widget_host,
+	unbind_thinking_status_hosts,
+} from "../thinking-status-tick.ts";
+import {
 	dispatch_gradient_tick,
 	set_gradient_render_request,
 } from "../gradient.ts";
@@ -39,8 +42,23 @@ import {
 	setUserTurnAnchorTimestamp,
 	setUserTurnCommitted,
 	resetToolExecutionInFlight,
+	markToolExecutionStarted,
+	setLatestSubagentRunning,
 } from "../mode-colors.ts";
-import { is_planning_style_text_delta } from "../thinking-wait.ts";
+import {
+	is_planning_style_text_delta,
+	bind_thinking_wait_handlers,
+	reconcile_thinking_wait_ui,
+} from "../thinking-wait.ts";
+
+function bind_thinking_reconcile_handlers(): void {
+	bind_thinking_wait_handlers({
+		armPreTokenThinkingStatus: arm_pre_token_thinking_status,
+		refreshThinkingStatus: () => {},
+		getThinkingActive: () => false,
+		clearStaleBlockers: clear_stale_thinking_wait_blockers,
+	});
+}
 
 describe("is_agent_thinking_wait", () => {
 	test("requires user turn committed when agent is idle", () => {
@@ -97,7 +115,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("shows during pre-tool gap even when thinking blocks are visible", () => {
+	test("hides during pre-tool gap when thinking blocks are visible", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(false);
 		setTurnToolTranscriptActive(false);
@@ -106,7 +124,7 @@ describe("thinking header visibility", () => {
 			setToolGroupActive(false);
 			setGroupThinkingChildActive(false);
 			arm_pre_token_thinking_status();
-			expect(thinking_status_should_show()).toBe(true);
+			expect(thinking_status_should_show()).toBe(false);
 		} finally {
 			setTurnToolTranscriptActive(false);
 			setUserTurnCommitted(false);
@@ -133,7 +151,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("stays visible while model streams thinking even with blocks visible post-tool", () => {
+	test("hides external header while model streams thinking when blocks are visible", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(false);
 		setTurnToolTranscriptActive(true);
@@ -144,7 +162,7 @@ describe("thinking header visibility", () => {
 			setToolGroupActive(false);
 			setGroupThinkingChildActive(false);
 			arm_thinking_stream_status();
-			expect(thinking_status_should_show()).toBe(true);
+			expect(thinking_status_should_show()).toBe(false);
 		} finally {
 			setAgentRunPending(false);
 			setTurnToolTranscriptActive(false);
@@ -310,20 +328,20 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("gradient tick schedules render through the live TUI requestRender", () => {
+	test("gradient tick schedules render through thinking host invalidate", () => {
 		const render_calls: number[] = [];
 		const mock_tui = { requestRender: () => render_calls.push(1) };
 		set_gradient_render_request(() => mock_tui.requestRender());
+		bind_thinking_widget_host({ invalidate: () => mock_tui.requestRender() });
 		setUserTurnCommitted(true);
 		setAgentRunPending(true);
 		arm_pre_token_thinking_status();
-		activate_gradient("thinking");
 		try {
 			expect(thinking_status_should_show()).toBe(true);
 			dispatch_gradient_tick();
 			expect(render_calls.length).toBe(1);
 		} finally {
-			deactivate_gradient("thinking");
+			unbind_thinking_status_hosts();
 			set_gradient_render_request(undefined);
 			setAgentRunPending(false);
 			setUserTurnCommitted(false);
@@ -339,6 +357,39 @@ describe("thinking header visibility", () => {
 			expect(isCurrentTurnAssistantTimestamp(undefined)).toBe(false);
 		} finally {
 			setUserTurnAnchorTimestamp(undefined);
+		}
+	});
+
+	test("isCurrentTurnAssistantTimestamp is false for historical assistants when idle", () => {
+		setUserTurnCommitted(false);
+		setAgentRunPending(false);
+		setUserTurnAnchorTimestamp(undefined);
+		try {
+			expect(isCurrentTurnAssistantTimestamp(100)).toBe(false);
+			expect(isCurrentTurnAssistantTimestamp(999)).toBe(false);
+		} finally {
+			setUserTurnCommitted(false);
+			setAgentRunPending(false);
+		}
+	});
+
+	test("user send after session idle arms widget Thinking via reconcile SSOT", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		reset_thinking_header_state_for_tests();
+		bind_thinking_reconcile_handlers();
+		try {
+			setToolGroupActive(false);
+			setGroupThinkingChildActive(false);
+			setUserTurnCommitted(true);
+			reconcile_thinking_wait_ui({ force_arm: true, clear_blockers: true });
+			expect(thinking_status_should_show()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe("widget");
+		} finally {
+			reset_thinking_header_state_for_tests();
+			setTurnToolTranscriptActive(false);
+			setThinkingBlocksHidden(prev_hidden);
 		}
 	});
 
@@ -591,6 +642,86 @@ describe("thinking header visibility", () => {
 			setAgentRunPending(false);
 			setTurnToolTranscriptActive(false);
 			setUserTurnCommitted(false);
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+});
+
+describe("reconcile_thinking_wait_ui", () => {
+	beforeEach(() => {
+		reset_thinking_header_state_for_tests();
+		bind_thinking_reconcile_handlers();
+	});
+
+	test("clears stale toolExecutionInFlight and arms Thinking", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		setUserTurnCommitted(true);
+		markToolExecutionStarted();
+		try {
+			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(false);
+			reconcile_thinking_wait_ui({ clear_blockers: true, force_arm: true });
+			expect(thinking_status_should_show()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe("widget");
+		} finally {
+			reset_thinking_header_state_for_tests();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("post-compaction reconcile clears blockers on active turn", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		setUserTurnCommitted(true);
+		setAgentRunPending(true);
+		markToolExecutionStarted();
+		setLatestSubagentRunning(true);
+		try {
+			expect(thinking_status_should_show()).toBe(false);
+			reconcile_thinking_wait_ui({ clear_blockers: true, force_arm: true });
+			expect(thinking_status_should_show()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe("widget");
+		} finally {
+			reset_thinking_header_state_for_tests();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("compact-and-continue force_arm after rebuild with agentRunPending only", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		setUserTurnCommitted(false);
+		setAgentRunPending(true);
+		markToolExecutionStarted();
+		try {
+			reconcile_thinking_wait_ui({ clear_blockers: true, force_arm: true });
+			expect(is_agent_thinking_wait()).toBe(true);
+			expect(thinking_status_should_show()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe("widget");
+		} finally {
+			reset_thinking_header_state_for_tests();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("clear_stale_thinking_wait_blockers drops stale subagent running flag", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		setUserTurnCommitted(true);
+		setLatestSubagentRunning(true);
+		try {
+			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(false);
+			clear_stale_thinking_wait_blockers();
+			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(true);
+		} finally {
+			reset_thinking_header_state_for_tests();
 			setThinkingBlocksHidden(prev_hidden);
 		}
 	});

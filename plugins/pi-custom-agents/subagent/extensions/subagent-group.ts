@@ -28,6 +28,23 @@ function isNativeMultiModeSubagentArgs(args: SubagentArgs): boolean {
 	return (args.tasks?.length ?? 0) > 0 || (args.chain?.length ?? 0) > 0;
 }
 
+/** Whether a snapshot still has live nested tool/thinking rows beneath the agent. */
+export function has_live_nested_preview(results: SubAgentResult[]): boolean {
+	const head = results[0];
+	return Boolean(head?.latestToolCall || head?.isThinking);
+}
+
+/** Keep live onToolCall partials when Pi renderCall replays stale context.state. */
+export function should_keep_existing_subagent_results(
+	existing: SubAgentResult[],
+	incoming: SubAgentResult[],
+): boolean {
+	if (existing.length === 0) return false;
+	if (incoming.length === 0) return true;
+	if (has_live_nested_preview(existing) && !has_live_nested_preview(incoming)) return true;
+	return false;
+}
+
 /** Groups consecutive single-mode subagent tool calls under one Subagents header. */
 export class SubagentGroupRenderer {
 	private batch: SubagentCallRecord[] | undefined;
@@ -56,8 +73,10 @@ export class SubagentGroupRenderer {
 		if (existing) {
 			existing.args = args;
 			// Pi rebuilds may call renderCall with a fresh context before renderResult;
-			// never wipe a populated snapshot with an empty placeholder.
-			if (results.length > 0 || existing.results.length === 0) {
+			// never wipe a populated snapshot with an empty placeholder or stale state.
+			if (should_keep_existing_subagent_results(existing.results, results)) {
+				// keep existing.results
+			} else if (results.length > 0 || existing.results.length === 0) {
 				existing.results = results;
 			}
 			if (invalidate) existing.invalidate = invalidate;

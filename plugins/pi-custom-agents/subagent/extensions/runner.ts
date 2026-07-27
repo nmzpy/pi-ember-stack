@@ -44,6 +44,20 @@ import {
 
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 120_000;
 
+/** Values below this are treated as seconds (models often pass 120 for 120s). */
+const SUBAGENT_TIMEOUT_SECONDS_THRESHOLD_MS = 1000;
+
+/** Normalize subagent timeout tool args — SSOT for runner + tool handler. */
+export function resolve_subagent_timeout_ms(timeout: unknown): number {
+	if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
+		return DEFAULT_SUBAGENT_TIMEOUT_MS;
+	}
+	if (timeout < SUBAGENT_TIMEOUT_SECONDS_THRESHOLD_MS) {
+		return Math.round(timeout * 1000);
+	}
+	return Math.round(timeout);
+}
+
 const SUBAGENT_EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPACTION_WIRING_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../compaction-wiring.ts");
 const DCP_SUBAGENT_WIRING_PATH = path.resolve(
@@ -59,6 +73,10 @@ When multiple independent tool calls are needed (e.g. reading several files,
 searching for different patterns), emit them all in a single response rather
 than one at a time. The runtime executes independent tool calls in parallel,
 so batching saves round-trips and reduces latency.
+
+## Todo
+
+\`todo\` update, get, and delete require a numeric \`id\`. Run \`todo list\` (or note the id from \`create\`) before updating — never call update without \`id\`.
 `;
 
 const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
@@ -70,13 +88,13 @@ const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
 	/token limit exceeded/i,
 ];
 
-/** In-memory settings for subagent child sessions — compaction on, retries off. */
+/** In-memory settings for subagent child sessions — auto-compaction off (handled by runner), retry off. */
 export function build_subagent_settings(): {
 	compaction: { enabled: boolean };
 	retry: { enabled: boolean };
 } {
 	return {
-		compaction: { enabled: true },
+		compaction: { enabled: false },
 		retry: { enabled: false },
 	};
 }
@@ -104,6 +122,26 @@ async function compact_subagent_session(
 	} catch (err) {
 		if (!is_benign_compact_error(err)) throw err;
 	}
+}
+
+const MAX_SUBAGENT_LENGTH_CONTINUES = 5;
+const SUBAGENT_CONTINUE_PROMPT = "continue from where you left off";
+
+/** Resume checkpoints may end with a partial/failed assistant turn. Move the leaf
+ * to the last non-assistant entry so the next prompt starts from a valid turn. */
+function trim_trailing_assistant_messages(sessionManager: SessionManager): void {
+	const branch = sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			continue;
+		}
+		if (i === branch.length - 1) return; // already ends on a non-assistant
+		sessionManager.branch(entry.id);
+		return;
+	}
+	// Every entry is an assistant message; start a fresh branch from the root.
+	sessionManager.resetLeaf();
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +300,93 @@ export interface SubAgentResume {
 	displayName: string;
 }
 
+type SubagentStreamToolEvent = {
+	toolName?: string;
+	name?: string;
+	input?: unknown;
+	args?: unknown;
+	arguments?: unknown;
+};
+
+/** Whether a child-session event counts as output for idle-timeout reset. */
+function is_subagent_output_progress_event(event: {
+	type: string;
+	assistantMessageEvent?: { type?: string };
+}): boolean {
+	if (
+		event.type === "message_end" ||
+		event.type === "tool_execution_start" ||
+		event.type === "tool_call" ||
+		event.type === "tool_execution_update" ||
+		event.type === "tool_execution_end"
+	) {
+		return true;
+	}
+	if (event.type === "message_update") {
+		const ev = event.assistantMessageEvent;
+		return (
+			ev?.type === "text_start" ||
+			ev?.type === "text_delta" ||
+			ev?.type === "thinking_start" ||
+			ev?.type === "thinking_delta"
+		);
+	}
+	return false;
+}
+
+/** Apply live child-session events that drive nested tool/thinking rows in the subagent renderer. */
+export function apply_subagent_stream_event(
+	result: SubAgentResult,
+	event: { type: string; assistantMessageEvent?: { type?: string } } & SubagentStreamToolEvent,
+	notify: () => void,
+): void {
+	if (event.type === "turn_start" || event.type === "agent_start") {
+		if (result.reasoning !== false && !result.latestToolCall && !result.isThinking) {
+			result.isThinking = true;
+			notify();
+		}
+		return;
+	}
+	if (event.type === "message_update") {
+		const ev = event.assistantMessageEvent;
+		if (ev?.type === "thinking_start" || ev?.type === "thinking_delta") {
+			const cleared_tool = Boolean(result.latestToolCall);
+			if (cleared_tool) delete result.latestToolCall;
+			if (!result.isThinking || cleared_tool) {
+				result.isThinking = true;
+				notify();
+			}
+		} else if (ev?.type === "thinking_end" || ev?.type === "text_start" || ev?.type === "text_delta") {
+			if (result.isThinking) {
+				result.isThinking = false;
+				notify();
+			}
+		}
+		return;
+	}
+	if (event.type === "tool_execution_start" || event.type === "tool_call") {
+		result.isThinking = false;
+		result.latestToolCall = {
+			name: event.toolName ?? event.name ?? "unknown",
+			args: (event.input ?? event.args ?? event.arguments ?? {}) as Record<string, unknown>,
+		};
+		notify();
+		return;
+	}
+	if (event.type === "tool_execution_update") {
+		result.isThinking = false;
+		result.latestToolCall = {
+			name: event.toolName ?? event.name ?? result.latestToolCall?.name ?? "unknown",
+			args: (event.args ?? event.input ?? event.arguments ?? result.latestToolCall?.args ?? {}) as Record<
+				string,
+				unknown
+			>,
+		};
+		notify();
+	}
+	// Keep latestToolCall visible after tool_execution_end until the next tool or thinking stream.
+}
+
 export async function runSubAgent(options: {
 	cwd: string;
 	systemPrompt: string;
@@ -287,7 +412,7 @@ export async function runSubAgent(options: {
 		model,
 		modelRegistry,
 		parentSignal,
-		timeoutMs = DEFAULT_SUBAGENT_TIMEOUT_MS,
+		timeoutMs: timeoutMsInput,
 		agentName = "subagent",
 		thinkingLevel = "off",
 		onMessage,
@@ -296,13 +421,13 @@ export async function runSubAgent(options: {
 		resume,
 	} = options;
 
-	let lastOutputTime = Date.now();
+	const timeoutMs = resolve_subagent_timeout_ms(timeoutMsInput);
+
 	const timeoutController = timeoutMs && timeoutMs > 0 ? new AbortController() : undefined;
 	let timeoutId: ReturnType<typeof setTimeout> | undefined;
 	function resetOutputTimeout(): void {
 		if (!timeoutController || !timeoutMs || timeoutMs <= 0) return;
 		if (timeoutId) clearTimeout(timeoutId);
-		lastOutputTime = Date.now();
 		timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
 	}
 	resetOutputTimeout();
@@ -341,7 +466,7 @@ export async function runSubAgent(options: {
 			turns: 0,
 		},
 		model: `${model.provider}/${model.id}`,
-		reasoning: model.reasoning === true,
+		reasoning: model.reasoning !== false,
 		isThinking: false,
 	};
 
@@ -382,6 +507,7 @@ export async function runSubAgent(options: {
 			);
 		}
 		sessionManager = SessionManager.open(meta.sessionFile, checkpoint_dir, cwd);
+		trim_trailing_assistant_messages(sessionManager);
 	} else if (checkpoint && checkpoint_dir) {
 		sessionManager = SessionManager.create(cwd, checkpoint_dir);
 	} else {
@@ -446,66 +572,16 @@ export async function runSubAgent(options: {
 			throw new Error("Sub-agent aborted before start");
 		}
 
-		const capture_latest_tool_call = (event: {
-			toolName?: string;
-			name?: string;
-			input?: unknown;
-			args?: unknown;
-			arguments?: unknown;
-		}): void => {
-			result.isThinking = false;
-			result.latestToolCall = {
-				name: event.toolName ?? event.name ?? "unknown",
-				args: (event.input ?? event.args ?? event.arguments ?? {}) as Record<string, unknown>,
-			};
-			onToolCall?.({ ...result, messages: [...result.messages] });
-		};
-
-		const clear_latest_tool_call = (): void => {
-			if (!result.latestToolCall) return;
-			delete result.latestToolCall;
-			onToolCall?.({ ...result, messages: [...result.messages] });
-		};
-
 		const notify_subagent_activity = (): void => {
 			onToolCall?.({ ...result, messages: [...result.messages] });
 		};
 
 		unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-			resetOutputTimeout();
-			if (event.type === "message_update") {
-				const ev = (event as { assistantMessageEvent?: { type?: string } }).assistantMessageEvent;
-				if (ev?.type === "thinking_start" || ev?.type === "thinking_delta") {
-					if (!result.isThinking) {
-						result.isThinking = true;
-						notify_subagent_activity();
-					}
-				} else if (
-					ev?.type === "thinking_end" ||
-					ev?.type === "text_start" ||
-					ev?.type === "text_delta"
-				) {
-					if (result.isThinking) {
-						result.isThinking = false;
-						notify_subagent_activity();
-					}
-				}
-			}
-			// Pi agent sessions emit tool_execution_start; extension hooks use tool_call.
-			if (
-				event.type === "tool_execution_start" ||
-				(event as { type: string }).type === "tool_call"
-			) {
-				capture_latest_tool_call(event as Parameters<typeof capture_latest_tool_call>[0]);
-			}
-			if (
-				event.type === "tool_execution_end" ||
-				(event as { type: string }).type === "tool_result"
-			) {
-				clear_latest_tool_call();
-			}
-			if (event.type === "message_end") {
+			if (is_subagent_output_progress_event(event)) {
 				resetOutputTimeout();
+			}
+			apply_subagent_stream_event(result, event, notify_subagent_activity);
+			if (event.type === "message_end") {
 				const msg = event.message as Message | undefined;
 				if (msg && msg.role === "assistant") {
 					result.usage.turns++;
@@ -534,10 +610,11 @@ export async function runSubAgent(options: {
 		});
 
 		let overflow_retried = false;
+		let length_continues = 0;
+		let pending_task = task;
 		while (true) {
 			try {
-				await session.prompt(task);
-				break;
+				await session.prompt(pending_task);
 			} catch (prompt_error) {
 				const overflow_message = extractFailureMessage(prompt_error);
 				if (
@@ -551,6 +628,14 @@ export async function runSubAgent(options: {
 				}
 				throw prompt_error;
 			}
+			if (result.stopReason !== "length" || length_continues >= MAX_SUBAGENT_LENGTH_CONTINUES) {
+				break;
+			}
+			length_continues++;
+			pending_task = SUBAGENT_CONTINUE_PROMPT;
+		}
+		if (result.stopReason === "length" && !result.errorMessage) {
+			result.errorMessage = "Output limit reached and continuation was exhausted.";
 		}
 		if (!aborted && result.stopReason === "aborted") {
 			if (result.errorMessage) {
@@ -560,8 +645,15 @@ export async function runSubAgent(options: {
 				result.stopReason = undefined;
 				result.exitCode = 0;
 			}
+		} else if (
+			result.stopReason === "aborted" ||
+			result.stopReason === "error" ||
+			result.stopReason === "timeout" ||
+			result.stopReason === "length"
+		) {
+			result.exitCode = 1;
 		} else {
-			result.exitCode = result.stopReason === "aborted" ? 1 : 0;
+			result.exitCode = 0;
 		}
 	} catch (error) {
 		result.exitCode = 1;
@@ -606,13 +698,17 @@ export async function runSubAgent(options: {
 	// when the run actually failed — a successful stop with no errorMessage
 	// must not be force-marked failed.
 	if (timeoutController?.signal.aborted && !parentSignal?.aborted) {
-		const elapsed = Date.now() - lastOutputTime;
-		result.exitCode = 1;
-		result.stopReason = "timeout";
-		result.errorMessage = `Timeout after ${elapsed}ms with no output`;
-		// Preserve the original 300s default in the public summary when the
-		// deadline has never been reset; otherwise report the idle gap so users
-		// see the timer started from the last subagent output, not the run start.
+		const has_real_error =
+			Boolean(result.errorMessage && !isGenericAbortMessage(result.errorMessage)) ||
+			Boolean(lastAssistantErrorMessage(result.messages));
+		if (!has_real_error) {
+			result.exitCode = 1;
+			result.stopReason = "timeout";
+			result.errorMessage =
+				result.messages.length === 0
+					? `Timed out after ${timeoutMs}ms with no output`
+					: `Timed out after ${timeoutMs}ms idle`;
+		}
 	} else if (parentSignal?.aborted) {
 		result.exitCode = 1;
 		result.stopReason = result.stopReason === "timeout" ? "timeout" : "aborted";

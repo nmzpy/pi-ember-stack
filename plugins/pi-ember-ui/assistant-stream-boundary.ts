@@ -1,5 +1,5 @@
 import type { CompactRenderer } from "../pi-compact-tools/renderer.ts";
-import { isInterRunGap, isThinkingBlocksHidden } from "./mode-colors.ts";
+import { isInterRunGap, isThinkingBlocksHidden, is_work_group_boundary_suppressed } from "./mode-colors.ts";
 import { is_planning_style_text_delta } from "./thinking-wait.ts";
 
 /** Classify assistant stream events that affect compact group boundaries. */
@@ -18,17 +18,20 @@ export function resolve_assistant_stream_boundary_event(ev: {
 /**
  * Apply compact-group stream boundaries — SSOT for message_update and tests.
  * Returns `"planning_text"` when inter-run planning narration should arm Thinking
- * without folding child rows (caller runs `sync_thinking_wait_ui()`).
+ * without folding child rows (caller runs `reconcile_thinking_wait_ui()`).
  */
 export function apply_assistant_stream_boundary(
 	renderer: CompactRenderer,
 	ev: { type: string; delta?: unknown },
 ): "planning_text" | void {
+	if (is_work_group_boundary_suppressed()) return;
+
 	const boundary = resolve_assistant_stream_boundary_event(ev);
 	if (!boundary) return;
 
 	if (boundary === "thinking") {
 		if (isThinkingBlocksHidden()) renderer.noteThinking();
+		else renderer.noteVisibleThinking();
 		return;
 	}
 

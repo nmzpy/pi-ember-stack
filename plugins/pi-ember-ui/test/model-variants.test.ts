@@ -6,6 +6,7 @@ import {
 	effort_description,
 	effort_from_fast_line_id,
 	format_effort_display_label,
+	format_model_effort_suffix,
 	extract_model_class_token,
 	extract_variant_token,
 	get_baked_thinking_variant,
@@ -252,5 +253,20 @@ describe("effort helpers", () => {
 	test("get_baked_thinking_variant still finds max/minimal", () => {
 		expect(get_baked_thinking_variant("Claude 4 Max")).toBe("max");
 		expect(get_baked_thinking_variant("o1 Minimal")).toBe("minimal");
+	});
+
+	test("format_model_effort_suffix omits redundant baked effort", () => {
+		expect(
+			format_model_effort_suffix({ id: "swe-1-7-medium", name: "SWE-1.7 Medium" }, "medium"),
+		).toBe("");
+		expect(
+			format_model_effort_suffix({ id: "claude-opus-4-7-high" }, "high"),
+		).toBe("");
+		expect(format_model_effort_suffix({ id: "glm-5-2-max", name: "GLM-5.2 Max" }, "max")).toBe(
+			"",
+		);
+		expect(format_model_effort_suffix({ id: "gpt-4o" }, "high")).toBe(" · high");
+		expect(format_model_effort_suffix({ id: "o3-mini" }, "off")).toBe("");
+		expect(format_model_effort_suffix({ id: "o3-mini" }, undefined)).toBe("");
 	});
 });

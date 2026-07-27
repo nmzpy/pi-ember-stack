@@ -1,10 +1,12 @@
 import { describe, expect, test, beforeEach } from "bun:test";
 import {
 	bash_execution_content_pad_cols,
+	fit_terminal_content_line,
 	format_ember_bash_transcript_lines,
 	shell_aware_editor_border_hex,
 	shell_aware_editor_inner_pad,
 } from "../index.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	MUTED_COLOR,
 	PAGE_BG,
@@ -72,5 +74,17 @@ describe("user bash integrated UI helpers", () => {
 		expect(isUserBashRunning()).toBe(true);
 		setUserBashRunning(false);
 		expect(isUserBashRunning()).toBe(false);
+	});
+
+	test("fit_terminal_content_line does not pad short rows", () => {
+		const line = fit_terminal_content_line("hello", 80);
+		expect(visibleWidth(line)).toBe(5);
+	});
+
+	test("format_ember_bash_transcript_lines does not pad content to full width", () => {
+		const width = 80;
+		const raw = [ruleLine(78), "short output", ruleLine(78)];
+		const row = format_ember_bash_transcript_lines(raw, width, false)[1];
+		expect(visibleWidth(row)).toBeLessThan(width);
 	});
 });

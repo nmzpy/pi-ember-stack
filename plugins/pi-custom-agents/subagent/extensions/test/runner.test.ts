@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { Message } from "@earendil-works/pi-ai";
 import {
 	type SubAgentResult,
+	DEFAULT_SUBAGENT_TIMEOUT_MS,
 	format_agent_tool_result_batch,
 	format_agent_tool_result_text,
 	get_agent_result_body,
 	isFailedResult,
 	resolve_failure_message,
+	resolve_subagent_timeout_ms,
 } from "../runner.ts";
 
 function makeResult(overrides: Partial<SubAgentResult> = {}): SubAgentResult {
@@ -36,6 +38,26 @@ function assistantMessage(overrides: Partial<Message> = {}): Message {
 		...overrides,
 	} as Message;
 }
+
+describe("resolve_subagent_timeout_ms", () => {
+	test("undefined or invalid values use the 120s default", () => {
+		expect(resolve_subagent_timeout_ms(undefined)).toBe(DEFAULT_SUBAGENT_TIMEOUT_MS);
+		expect(resolve_subagent_timeout_ms(null)).toBe(DEFAULT_SUBAGENT_TIMEOUT_MS);
+		expect(resolve_subagent_timeout_ms(0)).toBe(DEFAULT_SUBAGENT_TIMEOUT_MS);
+		expect(resolve_subagent_timeout_ms(-1)).toBe(DEFAULT_SUBAGENT_TIMEOUT_MS);
+		expect(resolve_subagent_timeout_ms(Number.NaN)).toBe(DEFAULT_SUBAGENT_TIMEOUT_MS);
+	});
+
+	test("values below 1000 are treated as seconds", () => {
+		expect(resolve_subagent_timeout_ms(120)).toBe(120_000);
+		expect(resolve_subagent_timeout_ms(1)).toBe(1_000);
+	});
+
+	test("values at or above 1000 are treated as milliseconds", () => {
+		expect(resolve_subagent_timeout_ms(120_000)).toBe(120_000);
+		expect(resolve_subagent_timeout_ms(5_000)).toBe(5_000);
+	});
+});
 
 describe("isFailedResult", () => {
 	test("non-zero exit code is a failure", () => {

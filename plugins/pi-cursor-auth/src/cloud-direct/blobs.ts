@@ -14,6 +14,13 @@ export function blob_id_to_store_key(blob_id: Uint8Array): string {
 	return Buffer.from(blob_id).toString("hex");
 }
 
+/** True when `bytes` is a Cursor KV blob id (sha256 digest or hex-ascii id). */
+export function bytes_look_like_blob_id(bytes: Uint8Array): boolean {
+	if (bytes.length === 32) return true;
+	if (bytes.length < 12 || bytes.length > 64) return false;
+	return /^[0-9a-f]{12,64}$/i.test(new TextDecoder().decode(bytes));
+}
+
 export function store_blob(
 	blob_store: Map<string, Uint8Array>,
 	blob_id: Uint8Array,

@@ -350,6 +350,27 @@ export function format_effort_display_label(point: EffortSliderPoint): string {
 	return point.charAt(0).toUpperCase() + point.slice(1);
 }
 
+/**
+ * Toast/notify effort suffix (` · high`) — omitted when effort is already baked
+ * into the catalog id/name (e.g. `devin/swe-1-7-medium` must not append ` · medium`).
+ */
+export function format_model_effort_suffix(
+	model: { id?: string; name?: string },
+	thinkingLevel?: string,
+): string {
+	const level = normalize_effort_suffix_level(thinkingLevel);
+	if (!level) return "";
+	if (has_baked_effort_variant(model)) return "";
+	return ` · ${level}`;
+}
+
+function normalize_effort_suffix_level(thinkingLevel?: string): string | undefined {
+	if (typeof thinkingLevel !== "string") return undefined;
+	const level = thinkingLevel.trim();
+	if (!level || level.toLowerCase() === "off") return undefined;
+	return level;
+}
+
 /** Bare id/name with no baked effort suffix (not even `none` / `no`). */
 export function is_unlabeled_sibling_base(model: {
 	id?: string;

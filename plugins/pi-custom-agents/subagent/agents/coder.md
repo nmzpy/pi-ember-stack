@@ -26,9 +26,10 @@ Animations must respect is_animation_enabled().
 Workflow:
 
 1. Read the files you need to understand the context.
-2. Implement the change in ordered, single-logical-change steps.
-3. After each logical change, run bash t.gate.sh <files> to validate.
-4. Report what you did, any deviations, and user-facing benefits.
+2. For todos: `todo list` first — `update`/`get`/`delete` require numeric `id`.
+3. Implement the change in ordered, single-logical-change steps.
+4. After each logical change, run bash t.gate.sh <files> to validate.
+5. Report what you did, any deviations, and user-facing benefits.
 
 Constraints:
 
