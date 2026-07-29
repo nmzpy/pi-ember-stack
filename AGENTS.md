@@ -240,7 +240,9 @@
   visible, the clock must stop entirely — zero periodic `requestRender` calls.
   **Binding a Thinking host (`bind_thinking_widget_host`) must not subscribe the
   clock** — only `sync_thinking_gradient_clock()` → `sync_thinking_status_tick()`
-  may subscribe/unsubscribe. Trackpad scroll uses terminal scrollback; Ember
+  may subscribe/unsubscribe. `render_thinking_status_lines` has a safety net
+  that activates the gradient reason and subscribes the tick if the host
+  resolves while the clock is stopped (race recovery — idempotent, O(1)). Trackpad scroll uses terminal scrollback; Ember
   must not intercept scroll input or repaint the live viewport while the user
   reads history. Do not re-anchor on slash/autocomplete exit or idle lifecycle
   events. Structural changes (show/hide Thinking, group settle/collapse,
@@ -293,9 +295,12 @@
   It is suppressed when a quiz overlay is active, when a compact tool group
   has a **running** member (`isToolGroupActive()` — lingering completed
   children alone no longer suppress), when the latest tool call is a running
-  subagent, when thinking blocks are **visible** (`!isThinkingBlocksHidden()` —
-  the transcript owns reasoning; external header is always suppressed), or when
-  in-group `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). Nested
+  subagent, when a visible thinking block is actively streaming (`thinkingActive`
+  with `!isThinkingBlocksHidden()` — the transcript owns reasoning), or when
+  in-group `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). The
+  `Thinking` placeholder still appears in the pre-token wait and in-message
+  pre-output wait while blocks are visible, until the model begins emitting
+  visible text or a thinking stream. Nested
   subagent `└ Thinking` rows are separate (`render.ts`) and still paint while
   blocks are visible. Bare
   `text_start` and empty `text_delta` never suppress via
@@ -403,6 +408,10 @@
   (`noteVisibleText()`). **`thinking_delta` with blocks visible** hard-exits the
   work group (`noteVisibleThinking()`) so the next tool wave spawns a fresh
   header downstream; hidden blocks use in-group `└ Thinking` via `noteThinking()`.
+  **Inter-run reasoning** (`thinking_delta`/`thinking_start` while
+  `isInterRunGap()`) soft-settles via `noteThinking()` regardless of block
+  visibility, so Devin/Cognition inter-batch reasoning keeps the unified work
+  group reopenable instead of spawning standalone rows per tool batch.
   The
   `isToolGroupActive`/`setToolGroupActive` flag
   lives in `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools`
@@ -577,6 +586,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
   the header uses bright success/error tokens; grouped child edit/write rows use
   muted `+N -N` via `formatGroupChildEditWriteStats`. Only the header carries
   the bullet. Bash grep calls count as searches and join the same bundle.
+  A pure run of at least two `apply_patch` calls uses a collapsible `Patching`
+  header with per-file children; any mixed patch/read/edit/search run remains in
+  this unified public work bundle so patches contribute to `Edited`/`Explored`
+  summaries.
   Grouped child rows show path/details only plus muted diff stats; grouped read
   children include offset/line limit. Final counts use distinct tool-call
   target paths for files; searches and bash commands count call entries. Every
@@ -636,7 +649,11 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `agent_settled` → collapse thinking lane (header-only, keep reopen pointer).
     `thinking_delta` with blocks visible hard-exits via `noteVisibleThinking()`
     so the next same-key batch spawns a fresh header downstream; hidden blocks
-    use in-group `└ Thinking` via `noteThinking()`. Hard
+    use in-group `└ Thinking` via `noteThinking()`. **Inter-run reasoning**
+    (`thinking_delta`/`thinking_start` while `isInterRunGap()` — Devin/Cognition
+    between tool batches) is treated as planning, not a final answer: it
+    soft-settles via `noteThinking()` regardless of whether blocks are visible,
+    so the unified work group stays reopenable for the next tool wave. Hard
     group splits on visible text use non-empty `text_delta` only — bare
     `text_start` must not split.
   - **Running / lingering children:** Under the unified work header
@@ -721,6 +738,12 @@ field. Keep that mechanism aligned with the actual plugin folders.
 
 ### `pi-custom-agents`
 
+- **Quiz for material uncertainty:** All parent modes (`plan`, `code`, `debug`,
+  `orchestrate`) tell the model to ask clarifying questions via the `quiz` tool
+  when uncertain about a materially important requirement, tradeoff, or
+  interpretation. Trivial or low-risk decisions remain autonomous. The canonical
+  guidance text lives once in `QUIZ_UNCERTAINTY_GUIDANCE` in `index.ts` and is
+  injected into each parent mode prompt.
 - **Provider-aware patch tool selection:** `edit-tools.ts` is the SSOT for
   choosing `apply_patch` vs `edit`, `SUBAGENT_DELEGATION_TOOLS`
   (`subagent` / `subagent_resume`), and `without_subagent_delegation_tools()`.
@@ -977,6 +1000,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
   rows. `truncateToWidth` is the SSOT lever for ANSI-aware truncation; the
   `TOOL_ROW_WIDTH_FRACTION` constant is the single source for the half-width
   threshold.
+  The subagent extension delegates Pi's native `ToolExecutionComponent.render`
+  and removes only its self-shell leading separator for `subagent` and
+  `subagent_resume`, keeping successive compact agent rows tight without
+  touching Pi's render scheduler or differential state.
 - Keep read-only modes read-only through their active-tool allowlists.
   Plan/debug/orchestrate include `SUBAGENT_DELEGATION_TOOLS`; code mode does
   not. Plan mode is Scout-only for exploration (`subagent-policy.ts` SSOT:
@@ -1080,8 +1107,15 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `new`/`fork`/`startup` do. `session_shutdown` clears only the active session via
   `clear_conversation_state(get_cursor_session_key())`. **Blob SSOT:**
   `src/cloud-direct/blobs.ts` (`blob_id_to_store_key`, `store_blob`,
-  `lookup_blob`, `assert_conversation_blobs_present`) — request build and KV
-  `getBlob` lookup must share the same hex key; never duplicate blob-key logic.
+  `store_cursor_blob`, `lookup_blob`, `assert_conversation_blobs_present`) —
+  request build and KV `getBlob` lookup must share the same hex key; never
+  duplicate blob-key logic. `build_cursor_request` in `request.ts` always
+  rebuilds `rootPromptMessagesJson` and `turns` from mapped Pi history:
+  every `ConversationTurnStructure`, nested `userMessage`, and `steps[]`
+  entry is a sha256 blob id stored in the per-session `blob_store` (never
+  inline serialized protobuf bytes). `rootPromptMessagesJson` carries system
+  plus prior user/assistant/tool-result JSON history blobs — Cursor uses this
+  field (not `turns[]`) to build the model prompt.
   Drop stale checkpoints when referenced blobs are missing locally and **rotate
   `conversation_id`** so Cursor does not reuse server-side state for a dead
   conversation. Persist checkpoint + `blob_store` **only after a successful
@@ -1092,11 +1126,18 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - **Outbound tool schema SSOT:** `PI_TO_CURSOR_TOOL_NAME` and
   `PI_TO_CURSOR_ARG_NAMES` in `src/context.ts` (`cursor_serialize_tool`;
   covers core tools plus `todo`, `apply_patch`, `subagent`, `quiz`, `task`,
-  web tools, `compress`). **Inbound mapping SSOT:** `TOOL_ALIASES` +
+  web tools, `compress`). Outbound MCP names are namespaced with `pi_ember_`
+  (e.g. `pi_ember_grep`, `pi_ember_glob`) so they never collide with Cursor's
+  native Read/Grep/Glob/LS/Shell tools, which are intentionally rejected.
+  **Inbound mapping SSOT:** `CURSOR_TO_PI_TOOL_NAME`, `TOOL_ALIASES` +
   `normalize_tool_arguments` + `resolve_pi_tool_name` at the `stream.ts` tool-call
   boundary only — never duplicate these maps. **Final arg normalization SSOT:**
   `finalize_cursor_tool_arguments()` in `stream.ts` (used on both streaming deltas
   and `close_tool_call`) — never parse final JSON without normalization.
+- **MCP routing instructions:** `request.ts` populates Cursor's
+  `mcpInstructions` with a server-level instruction reminding the model to use
+  only `pi_ember_*` MCP tools. The provider identifier `pi-ember-stack` is
+  centralized in `EMBER_MCP_PROVIDER_IDENTIFIER` and reused by `history.ts`.
 - Mode directives prepend to the system prompt on the first turn and after Pi
   mode changes (`stream.ts`; `plan` / `code` / `debug` / `orchestrate`).
 - **Reasoning models:** `CURSOR_REASONING_MODEL_PATTERNS` in `src/constants.ts`;

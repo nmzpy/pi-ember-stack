@@ -136,7 +136,7 @@ const indexPath = fileURLToPath(new URL("../index.ts", import.meta.url));
 const indexSrc = readFileSync(indexPath, "utf8");
 
 test("index.ts imports buildSearchErrorPlan and wires it into the web_search error path", () => {
-	assert.match(indexSrc, /import \{ buildSearchErrorPlan, type SearchErrorDetails, type SearchErrorPlan \} from "\.\/render-search-error\.ts";/);
+	assert.match(indexSrc, /import \{[\s\S]*?buildSearchErrorPlan,[\s\S]*?type SearchErrorDetails,[\s\S]*?type SearchErrorPlan,[\s\S]*?\} from "\.\/render-search-error\.ts";/);
 	// The web_search renderResult error branch must call buildSearchErrorPlan.
 	// (Mutation: reverting renderResult to `return new Text(error...)` drops this.)
 	assert.match(indexSrc, /buildSearchErrorPlan\(details as SearchErrorDetails\)/);

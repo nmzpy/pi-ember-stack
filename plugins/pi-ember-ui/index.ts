@@ -60,6 +60,7 @@ import {
 	get_gradient_phase,
 	get_gradient_phase_with_offset,
 	get_logo_phase,
+	gradient_reason_active,
 	neutral_pulse_hex,
 	invalidate_gradient_cache,
 	MUTED_GROUP_GRADIENT_PRESET,
@@ -71,6 +72,7 @@ import {
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
 import {
+	ensure_chatbox_leading_spacer,
 	request_live_tui_render,
 	reset_slash_command_tracking,
 } from "./layout.ts";
@@ -348,9 +350,11 @@ export function format_thinking_pass_elapsed_suffix(theme: {
 	return theme.fg("dim", ` ${formatElapsed(elapsedMs)}`);
 }
 
+/** SSOT padding for the above-editor Thinking widget row. */
+const WIDGET_INSET_COLUMNS = 2;
+
 function build_thinking_status_row_text(host: "widget" | "in_message"): string {
-	const WIDGET_INSET = 1;
-	const widgetPad = host === "widget" ? " ".repeat(WIDGET_INSET) : "";
+	const widgetPad = host === "widget" ? " ".repeat(WIDGET_INSET_COLUMNS) : "";
 	const theme = resolve_live_theme();
 	const labelGradient = render_thinking_gradient_label();
 	const elapsedColored = format_thinking_pass_elapsed_suffix(theme);
@@ -394,34 +398,46 @@ export function lingering_tool_children_visible_for_tests(): boolean {
  *  group is actually painting that row (renderer SSOT — not the synced flag). */
 export function compact_thinking_lane_owns_status(): boolean {
 	if (!isThinkingBlocksHidden() || !isTurnToolTranscriptActive()) return false;
-	return getSharedRenderer().hasGroupThinkingChild();
+	if (getSharedRenderer().hasGroupThinkingChild()) return true;
+	// A settled/reopenable group without a visible child row also claims the
+	// transcript Thinking slot; external hosts must not duplicate it.
+	return getSharedRenderer().hasReopenableGroup();
 }
 
 /** SSOT: mutually exclusive surface for the gradient Thinking row. */
 export function resolve_thinking_status_host(): "in_message" | "widget" | null {
 	if (!thinking_status_should_show()) return null;
 	if (compact_thinking_lane_owns_status()) return null;
+	// Reopenable/settled work groups already show in-group `└ Thinking`.
+	// Do not duplicate that with an external header.
+	if (getSharedRenderer().hasReopenableGroup()) return null;
 	// Pre-tool: above-editor widget until the first tool row lands in the transcript.
 	if (is_pre_tool_thinking_gap()) return "widget";
 	if (assistantThinkingHostReady) return "in_message";
 	return "widget";
 }
 
-/** Pre-tool wait: user just sent, no tool rows on screen yet this turn. */
+/** Pre-tool wait: user just sent, no assistant bubble and no tool rows yet. */
 export function is_pre_tool_thinking_gap(): boolean {
-	return isAgentRunPending() && !isTurnToolTranscriptActive();
+	return isAgentRunPending() && !isTurnToolTranscriptActive() && !assistantThinkingHostReady;
 }
 
 /** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
 
-	// Visible thinking blocks own reasoning in the transcript — never duplicate
-	// with the external gradient header. Subagent nested Thinking rows are separate.
-	if (!isThinkingBlocksHidden()) return false;
-
 	const pre_tool = is_pre_tool_thinking_gap();
 	if (pre_tool) return !thinkingHeaderSuppressed;
+
+	// With visible thinking blocks, show the placeholder only before any
+	// assistant output (no tool rows, no thinking/text stream). Once the
+	// turn has produced visible content, the transcript owns the slot.
+	if (
+		!isThinkingBlocksHidden() &&
+		(isTurnToolTranscriptActive() || thinkingActive || thinkingHeaderSuppressed)
+	) {
+		return false;
+	}
 
 	if (thinkingActive) {
 		if (thinkingHeaderSuppressed) return false;
@@ -434,6 +450,9 @@ export function thinking_status_should_show(): boolean {
 	if (compact_thinking_lane_owns_status()) return false;
 	if (running_compact_group_blocks_thinking_header()) return false;
 	if (lingering_tool_children_block_thinking_header()) return false;
+	// A settled/reopenable work group owns the Thinking slot; in-group
+	// `└ Thinking` is already rendered by the compact renderer.
+	if (getSharedRenderer().hasReopenableGroup()) return false;
 	return true;
 }
 
@@ -462,16 +481,28 @@ export function thinking_status_terminal_layout(
 	host: "widget" | "in_message" | "compact",
 ): { padAbove: number; padBelow: number } {
 	if (host === "compact") return { padAbove: 0, padBelow: 0 };
-	// In-message: one row only — the status line itself (no extra spacers).
-	if (host === "in_message") return { padAbove: 0, padBelow: 0 };
-	// Above-editor widget: one blank row between Thinking and the chatbox.
-	return { padAbove: 0, padBelow: 1 };
+	// In-message: one blank row above the gradient Thinking label so it sits
+	// below the assistant bubble like a distinct status line, not appended text.
+	if (host === "in_message") return { padAbove: 1, padBelow: 0 };
+	// Pi's above-editor widget container already owns the single leading
+	// spacer. Do not add another row here; the widget may render [] while
+	// hidden, but its container still keeps Pi's baseline chatbox spacer.
+	return { padAbove: 0, padBelow: 0 };
 }
 
 /** Shared Thinking status row — live gradient at render time (same path as in-group rows). */
 function render_thinking_status_lines(width: number): string[] {
 	const host = resolve_thinking_status_host();
 	if (!host) return [];
+	// Safety net: ensure the gradient clock is running so the label animates.
+	// The clock is normally activated by sync_thinking_gradient_clock, but a
+	// race (e.g. agent_end clearing thinkingActive before the next arm) can
+	// leave the clock stopped while the host still resolves. Without this,
+	// get_gradient_phase() returns 0 and the label renders as static dim.
+	if (!gradient_reason_active("thinking")) {
+		activate_gradient("thinking");
+		sync_thinking_status_tick(true);
+	}
 	const row = truncateToWidth(build_thinking_status_row_text(host), Math.max(1, width));
 	const { padAbove, padBelow } = thinking_status_terminal_layout(host);
 	return [...Array(padAbove).fill(""), row, ...Array(padBelow).fill("")];
@@ -526,6 +557,11 @@ export function set_thinking_status_host_fixtures_for_tests(fixtures: {
 	if (fixtures.assistantThinkingHostReady !== undefined) {
 		assistantThinkingHostReady = fixtures.assistantThinkingHostReady;
 	}
+}
+
+/** Test seam: render the resolved Thinking status lines at a width. */
+export function render_thinking_status_lines_for_tests(width: number): string[] {
+	return render_thinking_status_lines(width);
 }
 
 class ThinkingStatusComponent implements Component {
@@ -623,6 +659,8 @@ export function clear_stale_thinking_wait_blockers(): void {
 
 /** Re-arm Thinking after compaction_end rebuilds the transcript. */
 export function reconcile_thinking_after_transcript_rebuild(): void {
+	const renderer = getSharedRenderer();
+	renderer.armInGroupThinking();
 	reconcile_thinking_wait_ui({
 		clear_blockers: true,
 		force_arm: isUserTurnCommitted() || isAgentRunPending(),
@@ -772,12 +810,23 @@ function thinking_status_paint_active(): boolean {
 /** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
 export function arm_pre_token_thinking_status(): void {
 	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return;
-	sync_compact_group_flags(getSharedRenderer());
+	const renderer = getSharedRenderer();
+	sync_compact_group_flags(renderer);
 	reset_thinking_pass_timer();
 	setAgentRunPending(true);
 	thinkingHeaderSuppressed = false;
+	// In an inter-run gap with tools already on screen, the next thinking
+	// stream should replace lingering tool children so `└ Thinking` owns the
+	// slot. Request a fold on the next noteThinking.
+	renderer.requestFoldChildrenForThinking();
 	// In-group Thinking owns the slot only when the renderer is painting that row.
 	if (compact_thinking_lane_owns_status()) {
+		refresh_thinking_status();
+		return;
+	}
+	// A settled work group owns the slot; the renderer will paint in-group Thinking.
+	if (renderer.hasReopenableGroup() && isThinkingBlocksHidden()) {
+		activate_gradient("thinking");
 		refresh_thinking_status();
 		return;
 	}
@@ -804,13 +853,23 @@ function installThinkingWidget(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget("ember-thinking", (tui: any, _theme: any) => {
 		bind_live_tui_render(tui);
+		ensure_chatbox_leading_spacer(tui);
 		const host = {
 			render(width: number): string[] {
 				if (resolve_thinking_status_host() !== "widget") return [];
-				return render_thinking_status_lines(width);
+				const lines = render_thinking_status_lines(width);
+				if (lines.length === 0) {
+					ensure_chatbox_leading_spacer(tui);
+					return [];
+				}
+				if (lines[0] === "") {
+					lines.shift();
+				}
+				return ["", ...lines];
 			},
 			invalidate(): void {
 				if (!thinking_status_should_show() && !isGroupThinkingChildActive()) return;
+				ensure_chatbox_leading_spacer(tui);
 				request_live_tui_render(tui);
 			},
 		};
@@ -1502,7 +1561,13 @@ function installAssistantMessagePatch(): void {
 			}
 			const statusLines = render_thinking_status_lines(width);
 			if (statusLines.length === 0) return this._emberRenderBodyCache;
-			return [...this._emberRenderBodyCache, ...statusLines];
+			const body = this._emberRenderBodyCache;
+			// Strip a trailing blank row if the assistant render already ended
+			// with one, so the added padAbove does not create double spacing.
+			if (body.length > 0 && body[body.length - 1] === "") {
+				body.pop();
+			}
+			return [...body, ...statusLines];
 		};
 	}
 }

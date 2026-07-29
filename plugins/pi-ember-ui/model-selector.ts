@@ -64,9 +64,8 @@ export function extract_model_command_search(text: string): string | null {
 
 /** True once the user is typing a model filter after `/model`. */
 export function should_route_model_slash_to_picker(text: string): boolean {
-	const trimmed = text.trim();
 	return (
-		trimmed.startsWith(MODEL_COMMAND_PREFIX) && trimmed.length > MODEL_COMMAND_PREFIX.length
+		text.startsWith(MODEL_COMMAND_PREFIX) && text.length > MODEL_COMMAND_PREFIX.length
 	);
 }
 

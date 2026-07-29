@@ -6,6 +6,7 @@ import {
 	compact_thinking_lane_owns_status,
 	is_in_message_thinking_status_target,
 	lingering_tool_children_visible_for_tests,
+	render_thinking_status_lines_for_tests,
 	reset_thinking_header_state_for_tests,
 	resolve_thinking_status_host,
 	set_thinking_status_host_fixtures_for_tests,
@@ -13,13 +14,23 @@ import {
 	suppress_thinking_header_for_work,
 	thinking_status_should_show,
 } from "../index.ts";
+import { set_gradient_colorizer, reset_gradient_colorizer } from "../gradient.ts";
+
+function forcedColorizer(rgb: [number, number, number], text: string): string {
+	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
+}
 import {
+	bind_thinking_status_tick_should_paint,
 	bind_thinking_widget_host,
+	sync_thinking_status_tick,
 	unbind_thinking_status_hosts,
 } from "../thinking-status-tick.ts";
 import {
 	dispatch_gradient_tick,
+	gradient_clock_is_idle,
+	gradient_reason_active,
 	set_gradient_render_request,
+	stop_all_gradient_animation,
 } from "../gradient.ts";
 import { getSharedRenderer } from "../../pi-compact-tools/shared-renderer.ts";
 import {
@@ -35,6 +46,7 @@ import {
 	setAgentRunPending,
 	setGroupReopenableActive,
 	setGroupThinkingChildActive,
+	isGroupThinkingChildActive,
 	isThinkingBlocksHidden,
 	setThinkingBlocksHidden,
 	setToolGroupActive,
@@ -95,6 +107,7 @@ describe("is_planning_style_text_delta", () => {
 describe("thinking header visibility", () => {
 	beforeEach(() => {
 		reset_thinking_header_state_for_tests();
+		getSharedRenderer().resetForSession();
 	});
 
 	test("shows when thinking blocks are hidden and a settled group is only reopenable", () => {
@@ -115,7 +128,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("hides during pre-tool gap when thinking blocks are visible", () => {
+	test("shows during pre-tool gap when thinking blocks are visible", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(false);
 		setTurnToolTranscriptActive(false);
@@ -124,7 +137,8 @@ describe("thinking header visibility", () => {
 			setToolGroupActive(false);
 			setGroupThinkingChildActive(false);
 			arm_pre_token_thinking_status();
-			expect(thinking_status_should_show()).toBe(false);
+			expect(thinking_status_should_show()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe("widget");
 		} finally {
 			setTurnToolTranscriptActive(false);
 			setUserTurnCommitted(false);
@@ -158,12 +172,14 @@ describe("thinking header visibility", () => {
 		setAgentRunPending(true);
 		setUserTurnCommitted(true);
 		resetToolExecutionInFlight();
+		set_thinking_status_host_fixtures_for_tests({ assistantThinkingHostReady: true });
 		try {
 			setToolGroupActive(false);
 			setGroupThinkingChildActive(false);
 			arm_thinking_stream_status();
 			expect(thinking_status_should_show()).toBe(false);
 		} finally {
+			set_thinking_status_host_fixtures_for_tests({ assistantThinkingHostReady: false });
 			setAgentRunPending(false);
 			setTurnToolTranscriptActive(false);
 			setUserTurnCommitted(false);
@@ -332,6 +348,7 @@ describe("thinking header visibility", () => {
 		const render_calls: number[] = [];
 		const mock_tui = { requestRender: () => render_calls.push(1) };
 		set_gradient_render_request(() => mock_tui.requestRender());
+		bind_thinking_status_tick_should_paint(() => thinking_status_should_show() || isGroupThinkingChildActive());
 		bind_thinking_widget_host({ invalidate: () => mock_tui.requestRender() });
 		setUserTurnCommitted(true);
 		setAgentRunPending(true);
@@ -704,6 +721,91 @@ describe("reconcile_thinking_wait_ui", () => {
 			expect(resolve_thinking_status_host()).toBe("widget");
 		} finally {
 			reset_thinking_header_state_for_tests();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("in-message Thinking adds one leading blank row and gradient label", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setAgentRunPending(true);
+		setUserTurnCommitted(true);
+		setTurnToolTranscriptActive(false);
+		resetToolExecutionInFlight();
+		setUserTurnAnchorTimestamp(100);
+		const renderer = getSharedRenderer();
+		renderer.resetForSession();
+		set_gradient_colorizer(forcedColorizer);
+		try {
+			setToolGroupActive(false);
+			setGroupThinkingChildActive(false);
+			set_thinking_status_host_fixtures_for_tests({
+				latestAssistantMessageTimestamp: 250,
+				assistantThinkingHostReady: true,
+			});
+			arm_pre_token_thinking_status();
+			expect(resolve_thinking_status_host()).toBe("in_message");
+			const lines = render_thinking_status_lines_for_tests(80);
+			expect(lines.length).toBeGreaterThanOrEqual(2);
+			expect(lines[0]).toBe("");
+			const stripped = lines[1]?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
+			expect(stripped).toContain("Thinking");
+			expect(lines[1]).toMatch(/\x1b\[/);
+		} finally {
+			reset_gradient_colorizer();
+			renderer.resetForSession();
+			set_thinking_status_host_fixtures_for_tests({
+				latestAssistantMessageTimestamp: undefined,
+				assistantThinkingHostReady: false,
+			});
+			setAgentRunPending(false);
+			setTurnToolTranscriptActive(false);
+			setUserTurnCommitted(false);
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("render_thinking_status_lines activates gradient clock when stopped (safety net)", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setAgentRunPending(true);
+		setUserTurnCommitted(true);
+		setTurnToolTranscriptActive(false);
+		resetToolExecutionInFlight();
+		setUserTurnAnchorTimestamp(100);
+		const renderer = getSharedRenderer();
+		renderer.resetForSession();
+		set_gradient_colorizer(forcedColorizer);
+		try {
+			setToolGroupActive(false);
+			setGroupThinkingChildActive(false);
+			set_thinking_status_host_fixtures_for_tests({
+				latestAssistantMessageTimestamp: 250,
+				assistantThinkingHostReady: true,
+			});
+			arm_pre_token_thinking_status();
+			expect(resolve_thinking_status_host()).toBe("in_message");
+			// Stop the gradient clock to simulate a race where the clock was
+			// deactivated but the host still resolves on the next render.
+			stop_all_gradient_animation();
+			sync_thinking_status_tick(false);
+			expect(gradient_clock_is_idle()).toBe(true);
+			const lines = render_thinking_status_lines_for_tests(80);
+			expect(lines.length).toBeGreaterThanOrEqual(2);
+			// Safety net should have reactivated the gradient clock.
+			expect(gradient_reason_active("thinking")).toBe(true);
+		} finally {
+			reset_gradient_colorizer();
+			stop_all_gradient_animation();
+			sync_thinking_status_tick(false);
+			renderer.resetForSession();
+			set_thinking_status_host_fixtures_for_tests({
+				latestAssistantMessageTimestamp: undefined,
+				assistantThinkingHostReady: false,
+			});
+			setAgentRunPending(false);
+			setTurnToolTranscriptActive(false);
+			setUserTurnCommitted(false);
 			setThinkingBlocksHidden(prev_hidden);
 		}
 	});

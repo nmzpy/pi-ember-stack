@@ -116,6 +116,8 @@ export function read_resume_meta(
 
 export function persist_checkpoint_meta(meta: ResumeCheckpointMeta): void {
 	const dir = get_checkpoint_dir(meta.parentSessionId, meta.originToolCallId);
+	// Do not persist a checkpoint whose session file has already disappeared.
+	if (meta.sessionFile && !fs.existsSync(meta.sessionFile)) return;
 	write_json_file(path.join(dir, META_FILE), meta);
 
 	const index = read_resume_index(meta.parentSessionId);

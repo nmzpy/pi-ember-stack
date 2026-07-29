@@ -137,7 +137,7 @@ describe("Cursor tool serialization", () => {
 		};
 
 		const serialized = cursor_serialize_tool(tool);
-		expect(serialized.name).toBe("Edit");
+		expect(serialized.name).toBe("pi_ember_edit");
 		expect(serialized.description).toBe("Edit a file");
 		expect(serialized.parameters).toMatchObject({
 			type: "object",
@@ -157,6 +157,23 @@ describe("Cursor tool serialization", () => {
 		expect(resolve_pi_tool_name("unknownThing", [])).toBeUndefined();
 	});
 
+	test("resolve_pi_tool_name maps namespaced MCP names back to Pi tool ids", () => {
+		expect(resolve_pi_tool_name("pi_ember_bash", [])).toBe("bash");
+		expect(resolve_pi_tool_name("pi_ember_read", [])).toBe("read");
+		expect(resolve_pi_tool_name("pi_ember_grep", [])).toBe("grep");
+		expect(resolve_pi_tool_name("pi_ember_glob", [])).toBe("find");
+		expect(resolve_pi_tool_name("pi_ember_web_search", [])).toBe("web_search");
+		expect(resolve_pi_tool_name("pi_ember_apply_patch", [])).toBe("apply_patch");
+	});
+
+	test("cursor_serialize_tool uses pi_ember_ prefix to avoid native Cursor collisions", () => {
+		expect(cursor_serialize_tool({ name: "read", description: "Read", parameters: { type: "object", properties: {} } }).name).toBe("pi_ember_read");
+		expect(cursor_serialize_tool({ name: "grep", description: "Grep", parameters: { type: "object", properties: {} } }).name).toBe("pi_ember_grep");
+		expect(cursor_serialize_tool({ name: "find", description: "Glob", parameters: { type: "object", properties: {} } }).name).toBe("pi_ember_glob");
+		expect(cursor_serialize_tool({ name: "bash", description: "Shell", parameters: { type: "object", properties: {} } }).name).toBe("pi_ember_bash");
+		expect(cursor_serialize_tool({ name: "ls", description: "LS", parameters: { type: "object", properties: {} } }).name).toBe("pi_ember_ls");
+	});
+
 	test("serializes extended tools with cursor arg remaps", () => {
 		const tool = {
 			name: "web_search",
@@ -171,7 +188,7 @@ describe("Cursor tool serialization", () => {
 		};
 
 		const serialized = cursor_serialize_tool(tool);
-		expect(serialized.name).toBe("web_search");
+		expect(serialized.name).toBe("pi_ember_web_search");
 		expect(serialized.parameters).toMatchObject({
 			type: "object",
 			properties: {

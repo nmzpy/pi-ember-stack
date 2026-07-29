@@ -10,17 +10,35 @@ import {
 	set_thinking_pass_started_at_for_tests,
 	thinking_status_terminal_layout,
 } from "../index.ts";
+import { render_thinking_gradient_label } from "../thinking-status-render.ts";
+import { set_gradient_colorizer, reset_gradient_colorizer } from "../gradient.ts";
+
+function forcedColorizer(rgb: [number, number, number], text: string): string {
+	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
+}
 
 function makeTheme() {
 	return {
 		fg: (tag: string, text: string) => `[${tag}:${text}]`,
+		bold: (s: string) => `*${s}*`,
 	};
 }
 
 describe("thinking pass timer", () => {
 	test("thinking_status_terminal_layout keeps one row for each host", () => {
-		expect(thinking_status_terminal_layout("widget")).toEqual({ padAbove: 0, padBelow: 1 });
-		expect(thinking_status_terminal_layout("in_message")).toEqual({ padAbove: 0, padBelow: 0 });
+		expect(thinking_status_terminal_layout("widget")).toEqual({ padAbove: 0, padBelow: 0 });
+		expect(thinking_status_terminal_layout("in_message")).toEqual({ padAbove: 1, padBelow: 0 });
+	});
+
+	test("Thinking label is gradient-colored", () => {
+		set_gradient_colorizer(forcedColorizer);
+		try {
+			const label = render_thinking_gradient_label();
+			expect(label).toMatch(/\x1b\[/);
+			expect(label.replace(/\x1b\[[0-9;]*m/g, "")).toContain("Thinking");
+		} finally {
+			reset_gradient_colorizer();
+		}
 	});
 
 	test("format_thinking_pass_elapsed_suffix hides under 1s and formats elapsed text", () => {

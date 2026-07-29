@@ -117,6 +117,7 @@ import { prune_foreign_checkpoints, resolve_resume_target } from "./resume-store
 import { runNamedAgent, SUBAGENT_REQUEST_EVENT, type SubagentRunRequest } from "./service.ts";
 import { ThreadViewer, type ThreadViewerCallbacks } from "./thread-viewer.ts";
 import { type SubagentThread, threadStore } from "./threads.ts";
+import { install_subagent_render_spacing_patch } from "./subagent-render-spacing.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -401,7 +402,8 @@ interface SubagentDetails {
 // Extension entry point
 // ---------------------------------------------------------------------------
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI): Promise<void> {
+	await install_subagent_render_spacing_patch();
 	let currentCtx: ExtensionContext | undefined;
 
 	// Session-global per-type letter counters. Each agent type (e.g. "Coder",

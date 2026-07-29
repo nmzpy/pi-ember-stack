@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -9,8 +9,13 @@ import {
 	format_selector_option_row,
 	format_selector_option_row_with_description,
 	install_select_list_theme_patches,
+	resolve_coding_agent_dist_dir,
 } from "../select-list-theme.ts";
 import { buildThemeBgColors, buildThemeFgColors } from "../mode-colors.ts";
+
+function stripAnsi(s: string): string {
+	return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
 
 function make_theme(): Theme {
 	const accent = "#808080";
@@ -82,8 +87,9 @@ describe("select list theme SSOT", () => {
 		bind_select_list_theme_resolver(() => theme);
 		install_select_list_theme_patches(() => theme);
 
+		const dist_dir = resolve_coding_agent_dist_dir();
+		if (!dist_dir) throw new Error("pi-coding-agent dist dir not found");
 		const req = createRequire(import.meta.url);
-		const dist_dir = dirname(req.resolve("@earendil-works/pi-coding-agent/dist/index.js"));
 		const { ExtensionSelectorComponent } = req(
 			join(dist_dir, "modes/interactive/components/extension-selector.js"),
 		) as {
@@ -109,7 +115,7 @@ describe("select list theme SSOT", () => {
 				rows.length = 0;
 			},
 			addChild: (component: unknown) => {
-				const row = (component as { render: (width: number) => string[] }).render(80)[1] ?? "";
+				const row = (component as { render: (width: number) => string[] }).render(80)[0] ?? "";
 				rows.push(stripAnsi(row.trim()));
 			},
 		};

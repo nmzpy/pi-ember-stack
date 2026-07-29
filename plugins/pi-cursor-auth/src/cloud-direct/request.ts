@@ -14,6 +14,7 @@ import {
 	ConversationActionSchema,
 	ConversationStateStructureSchema,
 	ConversationTurnStructureSchema,
+	McpInstructionsSchema,
 	McpToolDefinitionSchema,
 	McpToolsSchema,
 	ModelDetailsSchema,
@@ -22,11 +23,17 @@ import {
 	UserMessageActionSchema,
 	UserMessageSchema,
 	type ConversationStateStructure,
+	type ConversationTurnStructure,
 	type McpToolDefinition,
 	type RequestContext,
 } from "./proto/agent_pb.js";
 import { frame_connect_message } from "./wire.js";
-import { assert_conversation_blobs_present, store_blob } from "./blobs.js";
+import {
+	assert_conversation_blobs_present,
+	blob_id_to_store_key,
+	lookup_blob,
+	store_cursor_blob,
+} from "./blobs.js";
 import type { CursorMappedContext, CursorToolDef, CursorTurn } from "../context-map.js";
 import { cursor_tool_name_for_pi_tool } from "../context.js";
 import {
@@ -84,6 +91,13 @@ export function deterministic_conversation_id(conv_key: string): string {
 	].join("-");
 }
 
+export const EMBER_MCP_PROVIDER_IDENTIFIER = "pi-ember-stack";
+
+const EMBER_MCP_INSTRUCTIONS = `
+Available MCP tools use the pi_ember_ name prefix (e.g. pi_ember_read, pi_ember_grep).
+Use only these MCP tools. The native tools Read, Grep, Glob, LS, Shell and Write are not available in this environment.
+`;
+
 function build_mcp_tool_definitions(tools: readonly CursorToolDef[]): McpToolDefinition[] {
 	return tools.map((tool) => {
 		const json_schema: JsonValue =
@@ -94,7 +108,7 @@ function build_mcp_tool_definitions(tools: readonly CursorToolDef[]): McpToolDef
 		return create(McpToolDefinitionSchema, {
 			name: tool.name,
 			description: tool.description || "",
-			providerIdentifier: "pi-ember-stack",
+			providerIdentifier: EMBER_MCP_PROVIDER_IDENTIFIER,
 			toolName: tool.name,
 			inputSchema: input_schema,
 		});
@@ -112,7 +126,12 @@ export function build_request_context(
 		tools: mcp_tools,
 		gitRepos: [],
 		projectLayouts: [],
-		mcpInstructions: [],
+		mcpInstructions: [
+			create(McpInstructionsSchema, {
+				serverName: EMBER_MCP_PROVIDER_IDENTIFIER,
+				instructions: EMBER_MCP_INSTRUCTIONS.trim(),
+			}),
+		],
 		fileContents: {},
 		customSubagents: [],
 		env: create(RequestContextEnvSchema, {
@@ -139,24 +158,156 @@ export function format_tool_results_for_cursor(results: readonly { tool_call_id:
 		.join("\n\n");
 }
 
-function build_turn_step_bytes(turn: CursorTurn): Uint8Array[] {
-	const step_bytes: Uint8Array[] = [];
-	if (turn.assistant_text) {
-		step_bytes.push(build_assistant_step_bytes(turn.assistant_text));
+function empty_conversation_metadata() {
+	return {
+		todos: [],
+		pendingToolCalls: [],
+		previousWorkspaceUris: [],
+		fileStates: {},
+		fileStatesV2: {},
+		summaryArchives: [],
+		turnTimings: [],
+		subagentStates: {},
+		selfSummaryCount: 0,
+		readPaths: [],
+	};
+}
+
+function blob_ids_match(left: Uint8Array, right: Uint8Array): boolean {
+	return blob_id_to_store_key(left) === blob_id_to_store_key(right);
+}
+
+/** Preserve non-history checkpoint fields when the system prompt blob is unchanged. */
+function checkpoint_metadata_shell(
+	checkpoint: Uint8Array | null,
+	system_blob_id: Uint8Array,
+) {
+	if (!checkpoint) return empty_conversation_metadata();
+
+	const loaded = fromBinary(ConversationStateStructureSchema, checkpoint);
+	const cached_system = loaded.rootPromptMessagesJson[0];
+	if (!cached_system || !blob_ids_match(cached_system, system_blob_id)) {
+		return empty_conversation_metadata();
 	}
+
+	return {
+		todos: loaded.todos,
+		pendingToolCalls: loaded.pendingToolCalls,
+		previousWorkspaceUris: loaded.previousWorkspaceUris,
+		fileStates: loaded.fileStates,
+		fileStatesV2: loaded.fileStatesV2,
+		summaryArchives: loaded.summaryArchives,
+		turnTimings: loaded.turnTimings,
+		subagentStates: loaded.subagentStates,
+		selfSummaryCount: loaded.selfSummaryCount,
+		readPaths: loaded.readPaths,
+		summary: loaded.summary,
+		plan: loaded.plan,
+		summaryArchive: loaded.summaryArchive,
+	};
+}
+
+function push_root_prompt_json_blob(
+	blob_store: Map<string, Uint8Array>,
+	ids: Uint8Array[],
+	value: unknown,
+): void {
+	ids.push(
+		store_cursor_blob(blob_store, new TextEncoder().encode(JSON.stringify(value))),
+	);
+}
+
+/** Cursor feeds rootPromptMessagesJson (not turns[]) to the model — include prior JSON history. */
+function build_root_prompt_blob_ids(
+	mapped: CursorMappedContext,
+	blob_store: Map<string, Uint8Array>,
+): Uint8Array[] {
+	const ids: Uint8Array[] = [];
+	push_root_prompt_json_blob(blob_store, ids, {
+		role: "system",
+		content: mapped.system_prompt,
+	});
+
+	for (const turn of mapped.turns) {
+		if (turn.user_text.trim()) {
+			push_root_prompt_json_blob(blob_store, ids, {
+				role: "user",
+				content: [{ type: "text", text: turn.user_text }],
+			});
+		}
+		if (turn.assistant_text.trim()) {
+			push_root_prompt_json_blob(blob_store, ids, {
+				role: "assistant",
+				content: [{ type: "text", text: turn.assistant_text }],
+			});
+		}
+		for (const result of turn.embedded_tool_results) {
+			push_root_prompt_json_blob(blob_store, ids, {
+				role: "user",
+				content: [{ type: "text", text: `[Tool Result]\n${result.content}` }],
+			});
+		}
+	}
+
+	return ids;
+}
+
+function build_turn_blob_ids(
+	turn: CursorTurn,
+	blob_store: Map<string, Uint8Array>,
+): Uint8Array {
+	const user_msg = create(UserMessageSchema, {
+		text: turn.user_text,
+		messageId: crypto.randomUUID(),
+	});
+	const user_message_blob_id = store_cursor_blob(
+		blob_store,
+		toBinary(UserMessageSchema, user_msg),
+	);
+
+	const step_blob_ids: Uint8Array[] = [];
+	if (turn.assistant_text) {
+		step_blob_ids.push(
+			store_cursor_blob(blob_store, build_assistant_step_bytes(turn.assistant_text)),
+		);
+	}
+
 	const results_by_id = new Map(
 		turn.embedded_tool_results.map((result) => [result.tool_call_id, result]),
 	);
 	for (const tool_call of turn.tool_calls) {
-		step_bytes.push(
-			build_tool_call_step_bytes(
-				tool_call,
-				results_by_id.get(tool_call.id),
-				cursor_tool_name_for_pi_tool(tool_call.name),
+		step_blob_ids.push(
+			store_cursor_blob(
+				blob_store,
+				build_tool_call_step_bytes(
+					tool_call,
+					results_by_id.get(tool_call.id),
+					cursor_tool_name_for_pi_tool(tool_call.name),
+				),
 			),
 		);
 	}
-	return step_bytes;
+
+	const agent_turn = create(AgentConversationTurnStructureSchema, {
+		userMessage: user_message_blob_id,
+		steps: step_blob_ids,
+	});
+	const turn_structure = create(ConversationTurnStructureSchema, {
+		turn: { case: "agentConversationTurn", value: agent_turn },
+	});
+	return store_cursor_blob(blob_store, toBinary(ConversationTurnStructureSchema, turn_structure));
+}
+
+/** Read a turn structure blob referenced from conversation_state.turns. */
+export function read_turn_structure_blob(
+	blob_store: Map<string, Uint8Array>,
+	turn_blob_id: Uint8Array,
+): ConversationTurnStructure {
+	const turn_bytes = lookup_blob(blob_store, turn_blob_id);
+	if (!turn_bytes) {
+		throw new Error(`Cursor turn blob missing from store: ${blob_id_to_store_key(turn_blob_id).slice(0, 12)}`);
+	}
+	return fromBinary(ConversationTurnStructureSchema, turn_bytes);
 }
 
 export function build_cursor_request(
@@ -168,54 +319,18 @@ export function build_cursor_request(
 ): CursorRequestPayload {
 	const blob_store = new Map<string, Uint8Array>(existing_blob_store ?? []);
 
-	const system_json = JSON.stringify({ role: "system", content: mapped.system_prompt });
-	const system_bytes = new TextEncoder().encode(system_json);
-	const system_blob_id = new Uint8Array(createHash("sha256").update(system_bytes).digest());
-	store_blob(blob_store, system_blob_id, system_bytes);
-
-	let conversation_state: ConversationStateStructure;
-	if (checkpoint) {
-		const loaded = fromBinary(ConversationStateStructureSchema, checkpoint);
-		conversation_state = create(ConversationStateStructureSchema, {
-			...loaded,
-			rootPromptMessagesJson: [system_blob_id],
-		});
-	} else {
-		const turn_bytes: Uint8Array[] = [];
-		for (const turn of mapped.turns) {
-			const user_msg = create(UserMessageSchema, {
-				text: turn.user_text,
-				messageId: crypto.randomUUID(),
-			});
-			const user_msg_bytes = toBinary(UserMessageSchema, user_msg);
-
-			const step_bytes = build_turn_step_bytes(turn);
-
-			const agent_turn = create(AgentConversationTurnStructureSchema, {
-				userMessage: user_msg_bytes,
-				steps: step_bytes,
-			});
-			const turn_structure = create(ConversationTurnStructureSchema, {
-				turn: { case: "agentConversationTurn", value: agent_turn },
-			});
-			turn_bytes.push(toBinary(ConversationTurnStructureSchema, turn_structure));
-		}
-
-		conversation_state = create(ConversationStateStructureSchema, {
-			rootPromptMessagesJson: [system_blob_id],
-			turns: turn_bytes,
-			todos: [],
-			pendingToolCalls: [],
-			previousWorkspaceUris: [],
-			fileStates: {},
-			fileStatesV2: {},
-			summaryArchives: [],
-			turnTimings: [],
-			subagentStates: {},
-			selfSummaryCount: 0,
-			readPaths: [],
-		});
+	const root_prompt_blob_ids = build_root_prompt_blob_ids(mapped, blob_store);
+	const system_blob_id = root_prompt_blob_ids[0];
+	if (!system_blob_id) {
+		throw new Error("Cursor request is missing the system prompt blob");
 	}
+	const turn_blob_ids = mapped.turns.map((turn) => build_turn_blob_ids(turn, blob_store));
+
+	const conversation_state = create(ConversationStateStructureSchema, {
+		...checkpoint_metadata_shell(checkpoint, system_blob_id),
+		rootPromptMessagesJson: root_prompt_blob_ids,
+		turns: turn_blob_ids,
+	});
 
 	const effective_user_text =
 		mapped.user_text ||

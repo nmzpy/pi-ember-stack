@@ -16,7 +16,7 @@ test("auto-summary skips curator and reuses summary model fallback plumbing", ()
 	assert.match(indexSrc, /const shouldCurate = workflow === "summary-review"/);
 	assert.match(indexSrc, /if \(workflow === "auto-summary"\)/);
 	assert.match(indexSrc, /await loadSummaryModelChoices\(summaryContext\)/);
-	assert.match(indexSrc, /await generateSummaryDraft\(searchResults, summaryContext, signal, summaryModelChoices\.defaultSummaryModel \?\? undefined\)/);
+	assert.match(indexSrc, /await generateSummaryDraft\([\s\S]*?searchResults,[\s\S]*?summaryContext,[\s\S]*?signal,[\s\S]*?summaryModelChoices\.defaultSummaryModel \?\? undefined/);
 	assert.match(indexSrc, /workflow: workflow === "auto-summary" \? "auto-summary" : undefined/);
 });
 

@@ -7,7 +7,7 @@ import {
 /** SSOT label for the gradient Thinking status row. */
 export const THINKING_STATUS_LABEL = "Thinking";
 
-/** Same dim→text sweep as compaction — one shared 20 FPS clock. */
+/** SSOT: Thinking status uses the live `thinking` preset (dim→text glow). */
 export const THINKING_GRADIENT_PRESET: GradientPreset = "thinking";
 
 /** Live gradient `Thinking` label at the current sweep phase. */

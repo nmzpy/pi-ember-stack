@@ -3,13 +3,15 @@ import { fromBinary } from "@bufbuild/protobuf";
 import {
 	AgentClientMessageSchema,
 	ConversationStepSchema,
-	ConversationTurnStructureSchema,
+	McpInstructionsSchema,
 } from "../src/cloud-direct/proto/agent_pb.ts";
 import { map_context_to_cursor } from "../src/context-map.ts";
 import {
 	build_cursor_request,
 	format_tool_results_for_cursor,
+	read_turn_structure_blob,
 } from "../src/cloud-direct/request.ts";
+import { blob_id_to_store_key, lookup_blob } from "../src/cloud-direct/blobs.ts";
 
 describe("format_tool_results_for_cursor", () => {
 	test("preserves tool_call_id markers in outbound user text", () => {
@@ -38,6 +40,15 @@ describe("build_cursor_request history encoding", () => {
 		const run_request = client_message.message.case === "runRequest" ? client_message.message.value : undefined;
 		expect(run_request?.conversationState?.turns.length).toBe(0);
 		expect(run_request?.action?.action.case).toBe("userMessageAction");
+		expect(run_request?.mcpTools?.mcpTools.length).toBe(0);
+		expect(run_request?.requestContext?.mcpInstructions.length).toBe(1);
+		const mcp_instruction = run_request?.requestContext?.mcpInstructions[0];
+		if (mcp_instruction) {
+			const decoded = fromBinary(McpInstructionsSchema, mcp_instruction);
+			expect(decoded.serverName).toBe("pi-ember-stack");
+			expect(decoded.instructions).toContain("pi_ember_");
+			expect(decoded.instructions).toContain("not available");
+		}
 	});
 
 	test("embeds assistant tool calls into rebuilt conversation turns", () => {
@@ -66,18 +77,57 @@ describe("build_cursor_request history encoding", () => {
 		if (!conversation_state) throw new Error("expected conversation state");
 		expect(conversation_state.turns.length).toBe(1);
 
-		const turn_structure = fromBinary(ConversationTurnStructureSchema, conversation_state.turns[0] ?? new Uint8Array());
+		const turn_blob_id = conversation_state.turns[0];
+		expect(turn_blob_id?.length).toBe(32);
+
+		const turn_structure = read_turn_structure_blob(payload.blob_store, turn_blob_id ?? new Uint8Array());
 		if (turn_structure.turn.case !== "agentConversationTurn" || !turn_structure.turn.value) {
 			throw new Error("expected agent conversation turn");
 		}
 		const agent_turn = turn_structure.turn.value;
+		expect(agent_turn.userMessage.length).toBe(32);
 		expect(agent_turn.steps.length).toBeGreaterThanOrEqual(2);
 
-		const step_cases = agent_turn.steps.map((step_bytes) => {
+		const step_cases = agent_turn.steps.map((step_blob_id) => {
+			const step_bytes = lookup_blob(payload.blob_store, step_blob_id);
+			if (!step_bytes) throw new Error("missing step blob");
 			const step = fromBinary(ConversationStepSchema, step_bytes);
 			return step.message.case;
 		});
 		expect(step_cases).toContain("toolCall");
 		expect(step_cases).toContain("assistantMessage");
+	});
+
+	test("rootPromptMessagesJson includes prior user and assistant JSON history", () => {
+		const mapped = map_context_to_cursor({
+			systemPrompt: "Base",
+			messages: [
+				{ role: "user", content: "first" },
+				{ role: "assistant", content: [{ type: "text", text: "second" }] },
+				{ role: "user", content: "third" },
+			],
+			tools: [],
+		});
+
+		const payload = build_cursor_request("default", mapped, crypto.randomUUID(), null);
+		const client_message = fromBinary(AgentClientMessageSchema, payload.request_bytes);
+		const run_request = client_message.message.case === "runRequest" ? client_message.message.value : undefined;
+		const root_ids = run_request?.conversationState?.rootPromptMessagesJson ?? [];
+		expect(root_ids.length).toBe(3);
+
+		const decoded = root_ids.map((blob_id) => {
+			const bytes = lookup_blob(payload.blob_store, blob_id);
+			if (!bytes) throw new Error("missing root prompt blob");
+			return JSON.parse(new TextDecoder().decode(bytes)) as { role: string; content: unknown };
+		});
+		expect(decoded[0]?.role).toBe("system");
+		expect(decoded[1]).toEqual({
+			role: "user",
+			content: [{ type: "text", text: "first" }],
+		});
+		expect(decoded[2]).toEqual({
+			role: "assistant",
+			content: [{ type: "text", text: "second" }],
+		});
 	});
 });

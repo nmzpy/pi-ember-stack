@@ -243,10 +243,13 @@ export class TodoRenderer {
 			return new Text("", 0, 0);
 		}
 
-		this.bind_call_text(group, theme, context, tasks, error);
-		// One blank line below the todo block so the next transcript row
-		// (e.g. gradient Thinking header) does not sit flush against it.
-		return new Spacer(1);
+		if (!group) {
+			// Pre-compaction or orphaned tool ids: keep the row empty so they collapse.
+			return new Text("", 0, 0);
+		}
+
+		const callText = this.bind_call_text(group, theme, context, tasks, error);
+		return callText;
 	}
 
 	renderResult(

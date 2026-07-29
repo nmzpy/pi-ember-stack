@@ -42,6 +42,17 @@ describe("Cursor blob store keys", () => {
 		expect(lookup_blob(store, ascii_id)).toEqual(system_bytes);
 	});
 
+	test("lookup resolves truncated 12-char blob id prefixes", () => {
+		const system_json = JSON.stringify({ role: "system", content: "hello" });
+		const system_bytes = new TextEncoder().encode(system_json);
+		const digest = new Uint8Array(createHash("sha256").update(system_bytes).digest());
+		const store = new Map<string, Uint8Array>();
+		store_blob(store, digest, system_bytes);
+
+		const truncated = new TextEncoder().encode(blob_id_to_store_key(digest).slice(0, 12));
+		expect(lookup_blob(store, truncated)).toEqual(system_bytes);
+	});
+
 	test("assert_conversation_blobs_present passes for new chat payloads", () => {
 		const mapped = map_context_to_cursor({
 			messages: [{ role: "user", content: "hello" }],

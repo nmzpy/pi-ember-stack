@@ -223,6 +223,26 @@ const DOTTED_TODO_ACTIONS = new Set<string>([
 ]);
 const DOTTED_TODO_RE = /^todo\.([a-zA-Z]+)$/;
 
+function normalize_todo_tool_call_part(part: unknown): { changed: boolean; part: unknown } {
+	if (!part || typeof part !== "object") return { changed: false, part };
+	const p = part as { type?: unknown; name?: string; arguments?: unknown };
+	if (p.type !== "toolCall" || typeof p.name !== "string") return { changed: false, part };
+	const match = DOTTED_TODO_RE.exec(p.name);
+	if (!match) return { changed: false, part };
+	const suffix = match[1];
+	if (!DOTTED_TODO_ACTIONS.has(suffix)) return { changed: false, part };
+
+	const old_args = (p.arguments ?? {}) as Record<string, unknown>;
+	return {
+		changed: true,
+		part: {
+			...p,
+			name: TOOL_NAME,
+			arguments: { ...old_args, action: suffix },
+		},
+	};
+}
+
 export function rewrite_dotted_todo_calls(message: AgentMessage): AgentMessage | null {
 	if (typeof (message as { role?: unknown }).role !== "string") return null;
 	const content = (message as { content?: unknown }).content;
@@ -230,21 +250,9 @@ export function rewrite_dotted_todo_calls(message: AgentMessage): AgentMessage |
 
 	let changed = false;
 	const new_content = content.map((part: unknown) => {
-		if (!part || typeof part !== "object") return part;
-		const p = part as { type?: unknown; name?: unknown; arguments?: unknown };
-		if (p.type !== "toolCall" || typeof p.name !== "string") return part;
-		const match = DOTTED_TODO_RE.exec(p.name);
-		if (!match) return part;
-		const suffix = match[1];
-		if (!DOTTED_TODO_ACTIONS.has(suffix)) return part;
-
-		changed = true;
-		const old_args = (p.arguments ?? {}) as Record<string, unknown>;
-		return {
-			...p,
-			name: TOOL_NAME,
-			arguments: { ...old_args, action: suffix },
-		};
+		const normalized = normalize_todo_tool_call_part(part);
+		if (normalized.changed) changed = true;
+		return normalized.part;
 	});
 
 	if (!changed) return null;
@@ -633,7 +641,6 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use `todo` for complex work with 3+ steps.",
 			"`update`, `get`, and `delete` require numeric `id` — run `list` first or use the id returned by `create`.",
-			"Call `todo.<action>` (dotted form) when preferred: `todo.create`, `todo.update`, `todo.list`, `todo.get`, `todo.delete`, `todo.clear`, `todo.batch`. The `action` field is auto-derived from the dotted name.",
 			"Batch `todo` updates with other tool calls — do not make `todo` the only tool in a turn unless the user asked about task status.",
 			"Mark a task `in_progress` before beginning, and `completed` immediately when done.",
 			"Task status: pending → in_progress → completed, plus deleted as a tombstone.",
@@ -781,6 +788,18 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			if (!/stale after session replacement/.test(String(e))) throw e;
 		}
 	};
+
+	pi.on("message_update", (event) => {
+		if (event.message.role !== "assistant") return;
+		const content = event.message.content as unknown[];
+		if (!Array.isArray(content)) return;
+		for (let i = 0; i < content.length; i++) {
+			const normalized = normalize_todo_tool_call_part(content[i]);
+			if (normalized.changed) {
+				content[i] = normalized.part;
+			}
+		}
+	});
 
 	pi.on("message_end", (event) => {
 		if (event.message.role !== "assistant") return;

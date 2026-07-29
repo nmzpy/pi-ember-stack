@@ -506,7 +506,17 @@ export async function runSubAgent(options: {
 				`No saved session for ${resume.displayName}. Spawn with subagent first.`,
 			);
 		}
-		sessionManager = SessionManager.open(meta.sessionFile, checkpoint_dir, cwd);
+		try {
+			sessionManager = SessionManager.open(meta.sessionFile, checkpoint_dir, cwd);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return failedResult(
+				agentName,
+				task,
+				"error",
+				`Resume session for ${resume.displayName} is missing or corrupted. ${message}`,
+			);
+		}
 		trim_trailing_assistant_messages(sessionManager);
 	} else if (checkpoint && checkpoint_dir) {
 		sessionManager = SessionManager.create(cwd, checkpoint_dir);

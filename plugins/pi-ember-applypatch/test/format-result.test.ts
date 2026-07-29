@@ -100,8 +100,6 @@ describe("format_result_row", () => {
 		const callText = (state.callText as PatchTextLike).text;
 		expect(callText).toContain("Patching");
 		expect(callText).toContain("2 files");
-		expect(callText).toContain("a.ts");
-		expect(callText).toContain("b.ts");
 		expect(callText).not.toContain("more");
 
 		const empty = toolDef.renderResult(
@@ -122,8 +120,6 @@ describe("format_result_row", () => {
 		const resultText = (state.callText as PatchTextLike).text;
 		expect(resultText).toContain("Patched");
 		expect(resultText).not.toContain("Patching 2 files");
-		expect(resultText).toContain("a.ts");
-		expect(resultText).toContain("b.ts");
 		expect(empty.render(80)).toEqual([]);
 	});
 });

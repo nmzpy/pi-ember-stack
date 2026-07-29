@@ -5,24 +5,29 @@ function is_record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Cursor wire names sent to the model as MCP tool definitions.
+ * They are namespaced with `pi_ember_` so they never collide with Cursor's
+ * native tools (Read, Grep, Glob, LS, Shell) which are intentionally rejected.
+ */
 const PI_TO_CURSOR_TOOL_NAME = new Map<string, string>([
-	["bash", "Shell"],
-	["read", "Read"],
-	["write", "Write"],
-	["edit", "Edit"],
-	["ls", "LS"],
-	["grep", "Grep"],
-	["find", "Glob"],
-	["todo", "todo"],
-	["apply_patch", "apply_patch"],
-	["subagent", "subagent"],
-	["subagent_resume", "subagent"],
-	["quiz", "quiz"],
-	["task", "task"],
-	["web_search", "web_search"],
-	["fetch_content", "fetch_content"],
-	["get_search_content", "get_search_content"],
-	["compress", "compress"],
+	["bash", "pi_ember_bash"],
+	["read", "pi_ember_read"],
+	["write", "pi_ember_write"],
+	["edit", "pi_ember_edit"],
+	["ls", "pi_ember_ls"],
+	["grep", "pi_ember_grep"],
+	["find", "pi_ember_glob"],
+	["todo", "pi_ember_todo"],
+	["apply_patch", "pi_ember_apply_patch"],
+	["subagent", "pi_ember_subagent"],
+	["subagent_resume", "pi_ember_subagent_resume"],
+	["quiz", "pi_ember_quiz"],
+	["task", "pi_ember_task"],
+	["web_search", "pi_ember_web_search"],
+	["fetch_content", "pi_ember_fetch_content"],
+	["get_search_content", "pi_ember_get_search_content"],
+	["compress", "pi_ember_compress"],
 ]);
 
 const PI_TO_CURSOR_ARG_NAMES: Record<string, Record<string, string>> = {
@@ -215,6 +220,45 @@ const TOOL_ALIASES = new Map<string, string>([
 	["tasktoolcall", "subagent"],
 ]);
 
+/** Reverse map from Cursor MCP wire names back to canonical Pi tool ids.
+ * Also accepts the old non-namespaced names and legacy aliases for compatibility. */
+const CURSOR_TO_PI_TOOL_NAME = new Map<string, string>([
+	["pi_ember_bash", "bash"],
+	["pi_ember_read", "read"],
+	["pi_ember_write", "write"],
+	["pi_ember_edit", "edit"],
+	["pi_ember_ls", "ls"],
+	["pi_ember_grep", "grep"],
+	["pi_ember_glob", "find"],
+	["pi_ember_todo", "todo"],
+	["pi_ember_apply_patch", "apply_patch"],
+	["pi_ember_subagent", "subagent"],
+	["pi_ember_subagent_resume", "subagent_resume"],
+	["pi_ember_quiz", "quiz"],
+	["pi_ember_task", "task"],
+	["pi_ember_web_search", "web_search"],
+	["pi_ember_fetch_content", "fetch_content"],
+	["pi_ember_get_search_content", "get_search_content"],
+	["pi_ember_compress", "compress"],
+	["Shell", "bash"],
+	["Read", "read"],
+	["Write", "write"],
+	["Edit", "edit"],
+	["LS", "ls"],
+	["Grep", "grep"],
+	["Glob", "find"],
+	["todo", "todo"],
+	["apply_patch", "apply_patch"],
+	["subagent", "subagent"],
+	["subagent_resume", "subagent_resume"],
+	["quiz", "quiz"],
+	["task", "task"],
+	["web_search", "web_search"],
+	["fetch_content", "fetch_content"],
+	["get_search_content", "get_search_content"],
+	["compress", "compress"],
+]);
+
 /** Canonical Pi tool ids Cursor can map to without a live Pi tool registry. */
 const CANONICAL_PI_TOOLS = new Set([
 	"read",
@@ -247,6 +291,8 @@ export function resolve_pi_tool_name(raw_name: string, tools: readonly Tool[] = 
 
 	// Cursor owns its tool loop — Pi's context.tools is often empty. Still map
 	// known Cursor names onto Pi compact-tool ids so grouping/labels stay SSOT.
+	const cursor_to_pi = CURSOR_TO_PI_TOOL_NAME.get(normalized) ?? CURSOR_TO_PI_TOOL_NAME.get(raw_name);
+	if (cursor_to_pi) return cursor_to_pi;
 	if (TOOL_ALIASES.has(normalized)) return TOOL_ALIASES.get(normalized);
 	if (CANONICAL_PI_TOOLS.has(aliased)) return aliased;
 	return undefined;

@@ -13,6 +13,7 @@ import {
 	fuzzyFilter,
 	getKeybindings,
 	SelectList,
+	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import {
 	finalize_editor_input_after,
@@ -56,6 +57,18 @@ export {
 const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
+};
+
+/** Resume layout: allow conversation titles to use up to half the terminal
+ *  width (mirrors the subagent `TOOL_ROW_WIDTH_FRACTION` = 0.5 compact-row
+ *  threshold) so long titles wrap after the middle of the screen, not a
+ *  narrow quarter. The description still gets the right-hand side.
+ */
+const RESUME_SELECT_LIST_LAYOUT = {
+	minPrimaryColumnWidth: 12,
+	maxPrimaryColumnWidth: Number.POSITIVE_INFINITY,
+	truncatePrimary: (context: { text: string; maxWidth: number; columnWidth: number }) =>
+		truncateToWidth(context.text, Math.min(context.maxWidth, Math.floor(context.columnWidth * 0.5))),
 };
 
 /**
@@ -784,7 +797,12 @@ function install_model_picker_prototype_patches(): void {
 			}
 			const slashMode =
 				prefix.startsWith("/") || this.getText?.().trimStart().startsWith("/") === true;
-			const layout = slashMode ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
+			const isResumeList = this.getText?.()?.trim().startsWith(RESUME_PREFIX) ?? false;
+			const layout = isResumeList
+				? RESUME_SELECT_LIST_LAYOUT
+				: slashMode
+					? SLASH_COMMAND_SELECT_LIST_LAYOUT
+					: undefined;
 			return new SelectList(
 				items,
 				AUTOCOMPLETE_MAX_VISIBLE,

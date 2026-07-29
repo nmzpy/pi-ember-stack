@@ -372,6 +372,11 @@ export function unsubscribe_gradient_tick(cb: () => void): void {
 	maybe_stop_clock();
 }
 
+/** Whether a specific animation reason is currently active. */
+export function gradient_reason_active(reason: string): boolean {
+	return active_reasons.has(reason);
+}
+
 /** Whether the gradient clock has no animation reasons or tick subscribers. */
 export function gradient_clock_is_idle(): boolean {
 	return active_reasons.size === 0 && tick_subscribers.size === 0;

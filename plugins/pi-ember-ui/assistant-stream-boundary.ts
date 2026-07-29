@@ -30,6 +30,16 @@ export function apply_assistant_stream_boundary(
 	if (!boundary) return;
 
 	if (boundary === "thinking") {
+		// Inter-run reasoning (Devin/Cognition between tool batches) is
+		// planning, not a final answer. Soft-settle so the unified work
+		// group stays reopenable for the next tool wave, regardless of
+		// whether thinking blocks are visible or hidden. Visible blocks
+		// still render in the transcript via Pi's assistant message path;
+		// the compact group header simply persists across the gap.
+		if (isInterRunGap()) {
+			renderer.noteThinking();
+			return;
+		}
 		if (isThinkingBlocksHidden()) renderer.noteThinking();
 		else renderer.noteVisibleThinking();
 		return;

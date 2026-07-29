@@ -23,7 +23,7 @@ test("cancel diagnostics include curator URL and browser-open error", () => {
 
 test("manual websearch command reports browser-open fallback without closing curator", () => {
 	assert.match(indexSrc, /let browserOpenError: string \| null = null;/);
-	assert.match(indexSrc, /ctx\.ui\.notify\(`Search curator is running, but the browser did not open automatically\. Open manually: \$\{handle\.url\}`/);
+	assert.match(indexSrc, /ctx\.ui\.notify\([\s\S]*?Search curator is running, but the browser did not open automatically\. Open manually: \$\{handle\.url\}`/);
 	assert.match(indexSrc, /if \(queries\.length > 0\) \{/);
 });
 

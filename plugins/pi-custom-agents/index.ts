@@ -329,6 +329,8 @@ Output style: Use markdown for structure. Prefer ## and ### section headers,
 fences for multi-line code blocks. Be concise and dense — no filler prose.
 `;
 
+const QUIZ_UNCERTAINTY_GUIDANCE = `If you are uncertain about a materially important requirement, tradeoff, or interpretation that would change what you do next, ask a clarifying question via the quiz tool before proceeding. Do not quiz for trivial or low-risk choices; make those autonomously.`;
+
 const SUBAGENT_AWARENESS_PROMPT = `
 
 Available subagents:
@@ -369,12 +371,12 @@ function compose_plan_prompt(body: string): string {
 ${style}`;
 }
 
-const ARCHITECT_PROMPT = compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands. Ask clarifying questions via the quiz tool when tradeoffs exist.
+const ARCHITECT_PROMPT = compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands.
 
 ${mode_intro(
 	"plan",
 	READONLY_DELEGATING_TOOLS,
-	"Delegate broad codebase exploration to the Scout subagent when it would flood this context; otherwise use read/grep/find directly. If implementation is needed, produce a plan and wait for the user to approve it.",
+	`Delegate broad codebase exploration to the Scout subagent when it would flood this context; otherwise use read/grep/find directly. If implementation is needed, produce a plan and wait for the user to approve it. ${QUIZ_UNCERTAINTY_GUIDANCE}`,
 )}${PLAN_SUBAGENT_AWARENESS_PROMPT}
 
 Responsibility: explore, analyze, and produce a well-researched, actionable plan. Tie loose ends before implementation begins.
@@ -458,7 +460,7 @@ const DOCTOR_PROMPT = compose_mode_prompt(`Debug mode is active. You are read-on
 ${mode_intro(
 	"debug",
 	READONLY_DELEGATING_TOOLS,
-	"Delegate implementation to the Coder subagent when a fix is straightforward; otherwise report the issue and recommended correction.",
+	`Delegate implementation to the Coder subagent when a fix is straightforward; otherwise report the issue and recommended correction. ${QUIZ_UNCERTAINTY_GUIDANCE}`,
 )}${SUBAGENT_AWARENESS_PROMPT}
 
 Focus areas: ownership conflicts, hidden coupling, duplicated state or mirrored config, SSOT violations, fail-fast behavior, and high-change-entropy files. Label each finding as 'Confirmed issue' or 'Needs owner decision' and include File, Evidence, Impact, Correction, and Risks.
@@ -478,7 +480,7 @@ const ORCHESTRATOR_PROMPT = compose_mode_prompt(`Orchestrate mode is active. You
 ${mode_intro(
 	"orchestrate",
 	READONLY_DELEGATING_TOOLS,
-	"Subagent delegation is your primary mechanism for getting work done.",
+	`Subagent delegation is your primary mechanism for getting work done. ${QUIZ_UNCERTAINTY_GUIDANCE}`,
 )}${SUBAGENT_AWARENESS_PROMPT}
 
 Decomposition rules:
@@ -519,7 +521,11 @@ Delegation Prompts: <self-contained prompt for each module, ready for the Coder 
 function coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`Code mode is active. You have full tool access. Implement, test, and verify code with autonomy.
 
-${mode_intro("code", build_full_tools(provider))}`);
+${mode_intro(
+		"code",
+		build_full_tools(provider),
+		QUIZ_UNCERTAINTY_GUIDANCE,
+	)}`);
 }
 
 function exit_to_coder_prompt(provider: string | undefined): string {
@@ -684,8 +690,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	}
 
-	function sync_footer_after_model_restore(ctx: any): void {
-		setFooterThinkingLevel(get_pi_thinking_level(pi) ?? "off");
+	function sync_footer_after_model_restore(ctx: any, bound_thinking_level?: string): void {
+		setFooterThinkingLevel(bound_thinking_level ?? get_pi_thinking_level(pi) ?? "off");
 		refresh_footer(ctx);
 	}
 
@@ -731,7 +737,13 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		const canonical = canonicalize_persisted_identity(bound);
 		const current = ctx.model as Model<any> | undefined;
 		const liveThinking = get_pi_thinking_level(pi);
-		if (bound_model_matches_live(canonical, current, liveThinking)) return;
+		if (bound_model_matches_live(canonical, current, liveThinking)) {
+			// A mode switch still needs to refresh the footer. The live model and
+			// thinking level can already match while footerThinkingLevel is stale
+			// from the previous mode, so do not let the fast path skip the variant.
+			sync_footer_after_model_restore(ctx, canonical.thinkingLevel);
+			return;
+		}
 
 		const target = ctx.modelRegistry.find(
 			canonical.provider,
@@ -747,7 +759,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				await pi.setModel(target);
 			}
 			await apply_bound_thinking_level(ctx, canonical);
-			sync_footer_after_model_restore(ctx);
+			sync_footer_after_model_restore(ctx, canonical.thinkingLevel);
 		} finally {
 			applying_mode_model = false;
 		}
@@ -1090,29 +1102,68 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		waitingForPlan = false;
 		latest_plan_text = "";
 		const parentSession = ctx.sessionManager?.getSessionFile?.();
-		const result = await newSession({
-			parentSession,
-			setup: async (sm: SessionManager) => {
-				sm.appendMessage({
-					role: "user",
-					content: [{ type: "text", text: plan }],
-					timestamp: Date.now(),
-				});
-			},
-			withSession: async (newCtx) => {
-				await apply_mode(DEFAULT_MODE, newCtx);
-				await newCtx.sendMessage({
-					customType: "pi-agents-plan-implement",
-					content: plan_implement_prompt(model_provider_of(newCtx.model)),
-					display: false,
-				});
-				await newCtx.sendUserMessage("Execute the plan following the modules.", {
-					deliverAs: "followUp",
-				});
-			},
-		});
-		if (result?.cancelled) {
-			ctx.ui.notify("New session cancelled.", "warning");
+		//
+		// Session replacement invalidates the module-level `pi` (the ExtensionAPI
+		// bound to the plan session's runtime). The new session re-invokes this
+		// plugin factory with a fresh `pi`, and its `session_start` → `restoreMode`
+		// lands on code mode automatically: the fresh session has no
+		// `pi-agents-enter-*` custom messages, so `getLastModeFromSession` returns
+		// null and `restoreMode` sets `currentMode = DEFAULT_MODE` with the full
+		// code tool set via the new (valid) `pi`. Calling `apply_mode` here would
+		// touch the stale `pi` and throw, which the interactive-mode wrapper turns
+		// into `handleFatalRuntimeError` → `process.exit(1)` (the "Ctrl+C" quit).
+		//
+		// So: never touch the stale module-level `pi` after `newSession()`. Seed
+		// the plan as the first user message via `setup`, then send the hidden
+		// implement directive + follow-up via the fresh `ReplacedSessionContext`
+		// (`newCtx`). Any error is notified, never thrown out of `withSession` —
+		// the wrapper exits the process on an uncaught `withSession` throw.
+		//
+		try {
+			const result = await newSession({
+				parentSession,
+				setup: async (sm: SessionManager) => {
+					sm.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: plan }],
+						timestamp: Date.now(),
+					});
+				},
+				withSession: async (newCtx) => {
+					try {
+						await newCtx.sendMessage({
+							customType: "pi-agents-plan-implement",
+							content: build_plan_implement_message_content(
+								plan,
+								plan_implement_prompt(model_provider_of(newCtx.model)),
+							),
+							display: false,
+						});
+						await newCtx.sendUserMessage("Execute the plan following the modules.", {
+							deliverAs: "followUp",
+						});
+					} catch (err) {
+						// Never let a withSession throw escape: the interactive-mode
+						// command-context wrapper turns it into a fatal process exit.
+						ctx.ui.notify(
+							`Fresh-context implement failed to start: ${
+								err instanceof Error ? err.message : String(err)
+							}`,
+							"error",
+						);
+					}
+				},
+			});
+			if (result?.cancelled) {
+				ctx.ui.notify("New session cancelled.", "warning");
+			}
+		} catch (err) {
+			ctx.ui.notify(
+				`Fresh-context implement failed: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+				"error",
+			);
 		}
 	}
 

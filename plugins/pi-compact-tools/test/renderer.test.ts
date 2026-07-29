@@ -1593,6 +1593,128 @@ describe("CompactRenderer apply_patch failures", () => {
 	});
 });
 
+describe("CompactRenderer apply_patch grouping", () => {
+	test("uses a collapsible Patching group for two pure patch calls", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("patch-group-owner", owner_state) as any;
+		const second_ctx = makeContext("patch-group-second", {}) as any;
+		const first_input = [
+			"*** Begin Patch",
+			"*** Add File: first.ts",
+			"+first",
+			"*** End Patch",
+		].join("\n");
+		const second_input = [
+			"*** Begin Patch",
+			"*** Add File: second.ts",
+			"+second",
+			"*** End Patch",
+		].join("\n");
+
+		r.renderCall("apply_patch", { input: first_input }, theme, owner_ctx);
+		r.renderCall("apply_patch", { input: second_input }, theme, second_ctx);
+		r.renderCall("apply_patch", { input: first_input }, theme, owner_ctx);
+
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Patching 2 files");
+		expect(row).toContain("+2");
+		expect(row).toContain("first.ts");
+		expect(row).toContain("second.ts");
+		expect(second_ctx.state.callText).toBeUndefined();
+
+		r.renderResult(
+			"apply_patch",
+			{ input: first_input },
+			{
+				details: {
+					ok: true,
+					fileCount: 1,
+					results: [{ path: "first.ts", op: "add", status: "ok" }],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"apply_patch",
+			{ input: second_input },
+			{
+				details: {
+					ok: true,
+					fileCount: 1,
+					results: [{ path: "second.ts", op: "add", status: "ok" }],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...second_ctx, isError: false },
+		);
+
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Patched 2 files");
+		expect(row).toContain("+2");
+		expect(row).toContain("first.ts");
+		expect(row).toContain("second.ts");
+
+		r.settleAllGroups();
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Patched 2 files");
+		expect(row).not.toContain("first.ts");
+		expect(row).not.toContain("second.ts");
+	});
+
+	test("keeps mixed patch calls in the public unified work group", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("patch-mixed-owner", owner_state) as any;
+		const read_ctx = makeContext("patch-mixed-read", {}) as any;
+		const patch_input = [
+			"*** Begin Patch",
+			"*** Update File: changed.ts",
+			"@@",
+			"-old",
+			"+new",
+			"*** End Patch",
+		].join("\n");
+
+		r.renderCall("apply_patch", { input: patch_input }, theme, owner_ctx);
+		r.renderCall("read", { path: "inspected.ts" }, theme, read_ctx);
+		r.renderCall("apply_patch", { input: patch_input }, theme, owner_ctx);
+		r.renderResult(
+			"apply_patch",
+			{ input: patch_input },
+			{
+				details: {
+					ok: true,
+					fileCount: 1,
+					results: [{ path: "changed.ts", op: "update", status: "ok" }],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "inspected.ts" },
+			{ content: [{ type: "text", text: "contents" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...read_ctx, isError: false },
+		);
+		r.renderCall("apply_patch", { input: patch_input }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Edited 1 file");
+		expect(row).toContain("Explored 1 file");
+		expect(row).not.toContain("Patching");
+	});
+});
+
 describe("CompactRenderer native render invalidation", () => {
 	test("set_compact_call_text marks pendingShrink when line count decreases", async () => {
 		const { CompactGroupText, __test_only } = await import("../renderer.ts");
@@ -2264,6 +2386,30 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, fresh_owner_ctx);
 		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
 		expect(stripAnsi((fresh_owner_state.callText as any).text)).toContain("c.ts");
+	});
+
+	test("inter-run thinking_delta with blocks visible keeps the work group reopenable", () => {
+		setThinkingBlocksHidden(false);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ir-think-vis1", owner_state) as any;
+		const child_ctx = makeContext("ir-think-vis2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "reasoning between batches" });
+		expect(r.hasReopenableGroup()).toBe(true);
+
+		const fresh_ctx = makeContext("ir-think-vis3", {}) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
+		// Re-render the owner so the shared group callText picks up the new child.
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		expect(stripAnsi((owner_state.callText as any).text)).toContain("c.ts");
 	});
 
 	test("thinking block toggle preserves lingering children through visible-thinking replay", () => {

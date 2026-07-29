@@ -20,6 +20,7 @@ import {
 	TREE_SINGLE_TOOL,
 } from "../../../../pi-compact-tools/renderer.ts";
 import { set_gradient_colorizer, reset_gradient_colorizer, type Rgb } from "../../../../pi-ember-ui/gradient.ts";
+import { strip_subagent_leading_render_gap } from "../subagent-render-spacing.ts";
 
 function forcedColorizer(rgb: Rgb, text: string): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
@@ -87,6 +88,20 @@ describe("SubagentToolText", () => {
 		const comp = new SubagentToolText("");
 		const out = comp.render(80);
 		expect(out).toEqual([""]);
+	});
+});
+
+describe("subagent render spacing", () => {
+	test("removes only the native leading self-shell separator", () => {
+		expect(strip_subagent_leading_render_gap(["", "Subagents", "  └ Coder A"])).toEqual([
+			"Subagents",
+			"  └ Coder A",
+		]);
+	});
+
+	test("does not remove a real first content row", () => {
+		const lines = ["Subagents", "  └ Coder A"];
+		expect(strip_subagent_leading_render_gap(lines)).toBe(lines);
 	});
 });
 

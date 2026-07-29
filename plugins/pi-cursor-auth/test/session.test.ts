@@ -19,6 +19,7 @@ import {
 	checkpoint_has_required_blobs,
 	clear_all_conversation_states,
 	collect_checkpoint_blob_hex_ids,
+	clear_conversation_state,
 	get_or_create_conversation_state,
 	persist_blob_store,
 	reset_conversation_after_blob_error,
@@ -153,7 +154,7 @@ describe("Cursor conversation checkpoint blobs", () => {
 		state.checkpoint = new Uint8Array([9, 8, 7]);
 		persist_blob_store("pi-session-disk", payload.blob_store);
 
-		clear_all_conversation_states();
+		clear_conversation_state("pi-session-disk");
 		const reloaded = get_or_create_conversation_state("pi-session-disk", mapped);
 		expect(reloaded.conversation_id).toBe(state.conversation_id);
 		expect(reloaded.checkpoint).toEqual(state.checkpoint);

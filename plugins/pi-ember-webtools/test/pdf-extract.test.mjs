@@ -1,23 +1,32 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 const extractorUrl = new URL("../pdf-extract.ts", import.meta.url).href;
 
-test("extractPDFToMarkdown works on Node 22 without native Promise.try", () => {
-  const child = spawnSync(process.execPath, ["--input-type=module"], {
-    input: buildChildScript(extractorUrl),
-    encoding: "utf8",
-    maxBuffer: 2 * 1024 * 1024,
-  });
+test("extractPDFToMarkdown works on Node 22 without native Promise.try", async () => {
+  const scriptDir = await mkdtemp(join(tmpdir(), "pi-web-access-pdf-child-"));
+  const scriptPath = join(scriptDir, "child.ts");
+  await writeFile(scriptPath, buildChildScript(extractorUrl), "utf8");
+  try {
+    const child = spawnSync(process.execPath, [scriptPath], {
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024,
+    });
 
-  assert.equal(
-    child.status,
-    0,
-    "PDF extraction failed in a child process. stderr summary:\n" + errorSummary(child.stderr),
-  );
+    assert.equal(
+      child.status,
+      0,
+      "PDF extraction failed in a child process. stderr summary:\n" + errorSummary(child.stderr),
+    );
 
-  assert.match(child.stdout, /Hello PDF/);
+    assert.match(child.stdout, /Hello PDF/);
+  } finally {
+    await rm(scriptDir, { recursive: true, force: true });
+  }
 });
 
 function buildChildScript(moduleUrl) {

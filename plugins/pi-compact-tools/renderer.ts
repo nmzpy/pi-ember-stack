@@ -287,12 +287,16 @@ function patch_files_for_record(record: CompactCall): PatchFileRow[] {
 	return patch_files_from_input(patch_input(record.args));
 }
 
-function patch_files_in_group(group: DiscoveryGroup): PatchFileRow[] {
+function patch_files_in_records(records: readonly CompactCall[]): PatchFileRow[] {
 	const rows: PatchFileRow[] = [];
-	for (const record of group.records) {
+	for (const record of records) {
 		rows.push(...patch_files_for_record(record));
 	}
 	return rows;
+}
+
+function patch_files_in_group(group: DiscoveryGroup): PatchFileRow[] {
+	return patch_files_in_records(group.records);
 }
 
 function errorText(result: ToolResult | undefined, isError: boolean): string | undefined {
@@ -724,17 +728,23 @@ function is_diff_record(record: CompactCall): boolean {
 function work_header_diff_stats(group: DiscoveryGroup): { additions: number; removals: number } {
 	const completed = completedRecords(group);
 	const visible = groupVisibleChildren(group);
-	// If the only completed diff record is still visible as the last child row,
-	// suppress its stats from the header to avoid duplicating the inline +N -N.
-	const last_visible = visible[0];
-	const last_visible_diff =
-		last_visible && is_diff_record(last_visible) && last_visible._completed
+	// Suppress the last visible child's diff stats from the header only when
+	// it is the single visible lingering diff tool — its child row already
+	// displays +N -N inline, so the header would duplicate it. Once another
+	// tool joins (multiple visible children), include every completed diff in
+	// the header total.
+	const last_visible = visible[visible.length - 1];
+	const single_visible_diff =
+		visible.length === 1 &&
+		last_visible &&
+		is_diff_record(last_visible) &&
+		last_visible._completed
 			? last_visible
 			: undefined;
 	let additions = 0;
 	let removals = 0;
 	for (const record of completed) {
-		if (last_visible_diff && record.id === last_visible_diff.id) continue;
+		if (single_visible_diff && record.id === single_visible_diff.id) continue;
 		if (record.name === "edit") {
 			const counts = edit_diff_counts(record.args, record.result, true);
 			if (counts) {
@@ -775,6 +785,9 @@ export function format_unified_work_segments(group: DiscoveryGroup): string[] {
 		} else if (record.name === "write") {
 			written.add(targetPathForRecord(record));
 		} else if (record.name === "apply_patch") {
+			// In the unified work bundle, apply_patch contributes to Edited.
+			// The dedicated "Patched" label only appears in a pure multi-patch
+			// group (format_patch_group), not in the mixed work header.
 			for (const file of patch_files_for_record(record)) {
 				edited.add(file.path);
 			}
@@ -999,9 +1012,9 @@ function apply_patch_record_has_errors(record: CompactCall): boolean {
 	return patch_has_file_errors(record.result?.details as ApplyPatchDetails | undefined);
 }
 
-function patch_errors_for_group(group: DiscoveryGroup): Map<string, string> {
+function patch_errors_for_records(records: readonly CompactCall[]): Map<string, string> {
 	const map = new Map<string, string>();
-	for (const record of group.records) {
+	for (const record of records) {
 		for (const [path, error] of patch_file_errors_by_path(
 			record.result?.details as ApplyPatchDetails | undefined,
 		)) {
@@ -1028,7 +1041,7 @@ function format_apply_patch_file_row(
 		: renderRunningGradient("Patching");
 	let row = verb + paint_compact_tool(theme, ` ${file.path}`, completed);
 	if (!file_error) {
-		const stats = formatEditStatsFromCounts(file, theme, file.removals > 0);
+		const stats = formatEditStatsFromCounts(file, theme, file.removals > 0, true);
 		if (stats) row += paint_compact_tool(theme, "  ", completed) + stats;
 	} else {
 		row += paint_compact_tool(theme, "  ", completed) + theme.fg("error", file_error);
@@ -1075,30 +1088,56 @@ function format_apply_patch_block(record: CompactCall, theme: ThemeLike): string
 
 function format_patch_group(group: DiscoveryGroup, theme: ThemeLike): string {
 	const files = patch_files_in_group(group);
-	const n = files.length;
 	const any_running = group.records.some((r) => !r._completed);
 	const headerVerb = any_running ? "Patching" : "Patched";
 	const header =
-		n > 0
-			? `${headerVerb} ${n} file${n === 1 ? "" : "s"}`
+		files.length > 0
+			? `${headerVerb} ${files.length} file${files.length === 1 ? "" : "s"}`
 			: headerVerb;
-	const has_errors = patch_errors_for_group(group).size > 0;
+	const visible_records = groupVisibleChildren(group);
+	const visible_file_rows: Array<{ file: PatchFileRow; completed: boolean }> = [];
+	for (const record of visible_records) {
+		for (const file of patch_files_for_record(record)) {
+			visible_file_rows.push({ file, completed: record._completed === true });
+		}
+	}
+	const has_errors = patch_errors_for_records(visible_records).size > 0;
 	const bullet = has_errors
 		? theme.fg("error", BULLET)
 		: groupBulletColor(group, theme);
-	const lines = [`${bullet}${theme.fg("muted", theme.bold(header))}`];
+	const header_stats = formatEditStatsFromCounts(apply_patch_total_stats(files), theme);
+	const lines = [
+		`${bullet}${theme.fg("muted", theme.bold(header))}${
+			header_stats ? paint_compact_tool(theme, "  ", true) + header_stats : ""
+		}`,
+	];
 	if (group.settled) return lines.join("\n");
-	const file_errors = patch_errors_for_group(group);
-	const children = files.length > 0 ? files : [{ path: ".", additions: 0, removals: 0 }];
-	for (const [index, file] of children.entries()) {
+	const file_errors = patch_errors_for_records(visible_records);
+	const children =
+		visible_file_rows.length > 0
+			? visible_file_rows
+			: [{ file: { path: ".", additions: 0, removals: 0 }, completed: !any_running }];
+	for (const [index, child] of children.entries()) {
 		const prefix = index === children.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_TEE;
-		const file_error = file_errors.get(normalize_patch_display_path(file.path));
+		const file_error = file_errors.get(normalize_patch_display_path(child.file.path));
 		lines.push(
 			theme.fg("dim", prefix) +
-				format_apply_patch_file_row(file, theme, file_error, !any_running),
+				format_apply_patch_file_row(child.file, theme, file_error, child.completed),
 		);
 	}
 	return lines.join("\n");
+}
+
+/**
+ * A pure run of two or more apply_patch calls gets the dedicated Patching
+ * header and per-file children. A mixed run stays in the public unified work
+ * bundle so patches contribute to Edited/Explored/Search summaries.
+ */
+function is_multi_patch_group(group: DiscoveryGroup): boolean {
+	return (
+		group.records.length >= 2 &&
+		group.records.every((record) => record.name === "apply_patch")
+	);
 }
 
 /** Child rows under a group header — SSOT for compact + cursor. */
@@ -1140,7 +1179,10 @@ function group_status_records(group: DiscoveryGroup): CompactCall[] {
 }
 
 function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
-	if (!is_work_group(group) && group.type === "patching" && group.records.length > 1) {
+	if (
+		is_multi_patch_group(group) ||
+		(!is_work_group(group) && group.type === "patching" && group.records.length >= 2)
+	) {
 		return format_patch_group(group, theme);
 	}
 	const headerText = groupHeaderLabel(group, theme);
@@ -1242,6 +1284,16 @@ export class CompactRenderer {
 	private childFoldAbsorbBefore = 0;
 	/** Last same-key group type kept for reopen after soft settle. */
 	private reopenGroupKey: string | undefined;
+	/** Set by the inter-run-gap pre-token arm so the next noteThinking folds
+	 *  lingering tool children and the `└ Thinking` lane owns the slot. */
+	private foldChildrenOnNextThinking = false;
+
+	/** Request that the next noteThinking folds lingering tool children.
+	 *  Used by the inter-run-gap pre-token arm so `└ Thinking` replaces the
+	 *  tool lane rather than appending after it. */
+	requestFoldChildrenForThinking(): void {
+		this.foldChildrenOnNextThinking = true;
+	}
 
 	beginTurn(): void {
 		// Child rows linger through turn_end; fold only on thinking stream,
@@ -1370,7 +1422,8 @@ export class CompactRenderer {
 
 	/** Soft settle for hidden thinking: past-tense header + in-group `└ Thinking`
 	 *  appended after lingering tool rows until the next tool call reopens the lane. */
-	noteThinking(): void {
+	/** Core implementation for arming the in-group `└ Thinking` lane. */
+	private arm_in_group_thinking(): void {
 		this.cancelDebouncedChildFold();
 		let group = this.resolveLiveGroup();
 		if (!group && this.reopenGroupKey) {
@@ -1379,11 +1432,21 @@ export class CompactRenderer {
 		}
 		this.settleGroups();
 		if (!group || group.records.length < 1) return;
-		if (group.records.some((r) => !r._completed)) return;
+		// Arm the in-group `└ Thinking` lane even while a tool is still running:
+		// a thinking stream can arrive between tool batches (inter-run gap)
+		// before the prior tool's result renders. The thinking row appends
+		// after the lingering tool row.
 		if (group.migrateAnchorOnNextWave) return;
 		this.currentGroup = group;
 		if (isThinkingBlocksHidden()) {
 			const entering_thinking_lane = !group.thinkingChild;
+			// Fold lingering tool children when the caller requested it (inter-run
+			// gap pre-token arm). Outside that, children linger and the thinking
+			// row appends after them.
+			if (entering_thinking_lane && this.foldChildrenOnNextThinking) {
+				fold_group_child_rows(group);
+				this.foldChildrenOnNextThinking = false;
+			}
 			group.thinkingChild = true;
 			group.settled = true;
 			if (entering_thinking_lane) {
@@ -1393,6 +1456,17 @@ export class CompactRenderer {
 		this.reopenGroupKey = group.key;
 		this.refreshGroupInPlace(group);
 		this.syncGroupTick(group);
+	}
+
+	/** Public seam: arm the renderer's in-group `└ Thinking` lane when blocks
+	 *  are hidden and the group has at least one completed record. */
+	armInGroupThinking(): void {
+		if (!isThinkingBlocksHidden()) return;
+		this.arm_in_group_thinking();
+	}
+
+	noteThinking(): void {
+		this.arm_in_group_thinking();
 	}
 
 	/** Leave the thinking lane when the agent fully settles — header-only,
@@ -1421,6 +1495,7 @@ export class CompactRenderer {
 		this.calls.clear();
 		this.currentGroup = undefined;
 		this.reopenGroupKey = undefined;
+		this.foldChildrenOnNextThinking = false;
 		this.pendingGroupInvalidations.clear();
 		this.lastTheme = undefined;
 	}
@@ -1456,7 +1531,7 @@ export class CompactRenderer {
 	/** Whether the live group can host in-group Thinking (settled / thinking lane). */
 	hasReopenableGroup(): boolean {
 		const group = this.resolveLiveGroup();
-		if (!group || group.hardExited || group.records.length < 2) return false;
+		if (!group || group.hardExited || group.records.length < 1) return false;
 		return group.settled === true;
 	}
 
@@ -1697,13 +1772,22 @@ export class CompactRenderer {
 		const has_visible_children = groupVisibleChildren(group).length > 0;
 		const reopening_from_thinking = group.thinkingChild;
 		const repeats_visible_child = is_repeat_visible_group_call(group, record.name, record.args);
-		// New tool wave only: absorb prior completed rows when every prior member
-		// is done or we are leaving the thinking lane. Skip todo-style soft
-		// boundaries and repeated same-signature calls — those keep lingering.
-		if (
+		// New tool wave: absorb prior rows when the group has visibly moved on
+		// (every prior member done, or the group already settled before this
+		// call reopened it) or we are leaving the thinking lane. Skip todo-style
+		// soft boundaries and repeated same-signature calls — those keep
+		// lingering. A settled group reopening with a still-running prior member
+		// still folds: the prior wave is historical. Reopening from the thinking
+		// lane folds immediately (synchronous) so the new tool wave is the only
+		// visible lane; a completed-prior wave folds after the debounce window.
+		const prior_wave_done = prior_all_done || group.settled === true;
+		if (has_visible_children && !repeats_visible_child && reopening_from_thinking) {
+			this.cancelDebouncedChildFold();
+			fold_group_child_rows(group);
+		} else if (
 			has_visible_children &&
 			!repeats_visible_child &&
-			(prior_all_done || reopening_from_thinking)
+			prior_wave_done
 		) {
 			this.scheduleDebouncedChildFold(group, group.records.length);
 		} else if (group.records.length === 0 || group.records.every((r) => r._completed)) {

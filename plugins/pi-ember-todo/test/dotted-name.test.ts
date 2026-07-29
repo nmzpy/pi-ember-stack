@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { rewrite_dotted_todo_calls } from "../index.ts";
+import { beforeEach, afterEach, describe, expect, test } from "bun:test";
+import { __reset_state, rewrite_dotted_todo_calls } from "../index.ts";
 
 function assistant_message(parts: unknown[]) {
 	return {
@@ -91,3 +91,65 @@ describe("rewrite_dotted_todo_calls", () => {
 		expect(msg.content).toBe(parts);
 	});
 });
+
+describe("message_update in-place dotted normalization", () => {
+	beforeEach(() => {
+		__reset_state();
+	});
+
+	afterEach(() => {
+		__reset_state();
+	});
+
+	test("valid dotted calls mutate message content in place", async () => {
+		const { pi, events, piEmberTodo } = make_test_api();
+		piEmberTodo(pi as any);
+		const message_update = events.get("message_update")![0];
+		const parts = [
+			{ type: "toolCall", id: "1", name: "todo.create", arguments: { subject: "X" } },
+			{ type: "toolCall", id: "2", name: "todo.update", arguments: { id: 1, status: "in_progress" } },
+		] as any;
+		const event = { message: { role: "assistant", content: parts } };
+		await message_update(event, {} as any);
+		expect(parts[0].name).toBe("todo");
+		expect(parts[0].arguments.action).toBe("create");
+		expect(parts[1].name).toBe("todo");
+		expect(parts[1].arguments.action).toBe("update");
+	});
+
+	test("unknown dotted action is not mutated", async () => {
+		const { pi, events, piEmberTodo } = make_test_api();
+		piEmberTodo(pi as any);
+		const message_update = events.get("message_update")![0];
+		const parts = [{ type: "toolCall", id: "1", name: "todo.foo", arguments: { subject: "X" } }] as any;
+		const event = { message: { role: "assistant", content: parts } };
+		await message_update(event, {} as any);
+		expect(parts[0].name).toBe("todo.foo");
+	});
+
+	test("non-assistant role is ignored", async () => {
+		const { pi, events, piEmberTodo } = make_test_api();
+		piEmberTodo(pi as any);
+		const message_update = events.get("message_update")![0];
+		const parts = [{ type: "toolCall", id: "1", name: "todo.create", arguments: {} }] as any;
+		const event = { message: { role: "user", content: parts } };
+		await message_update(event, {} as any);
+		expect(parts[0].name).toBe("todo.create");
+	});
+});
+
+function make_test_api() {
+	const events = new Map<string, ((event: any, ctx: any) => Promise<void>)[]>();
+	const pi = {
+		registerTool: () => {},
+		registerCommand: () => {},
+		on: (event: string, handler: (event: any, ctx: any) => Promise<void>) => {
+			const list = events.get(event) ?? [];
+			list.push(handler);
+			events.set(event, list);
+		},
+	};
+	return { pi, events, piEmberTodo: piEmberTodoFactory };
+}
+
+import piEmberTodoFactory from "../index.ts";

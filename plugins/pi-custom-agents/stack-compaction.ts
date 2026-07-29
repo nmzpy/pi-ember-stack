@@ -23,6 +23,9 @@ import {
 	SUMMARIZATION_SYSTEM_PROMPT,
 	TURN_PREFIX_SUMMARIZATION_PROMPT,
 } from "./compaction-prompts.ts";
+import { count_tokens, trim_to_token_budget } from "../pi-ember-dcp/lib/tokens.ts";
+
+const PROMPT_SAFETY_TOKENS = 200;
 
 type CompactionPreparation = Parameters<typeof compact>[0];
 
@@ -120,6 +123,21 @@ export function build_history_summarization_prompt(
 	return promptText;
 }
 
+function trim_llm_messages_for_summary(
+	messages: AgentMessage[],
+	reserveTokens: number,
+	responseMaxTokens: number,
+	emptyConversationPromptText: string,
+): Message[] {
+	const llmMessages = convertToLlm(messages);
+	const systemTokens = count_tokens(SUMMARIZATION_SYSTEM_PROMPT);
+	const promptTokenBudget =
+		reserveTokens - responseMaxTokens - PROMPT_SAFETY_TOKENS - systemTokens;
+	const fixedTokens = count_tokens(emptyConversationPromptText);
+	const conversationBudget = Math.max(1, promptTokenBudget - fixedTokens);
+	return trim_to_token_budget(llmMessages, conversationBudget, serializeConversation);
+}
+
 async function generate_history_summary(
 	messages: AgentMessage[],
 	model: Model<any>,
@@ -134,7 +152,12 @@ async function generate_history_summary(
 		Math.floor(0.8 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
-	const llmMessages = convertToLlm(messages);
+	const llmMessages = trim_llm_messages_for_summary(
+		messages,
+		reserveTokens,
+		maxTokens,
+		build_history_summarization_prompt("", previousSummary),
+	);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = build_history_summarization_prompt(conversationText, previousSummary);
 	const summarizationMessages: Message[] = [
@@ -169,7 +192,12 @@ async function generate_turn_prefix_summary(
 		Math.floor(0.5 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
-	const llmMessages = convertToLlm(messages);
+	const llmMessages = trim_llm_messages_for_summary(
+		messages,
+		reserveTokens,
+		maxTokens,
+		`<conversation>\n\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`,
+	);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 	const summarizationMessages: Message[] = [

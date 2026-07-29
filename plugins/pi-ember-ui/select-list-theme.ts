@@ -136,14 +136,14 @@ type ExtensionSelectorClass = new (...args: unknown[]) => HintStripContainer & E
 
 function patch_extension_selector_update_list(
 	ExtensionSelectorComponent: ExtensionSelectorClass,
-	get_theme: () => Theme,
+	_get_theme: () => Theme,
 ): void {
 	const proto = ExtensionSelectorComponent.prototype as ExtensionSelectorProto;
 	if (proto[EXTENSION_SELECTOR_PATCH]) return;
 	proto[EXTENSION_SELECTOR_PATCH] = true;
 
 	proto.updateList = function update_list_patched(this: ExtensionSelectorProto) {
-		const live = get_theme();
+		const live = resolve_select_list_theme();
 		this.listContainer.clear();
 		for (let i = 0; i < this.options.length; i++) {
 			const is_selected = i === this.selectedIndex;
@@ -162,7 +162,7 @@ function patch_extension_selector_update_list(
 	};
 }
 
-function resolve_coding_agent_dist_dir(): string | undefined {
+export function resolve_coding_agent_dist_dir(): string | undefined {
 	const req = createRequire(import.meta.url);
 	const verify = (dist_dir: string): string | undefined => {
 		const selector = join(dist_dir, "modes/interactive/components/extension-selector.js");

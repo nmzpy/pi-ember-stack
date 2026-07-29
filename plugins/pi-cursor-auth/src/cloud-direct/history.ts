@@ -15,8 +15,7 @@ import {
 	ToolCallSchema,
 } from "./proto/agent_pb.js";
 import type { CursorAssistantToolCall, CursorToolResult } from "../context-map.js";
-
-const MCP_PROVIDER_ID = "pi-ember-stack";
+import { EMBER_MCP_PROVIDER_IDENTIFIER } from "./request.js";
 
 function encode_mcp_args_map(args: Record<string, unknown>): Record<string, Uint8Array> {
 	const encoded: Record<string, Uint8Array> = {};
@@ -56,7 +55,7 @@ export function build_tool_call_step_bytes(
 			name: cursor_tool_name,
 			toolName: cursor_tool_name,
 			toolCallId: tool_call.id,
-			providerIdentifier: MCP_PROVIDER_ID,
+			providerIdentifier: EMBER_MCP_PROVIDER_IDENTIFIER,
 			args: encode_mcp_args_map(tool_call.arguments),
 		}),
 	});

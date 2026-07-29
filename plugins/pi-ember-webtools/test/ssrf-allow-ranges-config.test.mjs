@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,7 +9,7 @@ const extractUrl = new URL("../extract.ts", import.meta.url).href;
 
 // `loadSsrfAllowRanges` reads the config path captured at module load, so each
 // case runs in a child process with PI_CODING_AGENT_DIR pointed at a temp dir.
-function runLoad(env) {
+async function runLoad(env) {
 	const childEnv = { ...process.env };
 	delete childEnv.PI_CODING_AGENT_DIR;
 	delete childEnv.XDG_CONFIG_HOME;
@@ -25,13 +25,19 @@ function runLoad(env) {
 			console.log(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
 		}
 	`;
-	const child = spawnSync(process.execPath, ["--input-type=module"], {
-		input: script,
-		encoding: "utf8",
-		env: childEnv,
-	});
-	assert.equal(child.status, 0, child.stderr);
-	return JSON.parse(child.stdout);
+	const scriptDir = await mkdtemp(join(tmpdir(), "pi-web-access-ssrf-child-"));
+	const scriptPath = join(scriptDir, "child.ts");
+	await writeFile(scriptPath, script, "utf8");
+	try {
+		const child = spawnSync(process.execPath, [scriptPath], {
+			encoding: "utf8",
+			env: childEnv,
+		});
+		assert.equal(child.status, 0, child.stderr);
+		return JSON.parse(child.stdout);
+	} finally {
+		await rm(scriptDir, { recursive: true, force: true });
+	}
 }
 
 async function makeConfigDir(prefix) {
@@ -56,7 +62,7 @@ test("loadSsrfAllowRanges throws when ssrf.allowRanges is not an array", async (
 		const { root, agentDir, configPath } = await makeConfigDir("pi-ssrf-nonarray-");
 		await writeFile(configPath, JSON.stringify({ ssrf: { allowRanges } }), "utf8");
 
-		const result = runLoad(envFor(root, agentDir));
+		const result = await runLoad(envFor(root, agentDir));
 		assert.equal(result.ok, false, `expected throw for ${JSON.stringify(allowRanges)}`);
 		assert.match(result.error, /ssrf\.allowRanges in .* must be an array of CIDR strings/);
 	}
@@ -66,7 +72,7 @@ test("loadSsrfAllowRanges throws when an ssrf.allowRanges entry is not a string"
 	const { root, agentDir, configPath } = await makeConfigDir("pi-ssrf-entry-type-");
 	await writeFile(configPath, JSON.stringify({ ssrf: { allowRanges: ["198.18.0.0/15", 123] } }), "utf8");
 
-	const result = runLoad(envFor(root, agentDir));
+	const result = await runLoad(envFor(root, agentDir));
 	assert.equal(result.ok, false);
 	assert.match(result.error, /ssrf\.allowRanges in .* must contain only CIDR strings; entry 2 is number/);
 });
@@ -79,7 +85,7 @@ test("loadSsrfAllowRanges returns trimmed, non-empty CIDR strings for a valid ar
 		"utf8",
 	);
 
-	const result = runLoad(envFor(root, agentDir));
+	const result = await runLoad(envFor(root, agentDir));
 	assert.equal(result.ok, true, result.error);
 	assert.deepEqual(result.ranges, ["198.18.0.0/15", "fd00::/8"]);
 });
@@ -87,7 +93,7 @@ test("loadSsrfAllowRanges returns trimmed, non-empty CIDR strings for a valid ar
 test("loadSsrfAllowRanges returns [] when the config file is missing", async () => {
 	const { root, agentDir } = await makeConfigDir("pi-ssrf-missing-");
 	// Intentionally do not write web-search.json.
-	const result = runLoad(envFor(root, agentDir));
+	const result = await runLoad(envFor(root, agentDir));
 	assert.equal(result.ok, true, result.error);
 	assert.deepEqual(result.ranges, []);
 });
@@ -96,7 +102,7 @@ test("loadSsrfAllowRanges returns [] when ssrf.allowRanges is unset", async () =
 	const { root, agentDir, configPath } = await makeConfigDir("pi-ssrf-unset-");
 	await writeFile(configPath, JSON.stringify({ perplexityApiKey: "pplx-x" }), "utf8");
 
-	const result = runLoad(envFor(root, agentDir));
+	const result = await runLoad(envFor(root, agentDir));
 	assert.equal(result.ok, true, result.error);
 	assert.deepEqual(result.ranges, []);
 });
@@ -105,7 +111,7 @@ test("loadSsrfAllowRanges fails safe with [] when the config JSON is invalid", a
 	const { root, agentDir, configPath } = await makeConfigDir("pi-ssrf-badjson-");
 	await writeFile(configPath, "{ not valid json", "utf8");
 
-	const result = runLoad(envFor(root, agentDir));
+	const result = await runLoad(envFor(root, agentDir));
 	assert.equal(result.ok, true, result.error);
 	assert.deepEqual(result.ranges, []);
 });
