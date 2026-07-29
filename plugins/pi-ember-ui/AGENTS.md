@@ -34,6 +34,11 @@ timers, or Kitty image bookkeeping.
   after every tick. **Binding a host component must not subscribe the clock** —
   `sync_thinking_gradient_clock()` owns subscribe/unsubscribe via
   `sync_thinking_status_tick()`. It never paints terminal rows directly.
+- The external Thinking tick resolves the mutually-exclusive widget or
+  in-message host and invalidates only that host. A compact group's own
+  gradient subscriber owns in-group `└ Thinking`; the external Thinking tick
+  must not invalidate both external hosts or run while the compact lane owns
+  the status slot.
 - Do not re-anchor the viewport on slash/autocomplete exit, editor keystrokes,
   or idle lifecycle events — trackpad scroll uses terminal scrollback and any
   periodic `requestRender` snaps it back to the live frame.

@@ -39,20 +39,16 @@ export function set_shell_sync_callback(fn: (() => void) | undefined): void {
 	on_shell_sync = fn;
 }
 
-/** Clear the chatbox after a shell submit without re-entering shell mode. */
-function clear_shell_submit_editor(editor: ShellModeEditor): void {
-	with_suppressed_shell_history_sync(() => editor.setText?.(""));
-	editor.tui?.requestRender?.();
-}
-
 /**
- * Submit a bang-prefixed bash command and clear the editor — SSOT for shell Enter.
+ * Submit a bang-prefixed bash command from the editor — SSOT for shell Enter.
+ * Editor.submitValue() already resets state to an empty buffer; we only force a
+ * render so the chatbox clears immediately before the async bash handler runs.
  * Returns true when submit ran synchronously (caller should consume the Enter key).
  */
 export function submit_shell_command_from_editor(editor: ShellModeEditor): boolean {
 	if (typeof editor.submitValue !== "function") return false;
 	editor.submitValue();
-	clear_shell_submit_editor(editor);
+	editor.tui?.requestRender?.();
 	return true;
 }
 

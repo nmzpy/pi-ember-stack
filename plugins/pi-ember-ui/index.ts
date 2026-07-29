@@ -35,6 +35,7 @@ import { render_thinking_gradient_label } from "./thinking-status-render.ts";
 import {
 	bind_thinking_in_message_host,
 	bind_thinking_status_tick_should_paint,
+	bind_thinking_status_tick_host_resolver,
 	bind_thinking_widget_host,
 	sync_thinking_status_tick,
 	unbind_thinking_status_hosts,
@@ -363,13 +364,16 @@ function build_thinking_status_row_text(host: "widget" | "in_message"): string {
 
 /** Keep the thinking gradient clock aligned with visible Thinking UI. */
 export function sync_thinking_gradient_clock(): void {
-	const should_run = thinking_status_should_show() || isGroupThinkingChildActive();
-	if (should_run) {
+	const external_should_run = thinking_status_should_show();
+	const group_should_run = isGroupThinkingChildActive();
+	if (external_should_run || group_should_run) {
 		activate_gradient("thinking");
 	} else {
 		deactivate_gradient("thinking");
 	}
-	sync_thinking_status_tick(should_run);
+	// A compact group's own subscriber owns its in-group row. Do not keep the
+	// external host tick alive as a no-op while that lane is visible.
+	sync_thinking_status_tick(external_should_run);
 }
 
 /** Whether the latest assistant message belongs to the current user turn. */
@@ -571,7 +575,7 @@ class ThinkingStatusComponent implements Component {
 		return render_thinking_status_lines(width);
 	}
 	invalidate(): void {
-		if (!thinking_status_should_show() && !isGroupThinkingChildActive()) return;
+		if (!thinking_status_should_show()) return;
 		requestRender?.();
 	}
 }
@@ -804,7 +808,10 @@ let thinking_status_render_pending = false;
 let thinking_status_last_painted = false;
 
 function thinking_status_paint_active(): boolean {
-	return thinking_status_should_show() || isGroupThinkingChildActive();
+	// Compact group rows repaint themselves through CompactRenderer. This state
+	// tracks only the external widget/in-message host so the two paths do not
+	// schedule the same frame.
+	return thinking_status_should_show();
 }
 
 /** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
@@ -815,21 +822,26 @@ export function arm_pre_token_thinking_status(): void {
 	reset_thinking_pass_timer();
 	setAgentRunPending(true);
 	thinkingHeaderSuppressed = false;
-	// In an inter-run gap with tools already on screen, the next thinking
-	// stream should replace lingering tool children so `└ Thinking` owns the
-	// slot. Request a fold on the next noteThinking.
-	renderer.requestFoldChildrenForThinking();
-	// In-group Thinking owns the slot only when the renderer is painting that row.
+	// A settled work group owns the slot. Arm the actual compact child now;
+	// merely claiming the slot here leaves both the external widget and the
+	// transcript group empty during the post-tool wait.
+	if (renderer.hasReopenableGroup() && isThinkingBlocksHidden()) {
+		renderer.armInGroupThinking();
+		sync_compact_group_flags(renderer);
+		refresh_thinking_status();
+		return;
+	}
+	// In-group Thinking already owns the slot when the renderer painted it
+	// during an earlier lifecycle event.
 	if (compact_thinking_lane_owns_status()) {
 		refresh_thinking_status();
 		return;
 	}
-	// A settled work group owns the slot; the renderer will paint in-group Thinking.
-	if (renderer.hasReopenableGroup() && isThinkingBlocksHidden()) {
-		activate_gradient("thinking");
-		refresh_thinking_status();
-		return;
-	}
+	// If the current wave is still being finalized, let the real thinking
+	// stream replace those stale child rows once it arrives. A settled group
+	// was armed above and intentionally keeps its children lingering beside
+	// the in-group status row.
+	renderer.requestFoldChildrenForThinking();
 	activate_gradient("thinking");
 	refresh_thinking_status();
 }
@@ -868,7 +880,7 @@ function installThinkingWidget(ctx: any): void {
 				return ["", ...lines];
 			},
 			invalidate(): void {
-				if (!thinking_status_should_show() && !isGroupThinkingChildActive()) return;
+				if (!thinking_status_should_show()) return;
 				ensure_chatbox_leading_spacer(tui);
 				request_live_tui_render(tui);
 			},
@@ -2462,8 +2474,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		clearStaleBlockers: clear_stale_thinking_wait_blockers,
 	});
 	bind_thinking_status_tick_should_paint(
-		() => thinking_status_should_show() || isGroupThinkingChildActive(),
+		() => thinking_status_should_show(),
 	);
+	bind_thinking_status_tick_host_resolver(resolve_thinking_status_host);
 	// /model + /resume: prototype intercepts only (no registerCommand — that
 	// conflicts with built-ins and shows in Extension issues).
 	install_model_picker_patches();

@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
 	apply_assistant_stream_boundary,
 	resolve_assistant_stream_boundary_event,
@@ -8,6 +8,7 @@ import {
 	deactivate_gradient,
 	dispatch_gradient_tick,
 	set_gradient_render_request,
+	shutdown_gradient_clock,
 } from "../../pi-ember-ui/gradient.ts";
 import {
 	resetToolExecutionInFlight,
@@ -34,6 +35,13 @@ function makeContext(id: string, state: Record<string, any> = {}) {
 async function flush_group_child_fold_debounce(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, GROUP_CHILD_FOLD_DEBOUNCE_MS + 25));
 }
+
+afterEach(() => {
+	// Local renderer instances subscribe to the shared clock. Dispose the
+	// process-global clock between tests so one instance cannot keep a later
+	// Thinking-header test permanently non-idle.
+	shutdown_gradient_clock();
+});
 
 describe("CompactRenderer streaming edit stats", () => {
 	test("live +N -N updates as oldText/newText grow", () => {
@@ -1273,6 +1281,23 @@ describe("CompactRenderer thinking collapse", () => {
 			{ ...ctx, isError: false },
 		);
 		expect(r.hasActiveGroups()).toBe(false);
+	});
+
+	test("running Bash children use the Running verb", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const state: Record<string, any> = {};
+		const ctx = makeContext("running-bash", state) as any;
+		const child_ctx = makeContext("running-bash-child", {}) as any;
+
+		r.renderCall("bash", { command: "npm test" }, theme, ctx);
+		r.renderCall("read", { path: "package.json" }, theme, child_ctx);
+		r.renderCall("bash", { command: "npm test" }, theme, ctx);
+		const row = stripAnsi((state.callText as any).text);
+		expect(row).toContain("Running");
+		expect(row).toContain("npm test");
+		expect(row).not.toContain("Bashing");
 	});
 
 	test("noteThinking paints in-group Thinking for a single settled tool", () => {

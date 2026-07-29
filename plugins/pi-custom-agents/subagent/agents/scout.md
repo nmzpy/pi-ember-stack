@@ -1,6 +1,6 @@
 ---
-thinking: max
-model: cursor/composer-2.5
+thinking: medium
+model: devin/swe-1-7-medium
 name: Scout
 description: Fast agent specialized for exploring codebases. Use when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase.
 tools: read, bash, grep, find, ls

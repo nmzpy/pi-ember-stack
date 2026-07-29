@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { dispatch_gradient_tick, gradient_clock_is_idle, shutdown_gradient_clock } from "../gradient.ts";
 import {
+	bind_thinking_status_tick_host_resolver,
 	bind_thinking_status_tick_should_paint,
 	bind_thinking_widget_host,
+	bind_thinking_in_message_host,
 	sync_thinking_status_tick,
 	unbind_thinking_status_hosts,
 } from "../thinking-status-tick.ts";
@@ -60,6 +62,25 @@ describe("thinking status tick lifecycle", () => {
 			should_paint = true;
 			dispatch_gradient_tick();
 			expect(invalidate_calls).toBe(1);
+		} finally {
+			unbind_thinking_status_hosts();
+			shutdown_gradient_clock();
+		}
+	});
+
+	test("tick invalidates only the resolved external host", () => {
+		shutdown_gradient_clock();
+		let widget_invalidations = 0;
+		let message_invalidations = 0;
+		bind_thinking_status_tick_should_paint(() => true);
+		bind_thinking_status_tick_host_resolver(() => "in_message");
+		bind_thinking_widget_host({ invalidate: () => widget_invalidations++ });
+		bind_thinking_in_message_host({ invalidate: () => message_invalidations++ });
+		sync_thinking_status_tick(true);
+		try {
+			dispatch_gradient_tick();
+			expect(widget_invalidations).toBe(0);
+			expect(message_invalidations).toBe(1);
 		} finally {
 			unbind_thinking_status_hosts();
 			shutdown_gradient_clock();

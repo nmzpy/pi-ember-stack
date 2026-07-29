@@ -81,7 +81,7 @@
     duplicate pulse timing or bullet-color logic in other plugins. Tool bullets
     never pulse: `statusBulletColor` is static `muted` while running, `success`
     when done, `error` on failure; running state is shown by gradient child
-    verbs (Searching, Reading, Bashing, …). The subagent renderer no longer
+    verbs (Searching, Reading, Running, …). The subagent renderer no longer
     uses `PulseManager`; it subscribes to the
     shared gradient clock instead (see Animation Compliance).
   - Terminal gradient rendering (Gaussian sweep, RGB interpolation, Chalk
@@ -313,15 +313,17 @@
   SSOT — it optionally runs `clear_stale_thinking_wait_blockers()` (resets
   leaked `toolExecutionInFlight`, resyncs subagent flags from the session
   branch, clears stale in-group Thinking lane + header suppression) then arms
-  the external in-message / above-editor host via
-  `arm_pre_token_thinking_status()` — it never folds compact child rows.
+  either the settled compact group's in-group lane or the external in-message /
+  above-editor host via `arm_pre_token_thinking_status()`.
   `clear_blockers` runs on visible user `message_start`, `session_compact`,
   and `compaction_end` transcript rebuild (`reconcile_thinking_after_transcript_rebuild()`).
-  In-group `└ Thinking` is painted via `noteThinking()` on a real
-  thinking stream (`message_update` → `apply_assistant_stream_boundary` in
-  `assistant-stream-boundary.ts`, SSOT) — it appends after lingering tool rows
-  without folding them. Inter-run planning `text_delta` arms
-  Thinking via `reconcile_thinking_wait_ui()` without folding children.
+  In-group `└ Thinking` is painted immediately by
+  `arm_pre_token_thinking_status()` when a settled work group owns the slot;
+  it appends after lingering tool rows without folding them. A real thinking
+  stream (`message_update` → `apply_assistant_stream_boundary` in
+  `assistant-stream-boundary.ts`, SSOT) reuses that lane. Inter-run planning
+  `text_delta` arms Thinking via `reconcile_thinking_wait_ui()` without
+  folding children.
   When the last subagent finishes (`tool_execution_end` for `subagent` with no
   remaining subagent activity), `reconcile_thinking_wait_ui()` runs so the
   parent-agent inter-run gap shows gradient `Thinking` before the model streams
@@ -355,11 +357,12 @@
   safety floor) clear it. While it is true the label shows `Thinking` and the
   editor border stays muted, so the header state is never lost during
   compaction/retry/follow-up gaps. **Post-tool / inter-run Thinking:** while
-  tools are idle and the SSOT wait predicate holds, the in-message component or
-  above-editor widget shows gradient `Thinking` and lingering tool child rows
-  stay visible. When a thinking or inter-run planning stream arrives (blocks
-  hidden), `noteThinking()` appends in-group `└ Thinking` after lingering tool
-  rows and suppresses the external widget.
+  tools are idle and the SSOT wait predicate holds, a settled work group shows
+  gradient `└ Thinking` inside the group with lingering child rows; without a
+  work group, the in-message component or above-editor widget shows gradient
+  `Thinking`. When a thinking or inter-run planning stream arrives (blocks
+  hidden), `noteThinking()` reuses the in-group lane and suppresses the
+  external widget.
   `resolve_thinking_status_host()` prefers in-message whenever
   `assistantThinkingHostReady`, not only during the pre-tool gap. Child rows
   are folded only via `fold_group_child_rows()` on a genuinely new tool wave

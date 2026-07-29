@@ -493,7 +493,7 @@ export const PULSE_INTERVAL_MS = 600;
 /**
  * Canonical status-bullet color: error→red, completed→green, else static
  * muted. Running state is shown by gradient child verbs (Searching, Reading,
- * Bashing, …) — bullets do not pulse.
+ * Running, …) — bullets do not pulse.
  */
 export function statusBulletColor(
 	isError: boolean,
@@ -653,8 +653,7 @@ function presentTenseVerb(name: string, args: ToolArgs): string {
 		case "ls":
 			return "Listing";
 		case "bash": {
-			const cmd = textValue(args?.command);
-			return bashGrepInfo(cmd) ? "Searching" : "Bashing";
+			return "Running";
 		}
 		case "edit":
 			return "Editing";
@@ -1310,7 +1309,8 @@ export class CompactRenderer {
 	 * - Tool lane: running/lingering children (Searching, Reading, …).
 	 * - Thinking lane: one gradient `└ Thinking` row replaces the linger child.
 	 *
-	 * Enter thinking lane: real thinking streams (`noteThinking()`).
+	 * Enter thinking lane: the wait arm or a real thinking stream
+	 * (`armInGroupThinking()` / `noteThinking()`).
 	 * Leave thinking lane:
 	 *   - same-key `tool_call` → `appendToGroup` (reopen tool lane);
 	 *   - visible assistant text, user message, or hard non-groupable tool

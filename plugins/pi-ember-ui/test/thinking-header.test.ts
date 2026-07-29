@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
 	arm_pre_token_thinking_status,
 	arm_thinking_stream_status,
@@ -20,6 +20,7 @@ function forcedColorizer(rgb: [number, number, number], text: string): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
 }
 import {
+	bind_thinking_status_tick_host_resolver,
 	bind_thinking_status_tick_should_paint,
 	bind_thinking_widget_host,
 	sync_thinking_status_tick,
@@ -30,6 +31,7 @@ import {
 	gradient_clock_is_idle,
 	gradient_reason_active,
 	set_gradient_render_request,
+	shutdown_gradient_clock,
 	stop_all_gradient_animation,
 } from "../gradient.ts";
 import { getSharedRenderer } from "../../pi-compact-tools/shared-renderer.ts";
@@ -71,6 +73,11 @@ function bind_thinking_reconcile_handlers(): void {
 		clearStaleBlockers: clear_stale_thinking_wait_blockers,
 	});
 }
+
+afterEach(() => {
+	unbind_thinking_status_hosts();
+	shutdown_gradient_clock();
+});
 
 describe("is_agent_thinking_wait", () => {
 	test("requires user turn committed when agent is idle", () => {
@@ -348,6 +355,7 @@ describe("thinking header visibility", () => {
 		const render_calls: number[] = [];
 		const mock_tui = { requestRender: () => render_calls.push(1) };
 		set_gradient_render_request(() => mock_tui.requestRender());
+		bind_thinking_status_tick_host_resolver(() => "widget");
 		bind_thinking_status_tick_should_paint(() => thinking_status_should_show() || isGroupThinkingChildActive());
 		bind_thinking_widget_host({ invalidate: () => mock_tui.requestRender() });
 		setUserTurnCommitted(true);
@@ -627,6 +635,52 @@ describe("thinking header visibility", () => {
 		} finally {
 			setAgentRunPending(false);
 			setTurnToolTranscriptActive(false);
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("post-tool wait arms Thinking inside a settled work group", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(true);
+		setAgentRunPending(true);
+		setUserTurnCommitted(true);
+		resetToolExecutionInFlight();
+		const renderer = getSharedRenderer();
+		renderer.resetForSession();
+		const theme = { fg: (t: string, s: string) => `[${t}:${s}]`, bold: (s: string) => s };
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = {
+			args: {},
+			toolCallId: "settled-owner",
+			invalidate: () => {},
+			state: owner_state,
+		};
+		try {
+			renderer.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
+			renderer.renderResult(
+				"bash",
+				{ command: "npm test" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...owner_ctx, isError: false },
+			);
+			renderer.settleAllGroups();
+			arm_pre_token_thinking_status();
+			expect(renderer.hasGroupThinkingChild()).toBe(true);
+			expect(thinking_status_should_show()).toBe(false);
+			expect(resolve_thinking_status_host()).toBe(null);
+			const row = owner_state.callText?.text?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
+			expect(row).toContain("Thinking");
+			expect(row).toContain("npm test");
+		} finally {
+			renderer.resetForSession();
+			setGroupThinkingChildActive(false);
+			setAgentRunPending(false);
+			setTurnToolTranscriptActive(false);
+			setUserTurnCommitted(false);
+			resetToolExecutionInFlight();
 			setThinkingBlocksHidden(prev_hidden);
 		}
 	});

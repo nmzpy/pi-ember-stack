@@ -6,21 +6,46 @@ import {
 type ThinkingStatusHost = {
 	invalidate?: () => void;
 };
+type ThinkingStatusHostKind = "in_message" | "widget" | null;
 
 let widget_host: ThinkingStatusHost | undefined;
 let in_message_host: ThinkingStatusHost | undefined;
 let thinking_status_tick_cb: (() => void) | undefined;
 let should_paint_fn: () => boolean = () => false;
+let resolve_host_fn: (() => ThinkingStatusHostKind) | undefined;
 
 /** Wire the live should-paint predicate from pi-ember-ui/index.ts (avoids circular imports). */
 export function bind_thinking_status_tick_should_paint(fn: () => boolean): void {
 	should_paint_fn = fn;
 }
 
+/** Wire the SSOT host resolver without importing the host owner (circularly). */
+export function bind_thinking_status_tick_host_resolver(
+	fn: () => ThinkingStatusHostKind,
+): void {
+	resolve_host_fn = fn;
+}
+
 function dispatch_thinking_status_tick(): void {
 	if (!should_paint_fn()) return;
+	if (resolve_host_fn) {
+		const host = resolve_host_fn();
+		if (host === "widget") {
+			widget_host?.invalidate?.();
+			return;
+		}
+		if (host === "in_message") {
+			in_message_host?.invalidate?.();
+			return;
+		}
+		// The compact group owns the status slot, so its own subscriber is
+		// responsible for the render. Do not wake either external host.
+		return;
+	}
+	// Keep the small unit-test seam useful before the production host resolver
+	// is bound. Production always binds the resolver from index.ts, so only one
+	// mutually-exclusive host is invalidated per tick.
 	widget_host?.invalidate?.();
-	in_message_host?.invalidate?.();
 }
 
 function ensure_thinking_status_tick(): void {
@@ -55,5 +80,6 @@ export function bind_thinking_in_message_host(host: ThinkingStatusHost | undefin
 export function unbind_thinking_status_hosts(): void {
 	widget_host = undefined;
 	in_message_host = undefined;
+	resolve_host_fn = undefined;
 	drop_thinking_status_tick();
 }

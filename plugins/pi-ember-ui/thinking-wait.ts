@@ -51,8 +51,10 @@ export function reconcile_thinking_wait_ui(options?: {
 
 /**
  * Arm external Thinking UI (widget / in-message) when the SSOT wait predicate
- * passes. In-group `└ Thinking` is entered only on a real thinking stream
- * (`apply_assistant_stream_boundary` → `noteThinking()`), not on inter-run gaps.
+ * passes. When a settled compact work group owns the transcript slot, the
+ * arm callback paints its in-group `└ Thinking` row immediately; a real
+ * thinking stream still enters/reuses that lane through
+ * (`apply_assistant_stream_boundary` → `noteThinking()`).
  *
  * `force_arm` is used when the agent is about to run (before_agent_start) but
  * flags are not yet in the wait predicate — e.g. auto-continue after
