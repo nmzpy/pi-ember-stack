@@ -163,8 +163,7 @@ export function is_agent_thinking_wait(thinkingActive = false): boolean {
 	if (!isAgentRunPending() && !thinkingActive) return false;
 	if (!isUserTurnCommitted() && !isAgentRunPending()) return false;
 	if (isToolExecutionInFlight()) return false;
-	if (isLatestSubagentRunning() || isSubagentActivityActive()) return false;
-	if (isSubagentDelegatingActive()) return false;
+	if (isSubagentDelegationActive()) return false;
 	if ((globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] === true) return false;
 	return true;
 }
@@ -256,79 +255,52 @@ export function setGroupReopenableActive(active: boolean): void {
 	groupReopenableActive = active;
 }
 
-/** Subagent activity counters/flags stored on `globalThis` via `Symbol.for`
- *  so jiti module duplication cannot desync `markSubagentActivityStarted`
- *  from `isSubagentActivityActive` / `is_agent_thinking_wait`.
+/**
+ * Live parent subagent tool-call ids. This is the sole lifecycle record for
+ * Thinking suppression: a delegated call blocks the external Thinking host
+ * from `tool_execution_start` until its matching `tool_execution_end`.
+ *
+ * The set lives on `globalThis` so jiti module duplication cannot split the
+ * lifecycle writer from the Thinking predicate. The latest-session scan is
+ * retained separately for the editor border; it is not a second Thinking
+ * suppression source.
  */
-const SUBAGENT_ACTIVITY_COUNT_KEY = Symbol.for("pi-ember-ui:subagent-activity-count");
-const SUBAGENT_ACTIVITY_ACTIVE_KEY = Symbol.for("pi-ember-ui:subagent-activity-active");
+const SUBAGENT_DELEGATION_IDS_KEY = Symbol.for("pi-ember-ui:subagent-delegation-ids");
 
-function subagent_activity_count(): number {
-	const value = (globalThis as GlobalThis)[SUBAGENT_ACTIVITY_COUNT_KEY];
-	return typeof value === "number" && value > 0 ? value : 0;
-}
-
-/** Whether any subagent tool call is active (delegating or running). */
-export function isSubagentActivityActive(): boolean {
-	return (globalThis as GlobalThis)[SUBAGENT_ACTIVITY_ACTIVE_KEY] === true;
-}
-
-export function markSubagentActivityStarted(): void {
+function subagent_delegation_ids(): Set<string> {
 	const g = globalThis as GlobalThis;
-	g[SUBAGENT_ACTIVITY_COUNT_KEY] = subagent_activity_count() + 1;
-	g[SUBAGENT_ACTIVITY_ACTIVE_KEY] = true;
+	if (!g[SUBAGENT_DELEGATION_IDS_KEY]) {
+		g[SUBAGENT_DELEGATION_IDS_KEY] = new Set<string>();
+	}
+	return g[SUBAGENT_DELEGATION_IDS_KEY] as Set<string>;
+}
+
+/**
+ * SSOT for suppressing parent Thinking while a subagent is being delegated or
+ * running. The matching lifecycle id is the sole authority.
+ */
+export function isSubagentDelegationActive(): boolean {
+	return subagent_delegation_ids().size > 0;
+}
+
+/** Idempotent — safe if lifecycle delivery is replayed during a rebuild. */
+export function markSubagentDelegationStarted(toolCallId: string): void {
+	if (!toolCallId) return;
+	subagent_delegation_ids().add(toolCallId);
 	setLatestSubagentRunning(true);
 }
 
-export function markSubagentActivityEnded(): void {
-	const g = globalThis as GlobalThis;
-	const count = Math.max(0, subagent_activity_count() - 1);
-	g[SUBAGENT_ACTIVITY_COUNT_KEY] = count;
-	const active = count > 0;
-	g[SUBAGENT_ACTIVITY_ACTIVE_KEY] = active;
-	setLatestSubagentRunning(active);
+/** End one delegated call without unblocking Thinking while siblings remain. */
+export function markSubagentDelegationEnded(toolCallId: string): void {
+	if (!toolCallId) return;
+	const ids = subagent_delegation_ids();
+	ids.delete(toolCallId);
+	setLatestSubagentRunning(ids.size > 0);
 }
 
-export function resetSubagentActivity(): void {
-	const g = globalThis as GlobalThis;
-	g[SUBAGENT_ACTIVITY_COUNT_KEY] = 0;
-	g[SUBAGENT_ACTIVITY_ACTIVE_KEY] = false;
+export function resetSubagentDelegation(): void {
+	subagent_delegation_ids().clear();
 	setLatestSubagentRunning(false);
-	resetSubagentDelegating();
-}
-
-/** Delegating tool-call ids stored on `globalThis` via a `Symbol.for` key so
- *  `noteSubagentDelegating` and `isSubagentDelegatingActive` cannot land on
- *  two different `Set` instances after jiti duplication.
- */
-const SUBAGENT_DELEGATING_IDS_KEY = Symbol.for("pi-ember-ui:subagent-delegating-ids");
-
-function subagent_delegating_ids(): Set<string> {
-	const g = globalThis as GlobalThis;
-	if (!g[SUBAGENT_DELEGATING_IDS_KEY]) {
-		g[SUBAGENT_DELEGATING_IDS_KEY] = new Set<string>();
-	}
-	return g[SUBAGENT_DELEGATING_IDS_KEY] as Set<string>;
-}
-
-/** Parent subagent tool is streaming/executing but child placeholders are not published yet. */
-export function isSubagentDelegatingActive(): boolean {
-	return subagent_delegating_ids().size > 0;
-}
-
-/** Idempotent — safe from subagent renderCall while Delegating is visible. */
-export function noteSubagentDelegating(toolCallId: string): void {
-	if (!toolCallId) return;
-	subagent_delegating_ids().add(toolCallId);
-}
-
-export function clearSubagentDelegating(toolCallId: string): void {
-	if (!toolCallId) return;
-	subagent_delegating_ids().delete(toolCallId);
-}
-
-export function resetSubagentDelegating(): void {
-	subagent_delegating_ids().clear();
 }
 
 let thinkingBlocksHidden = false;

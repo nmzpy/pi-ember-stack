@@ -12,6 +12,7 @@ export const SIBLING_DEFAULT_EFFORT = "default" as const;
 /** Effort points shown on the Switch Model slider (UI axis only). */
 export const EFFORT_SLIDER_POINTS = [
 	SIBLING_DEFAULT_EFFORT,
+	"minimal",
 	"low",
 	"medium",
 	"high",
@@ -41,6 +42,7 @@ export type ThinkingVariantToken = (typeof THINKING_VARIANT_TOKENS)[number];
 /** Screenshot-style captions under the Effort slider. */
 export const EFFORT_DESCRIPTIONS: Record<EffortSliderPoint, string> = {
 	default: "Standard tier for this model family.",
+	minimal: "Minimal reasoning for the fastest responses.",
 	low: "Faster responses with lighter reasoning.",
 	medium: "Balanced speed and reasoning quality for most tasks.",
 	high: "Deeper reasoning for harder problems.",

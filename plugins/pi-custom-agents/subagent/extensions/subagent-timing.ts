@@ -1,12 +1,11 @@
 import { formatElapsed } from "../../../pi-ember-ui/index.ts";
+import { THINKING_ELAPSED_MIN_MS } from "../../../pi-ember-ui/thinking-status-render.ts";
 
 /** Elapsed-time + terminal tracking per subagent tool call — SSOT with Thinking's formatElapsed. */
 
 const subagent_started_at = new Map<string, number>();
 const subagent_final_elapsed_ms = new Map<string, number>();
 const subagent_thinking_started_at = new Map<string, number>();
-
-const THINKING_ELAPSED_MIN_MS = 1000;
 
 export function markSubagentRunning(toolCallId: string): void {
 	if (!subagent_started_at.has(toolCallId)) {
@@ -27,7 +26,9 @@ export function markSubagentTerminal(toolCallId: string): void {
 
 /** Arm a per-subagent thinking-pass timer (mirrors parent thinkingPassStartedAt). */
 export function arm_subagent_thinking_pass(toolCallId: string): void {
-	subagent_thinking_started_at.set(toolCallId, performance.now());
+	if (!subagent_thinking_started_at.has(toolCallId)) {
+		subagent_thinking_started_at.set(toolCallId, performance.now());
+	}
 }
 
 export function clear_subagent_thinking_pass(toolCallId: string): void {

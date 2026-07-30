@@ -836,7 +836,7 @@ export function isFailedResult(result: SubAgentResult): boolean {
 
 export function getResultOutput(result: SubAgentResult): string {
 	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+		return resolve_failure_message(result) || "(no output)";
 	}
 	return getFinalOutput(result.messages) || "(no output)";
 }

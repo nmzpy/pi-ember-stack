@@ -15,7 +15,6 @@ describe("subagent thinking pass timer", () => {
 		arm_subagent_thinking_pass(id);
 		expect(format_subagent_thinking_elapsed_suffix(theme, id)).toBe("");
 
-		const started = performance.now() - 2500;
 		arm_subagent_thinking_pass(id);
 		clear_subagent_thinking_pass(id);
 		arm_subagent_thinking_pass(id);
@@ -26,6 +25,27 @@ describe("subagent thinking pass timer", () => {
 		// Sleep-free: test the threshold with a mocked approach — mark terminal clears
 		markSubagentTerminal(id);
 		expect(format_subagent_thinking_elapsed_suffix(theme, id)).toBe("");
+	});
+
+	test("repeated thinking updates keep the original start time", () => {
+		const theme = {
+			fg: (tag: string, text: string) => `[${tag}:${text}]`,
+		};
+		const id = "call-streaming-thinking";
+		const original_now = performance.now;
+		let now = 1_000_000;
+		performance.now = () => now;
+		try {
+			arm_subagent_thinking_pass(id);
+			now += 2500;
+			// Child stream updates call arm repeatedly while thinking. They must
+			// not restart the timer on every update.
+			arm_subagent_thinking_pass(id);
+			expect(format_subagent_thinking_elapsed_suffix(theme, id)).toBe("[dim: 2s]");
+		} finally {
+			performance.now = original_now;
+			clear_subagent_thinking_pass(id);
+		}
 	});
 
 	test("markSubagentTerminal clears thinking pass", () => {

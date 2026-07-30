@@ -78,7 +78,6 @@ import { getSharedRenderer } from "../../../pi-compact-tools/index.ts";
 import { subscribeGradientTick, unsubscribeGradientTick, requestTuiRender } from "../../../pi-ember-ui/index.ts";
 import { buildSelectListTheme } from "../../../pi-ember-ui/select-list-theme.ts";
 import {
-	clearSubagentDelegating,
 	isThinkingBlocksHidden,
 	setGroupReopenableActive,
 	setGroupThinkingChildActive,
@@ -253,6 +252,7 @@ function map_grouped_members(batch: SubagentCallRecord[]) {
 	return batch.map((member) => ({
 		args: member.args,
 		results: member.results,
+		failureMessage: member.failureMessage,
 		displayName: member.displayName,
 		terminal: isSubagentToolTerminal(member.toolCallId),
 		toolCallId: member.toolCallId,
@@ -474,7 +474,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			(event.toolName === "subagent" || is_subagent_resume_tool(event.toolName ?? "")) &&
 			typeof event.toolCallId === "string"
 		) {
-			clearSubagentDelegating(event.toolCallId);
 			markSubagentTerminal(event.toolCallId);
 			clear_subagent_thinking_pass(event.toolCallId);
 			const batch = getSubagentGroupRenderer().getBatch(event.toolCallId);
@@ -715,13 +714,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			invalidate: () => void;
 			state: Record<string, unknown>;
 			args: SubagentArgs;
+			isError?: boolean;
 		},
 	): Component {
 		const group_renderer = getSubagentGroupRenderer();
 		const details = result.details as SubagentDetails | undefined;
 		const results = details?.results ?? [];
+		const failureMessage =
+			context.isError === true && results.length === 0
+				? result.content
+						.filter((item): item is { type: "text"; text: string } => item.type === "text" && typeof item.text === "string")
+						.map((item) => item.text.trim())
+						.filter(Boolean)
+						.join(" ") || undefined
+				: undefined;
 		context.state.results = results;
-		group_renderer.register(context.toolCallId, context.args, results, context.invalidate);
+		group_renderer.register(context.toolCallId, context.args, results, context.invalidate, failureMessage);
 
 		const batch = group_renderer.getBatch(context.toolCallId);
 		const owner = batch_owner(batch);
@@ -768,6 +776,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				grouped_members,
 				!isRunning && terminal,
 				context.toolCallId,
+				failureMessage,
 			);
 			context.state.layout = layout;
 			shell.addChild(layout);

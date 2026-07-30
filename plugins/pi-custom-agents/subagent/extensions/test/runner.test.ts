@@ -6,6 +6,7 @@ import {
 	format_agent_tool_result_batch,
 	format_agent_tool_result_text,
 	get_agent_result_body,
+	getResultOutput,
 	isFailedResult,
 	resolve_failure_message,
 	resolve_subagent_timeout_ms,
@@ -164,6 +165,16 @@ describe("resolve_failure_message", () => {
 });
 
 describe("format_agent_tool_result_text", () => {
+	test("getResultOutput uses the resolved provider failure reason", () => {
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "This operation was aborted",
+			messages: [assistantMessage({ errorMessage: "503 Service Unavailable" })],
+		});
+		expect(getResultOutput(result)).toBe("503 Service Unavailable");
+	});
+
 	test("includes lettered agent label for completed results", () => {
 		const result = makeResult({
 			agent: "Coder A",

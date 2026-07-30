@@ -91,7 +91,8 @@ export interface OpenModelPickerOptions {
 
 const MAX_VISIBLE_FAMILIES = 7;
 
-const EFFORT_OPACITY_FOUR: Record<"low" | "medium" | "high" | "xhigh" | "max", number> = {
+const EFFORT_OPACITY_FOUR: Record<"minimal" | "low" | "medium" | "high" | "xhigh" | "max", number> = {
+	minimal: 0.2,
 	low: 0.25,
 	medium: 0.5,
 	high: 0.75,
@@ -101,6 +102,7 @@ const EFFORT_OPACITY_FOUR: Record<"low" | "medium" | "high" | "xhigh" | "max", n
 
 const EFFORT_OPACITY_FIVE: Record<EffortSliderPoint, number> = {
 	default: 0.5,
+	minimal: 0.2,
 	low: 0.2,
 	medium: 0.4,
 	high: 0.6,
@@ -108,7 +110,8 @@ const EFFORT_OPACITY_FIVE: Record<EffortSliderPoint, number> = {
 	max: 1,
 };
 
-const EFFORT_OPACITY_THREE: Record<"low" | "medium" | "high", number> = {
+const EFFORT_OPACITY_THREE: Record<"minimal" | "low" | "medium" | "high", number> = {
+	minimal: 0.2,
 	low: 0.33,
 	medium: 0.66,
 	high: 1,
@@ -122,14 +125,14 @@ function effort_point_opacity(point: EffortSliderPoint, efforts: EffortSliderPoi
 		return 0.5;
 	}
 	if (efforts.includes("max")) {
-		return EFFORT_OPACITY_FIVE[point as keyof typeof EFFORT_OPACITY_FIVE];
+		return EFFORT_OPACITY_FIVE[point];
 	}
 	if (!efforts.includes("xhigh")) {
-		if (point === "low" || point === "medium" || point === "high") {
+		if (point === "minimal" || point === "low" || point === "medium" || point === "high") {
 			return EFFORT_OPACITY_THREE[point];
 		}
 	}
-	return EFFORT_OPACITY_FOUR[point as keyof typeof EFFORT_OPACITY_FOUR];
+	return EFFORT_OPACITY_FOUR[point];
 }
 
 /** Orange accent at the Effort point opacity (SSOT for the slider). */

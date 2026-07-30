@@ -13,12 +13,16 @@ type CompactionStatusIndicator = {
 };
 
 let active_compaction_indicator: CompactionStatusIndicator | undefined;
+let compaction_render_request: (() => void) | undefined;
 let compaction_tick_cb: (() => void) | undefined;
 
 function ensure_compaction_status_tick(): void {
 	if (compaction_tick_cb) return;
 	compaction_tick_cb = (): void => {
 		active_compaction_indicator?.invalidate?.();
+		// Text.invalidate() only drops Pi's component cache. The native TUI still
+		// needs its public render request to observe the new gradient phase.
+		compaction_render_request?.();
 	};
 	subscribe_gradient_tick(compaction_tick_cb);
 }
@@ -30,14 +34,19 @@ function drop_compaction_status_tick(): void {
 }
 
 /** Wire the live compaction status row to the shared 20 FPS gradient clock. */
-export function bind_compaction_status_indicator(indicator: unknown): void {
+export function bind_compaction_status_indicator(
+	indicator: unknown,
+	request_render?: () => void,
+): void {
 	active_compaction_indicator = indicator as CompactionStatusIndicator;
+	compaction_render_request = request_render;
 	ensure_compaction_status_tick();
 }
 
 /** Clear compaction status tick wiring when the indicator is removed. */
 export function unbind_compaction_status_indicator(): void {
 	active_compaction_indicator = undefined;
+	compaction_render_request = undefined;
 	drop_compaction_status_tick();
 }
 

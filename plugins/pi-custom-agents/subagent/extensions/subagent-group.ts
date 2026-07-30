@@ -13,6 +13,8 @@ export interface SubagentCallRecord {
 	toolCallId: string;
 	args: SubagentArgs;
 	results: SubAgentResult[];
+	/** Tool-level failure text when Pi finalized without per-agent details. */
+	failureMessage?: string;
 	invalidate?: () => void;
 	/** Lettered display label (e.g. Coder A) assigned when the call starts. */
 	displayName?: string;
@@ -68,6 +70,7 @@ export class SubagentGroupRenderer {
 		args: SubagentArgs,
 		results: SubAgentResult[],
 		invalidate?: () => void,
+		failureMessage?: string,
 	): SubagentCallRecord {
 		const existing = this.by_id.get(toolCallId);
 		if (existing) {
@@ -80,10 +83,11 @@ export class SubagentGroupRenderer {
 				existing.results = results;
 			}
 			if (invalidate) existing.invalidate = invalidate;
+			if (failureMessage) existing.failureMessage = failureMessage;
 			return existing;
 		}
 
-		const record: SubagentCallRecord = { toolCallId, args, results, invalidate };
+		const record: SubagentCallRecord = { toolCallId, args, results, invalidate, failureMessage };
 		this.by_id.set(toolCallId, record);
 
 		if (isNativeMultiModeSubagentArgs(args) || !isSingleModeSubagentArgs(args)) {

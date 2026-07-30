@@ -38,13 +38,11 @@ import { getSharedRenderer } from "../../pi-compact-tools/shared-renderer.ts";
 import {
 	isCurrentTurnAssistantTimestamp,
 	isInterRunGap,
+	isLatestSubagentRunning,
 	is_agent_thinking_wait,
-	markSubagentActivityEnded,
-	markSubagentActivityStarted,
-	noteSubagentDelegating,
-	resetSubagentActivity,
-	resetSubagentDelegating,
-	clearSubagentDelegating,
+	markSubagentDelegationEnded,
+	markSubagentDelegationStarted,
+	resetSubagentDelegation,
 	setAgentRunPending,
 	setGroupReopenableActive,
 	setGroupThinkingChildActive,
@@ -266,7 +264,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("hides while subagent Delegating is visible (streaming before tool_call)", () => {
+	test("hides while delegated subagents are active and restores after the last one", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(true);
 		setAgentRunPending(true);
@@ -276,13 +274,21 @@ describe("thinking header visibility", () => {
 		try {
 			arm_pre_token_thinking_status();
 			expect(thinking_status_should_show()).toBe(true);
-			noteSubagentDelegating("call-delegating");
+			markSubagentDelegationStarted("call-scout-a");
+			markSubagentDelegationStarted("call-scout-b");
 			expect(thinking_status_should_show()).toBe(false);
-			clearSubagentDelegating("call-delegating");
+			// The branch can lag concurrent lifecycle events. Clearing stale
+			// blockers must preserve the active delegation ids and keep the
+			// external Thinking header hidden alongside the Subagents block.
+			clear_stale_thinking_wait_blockers();
+			expect(thinking_status_should_show()).toBe(false);
+			markSubagentDelegationEnded("call-scout-a");
+			expect(thinking_status_should_show()).toBe(false);
+			markSubagentDelegationEnded("call-scout-b");
 			arm_pre_token_thinking_status();
 			expect(thinking_status_should_show()).toBe(true);
 		} finally {
-			resetSubagentDelegating();
+			resetSubagentDelegation();
 			setAgentRunPending(false);
 			setTurnToolTranscriptActive(false);
 			setUserTurnCommitted(false);
@@ -297,15 +303,15 @@ describe("thinking header visibility", () => {
 		setTurnToolTranscriptActive(true);
 		setUserTurnCommitted(true);
 		suppress_thinking_header_for_work();
-		markSubagentActivityStarted();
+		markSubagentDelegationStarted("call-finished");
 		try {
 			setToolGroupActive(false);
 			setGroupThinkingChildActive(false);
-			markSubagentActivityEnded();
+			markSubagentDelegationEnded("call-finished");
 			arm_pre_token_thinking_status();
 			expect(thinking_status_should_show()).toBe(true);
 		} finally {
-			resetSubagentActivity();
+			resetSubagentDelegation();
 			setAgentRunPending(false);
 			setTurnToolTranscriptActive(false);
 			setUserTurnCommitted(false);
@@ -864,18 +870,15 @@ describe("reconcile_thinking_wait_ui", () => {
 		}
 	});
 
-	test("clear_stale_thinking_wait_blockers drops stale subagent running flag", () => {
+	test("clear_stale_thinking_wait_blockers drops the stale editor-border flag", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(true);
 		setTurnToolTranscriptActive(false);
 		setUserTurnCommitted(true);
 		setLatestSubagentRunning(true);
 		try {
-			arm_pre_token_thinking_status();
-			expect(thinking_status_should_show()).toBe(false);
 			clear_stale_thinking_wait_blockers();
-			arm_pre_token_thinking_status();
-			expect(thinking_status_should_show()).toBe(true);
+			expect(isLatestSubagentRunning()).toBe(false);
 		} finally {
 			reset_thinking_header_state_for_tests();
 			setThinkingBlocksHidden(prev_hidden);

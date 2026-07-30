@@ -31,7 +31,10 @@ import {
 import { CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { sync_compact_group_flags } from "../pi-compact-tools/group-flags.ts";
 import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
-import { render_thinking_gradient_label } from "./thinking-status-render.ts";
+import {
+	THINKING_ELAPSED_MIN_MS,
+	render_thinking_gradient_label,
+} from "./thinking-status-render.ts";
 import {
 	bind_thinking_in_message_host,
 	bind_thinking_status_tick_should_paint,
@@ -83,27 +86,23 @@ import {
 	buildThemeFgColors,
 	DIM_COLOR,
 	getActiveModeColor,
-	isLatestSubagentRunning,
 	isQuizActive,
 	isShellMode,
 	isUserBashRunning,
 	isGroupThinkingChildActive,
-	isSubagentActivityActive,
-	isToolGroupActive,
+	isSubagentDelegationActive,
 	MUTED_COLOR,
 	MUTED_MESSAGE_BG,
 	PAGE_BG,
-	markSubagentActivityEnded,
-	markSubagentActivityStarted,
-	noteSubagentDelegating,
-	resetSubagentActivity,
+	markSubagentDelegationEnded,
+	markSubagentDelegationStarted,
+	resetSubagentDelegation,
 	setLatestSubagentRunning,
 	setPlanAutoContinuing,
 	setShellMode,
 	setUserBashRunning,
 	isAgentRunPending,
 	isInterRunGap,
-	isSubagentDelegatingActive,
 	isThinkingBlocksHidden,
 	isUserTurnCommitted,
 	is_agent_thinking_wait,
@@ -349,7 +348,7 @@ export function format_thinking_pass_elapsed_suffix(theme: {
 }): string {
 	if (thinkingPassStartedAt <= 0) return "";
 	const elapsedMs = performance.now() - thinkingPassStartedAt;
-	if (elapsedMs < 1000) return "";
+	if (elapsedMs < THINKING_ELAPSED_MIN_MS) return "";
 	return theme.fg("dim", ` ${formatElapsed(elapsedMs)}`);
 }
 
@@ -655,8 +654,11 @@ function recompute_latest_subagent_running(): boolean {
 export function clear_stale_thinking_wait_blockers(): void {
 	resetToolExecutionInFlight();
 	const subagent_running = recompute_latest_subagent_running();
-	if (!subagent_running) {
-		resetSubagentActivity();
+	// Do not erase live lifecycle ids just because the session branch has not
+	// recorded a concurrently running subagent call yet. The id set is the
+	// authoritative state; the branch scan only repairs stale fallback state.
+	if (!subagent_running && !isSubagentDelegationActive()) {
+		resetSubagentDelegation();
 	}
 	const renderer = getSharedRenderer();
 	renderer.clearGroupThinkingChild();
@@ -819,7 +821,7 @@ function thinking_status_paint_active(): boolean {
 
 /** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
 export function arm_pre_token_thinking_status(): void {
-	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive() || isSubagentDelegatingActive()) return;
+	if (isQuizActive() || isSubagentDelegationActive()) return;
 	const renderer = getSharedRenderer();
 	sync_compact_group_flags(renderer);
 	reset_thinking_pass_timer();
@@ -1803,7 +1805,7 @@ function installCompactionStatusPatch(): void {
 		// drives gradient text via bind_compaction_status_indicator.
 		if (typeof indicator.stop === "function") indicator.stop();
 		activate_gradient("compaction");
-		bind_compaction_status_indicator(indicator);
+		bind_compaction_status_indicator(indicator, () => requestRender?.());
 		indicator.render = (width: number): string[] => {
 			const theme = resolve_live_theme();
 			if (!theme) return [];
@@ -2721,7 +2723,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setUserTurnCommitted(false);
 		thinkingHeaderSuppressed = false;
 		setTurnToolTranscriptActive(false);
-		resetSubagentActivity();
+		resetSubagentDelegation();
 		stopLogoAnimation();
 		stopThinkingAnimation();
 		stop_all_gradient_animation();
@@ -2747,8 +2749,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		suppress_thinking_header_for_work();
 		setTurnToolTranscriptActive(true);
 		if (is_subagent_delegation_tool(event.toolName)) {
-			markSubagentActivityStarted();
-			noteSubagentDelegating(event.toolCallId);
 			refresh_thinking_status();
 		}
 	});
@@ -2760,6 +2760,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setTurnToolTranscriptActive(true);
 		if (is_subagent_delegation_tool(event.toolName)) {
 			recompute_latest_subagent_running();
+			markSubagentDelegationStarted(event.toolCallId);
 		}
 		refresh_thinking_status();
 	});
@@ -2774,9 +2775,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		schedule_footer_stats(ctx);
 		if (is_subagent_delegation_tool(event.toolName)) {
 			recompute_latest_subagent_running();
-			markSubagentActivityEnded();
+			markSubagentDelegationEnded(event.toolCallId);
 			// Last subagent finished — arm Thinking before the parent streams again.
-			if (!isSubagentActivityActive() && !isLatestSubagentRunning()) {
+			if (!isSubagentDelegationActive()) {
 				reconcile_thinking_wait_ui();
 			} else {
 				refresh_thinking_status();
@@ -2827,13 +2828,13 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		logo_settled_by_user_message = false;
 		stopLogoAnimation();
 		drop_logo_tick();
+		unbind_compaction_status_indicator();
 		shutdown_gradient_clock();
 		unbind_thinking_status_hosts();
 		thinking_status_render_pending = false;
 		reset_thinking_header_session_state();
 		setShellMode(false);
-		setLatestSubagentRunning(false);
-		resetSubagentActivity();
+		resetSubagentDelegation();
 		setToolGroupActive(false);
 		setGroupThinkingChildActive(false);
 		setGroupReopenableActive(false);

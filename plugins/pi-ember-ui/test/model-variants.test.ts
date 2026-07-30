@@ -127,9 +127,10 @@ describe("extract_variant_token / strip_variant_token", () => {
 });
 
 describe("effort helpers", () => {
-	test("slider points include Default then low/medium/high/xhigh/max", () => {
+	test("slider points include Default then minimal/low/medium/high/xhigh/max", () => {
 		expect([...EFFORT_SLIDER_POINTS]).toEqual([
 			"default",
+			"minimal",
 			"low",
 			"medium",
 			"high",
@@ -138,10 +139,10 @@ describe("effort helpers", () => {
 		]);
 	});
 
-	test("variant_to_effort_point maps slider tokens only", () => {
+	test("variant_to_effort_point maps slider tokens including minimal", () => {
 		expect(variant_to_effort_point("high")).toBe("high");
 		expect(variant_to_effort_point("max")).toBe("max");
-		expect(variant_to_effort_point("minimal")).toBeUndefined();
+		expect(variant_to_effort_point("minimal")).toBe("minimal");
 	});
 
 	test("is_effort_slider_point and descriptions", () => {
@@ -153,6 +154,7 @@ describe("effort helpers", () => {
 
 	test("format_effort_display_label title-cases effort points", () => {
 		expect(format_effort_display_label("default")).toBe("Default");
+		expect(format_effort_display_label("minimal")).toBe("Minimal");
 		expect(format_effort_display_label("low")).toBe("Low");
 		expect(format_effort_display_label("medium")).toBe("Medium");
 		expect(format_effort_display_label("high")).toBe("High");

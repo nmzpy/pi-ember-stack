@@ -10,6 +10,7 @@ import {
 	memberRecordsToRows,
 	SubagentToolText,
 	renderSubagentExpanded,
+	renderSubagentThinkingRow,
 } from "../render.ts";
 import {
 	BULLET,
@@ -21,6 +22,10 @@ import {
 } from "../../../../pi-compact-tools/renderer.ts";
 import { set_gradient_colorizer, reset_gradient_colorizer, type Rgb } from "../../../../pi-ember-ui/gradient.ts";
 import { strip_subagent_leading_render_gap } from "../subagent-render-spacing.ts";
+import {
+	arm_subagent_thinking_pass,
+	clear_subagent_thinking_pass,
+} from "../subagent-timing.ts";
 
 function forcedColorizer(rgb: Rgb, text: string): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
@@ -214,6 +219,24 @@ describe("subagent elapsed time", () => {
 		expect(out).toContain("[dim: 3s]");
 	});
 
+	test("lingering subagent Thinking row shows time since thinking started", () => {
+		const theme = makeTheme() as any;
+		const id = "call-lingering-thinking";
+		const original_now = performance.now;
+		let now = 1_000_000;
+		performance.now = () => now;
+		try {
+			arm_subagent_thinking_pass(id);
+			now += 2500;
+			const out = renderSubagentThinkingRow(theme, "  └ ", id);
+			expect(stripAnsi(out)).toContain("Thinking");
+			expect(out).toContain("[dim: 2s]");
+		} finally {
+			performance.now = original_now;
+			clear_subagent_thinking_pass(id);
+		}
+	});
+
 	test("grouped consecutive singles render one Subagents header", () => {
 		const theme = makeTheme() as any;
 		const members = [
@@ -230,6 +253,32 @@ describe("subagent elapsed time", () => {
 		expect(stripAnsi(out)).toContain("Coder A");
 		expect(stripAnsi(out)).toContain("Coder B");
 		expect(stripAnsi(out)).toContain("Coder C");
+	});
+
+	test("grouped tool-level failures keep each diagnostic on its agent row", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{
+				args: { agent: "Coder", task: "a" },
+				results: [],
+				displayName: "Coder A",
+				terminal: true,
+				failureMessage: "401 Unauthorized",
+			},
+			{
+				args: { agent: "Coder", task: "b" },
+				results: [],
+				displayName: "Coder B",
+				terminal: true,
+				failureMessage: "503 Service Unavailable",
+			},
+		];
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, [], theme, undefined, members, true);
+		const output = stripAnsi(out);
+		expect(output).toContain("Coder A");
+		expect(output).toContain("401 Unauthorized");
+		expect(output).toContain("Coder B");
+		expect(output).toContain("503 Service Unavailable");
 	});
 
 	test("grouped second running agent shows thinking after first completes", () => {
@@ -408,6 +457,32 @@ describe("renderSubagentLayout (string)", () => {
 		// so the real reason stands out next to the agent name.
 		expect(out).toContain("[error:timeout during read]");
 		expect(out).not.toContain("[muted:timeout during read]");
+	});
+
+	test("failed row uses the provider error instead of a generic abort", () => {
+		const theme = makeTheme() as any;
+		const result = makeResult("Coder A", 1, true);
+		result.errorMessage = "This operation was aborted";
+		result.messages = [
+			{ role: "assistant", errorMessage: "401 Unauthorized: invalid api key", content: [] },
+		];
+		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [result], theme);
+		expect(stripAnsi(out)).toContain("401 Unauthorized: invalid api key");
+		expect(stripAnsi(out)).not.toContain("This operation was aborted");
+	});
+
+	test("tool-level failure is shown when no per-agent result was persisted", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{ agent: "Coder A", task: "do stuff" },
+			[],
+			theme,
+			undefined,
+			undefined,
+			true,
+			"No model resolved for agent",
+		);
+		expect(stripAnsi(out)).toContain("No model resolved for agent");
 	});
 
 	test("completed single mode does not include error text", () => {

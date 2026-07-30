@@ -1420,7 +1420,6 @@ export class CompactRenderer {
 			if (group) this.currentGroup = group;
 		}
 		if (!group || group.records.length < 1) return;
-		if (group.records.some((r) => !r._completed)) return;
 		this.hardExitGroup();
 	}
 

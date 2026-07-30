@@ -7,6 +7,7 @@ import {
 	bind_live_editor_for_tests,
 	set_native_editor_submit_value_for_tests,
 	should_auto_submit_slash_text,
+	should_auto_submit_resume_text,
 	extract_model_command_search,
 	should_route_model_slash_to_picker,
 } from "../model-picker.ts";
@@ -128,6 +129,17 @@ describe("should_auto_submit_slash_text", () => {
 		expect(should_auto_submit_slash_text("/model ")).toBe(false);
 		expect(should_auto_submit_slash_text("/export path/to/dir/")).toBe(false);
 		expect(should_auto_submit_slash_text('/export "path/to/dir/"')).toBe(false);
+	});
+});
+
+describe("should_auto_submit_resume_text", () => {
+	test("commits a selected session on the same Enter press", () => {
+		expect(should_auto_submit_resume_text("/resume /sessions/alpha.jsonl")).toBe(true);
+	});
+
+	test("does not commit the bare command or an unfinished directory", () => {
+		expect(should_auto_submit_resume_text("/resume")).toBe(false);
+		expect(should_auto_submit_resume_text("/resume /sessions/")).toBe(false);
 	});
 });
 

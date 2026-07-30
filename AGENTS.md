@@ -88,9 +88,12 @@
     colorization, semantic presets, and the 20 FPS shared clock) lives once
     in `pi-ember-ui/gradient.ts` — never duplicate gradient math, animation
     timing, or color constants in other files.
-  - The subagent-running flag (`isLatestSubagentRunning`/
-    `setLatestSubagentRunning`) lives in `pi-ember-ui/mode-colors.ts` — never
-    duplicate the session-scan logic that sets it.
+  - Subagent Thinking suppression lives in
+    `pi-ember-ui/mode-colors.ts` `isSubagentDelegationActive()` with one live
+    tool-call-id set (`markSubagentDelegationStarted` /
+    `markSubagentDelegationEnded`). `isLatestSubagentRunning` remains the
+    editor-border/session-scan state, not a Thinking suppression input; never
+    add a second activity counter, delegating set, or session scan.
   - The output-limit auto-continue flag (`isPlanAutoContinuing`/
     `setPlanAutoContinuing`) lives in `pi-ember-ui/mode-colors.ts` — never
     duplicate the output-limit suppression logic that sets it. The flag
@@ -187,11 +190,11 @@
   terminal height. The `recompute_latest_subagent_running()` helper
   scans `sessionCtx.sessionManager` entries and writes the result to the
   shared `isLatestSubagentRunning()`/`setLatestSubagentRunning()` flag in
-  `pi-ember-ui/mode-colors.ts`. It is called ONLY from
-  `tool_execution_start`/`tool_execution_end` handlers — never from the
-  render path. The local subagent-running cache has been removed; the
-  editor border no longer reads subagent state. Never duplicate this
-  session-scan logic and never call it from a render closure. The
+  `pi-ember-ui/mode-colors.ts`. It is called only from lifecycle and stale-
+  blocker reconciliation handlers — never from the render path. Live
+  subagent Thinking suppression uses only the matching tool-call-id set; the
+  scan is editor-border state. Never duplicate either state source or call
+  the scan from a render closure. The
   Thinking gradient label is NO LONGER rendered inside the editor border or
   above the chatbox — it lives inside the latest assistant message in the
   transcript (see Thinking/Summarizing status below). Pi owns the editor fake
@@ -291,11 +294,12 @@
   `updateContent`) so only the most recent assistant message renders the
   in-message label. The render path is O(1): it reads `thinkingActive`,
   `agentRunPending`, `isThinkingBlocksHidden()`,
-  `isQuizActive()`, `isToolGroupActive()`, and `isLatestSubagentRunning()`.
+  `isQuizActive()`, `isToolGroupActive()`, and
+  `isSubagentDelegationActive()`.
   It is suppressed when a quiz overlay is active, when a compact tool group
   has a **running** member (`isToolGroupActive()` — lingering completed
-  children alone no longer suppress), when the latest tool call is a running
-  subagent, when a visible thinking block is actively streaming (`thinkingActive`
+  children alone no longer suppress), when a delegated subagent tool call is
+  active, when a visible thinking block is actively streaming (`thinkingActive`
   with `!isThinkingBlocksHidden()` — the transcript owns reasoning), or when
   in-group `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). The
   `Thinking` placeholder still appears in the pre-token wait and in-message
@@ -325,7 +329,7 @@
   `text_delta` arms Thinking via `reconcile_thinking_wait_ui()` without
   folding children.
   When the last subagent finishes (`tool_execution_end` for `subagent` with no
-  remaining subagent activity), `reconcile_thinking_wait_ui()` runs so the
+  remaining delegated subagent call), `reconcile_thinking_wait_ui()` runs so the
   parent-agent inter-run gap shows gradient `Thinking` before the model streams
   again — same post-tool feedback as other tools.
   The **pre-tool gap** (`is_pre_tool_thinking_gap()` — `agentRunPending` and
@@ -398,23 +402,21 @@
   to stay — `agent_end` is not the end of the user's task. When the group
   settles (visible user-facing text, a thinking stream, a non-group or
   different-group tool, a user message, or `agent_end`), child rows collapse to
-  the header. Thinking streams always soft-settle the active group (collapse
-  linger so the `Thinking` status can appear) even when thinking blocks are
-  hidden; when blocks are hidden the live `currentGroup` is kept so the next
-  same-key discovery/action call reopens that header instead of spawning
-  another `Explored`/`Edited`/… row. **Inter-run planning text** (non-empty
+  the header. A visible thinking stream is a hard chronological boundary: it
+  calls `noteVisibleThinking()` and the following tool wave always starts a
+  new header below the transcript reasoning, including during an inter-run
+  gap. Hidden thinking uses `noteHiddenThinking()` to paint the in-group
+  `└ Thinking` lane. **Inter-run planning text** (non-empty
   `text_delta` while `isInterRunGap()` — `agentRunPending`, no tool in flight,
   tools already on screen this turn, e.g. OpenAI/Codex between tool batches) is a
   **soft** boundary: inter-run planning `text_delta` arms Thinking without
   folding; inter-run non-planning text uses `noteVisibleText()`. **Final answer text**
   (`text_delta` outside the inter-run gap) remains a hard boundary
-  (`noteVisibleText()`). **`thinking_delta` with blocks visible** hard-exits the
-  work group (`noteVisibleThinking()`) so the next tool wave spawns a fresh
-  header downstream; hidden blocks use in-group `└ Thinking` via `noteThinking()`.
-  **Inter-run reasoning** (`thinking_delta`/`thinking_start` while
-  `isInterRunGap()`) soft-settles via `noteThinking()` regardless of block
-  visibility, so Devin/Cognition inter-batch reasoning keeps the unified work
-  group reopenable instead of spawning standalone rows per tool batch.
+  (`noteVisibleText()`). **Every visible `thinking_delta` / `thinking_start`**
+  hard-exits the work group (`noteVisibleThinking()`), including during an
+  inter-run gap, so the next tool wave cannot update a header above visible
+  reasoning. Hidden reasoning uses `noteHiddenThinking()` for the in-group
+  lane.
   The
   `isToolGroupActive`/`setToolGroupActive` flag
   lives in `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools`
@@ -650,14 +652,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `tool_call` → reopen tool lane (recovers frozen group via
     `findReopenableGroup` if `currentGroup` was lost without a hard exit);
     `agent_settled` → collapse thinking lane (header-only, keep reopen pointer).
-    `thinking_delta` with blocks visible hard-exits via `noteVisibleThinking()`
-    so the next same-key batch spawns a fresh header downstream; hidden blocks
-    use in-group `└ Thinking` via `noteThinking()`. **Inter-run reasoning**
-    (`thinking_delta`/`thinking_start` while `isInterRunGap()` — Devin/Cognition
-    between tool batches) is treated as planning, not a final answer: it
-    soft-settles via `noteThinking()` regardless of whether blocks are visible,
-    so the unified work group stays reopenable for the next tool wave. Hard
-    group splits on visible text use non-empty `text_delta` only — bare
+    every visible `thinking_delta` / `thinking_start` hard-exits via
+    `noteVisibleThinking()`, including inter-run reasoning, so the next
+    same-key batch gets a fresh header downstream. Hidden reasoning uses
+    `noteHiddenThinking()` for its in-group lane. Hard group splits on visible text use non-empty `text_delta` only — bare
     `text_start` must not split.
   - **Running / lingering children:** Under the unified work header
     (`• Edited N files, explored M files, … +N -N`), every member in the

@@ -25,7 +25,12 @@ import {
 } from "../../../pi-compact-tools/renderer.ts";
 import { Container, type Component, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Message } from "@earendil-works/pi-ai";
-import { type SubAgentResult, isFailedResult, getResultOutput } from "./runner.ts";
+import {
+	type SubAgentResult,
+	getResultOutput,
+	isFailedResult,
+	resolve_failure_message,
+} from "./runner.ts";
 import {
 	format_subagent_thinking_elapsed_suffix,
 } from "./subagent-timing.ts";
@@ -267,6 +272,7 @@ export function renderSingleResult(
 	const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 	const displayItems = getDisplayItems(result.messages);
 	const finalOutput = getResultOutput(result);
+	const failureMessage = isError ? resolve_failure_message(result) : undefined;
 
 	if (expanded) {
 		const mdTheme = getMarkdownTheme();
@@ -277,9 +283,9 @@ export function renderSingleResult(
 			header += ` ${theme.fg(reasonColor, `[${result.stopReason}]`)}`;
 		}
 		container.addChild(new Text(header, 0, 0));
-		if (isError && result.errorMessage) {
+		if (failureMessage) {
 			const messageColor = result.stopReason === "timeout" ? "warning" : "error";
-			container.addChild(new Text(theme.fg(messageColor, `Error: ${result.errorMessage}`), 0, 0));
+			container.addChild(new Text(theme.fg(messageColor, `Error: ${failureMessage}`), 0, 0));
 		}
 		container.addChild(new Spacer(1));
 		container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
@@ -319,9 +325,9 @@ export function renderSingleResult(
 		const reasonColor = result.stopReason === "timeout" ? "warning" : "error";
 		text += ` ${theme.fg(reasonColor, `[${result.stopReason}]`)}`;
 	}
-	if (isError && result.errorMessage) {
+	if (failureMessage) {
 		const messageColor = result.stopReason === "timeout" ? "warning" : "error";
-		text += `\n${theme.fg(messageColor, `Error: ${result.errorMessage}`)}`;
+		text += `\n${theme.fg(messageColor, `Error: ${failureMessage}`)}`;
 	} else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 	else {
 		text += `\n${renderDisplayItems(displayItems, theme, COLLAPSED_ITEM_COUNT)}`;
@@ -378,6 +384,7 @@ function renderAgentLabel(
 	agentName: string,
 	theme: ThemeLike,
 	result?: SubAgentResult,
+	failureMessage?: string,
 	phaseOffsetMs: number = 0,
 	isSingle = false,
 	elapsedMs?: number,
@@ -392,10 +399,11 @@ function renderAgentLabel(
 		return prefix + theme.fg("text", agentName) + elapsedSuffix;
 	}
 	let suffix = "";
-	if (status === "failed" && result) {
-		const output = getResultOutput(result).trim();
+	if (status === "failed") {
+		const output = (failureMessage ?? (result ? resolve_failure_message(result) : undefined))?.trim();
 		if (output) {
-			const clipped = output.length > 60 ? `${output.slice(0, 60)}...` : output;
+			const singleLine = output.replace(/\s+/g, " ");
+			const clipped = singleLine.length > 60 ? `${singleLine.slice(0, 57)}...` : singleLine;
 			suffix = ` ${theme.fg("error", clipped)}`;
 		}
 	}
@@ -413,11 +421,12 @@ function renderAgentRow(
 	theme: ThemeLike,
 	result?: SubAgentResult,
 	prefix = "",
+	failureMessage?: string,
 	phaseOffsetMs: number = 0,
 	isSingle = false,
 	elapsedMs?: number,
 ): string {
-	return prefix + renderAgentLabel(status, agentName, theme, result, phaseOffsetMs, isSingle, elapsedMs);
+	return prefix + renderAgentLabel(status, agentName, theme, result, failureMessage, phaseOffsetMs, isSingle, elapsedMs);
 }
 
 type FlatEntry =
@@ -569,6 +578,7 @@ interface AgentRowDescriptor {
 	status: AgentStatus;
 	name: string;
 	result?: SubAgentResult;
+	failureMessage?: string;
 	isSingle: boolean;
 	toolCallId?: string;
 }
@@ -576,6 +586,7 @@ interface AgentRowDescriptor {
 export interface SubagentLayoutMember {
 	args: SubagentArgs;
 	results: SubAgentResult[];
+	failureMessage?: string;
 	displayName?: string;
 	/** Tool execution finished — stop Delegating gradient + live elapsed timer. */
 	terminal?: boolean;
@@ -597,6 +608,7 @@ export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDe
 		const terminal = member.terminal === true;
 		if (
 			!terminal &&
+			!member.failureMessage &&
 			isSingleModeSubagentArgs(member.args) &&
 			(member.results.length === 0 || isSubagentDelegating(member.results))
 		) {
@@ -604,14 +616,16 @@ export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDe
 				status: "running" as const,
 				name: displayName,
 				result: member.results[0],
+				failureMessage: member.failureMessage,
 				isSingle: false,
 				toolCallId: member.toolCallId,
 			};
 		}
 		return {
-			status: agentStatus(member.results[0], terminal),
+			status: member.failureMessage ? "failed" : agentStatus(member.results[0], terminal),
 			name: displayName,
 			result: member.results[0],
+			failureMessage: member.failureMessage,
 			isSingle: false,
 			toolCallId: member.toolCallId,
 		};
@@ -643,6 +657,7 @@ function fillSubagentLayoutContainer(
 				theme,
 				row.result,
 				hasHeader ? fg("dim", treePrefix) : "",
+				row.failureMessage,
 				entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 				row.isSingle,
 				row.isSingle ? elapsedMs : undefined,
@@ -669,6 +684,7 @@ function deriveAgentRows(
 	results: SubAgentResult[],
 	terminal = false,
 	toolCallId?: string,
+	failureMessage?: string,
 ): {
 	headerLabel: string | undefined;
 	rows: AgentRowDescriptor[];
@@ -678,9 +694,10 @@ function deriveAgentRows(
 			headerLabel: undefined,
 			rows: [
 				{
-					status: agentStatus(results[0], terminal),
+					status: failureMessage ? "failed" : agentStatus(results[0], terminal),
 					name: results[0]?.agent ?? args.agent ?? "subagent",
 					result: results[0],
+					failureMessage,
 					isSingle: true,
 					toolCallId,
 				},
@@ -738,6 +755,7 @@ export function renderSubagentLayout(
 	elapsedMs?: number,
 	groupedMembers?: SubagentLayoutMember[],
 	terminal = false,
+	failureMessage?: string,
 ): string {
 	if (groupedMembers && groupedMembers.length > 1) {
 		const rows = memberRecordsToRows(groupedMembers);
@@ -759,6 +777,7 @@ export function renderSubagentLayout(
 						theme,
 						row.result,
 						fg("dim", treePrefix),
+						row.failureMessage,
 						entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 						false,
 					),
@@ -775,7 +794,7 @@ export function renderSubagentLayout(
 			return renderDelegatingRow(theme, elapsedMs);
 		}
 	}
-	const { headerLabel, rows } = deriveAgentRows(args, results, terminal);
+	const { headerLabel, rows } = deriveAgentRows(args, results, terminal, undefined, failureMessage);
 	const fg = theme.fg.bind(theme);
 	const lines: string[] = [];
 	const hasHeader = headerLabel !== undefined;
@@ -796,6 +815,7 @@ export function renderSubagentLayout(
 					theme,
 					row.result,
 					hasHeader ? fg("dim", treePrefix) : "",
+					row.failureMessage,
 					entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 					row.isSingle,
 					row.isSingle ? elapsedMs : undefined,
@@ -831,6 +851,7 @@ export function buildSubagentLayoutComponent(
 	groupedMembers?: SubagentLayoutMember[],
 	terminal = false,
 	toolCallId?: string,
+	failureMessage?: string,
 ): Container {
 	const container = new Container();
 	if (groupedMembers && groupedMembers.length > 1) {
@@ -842,7 +863,7 @@ export function buildSubagentLayoutComponent(
 		container.addChild(new Text(renderDelegatingRow(theme, elapsedMs), 0, 0));
 		return container;
 	}
-	const { headerLabel, rows } = deriveAgentRows(args, results, terminal, toolCallId);
+	const { headerLabel, rows } = deriveAgentRows(args, results, terminal, toolCallId, failureMessage);
 	fillSubagentLayoutContainer(container, headerLabel, rows, theme, elapsedMs);
 	return container;
 }
@@ -891,8 +912,9 @@ export function renderSubagentExpanded(
 		const rowContent = new Container();
 		const stepIcon = isFailedResult(r) ? fg("error", "✗") : fg("success", "✓");
 		rowContent.addChild(new Text(`${stepIcon} ${fg("dim", r.agent)}`, 0, 0));
-		if (r.errorMessage) {
-			rowContent.addChild(new Text(fg("error", `Error: ${r.errorMessage}`), 0, 0));
+		const failureMessage = isFailedResult(r) ? resolve_failure_message(r) : undefined;
+		if (failureMessage) {
+			rowContent.addChild(new Text(fg("error", `Error: ${failureMessage}`), 0, 0));
 		}
 		const finalOutput = getResultOutput(r);
 		if (finalOutput) {

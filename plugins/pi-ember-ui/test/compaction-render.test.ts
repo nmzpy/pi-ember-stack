@@ -46,20 +46,28 @@ describe("compaction render rows", () => {
 		deactivate_gradient("compaction");
 	});
 
-	test("compaction status indicator invalidates on shared gradient tick", () => {
+	test("compaction status indicator invalidates and requests a native render on shared gradient tick", () => {
 		let invalidations = 0;
-		bind_compaction_status_indicator({
-			invalidate: () => {
-				invalidations += 1;
+		let render_requests = 0;
+		bind_compaction_status_indicator(
+			{
+				invalidate: () => {
+					invalidations += 1;
+				},
 			},
-		});
+			() => {
+				render_requests += 1;
+			},
+		);
 		activate_gradient("compaction");
 		dispatch_gradient_tick();
 		expect(invalidations).toBe(1);
+		expect(render_requests).toBe(1);
 		unbind_compaction_status_indicator();
 		deactivate_gradient("compaction");
 		dispatch_gradient_tick();
 		expect(invalidations).toBe(1);
+		expect(render_requests).toBe(1);
 	});
 
 	test("completed row uses Compacted stats line", () => {

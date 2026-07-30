@@ -9,7 +9,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth, Markdown } from "@earendil-works/pi-tui";
 import type { Message } from "@earendil-works/pi-ai";
 
-import { isFailedResult, getFinalOutput } from "./runner.ts";
+import { isFailedResult, getFinalOutput, resolve_failure_message } from "./runner.ts";
 import { formatUsageStats } from "./render.ts";
 import type { SubagentThread } from "./threads.ts";
 import * as os from "node:os";
@@ -257,9 +257,10 @@ export class ThreadViewer {
 		lines.push(truncateToWidth(header, width));
 
 		// Error message
-		if (result && isErr && result.errorMessage) {
-			const msgColor = result.stopReason === "timeout" ? "warning" : "error";
-			lines.push(truncateToWidth(t.fg(msgColor, `Error: ${result.errorMessage}`), width));
+		const failureMessage = result && isErr ? resolve_failure_message(result) : undefined;
+		if (failureMessage) {
+			const msgColor = result?.stopReason === "timeout" ? "warning" : "error";
+			lines.push(truncateToWidth(t.fg(msgColor, `Error: ${failureMessage}`), width));
 		}
 
 		lines.push("");

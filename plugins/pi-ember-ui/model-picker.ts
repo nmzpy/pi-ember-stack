@@ -522,6 +522,12 @@ export function should_auto_submit_slash_text(text: string): boolean {
 	return /^\S+\s+\S/.test(trimmed);
 }
 
+/** True for a completed /resume argument selected from autocomplete. */
+export function should_auto_submit_resume_text(text: string): boolean {
+	const trimmed = text.trim();
+	return trimmed.startsWith(`${RESUME_PREFIX} `) && should_auto_submit_slash_text(trimmed);
+}
+
 /** Outermost editor wrap — call from pi-custom-agents editor factory after other wraps. */
 export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any): void {
 	live_editor = editor;
@@ -597,27 +603,48 @@ export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any
 		// Native command-name submits with Enter already clear the editor, so
 		// the argument-only guard makes this a no-op for them. submitValue
 		// routes /model and /resume through our patch.
-		if (was_showing && !editor_is_showing_autocomplete(editor)) {
+		if (was_showing) {
 			const text = editor.getText?.()?.trim() ?? "";
-			// Enter/Tab on bare /model or /resume must open the picker / resume UI.
-			// should_auto_submit_slash_text requires an argument, so handle these
-			// explicitly (Pi may have already submitted — then text is empty).
+			const is_completion_confirm = is_confirm || is_submit || is_tab;
+			const autocomplete_closed = !editor_is_showing_autocomplete(editor);
+			const completion_changed_text = text !== trimmed_before;
+			// Pi's argument autocomplete treats Enter as "apply and close" when
+			// the prefix is the /resume search term, so it does not fall through
+			// to submit. Commit the selected session directly on that same keypress.
+			// Do this before checking the autocomplete state because Pi can finish
+			// cancelling the list just after the component input handler returns.
 			if (
-				(is_tab || is_confirm || is_submit) &&
-				(text === MODEL_PREFIX || text === RESUME_PREFIX)
-			) {
-				editor.submitValue?.();
-				finalize_editor_input_after(editor);
-				return;
-			}
-			if (
-				(is_confirm || is_submit || is_tab) &&
-				should_auto_submit_slash_text(text) &&
+				is_completion_confirm &&
+				should_auto_submit_resume_text(text) &&
+				(autocomplete_closed || completion_changed_text) &&
 				typeof editor.submitValue === "function"
 			) {
 				editor.submitValue();
 				finalize_editor_input_after(editor);
 				return;
+			}
+
+			if (autocomplete_closed) {
+				// Enter/Tab on bare /model or /resume must open the picker / resume UI.
+				// should_auto_submit_slash_text requires an argument, so handle these
+				// explicitly (Pi may have already submitted — then text is empty).
+				if (
+					(is_tab || is_confirm || is_submit) &&
+					(text === MODEL_PREFIX || text === RESUME_PREFIX)
+				) {
+					editor.submitValue?.();
+					finalize_editor_input_after(editor);
+					return;
+				}
+				if (
+					(is_confirm || is_submit || is_tab) &&
+					should_auto_submit_slash_text(text) &&
+					typeof editor.submitValue === "function"
+				) {
+					editor.submitValue();
+					finalize_editor_input_after(editor);
+					return;
+				}
 			}
 		}
 		finalize_editor_input_after(editor);

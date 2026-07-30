@@ -2413,7 +2413,7 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		expect(stripAnsi((fresh_owner_state.callText as any).text)).toContain("c.ts");
 	});
 
-	test("inter-run thinking_delta with blocks visible keeps the work group reopenable", () => {
+	test("inter-run thinking_delta with blocks visible hard-exits before the next tool wave", () => {
 		setThinkingBlocksHidden(false);
 		setup_inter_run_gap();
 		const r = new CompactRenderer();
@@ -2428,13 +2428,40 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
 
 		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "reasoning between batches" });
-		expect(r.hasReopenableGroup()).toBe(true);
+		expect(r.hasReopenableGroup()).toBe(false);
+		expect(r.hasActiveGroups()).toBe(false);
 
-		const fresh_ctx = makeContext("ir-think-vis3", {}) as any;
+		const fresh_state: Record<string, any> = {};
+		const fresh_ctx = makeContext("ir-think-vis3", fresh_state) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
-		// Re-render the owner so the shared group callText picks up the new child.
+		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
+		expect(stripAnsi((fresh_state.callText as any).text)).toContain("c.ts");
+	});
+
+	test("visible thinking hard-exits a still-running work group", () => {
+		setThinkingBlocksHidden(false);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("visible-running-owner", owner_state) as any;
+
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		expect(stripAnsi((owner_state.callText as any).text)).toContain("c.ts");
+		expect(r.hasActiveGroups()).toBe(true);
+
+		apply_assistant_stream_boundary(r, { type: "thinking_start" });
+		expect(r.hasActiveGroups()).toBe(false);
+		expect(r.hasReopenableGroup()).toBe(false);
+
+		const fresh_state: Record<string, any> = {};
+		r.renderCall(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			theme,
+			makeContext("visible-running-next", fresh_state) as any,
+		);
+		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("b.ts");
+		expect(stripAnsi((fresh_state.callText as any).text)).toContain("b.ts");
 	});
 
 	test("thinking block toggle preserves lingering children through visible-thinking replay", () => {

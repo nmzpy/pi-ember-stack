@@ -10,8 +10,13 @@ import {
 	set_thinking_pass_started_at_for_tests,
 	thinking_status_terminal_layout,
 } from "../index.ts";
-import { render_thinking_gradient_label } from "../thinking-status-render.ts";
-import { set_gradient_colorizer, reset_gradient_colorizer } from "../gradient.ts";
+import { format_in_group_thinking_row, render_thinking_gradient_label } from "../thinking-status-render.ts";
+import {
+	activate_gradient,
+	reset_gradient_colorizer,
+	set_gradient_colorizer,
+	shutdown_gradient_clock,
+} from "../gradient.ts";
 
 function forcedColorizer(rgb: [number, number, number], text: string): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
@@ -37,6 +42,23 @@ describe("thinking pass timer", () => {
 			expect(label).toMatch(/\x1b\[/);
 			expect(label.replace(/\x1b\[[0-9;]*m/g, "")).toContain("Thinking");
 		} finally {
+			reset_gradient_colorizer();
+		}
+	});
+
+	test("in-group Thinking uses the normal clock phase on every render", () => {
+		const original_now = performance.now;
+		set_gradient_colorizer(forcedColorizer);
+		shutdown_gradient_clock();
+		performance.now = () => 1_000_000;
+		try {
+			activate_gradient("thinking");
+			const first = format_in_group_thinking_row();
+			const second = format_in_group_thinking_row();
+			expect(second).toBe(first);
+		} finally {
+			performance.now = original_now;
+			shutdown_gradient_clock();
 			reset_gradient_colorizer();
 		}
 	});
