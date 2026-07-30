@@ -37,11 +37,21 @@ export function apply_assistant_stream_boundary(
 		// still render in the transcript via Pi's assistant message path;
 		// the compact group header simply persists across the gap.
 		if (isInterRunGap()) {
-			renderer.noteThinking();
+			if (isThinkingBlocksHidden()) {
+				renderer.noteHiddenThinking();
+			} else {
+				renderer.noteThinking();
+			}
 			return;
 		}
-		if (isThinkingBlocksHidden()) renderer.noteThinking();
-		else renderer.noteVisibleThinking();
+		if (isThinkingBlocksHidden()) {
+			// Hidden thinking is a real transcript block between tool waves;
+			// render the in-group Thinking row but close the group so the next
+			// tool wave starts a fresh work group below the hidden reasoning.
+			renderer.noteHiddenThinking();
+		} else {
+			renderer.noteVisibleThinking();
+		}
 		return;
 	}
 

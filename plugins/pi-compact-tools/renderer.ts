@@ -169,6 +169,10 @@ export type DiscoveryGroup = {
 	settled?: boolean;
 	/** Set when a hard boundary splits the group — never reopen across this row. */
 	hardExited?: boolean;
+	/** Set when hidden thinking/reasoning interrupts the group. The next tool
+	 *  wave must spawn a fresh work group because the hidden transcript block sits
+	 *  chronologically between the prior wave and the new ones. */
+	reopenClosed?: boolean;
 	/** After a soft transcript boundary (e.g. `todo`), migrate the visual anchor
 	 *  to the next tool wave so the block renders below the intervening row. */
 	migrateAnchorOnNextWave?: boolean;
@@ -1357,7 +1361,7 @@ export class CompactRenderer {
 		let index = 0;
 		for (const record of this.calls.values()) {
 			const group = record.group;
-			if (group && !group.hardExited && group.key === key) {
+			if (group && !group.hardExited && !group.reopenClosed && group.key === key) {
 				if (index >= candidate_index) {
 					candidate_index = index;
 					candidate = group;
@@ -1469,6 +1473,17 @@ export class CompactRenderer {
 		this.arm_in_group_thinking();
 	}
 
+	/** Arm the in-group `└ Thinking` lane and mark the group non-reopenable.
+	 *  Hidden thinking is a real transcript block between tool waves, so the
+	 *  next tool wave must start a fresh work group below the reasoning. */
+	noteHiddenThinking(): void {
+		this.arm_in_group_thinking();
+		const group = this.currentGroup;
+		if (group) {
+			group.reopenClosed = true;
+		}
+	}
+
 	/** Leave the thinking lane when the agent fully settles — header-only,
 	 *  keep currentGroup for a later same-key reopen. */
 	clearGroupThinkingChild(): void {
@@ -1531,7 +1546,7 @@ export class CompactRenderer {
 	/** Whether the live group can host in-group Thinking (settled / thinking lane). */
 	hasReopenableGroup(): boolean {
 		const group = this.resolveLiveGroup();
-		if (!group || group.hardExited || group.records.length < 1) return false;
+		if (!group || group.hardExited || group.reopenClosed || group.records.length < 1) return false;
 		return group.settled === true;
 	}
 

@@ -271,14 +271,14 @@ export function render_gradient(text: string, preset: GradientPreset, phase: num
 const active_reasons = new Set<string>();
 const tick_subscribers = new Set<() => void>();
 let gradient_timer: ReturnType<typeof setInterval> | undefined;
-let render_request: (() => void) | undefined;
+let _render_request: (() => void) | undefined;
 
 /**
  * Bind the one public Pi render request used by animated component state.
  * The gradient clock never writes to the terminal or touches TUI diff state.
  */
 export function set_gradient_render_request(cb: (() => void) | undefined): void {
-	render_request = cb;
+	_render_request = cb;
 }
 let clock_start = 0;
 
@@ -308,7 +308,7 @@ export function get_logo_phase(): number {
 
 /**
  * Dispatch one tick to all current subscribers. Exposed for deterministic
- * mutation-safety tests — production dispatch goes through the interval
+ * mutation-safety tests — production dispatch goes through the scheduled
  * timer which calls this.
  *
  * A stable snapshot of subscribers is captured at the start of each
@@ -333,43 +333,44 @@ export function dispatch_gradient_tick(): void {
 	}
 }
 
-function maybe_start_clock(): void {
-	if (gradient_timer) return;
-	if (active_reasons.size === 0 && tick_subscribers.size === 0) return;
-	clock_start = performance.now();
-	gradient_timer = setInterval(dispatch_gradient_tick, GRADIENT_TICK_MS);
+function run_gradient_tick(): void {
+	dispatch_gradient_tick();
 }
 
-function maybe_stop_clock(): void {
+function start_clock(): void {
+	if (gradient_timer) return;
+	if (clock_start === 0) clock_start = performance.now();
+	gradient_timer = setInterval(run_gradient_tick, GRADIENT_TICK_MS);
+}
+
+function stop_clock(): void {
 	if (!gradient_timer) return;
-	if (active_reasons.size > 0 || tick_subscribers.size > 0) return;
 	clearInterval(gradient_timer);
 	gradient_timer = undefined;
-	clock_start = 0;
 }
 
 /** Mark a reason (e.g. "thinking", "working", "logo") as active. */
 export function activate_gradient(reason: string): void {
 	active_reasons.add(reason);
-	maybe_start_clock();
+	start_clock();
 }
 
 /** Mark a reason as inactive. Clock stops when no reasons/subscribers remain. */
 export function deactivate_gradient(reason: string): void {
 	active_reasons.delete(reason);
-	maybe_stop_clock();
+	if (active_reasons.size === 0 && tick_subscribers.size === 0) stop_clock();
 }
 
 /** Subscribe to gradient tick events. Keeps the clock alive while subscribed. */
 export function subscribe_gradient_tick(cb: () => void): void {
 	tick_subscribers.add(cb);
-	maybe_start_clock();
+	start_clock();
 }
 
 /** Unsubscribe from gradient tick events. */
 export function unsubscribe_gradient_tick(cb: () => void): void {
 	tick_subscribers.delete(cb);
-	maybe_stop_clock();
+	if (active_reasons.size === 0 && tick_subscribers.size === 0) stop_clock();
 }
 
 /** Whether a specific animation reason is currently active. */
@@ -385,7 +386,7 @@ export function gradient_clock_is_idle(): boolean {
 /** Safety floor: clear animation reasons and stop the clock when idle. */
 export function stop_all_gradient_animation(): void {
 	active_reasons.clear();
-	maybe_stop_clock();
+	if (tick_subscribers.size === 0) stop_clock();
 }
 
 /** Full reset for session replacement/shutdown. */
@@ -397,6 +398,6 @@ export function shutdown_gradient_clock(): void {
 		gradient_timer = undefined;
 	}
 	clock_start = 0;
-	render_request = undefined;
+	_render_request = undefined;
 	invalidate_gradient_cache();
 }

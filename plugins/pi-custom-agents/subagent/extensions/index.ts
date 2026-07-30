@@ -80,7 +80,6 @@ import { buildSelectListTheme } from "../../../pi-ember-ui/select-list-theme.ts"
 import {
 	clearSubagentDelegating,
 	isThinkingBlocksHidden,
-	noteSubagentDelegating,
 	setGroupReopenableActive,
 	setGroupThinkingChildActive,
 	setToolGroupActive,
@@ -664,12 +663,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const batch_running = any_batch_member_running(batch);
 		const owner_tool_call_id = owner?.toolCallId ?? context.toolCallId;
 		const terminal = isSubagentToolTerminal(owner_tool_call_id);
-
-		if (!terminal && shouldShowSubagentDelegating(results, terminal)) {
-			noteSubagentDelegating(context.toolCallId);
-		} else {
-			clearSubagentDelegating(context.toolCallId);
-		}
 
 		if (!group_renderer.isOwner(context.toolCallId)) {
 			if (owner && batch_running) {

@@ -14,6 +14,7 @@
  * worker_thread boundary that previously prevented provider inheritance.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Api, Message, Model } from "@earendil-works/pi-ai";
@@ -430,7 +431,6 @@ export async function runSubAgent(options: {
 		if (timeoutId) clearTimeout(timeoutId);
 		timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
 	}
-	resetOutputTimeout();
 	const signals = [parentSignal, timeoutController?.signal].filter((value): value is AbortSignal =>
 		Boolean(value),
 	);
@@ -498,7 +498,7 @@ export async function runSubAgent(options: {
 	let sessionManager: SessionManager;
 	if (resume && checkpoint_dir) {
 		const meta = read_resume_meta(resume.parentSessionId, resume.originToolCallId);
-		if (!meta?.sessionFile) {
+		if (!meta?.sessionFile || !fs.existsSync(meta.sessionFile)) {
 			return failedResult(
 				agentName,
 				task,
@@ -587,9 +587,9 @@ export async function runSubAgent(options: {
 		};
 
 		unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-			if (is_subagent_output_progress_event(event)) {
-				resetOutputTimeout();
-			}
+			// Idle timeout: reset on every child-session event so it fires only when
+			// the subagent stops producing *any* output/activity for timeoutMs.
+			resetOutputTimeout();
 			apply_subagent_stream_event(result, event, notify_subagent_activity);
 			if (event.type === "message_end") {
 				const msg = event.message as Message | undefined;

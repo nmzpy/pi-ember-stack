@@ -9,9 +9,11 @@ import type {
 	AgentToolResult,
 	ExtensionAPI,
 	ExtensionContext,
+	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { Box, type KeyId, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Box, type KeyId, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { BULLET, CompactGroupText, statusBulletColor } from "../pi-compact-tools/renderer.ts";
 import { MUTED_COLOR, PAGE_BG } from "../pi-ember-ui/mode-colors.ts";
 import { type ActivityEntry, activityMonitor } from "./activity.ts";
 import { type CuratorServerHandle, startCuratorServer } from "./curator-server.ts";
@@ -48,33 +50,57 @@ import { formatSeconds, getWebSearchConfigDir, getWebSearchConfigPath } from "./
 
 const WEB_SEARCH_CONFIG_PATH = getWebSearchConfigPath();
 
+type WebToolTheme = {
+	fg: (key: ThemeColor, text: string) => string;
+	bold: (text: string) => string;
+};
+
+type WebToolStatus = "running" | "success" | "error";
+
+/** Transparent compact shell shared by web_search, fetch_content, and
+ * get_search_content. The bullet is the state indicator; backgrounds are not. */
+function renderWebToolBlock(
+	lines: readonly string[],
+	status: WebToolStatus,
+	theme: WebToolTheme,
+): Box {
+	const isError = status === "error";
+	const bullet = statusBulletColor(isError, status === "success", theme);
+	const continuationIndent = " ".repeat(BULLET.length);
+	const text = lines
+		.map((line, index) => {
+			if (index === 0) return bullet + line;
+			return line.startsWith(" ") ? line : continuationIndent + line;
+		})
+		.join("\n");
+	const compactText = new CompactGroupText();
+	compactText.setText(text);
+	const box = new Box(1, 0, undefined);
+	box.addChild(compactText);
+	return box;
+}
+
 /** Shared collapsed/expanded renderer for an error/cancel plan produced by
  * buildSearchErrorPlan(). Used by every tool renderResult's error branch so
  * Ctrl+O (app.tools.expand) reveals diagnostics instead of a dead-end single line. */
 function renderSearchErrorPlan(
 	plan: SearchErrorPlan,
 	expanded: boolean,
-	// biome-ignore lint/suspicious/noExplicitAny: theme color keys are dynamic
-	theme: { fg: (key: any, s: string) => string; bg: (key: any, s: string) => string },
+	theme: WebToolTheme,
 ) {
 	if (expanded) {
-		return new Text(
-			plan.expanded
-				.map((l, i) => (i === 0 ? theme.fg("error", l) : theme.fg("toolOutput", l)))
-				.join("\n"),
-			0,
-			0,
+		return renderWebToolBlock(
+			plan.expanded.map((line, index) =>
+				index === 0 ? theme.fg("error", line) : theme.fg("toolOutput", line),
+			),
+			"error",
+			theme,
 		);
 	}
-	const box = new Box(1, 0, (t) => theme.bg("toolErrorBg", t));
-	box.addChild(new Text(theme.fg("error", plan.expanded[0]), 0, 0));
-	for (const line of plan.collapsed) {
-		box.addChild(new Text(theme.fg("dim", line), 0, 0));
-	}
-	if (plan.expandHint) {
-		box.addChild(new Text(theme.fg("muted", plan.expandHint), 0, 0));
-	}
-	return box;
+	const lines = [theme.fg("error", plan.expanded[0])];
+	for (const line of plan.collapsed) lines.push(theme.fg("dim", line));
+	if (plan.expandHint) lines.push(theme.fg("muted", plan.expandHint));
+	return renderWebToolBlock(lines, "error", theme);
 }
 
 interface WebSearchConfig {
@@ -1741,19 +1767,19 @@ export default function (pi: ExtensionAPI) {
 						: [];
 				const queryList = normalizeQueryList(rawQueryList);
 				if (queryList.length === 0) {
-					return new Text(
-						theme.fg("toolTitle", theme.bold("search ")) + theme.fg("error", "(no query)"),
-						0,
-						0,
+					return renderWebToolBlock(
+						[theme.fg("toolTitle", theme.bold("search ")) + theme.fg("error", "(no query)")],
+						"running",
+						theme,
 					);
 				}
 				if (queryList.length === 1) {
 					const q = queryList[0];
 					const display = q.length > 60 ? `${q.slice(0, 57)}...` : q;
-					return new Text(
-						theme.fg("toolTitle", theme.bold("search ")) + theme.fg("text", `"${display}"`),
-						0,
-						0,
+					return renderWebToolBlock(
+						[theme.fg("toolTitle", theme.bold("search ")) + theme.fg("text", `"${display}"`)],
+						"running",
+						theme,
 					);
 				}
 				const lines = [
@@ -1767,7 +1793,7 @@ export default function (pi: ExtensionAPI) {
 				if (queryList.length > 5) {
 					lines.push(theme.fg("muted", `  ... and ${queryList.length - 5} more`));
 				}
-				return new Text(lines.join("\n"), 0, 0);
+				return renderWebToolBlock(lines, "running", theme);
 			},
 
 			renderResult(result, { expanded, isPartial }, theme) {
@@ -1829,7 +1855,7 @@ export default function (pi: ExtensionAPI) {
 									: `  ${shortcut} reopens`,
 							),
 						);
-						return new Text(lines.join("\n"), 0, 0);
+						return renderWebToolBlock(lines, "running", theme);
 					}
 					if (
 						details?.phase === "curating" ||
@@ -1856,7 +1882,7 @@ export default function (pi: ExtensionAPI) {
 						} else {
 							lines.push(theme.fg("dim", `  ${shortcut} reopens`));
 						}
-						return new Text(lines.join("\n"), 0, 0);
+						return renderWebToolBlock(lines, "running", theme);
 					}
 					if (details?.phase === "searching") {
 						const progress = details?.progress ?? 0;
@@ -1865,23 +1891,25 @@ export default function (pi: ExtensionAPI) {
 						const barDim = theme.fg("dim", "\u2591".repeat(10 - full));
 						const query = details?.currentQuery || "";
 						const display = query.length > 40 ? `${query.slice(0, 37)}...` : query;
-						return new Text(
-							theme.fg("text", "[") + barText + barDim + theme.fg("text", `] ${display}`),
-							0,
-							0,
+						return renderWebToolBlock(
+							[theme.fg("text", "[") + barText + barDim + theme.fg("text", `] ${display}`)],
+							"running",
+							theme,
 						);
 					}
 					const progress = details?.progress ?? 0;
 					const full = Math.floor(progress * 10);
 					const barText = theme.fg("text", "\u2588".repeat(full));
 					const barDim = theme.fg("dim", "\u2591".repeat(10 - full));
-					return new Text(
-						theme.fg("text", "[") +
-							barText +
-							barDim +
-							theme.fg("text", `] ${details?.phase || "searching"}`),
-						0,
-						0,
+					return renderWebToolBlock(
+						[
+							theme.fg("text", "[") +
+								barText +
+								barDim +
+								theme.fg("text", `] ${details?.phase || "searching"}`),
+						],
+						"running",
+						theme,
 					);
 				}
 
@@ -1890,7 +1918,11 @@ export default function (pi: ExtensionAPI) {
 					// browser connection state, cancel reason. See render-search-error.ts.
 					const plan = buildSearchErrorPlan(details as SearchErrorDetails);
 					if (plan) return renderSearchErrorPlan(plan, expanded, theme);
-					return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
+					return renderWebToolBlock(
+						[theme.fg("error", `Error: ${details.error}`)],
+						"error",
+						theme,
+					);
 				}
 
 				let statusLine: string;
@@ -2007,15 +2039,14 @@ export default function (pi: ExtensionAPI) {
 				const totalLines = lines.length;
 
 				if (!expanded) {
-					const box = new Box(1, 0, (t) => theme.bg("toolSuccessBg", t));
-					box.addChild(new Text(statusLine, 0, 0));
+					const collapsed = [statusLine];
 
 					let collapsedLines = 1; // statusLine
 					const summaryPreview = details?.summary?.text?.trim() || "";
 					if (summaryPreview) {
 						const preview =
 							summaryPreview.length > 120 ? `${summaryPreview.slice(0, 117)}...` : summaryPreview;
-						box.addChild(new Text(theme.fg("dim", preview), 0, 0));
+						collapsed.push(theme.fg("dim", preview));
 						collapsedLines++;
 					} else if (details?.curatedQueries?.length) {
 						for (const cq of details.curatedQueries.slice(0, 3)) {
@@ -2024,16 +2055,12 @@ export default function (pi: ExtensionAPI) {
 							const suffix = cq.error
 								? theme.fg("error", " (error)")
 								: theme.fg("dim", ` · ${srcCount} sources`);
-							box.addChild(new Text(theme.fg("text", `  "${dq}"`) + suffix, 0, 0));
+							collapsed.push(theme.fg("text", `  "${dq}"`) + suffix);
 							collapsedLines++;
 						}
 						if (details.curatedQueries.length > 3) {
-							box.addChild(
-								new Text(
-									theme.fg("dim", `  ... and ${details.curatedQueries.length - 3} more`),
-									0,
-									0,
-								),
+							collapsed.push(
+								theme.fg("dim", `  ... and ${details.curatedQueries.length - 3} more`),
 							);
 							collapsedLines++;
 						}
@@ -2047,27 +2074,23 @@ export default function (pi: ExtensionAPI) {
 						if (fallbackLine) {
 							const preview =
 								fallbackLine.length > 120 ? `${fallbackLine.slice(0, 117)}...` : fallbackLine;
-							box.addChild(new Text(theme.fg("dim", preview), 0, 0));
+							collapsed.push(theme.fg("dim", preview));
 							collapsedLines++;
 						}
 					}
 					const moreLines = Math.max(0, totalLines - collapsedLines);
 					if (moreLines > 0) {
-						box.addChild(
-							new Text(
-								theme.fg(
-									"muted",
-									`\n... (${moreLines} more lines, ${totalLines} total, ctrl+o to expand)`,
-								),
-								0,
-								0,
+						collapsed.push(
+							theme.fg(
+								"muted",
+								`... (${moreLines} more lines, ${totalLines} total, ctrl+o to expand)`,
 							),
 						);
 					}
-					return box;
+					return renderWebToolBlock(collapsed, "success", theme);
 				}
 
-				return new Text(lines.join("\n"), 0, 0);
+				return renderWebToolBlock(lines, "success", theme);
 			},
 		});
 
@@ -2241,10 +2264,10 @@ export default function (pi: ExtensionAPI) {
 			};
 			const urlList = urls ?? (url ? [url] : []);
 			if (urlList.length === 0) {
-				return new Text(
-					theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("error", "(no URL)"),
-					0,
-					0,
+				return renderWebToolBlock(
+					[theme.fg("toolTitle", theme.bold("fetch ")) + theme.fg("error", "(no URL)")],
+					"running",
+					theme,
 				);
 			}
 			const lines: string[] = [];
@@ -2277,7 +2300,7 @@ export default function (pi: ExtensionAPI) {
 			if (model) {
 				lines.push(theme.fg("dim", "  model: ") + theme.fg("warning", model));
 			}
-			return new Text(lines.join("\n"), 0, 0);
+			return renderWebToolBlock(lines, "running", theme);
 		},
 
 		renderResult(result, { expanded, isPartial }, theme) {
@@ -2304,7 +2327,11 @@ export default function (pi: ExtensionAPI) {
 				const bar =
 					"\u2588".repeat(Math.floor(progress * 10)) +
 					"\u2591".repeat(10 - Math.floor(progress * 10));
-				return new Text(theme.fg("accent", `[${bar}] ${details?.phase || "fetching"}`), 0, 0);
+				return renderWebToolBlock(
+					[theme.fg("accent", `[${bar}] ${details?.phase || "fetching"}`)],
+					"running",
+					theme,
+				);
 			}
 
 			if (details?.error) {
@@ -2320,7 +2347,11 @@ export default function (pi: ExtensionAPI) {
 				}
 				const plan = buildSearchErrorPlan({ error: details.error, extraLines: extras });
 				if (plan) return renderSearchErrorPlan(plan, expanded, theme);
-				return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
+				return renderWebToolBlock(
+					[theme.fg("error", `Error: ${details.error}`)],
+					"error",
+					theme,
+				);
 			}
 
 			if (details?.urlCount === 1) {
@@ -2348,7 +2379,7 @@ export default function (pi: ExtensionAPI) {
 				const textContent = result.content.find((c) => c.type === "text")?.text || "";
 				if (!expanded) {
 					const brief = textContent.length > 200 ? `${textContent.slice(0, 200)}...` : textContent;
-					return new Text(`${statusLine}\n${theme.fg("dim", brief)}`, 0, 0);
+					return renderWebToolBlock([statusLine, theme.fg("dim", brief)], "success", theme);
 				}
 				const lines = [statusLine];
 				if (details?.prompt) {
@@ -2364,7 +2395,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const preview = textContent.length > 500 ? `${textContent.slice(0, 500)}...` : textContent;
 				lines.push(theme.fg("dim", preview));
-				return new Text(lines.join("\n"), 0, 0);
+				return renderWebToolBlock(lines, "success", theme);
 			}
 
 			const countColor = (details?.successful ?? 0) > 0 ? "success" : "error";
@@ -2372,11 +2403,15 @@ export default function (pi: ExtensionAPI) {
 				theme.fg(countColor, `${details?.successful}/${details?.urlCount} URLs`) +
 				theme.fg("muted", " (content stored)");
 			if (!expanded) {
-				return new Text(statusLine, 0, 0);
+				return renderWebToolBlock([statusLine], countColor === "error" ? "error" : "success", theme);
 			}
 			const textContent = result.content.find((c) => c.type === "text")?.text || "";
 			const preview = textContent.length > 500 ? `${textContent.slice(0, 500)}...` : textContent;
-			return new Text(`${statusLine}\n${theme.fg("dim", preview)}`, 0, 0);
+			return renderWebToolBlock(
+				[statusLine, theme.fg("dim", preview)],
+				countColor === "error" ? "error" : "success",
+				theme,
+			);
 		},
 	});
 
@@ -2528,11 +2563,13 @@ export default function (pi: ExtensionAPI) {
 			else if (queryIndex !== undefined) target = `queryIndex=${queryIndex}`;
 			else if (url) target = url.length > 30 ? `${url.slice(0, 27)}...` : url;
 			else if (urlIndex !== undefined) target = `urlIndex=${urlIndex}`;
-			return new Text(
-				theme.fg("toolTitle", theme.bold("get_content ")) +
-					theme.fg("text", target || responseId.slice(0, 8)),
-				0,
-				0,
+			return renderWebToolBlock(
+				[
+					theme.fg("toolTitle", theme.bold("get_content ")) +
+						theme.fg("text", target || responseId.slice(0, 8)),
+				],
+				"running",
+				theme,
 			);
 		},
 
@@ -2553,7 +2590,11 @@ export default function (pi: ExtensionAPI) {
 				else if (details.title) extras.push(`resource: ${details.title}`);
 				const plan = buildSearchErrorPlan({ error: details.error, extraLines: extras });
 				if (plan) return renderSearchErrorPlan(plan, expanded, theme);
-				return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
+				return renderWebToolBlock(
+					[theme.fg("error", `Error: ${details.error}`)],
+					"error",
+					theme,
+				);
 			}
 
 			let statusLine: string;
@@ -2568,12 +2609,12 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (!expanded) {
-				return new Text(statusLine, 0, 0);
+				return renderWebToolBlock([statusLine], "success", theme);
 			}
 
 			const textContent = result.content.find((c) => c.type === "text")?.text || "";
 			const preview = textContent.length > 500 ? `${textContent.slice(0, 500)}...` : textContent;
-			return new Text(`${statusLine}\n${theme.fg("dim", preview)}`, 0, 0);
+			return renderWebToolBlock([statusLine, theme.fg("dim", preview)], "success", theme);
 		},
 	});
 

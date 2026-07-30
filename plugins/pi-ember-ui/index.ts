@@ -95,6 +95,7 @@ import {
 	PAGE_BG,
 	markSubagentActivityEnded,
 	markSubagentActivityStarted,
+	noteSubagentDelegating,
 	resetSubagentActivity,
 	setLatestSubagentRunning,
 	setPlanAutoContinuing,
@@ -102,6 +103,7 @@ import {
 	setUserBashRunning,
 	isAgentRunPending,
 	isInterRunGap,
+	isSubagentDelegatingActive,
 	isThinkingBlocksHidden,
 	isUserTurnCommitted,
 	is_agent_thinking_wait,
@@ -355,11 +357,12 @@ export function format_thinking_pass_elapsed_suffix(theme: {
 const WIDGET_INSET_COLUMNS = 2;
 
 function build_thinking_status_row_text(host: "widget" | "in_message"): string {
-	const widgetPad = host === "widget" ? " ".repeat(WIDGET_INSET_COLUMNS) : "";
+	const leftPad = " ".repeat(WIDGET_INSET_COLUMNS);
+	const rightPad = host === "widget" ? " ".repeat(WIDGET_INSET_COLUMNS) : "";
 	const theme = resolve_live_theme();
 	const labelGradient = render_thinking_gradient_label();
 	const elapsedColored = format_thinking_pass_elapsed_suffix(theme);
-	return `${widgetPad}${labelGradient}${elapsedColored}${widgetPad}`;
+	return `${leftPad}${labelGradient}${elapsedColored}${rightPad}`;
 }
 
 /** Keep the thinking gradient clock aligned with visible Thinking UI. */
@@ -816,7 +819,7 @@ function thinking_status_paint_active(): boolean {
 
 /** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
 export function arm_pre_token_thinking_status(): void {
-	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive()) return;
+	if (isQuizActive() || isLatestSubagentRunning() || isSubagentActivityActive() || isSubagentDelegatingActive()) return;
 	const renderer = getSharedRenderer();
 	sync_compact_group_flags(renderer);
 	reset_thinking_pass_timer();
@@ -874,10 +877,7 @@ function installThinkingWidget(ctx: any): void {
 					ensure_chatbox_leading_spacer(tui);
 					return [];
 				}
-				if (lines[0] === "") {
-					lines.shift();
-				}
-				return ["", ...lines];
+				return lines;
 			},
 			invalidate(): void {
 				if (!thinking_status_should_show()) return;
@@ -1548,7 +1548,11 @@ function installAssistantMessagePatch(): void {
 
 		// Mirror user-message Box paddingY: keep a blank row below visible
 		// assistant text when tool rows are not about to follow in the transcript.
-		if (hasVisibleContent && !hasToolCalls) {
+		// When the in-message Thinking host owns this message, the blank row is
+		// provided by thinking_status_terminal_layout (SSOT) so the spacing is
+		// not duplicated and the gap stays consistent from the first arm.
+		const isInMessageTarget = is_in_message_thinking_status_target(msgTimestamp);
+		if (hasVisibleContent && !hasToolCalls && !isInMessageTarget) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 
@@ -2744,6 +2748,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setTurnToolTranscriptActive(true);
 		if (is_subagent_delegation_tool(event.toolName)) {
 			markSubagentActivityStarted();
+			noteSubagentDelegating(event.toolCallId);
 			refresh_thinking_status();
 		}
 	});

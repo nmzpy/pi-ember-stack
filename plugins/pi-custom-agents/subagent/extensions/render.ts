@@ -430,11 +430,11 @@ function buildFlatEntries(rows: AgentRowDescriptor[]): FlatEntry[] {
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i];
 		entries.push({ type: "agent", descriptor: row, agentIndex: i });
-		// Lingering last tool call is shown under every agent that has one,
-		// whether running or completed, so the preview does not vanish when
-		// a child finishes earlier than its siblings. Thinking only appears
-		// for currently running agents.
-		if (row.result?.latestToolCall) {
+		// Latest tool call preview is shown only for running agents. Completed
+		// and failed agents have a checkmark/X and no nested tool row, so the
+		// group stays compact when a child finishes earlier than its siblings.
+		// Thinking only appears for currently running agents.
+		if (row.status === "running" && row.result?.latestToolCall) {
 			entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });
 		} else if (row.status === "running" && row.result?.isThinking && row.result.reasoning !== false) {
 			entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });

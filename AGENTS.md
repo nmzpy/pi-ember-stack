@@ -1309,6 +1309,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
   they are excluded from the bun test gate in `t.gate.sh`.
 - Runtime dependencies (`@mozilla/readability`, `linkedom`, `p-limit`,
   `turndown`, `unpdf`) are declared in the root `package.json`.
+- Web-tool call/result rows use `statusBulletColor` and `BULLET` from
+  `pi-compact-tools/renderer.ts` with a transparent `Box(1, 0, undefined)`
+  shell. The bullet is the sole success/running/error state indicator; do not
+  restore `toolSuccessBg`/`toolErrorBg` blocks in web-tool renderers.
 - When customizing vendored files, bring them into compliance with our
   TypeScript strict mode and Biome lint rules, then remove them from the
   `tsconfig.json` and `biome.json` exclude lists.

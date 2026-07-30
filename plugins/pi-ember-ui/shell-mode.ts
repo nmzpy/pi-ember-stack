@@ -41,13 +41,15 @@ export function set_shell_sync_callback(fn: (() => void) | undefined): void {
 
 /**
  * Submit a bang-prefixed bash command from the editor — SSOT for shell Enter.
- * Editor.submitValue() already resets state to an empty buffer; we only force a
- * render so the chatbox clears immediately before the async bash handler runs.
+ * Editor.submitValue() resets the internal state; we then explicitly setText("")
+ * so the chatbox is guaranteed to clear before the async bash handler runs, even
+ * if a stale render cache or delayed state update keeps the command visible.
  * Returns true when submit ran synchronously (caller should consume the Enter key).
  */
 export function submit_shell_command_from_editor(editor: ShellModeEditor): boolean {
 	if (typeof editor.submitValue !== "function") return false;
 	editor.submitValue();
+	with_suppressed_shell_history_sync(() => editor.setText?.(""));
 	editor.tui?.requestRender?.();
 	return true;
 }

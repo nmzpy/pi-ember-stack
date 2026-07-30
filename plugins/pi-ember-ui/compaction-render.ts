@@ -55,11 +55,12 @@ export function render_compacting_gradient_label(): string {
 	return render_gradient("Compacting", COMPACTION_GRADIENT_PRESET, get_gradient_phase());
 }
 
-/** Running compaction row: muted bullet + gradient `Compacting`. */
+/** Running compaction row: muted bullet + gradient `Compacting`.
+ *  One blank row above so it does not sit flush against prior output. */
 export function format_compacting_row(theme: CompactionThemeLike, width: number): string[] {
 	const bullet = statusBulletColor(false, false, theme);
 	const line = bullet + render_compacting_gradient_label();
-	return [truncateToWidth(line, Math.max(1, width))];
+	return ["", truncateToWidth(line, Math.max(1, width))];
 }
 
 /** Completed compaction row: success bullet + `Compacted N tokens into ~M.` */

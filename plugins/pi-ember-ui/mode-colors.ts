@@ -163,7 +163,7 @@ export function is_agent_thinking_wait(thinkingActive = false): boolean {
 	if (!isAgentRunPending() && !thinkingActive) return false;
 	if (!isUserTurnCommitted() && !isAgentRunPending()) return false;
 	if (isToolExecutionInFlight()) return false;
-	if (latestSubagentRunningFlag || subagentActivityActive) return false;
+	if (isLatestSubagentRunning() || isSubagentActivityActive()) return false;
 	if (isSubagentDelegatingActive()) return false;
 	if ((globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] === true) return false;
 	return true;
@@ -197,7 +197,13 @@ export function isInterRunGap(): boolean {
 	return isAgentRunPending() && !isToolExecutionInFlight() && isTurnToolTranscriptActive();
 }
 
-let latestSubagentRunningFlag = false;
+/** Latest-subagent-running flag stored on `globalThis` via a `Symbol.for` key
+ *  so it survives jiti module duplication. `pi-ember-ui/index.ts` and
+ *  `pi-custom-agents/subagent` may each load `mode-colors.ts` as a distinct
+ *  module instance; a module-level `let` would let one instance set the flag
+ *  while another instance (the one `is_agent_thinking_wait` reads) stays false.
+ */
+const LATEST_SUBAGENT_RUNNING_KEY = Symbol.for("pi-ember-ui:latest-subagent-running");
 
 /**
  * Whether the latest tool call in the session is a running subagent.
@@ -206,11 +212,11 @@ let latestSubagentRunningFlag = false;
  * this shared module) to draw the integrated border + cap line.
  */
 export function isLatestSubagentRunning(): boolean {
-	return latestSubagentRunningFlag;
+	return (globalThis as GlobalThis)[LATEST_SUBAGENT_RUNNING_KEY] === true;
 }
 
 export function setLatestSubagentRunning(active: boolean): void {
-	latestSubagentRunningFlag = active;
+	(globalThis as GlobalThis)[LATEST_SUBAGENT_RUNNING_KEY] = active;
 }
 
 let toolGroupActive = false;
@@ -250,54 +256,79 @@ export function setGroupReopenableActive(active: boolean): void {
 	groupReopenableActive = active;
 }
 
-let subagentActivityCount = 0;
-let subagentActivityActive = false;
+/** Subagent activity counters/flags stored on `globalThis` via `Symbol.for`
+ *  so jiti module duplication cannot desync `markSubagentActivityStarted`
+ *  from `isSubagentActivityActive` / `is_agent_thinking_wait`.
+ */
+const SUBAGENT_ACTIVITY_COUNT_KEY = Symbol.for("pi-ember-ui:subagent-activity-count");
+const SUBAGENT_ACTIVITY_ACTIVE_KEY = Symbol.for("pi-ember-ui:subagent-activity-active");
+
+function subagent_activity_count(): number {
+	const value = (globalThis as GlobalThis)[SUBAGENT_ACTIVITY_COUNT_KEY];
+	return typeof value === "number" && value > 0 ? value : 0;
+}
 
 /** Whether any subagent tool call is active (delegating or running). */
 export function isSubagentActivityActive(): boolean {
-	return subagentActivityActive;
+	return (globalThis as GlobalThis)[SUBAGENT_ACTIVITY_ACTIVE_KEY] === true;
 }
 
 export function markSubagentActivityStarted(): void {
-	subagentActivityCount += 1;
-	subagentActivityActive = true;
+	const g = globalThis as GlobalThis;
+	g[SUBAGENT_ACTIVITY_COUNT_KEY] = subagent_activity_count() + 1;
+	g[SUBAGENT_ACTIVITY_ACTIVE_KEY] = true;
 	setLatestSubagentRunning(true);
 }
 
 export function markSubagentActivityEnded(): void {
-	subagentActivityCount = Math.max(0, subagentActivityCount - 1);
-	const active = subagentActivityCount > 0;
-	subagentActivityActive = active;
+	const g = globalThis as GlobalThis;
+	const count = Math.max(0, subagent_activity_count() - 1);
+	g[SUBAGENT_ACTIVITY_COUNT_KEY] = count;
+	const active = count > 0;
+	g[SUBAGENT_ACTIVITY_ACTIVE_KEY] = active;
 	setLatestSubagentRunning(active);
 }
 
 export function resetSubagentActivity(): void {
-	subagentActivityCount = 0;
-	subagentActivityActive = false;
+	const g = globalThis as GlobalThis;
+	g[SUBAGENT_ACTIVITY_COUNT_KEY] = 0;
+	g[SUBAGENT_ACTIVITY_ACTIVE_KEY] = false;
 	setLatestSubagentRunning(false);
 	resetSubagentDelegating();
 }
 
-const subagentDelegatingToolCallIds = new Set<string>();
+/** Delegating tool-call ids stored on `globalThis` via a `Symbol.for` key so
+ *  `noteSubagentDelegating` and `isSubagentDelegatingActive` cannot land on
+ *  two different `Set` instances after jiti duplication.
+ */
+const SUBAGENT_DELEGATING_IDS_KEY = Symbol.for("pi-ember-ui:subagent-delegating-ids");
+
+function subagent_delegating_ids(): Set<string> {
+	const g = globalThis as GlobalThis;
+	if (!g[SUBAGENT_DELEGATING_IDS_KEY]) {
+		g[SUBAGENT_DELEGATING_IDS_KEY] = new Set<string>();
+	}
+	return g[SUBAGENT_DELEGATING_IDS_KEY] as Set<string>;
+}
 
 /** Parent subagent tool is streaming/executing but child placeholders are not published yet. */
 export function isSubagentDelegatingActive(): boolean {
-	return subagentDelegatingToolCallIds.size > 0;
+	return subagent_delegating_ids().size > 0;
 }
 
 /** Idempotent — safe from subagent renderCall while Delegating is visible. */
 export function noteSubagentDelegating(toolCallId: string): void {
 	if (!toolCallId) return;
-	subagentDelegatingToolCallIds.add(toolCallId);
+	subagent_delegating_ids().add(toolCallId);
 }
 
 export function clearSubagentDelegating(toolCallId: string): void {
 	if (!toolCallId) return;
-	subagentDelegatingToolCallIds.delete(toolCallId);
+	subagent_delegating_ids().delete(toolCallId);
 }
 
 export function resetSubagentDelegating(): void {
-	subagentDelegatingToolCallIds.clear();
+	subagent_delegating_ids().clear();
 }
 
 let thinkingBlocksHidden = false;

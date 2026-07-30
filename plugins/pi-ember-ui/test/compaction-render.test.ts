@@ -23,8 +23,9 @@ const theme = {
 };
 
 describe("compaction render rows", () => {
-	test("running row uses Compacting label with bullet prefix", () => {
-		const [line] = format_compacting_row(theme, 80);
+	test("running row uses Compacting label with bullet prefix and a leading pad row", () => {
+		const [pad, line] = format_compacting_row(theme, 80);
+		expect(pad).toBe("");
 		expect(line).toContain("Compacting");
 		expect(line.startsWith("•")).toBe(true);
 	});
