@@ -82,19 +82,19 @@ export const WORK_GROUP_KEY = "__work__";
 export const WORK_GROUP_SOFT_BOUNDARY_TOOLS = new Set(["todo"]);
 
 /** Exploring-style child tree gutter — SSOT for compact groups and subagents. */
-export const TREE_BRANCH_PIPE = "  │ ";
+export const TREE_BRANCH_PIPE = "│ ";
 /** Tee branch for non-terminal subagent rows (vertical continues + opens right). */
-export const TREE_BRANCH_TEE = "  ├ ";
-export const TREE_BRANCH_LAST = "  └ ";
+export const TREE_BRANCH_TEE = "├ ";
+export const TREE_BRANCH_LAST = "└ ";
 /** Compact group child rows — flush with the branch glyph (no trailing space). */
 const GROUP_CHILD_TEE = "  ├";
 const GROUP_CHILD_LAST = "  └";
 /** Nested subagent tool rows — the └ sits on the agent-name column
- *  (`  ├ ` / `  └ ` place the name at column 4; tool └ goes there too). */
-export const TREE_NESTED_PIPE = "  │ └";
-export const TREE_NESTED_LAST = "    └";
-/** Single subagent tool row — └ on the agent-name column after `• `. */
-export const TREE_SINGLE_TOOL = "  └";
+ *  (`├ ` / `└ ` place the name at column 2; tool └ goes there too). */
+export const TREE_NESTED_PIPE = "│ └";
+export const TREE_NESTED_LAST = "  └";
+/** Single subagent tool row — └ flush with the left margin. */
+export const TREE_SINGLE_TOOL = "└";
 
 export { BULLET, CompactGroupText } from "./compact-text.ts";
 

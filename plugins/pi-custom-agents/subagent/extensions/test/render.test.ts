@@ -461,7 +461,7 @@ describe("renderSubagentLayout (string)", () => {
 		expect(lines.length).toBe(2);
 		expect(stripAnsi(lines[0])).toContain("\u2022");
 		expect(stripAnsi(lines[0])).toContain("Coder");
-		expect(stripAnsi(lines[1])).toContain("  \u2514");
+		expect(stripAnsi(lines[1])).toContain("\u2514");
 		expect(stripAnsi(lines[1])).toContain("Read");
 		expect(stripAnsi(lines[1])).toContain("plugins/render.ts");
 		expect(lines[1]).toContain("\u001b[38;2;");
@@ -584,12 +584,12 @@ describe("renderSubagentLayout (string)", () => {
 	});
 
 	test("tool row └ sits on the agent name column", () => {
-		// Agent names start at column 4; nested └ must land there too.
-		expect(TREE_BRANCH_TEE.length).toBe(4);
-		expect(TREE_NESTED_PIPE.indexOf("\u2514")).toBe(4);
-		expect(TREE_NESTED_LAST.indexOf("\u2514")).toBe(4);
+		// Agent names start at column 2; nested └ must land there too.
+		expect(TREE_BRANCH_TEE.length).toBe(2);
+		expect(TREE_NESTED_PIPE.indexOf("\u2514")).toBe(2);
+		expect(TREE_NESTED_LAST.indexOf("\u2514")).toBe(2);
 		expect(BULLET.length).toBe(2);
-		expect(TREE_SINGLE_TOOL.indexOf("\u2514")).toBe(2);
+		expect(TREE_SINGLE_TOOL.indexOf("\u2514")).toBe(0);
 	});
 
 	test("running parallel mode uses full Exploring-style tree with nested tool rows", () => {
@@ -604,13 +604,13 @@ describe("renderSubagentLayout (string)", () => {
 		expect(lines.length).toBe(5);
 		expect(stripAnsi(lines[0])).toContain("Subagents");
 		expect(stripAnsi(lines[0])).toContain("\u2022");
-		expect(stripAnsi(lines[1])).toContain("  \u251c ");
+		expect(stripAnsi(lines[1])).toContain("\u251c ");
 		expect(stripAnsi(lines[1])).toContain("Coder A");
-		expect(stripAnsi(lines[2])).toContain("  \u2502 \u2514");
+		expect(stripAnsi(lines[2])).toContain("\u2502 \u2514");
 		expect(stripAnsi(lines[2])).toContain("Search");
-		expect(stripAnsi(lines[3])).toContain("  \u2514 ");
+		expect(stripAnsi(lines[3])).toContain("\u2514 ");
 		expect(stripAnsi(lines[3])).toContain("Scout A");
-		expect(stripAnsi(lines[4])).toContain("    \u2514");
+		expect(stripAnsi(lines[4])).toContain("  \u2514");
 		expect(stripAnsi(lines[4])).toContain("Read");
 	});
 
@@ -622,10 +622,10 @@ describe("renderSubagentLayout (string)", () => {
 		const header = lines[0];
 		expect(stripAnsi(header)).toContain("Subagents");
 		expect(header).not.toContain("\u001b[38;2;");
-		expect(stripAnsi(lines[1])).toContain("  \u251c ");
+		expect(stripAnsi(lines[1])).toContain("\u251c ");
 		expect(stripAnsi(lines[1])).toContain("Coder A");
 		expect(stripAnsi(lines[2])).toContain("Thinking");
-		expect(stripAnsi(lines[3])).toContain("  \u2514 ");
+		expect(stripAnsi(lines[3])).toContain("\u2514 ");
 		expect(stripAnsi(lines[3])).toContain("Scout A");
 		expect(stripAnsi(lines[4])).toContain("Thinking");
 		expect(out).not.toContain("\u23f3");
@@ -742,8 +742,8 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		// Tree-prefix column alignment: the completed row's prefix must start at
 		// the same column as the running row's prefix. Both rows should start
 		// with the same tree glyph (`├ ` / `└ `) at column 0.
-		expect(stripAnsi(lines[1]).startsWith("[dim:  ├ ")).toBe(true);
-		expect(stripAnsi(scoutLine!).startsWith("[dim:  └ ")).toBe(true);
+		expect(stripAnsi(lines[1]).startsWith("[dim:\u251c ")).toBe(true);
+		expect(stripAnsi(scoutLine!).startsWith("[dim:\u2514 ")).toBe(true);
 	});
 
 	test("all completed parallel: no subagentBg on any row", () => {
