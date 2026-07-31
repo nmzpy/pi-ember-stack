@@ -245,7 +245,21 @@
   clock** — only `sync_thinking_gradient_clock()` → `sync_thinking_status_tick()`
   may subscribe/unsubscribe. `render_thinking_status_lines` has a safety net
   that activates the gradient reason and subscribes the tick if the host
-  resolves while the clock is stopped (race recovery — idempotent, O(1)). Trackpad scroll uses terminal scrollback; Ember
+  resolves while the clock is stopped (race recovery — idempotent, O(1)). The
+  external Thinking row (widget + in-message) reads its gradient text from a
+  shared `CompactGroupText` cache in `thinking-status-tick.ts`; the 20 FPS tick
+  callback (`dispatch_thinking_status_tick`) builds `leftPad +
+  render_thinking_gradient_label() + elapsed + rightPad` via the bound
+  `build_thinking_status_row_text` builder and stages it in the cache before
+  invalidating the host, so Pi's `render()` only truncates the pre-baked ANSI
+  string — the same pattern as the in-group `└ Thinking` lane writing into a
+  group's `CompactGroupText`. The external host repaints at the shared 20 FPS
+  clock cadence (`EXTERNAL_THINKING_RENDER_INTERVAL_MS` = `GRADIENT_TICK_MS` =
+  50 ms), matching the in-group `└ Thinking` lane and compact group child
+  verbs so standalone/widget/in-message Thinking animates as smoothly as the
+  in-group lane. The tick skips `host.invalidate()` when the staged text is
+  identical to the last frame (clock stopped / no phase change) so no redundant
+  `requestRender` is queued. Trackpad scroll uses terminal scrollback; Ember
   must not intercept scroll input or repaint the live viewport while the user
   reads history. Do not re-anchor on slash/autocomplete exit or idle lifecycle
   events. Structural changes (show/hide Thinking, group settle/collapse,
@@ -286,7 +300,11 @@
   (mutually exclusive — never widget + in-message together): the in-message
   `ThinkingStatusComponent` under the latest assistant message owns the pre-tool
   wait directly below the user row once the assistant bubble exists; the
-  above-editor `ember-thinking` widget owns post-tool inter-run gaps. There is
+  above-editor `ember-thinking` widget owns post-tool inter-run gaps. Both
+  external hosts are inset by `THINKING_STATUS_INSET_COLUMNS` = 1 column on
+  each side (`build_thinking_status_row_text` SSOT); the in-group `└ Thinking`
+  lane is owned by the compact renderer (tree-branch prefix) and does not use
+  this inset. There is
   no `Working` label. `installAssistantMessagePatch` creates a
   `ThinkingStatusComponent` per assistant message and binds it to the message's
   timestamp. A module-level `latestAssistantMessageTimestamp` is updated from
@@ -370,8 +388,13 @@
   `resolve_thinking_status_host()` prefers in-message whenever
   `assistantThinkingHostReady`, not only during the pre-tool gap. Child rows
   are folded only via `fold_group_child_rows()` on a genuinely new tool wave
-  (`appendToGroup`) or a hard boundary — never on thinking, todo, bare
-  `tool_execution_end` / tool success, or Pi `turn_start`. Same-key batches reopen the latest
+  (`appendToGroup` with a different tool name from the last visible child)
+  or a hard boundary — never on thinking, todo, bare
+  `tool_execution_end` / tool success, or Pi `turn_start`. Same-name calls
+  (e.g. read a.ts → read b.ts) append below without folding priors;
+  only a different tool name folds the prior wave. Thinking never folds
+  prior tool children — the in-group `└ Thinking` lane appends after
+  lingering tool rows. Same-key batches reopen the latest
   settled group (`findReopenableGroup`) instead of spawning another
   `Explored`/`Edited`/… header. Each Thinking pass resets
   `thinkingPassStartedAt` and shows a dim live elapsed suffix after 1s (widget +
@@ -406,17 +429,26 @@
   calls `noteVisibleThinking()` and the following tool wave always starts a
   new header below the transcript reasoning, including during an inter-run
   gap. Hidden thinking uses `noteHiddenThinking()` to paint the in-group
-  `└ Thinking` lane. **Inter-run planning text** (non-empty
+  `└ Thinking` lane and keeps the group reopenable — hidden reasoning is NOT
+  a separate transcript block, so the next tool wave folds prior children
+  (different tool name) and reopens under the same header instead of spawning
+  a fresh `Explored`/`Edited`/… row. **Inter-run planning text** (non-empty
   `text_delta` while `isInterRunGap()` — `agentRunPending`, no tool in flight,
   tools already on screen this turn, e.g. OpenAI/Codex between tool batches) is a
   **soft** boundary: inter-run planning `text_delta` arms Thinking without
-  folding; inter-run non-planning text uses `noteVisibleText()`. **Final answer text**
+  folding; inter-run non-planning text uses `noteVisibleText()`. The planning
+  path arms the in-group `└ Thinking` lane via
+  `renderer.armInGroupThinkingForPlanning()` (thinking never folds prior
+  tool children, so lingering tool rows stay visible beside the status row) so the
+  transcript slot is owned inside the work group, not duplicated by an
+  external header. The group stays reopenable (no `reopenClosed`) so the next
+  tool wave reopens under the same header. **Final answer text**
   (`text_delta` outside the inter-run gap) remains a hard boundary
   (`noteVisibleText()`). **Every visible `thinking_delta` / `thinking_start`**
   hard-exits the work group (`noteVisibleThinking()`), including during an
   inter-run gap, so the next tool wave cannot update a header above visible
   reasoning. Hidden reasoning uses `noteHiddenThinking()` for the in-group
-  lane.
+  lane and stays reopenable (same as planning text) — never `reopenClosed`.
   The
   `isToolGroupActive`/`setToolGroupActive` flag
   lives in `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools`
@@ -447,15 +479,19 @@
   these backgrounds and never re-derive them from the accent. The subagent
   background is applied per completed/failed row only; running rows and the
   `Subagents` header remain transparent.
-- **User-message / quiz / compaction border style:**
-  `UserMessageComponent`, the quiz `renderCall`/`renderResult`, and
-  `CompactionSummaryMessageComponent` use chatbox-style horizontal rules (`──`)
-  at 50% opacity over `PAGE_BG`, sourced from `TEXT_COLOR` via
-  `colorWithOpacity(..., 0.5)` in `pi-ember-ui/index.ts`. The
-  `chatboxBorderContainer(content, paddingX)` helper wraps content with a top
-  and bottom `DynamicBorder` and a `Box(paddingX, 0, undefined)` for
-  left/right inset, with no background fill. This replaces the previous
-  `userMessageBg`/`customMessageBg` block backgrounds for those rows.
+- **User-message / quiz / compaction / bash border style:**
+  `UserMessageComponent`, the quiz `renderCall`/`renderResult`,
+  `CompactionSummaryMessageComponent`, the finished-bash transcript rules
+  (`format_ember_bash_transcript_lines`), and the slash-command / model-picker
+  middle separator all use chatbox-style horizontal rules (`──`) colored by
+  the single `chatboxBorderColor(text)` helper in `pi-ember-ui/index.ts`,
+  which applies the `DIM_COLOR` token (SSOT in `mode-colors.ts`). No call site
+  uses `TEXT_COLOR`, `colorWithOpacity`, or a per-site hex for these rules.
+  The `chatboxBorderContainer(content, paddingX)` helper wraps content with a
+  top and bottom `DynamicBorder` (using `chatboxBorderColor`) and a
+  `Box(paddingX, 0, undefined)` for left/right inset, with no background fill.
+  This replaces the previous `userMessageBg`/`customMessageBg` block
+  backgrounds for those rows.
   Compaction summaries render as compact tool rows (no chatbox rules): running
   `• Compacting` (gradient verb, muted bullet) via the patched status
   indicator; completed `• Compacted {tokensBefore} tokens into
@@ -565,6 +601,17 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `streamingWriteStats` counts non-empty content lines from `args.content`
   (write has no `details.diff`); `-0` is shown because write is a full
   rewrite / new file.
+- Standalone running edit/write verb: a single-member work group (the first
+  edit/write in a burst, before a second member joins) shows the gradient
+  present-tense verb (`Editing`/`Writing`) via `formatGroupChildGradientVerb`,
+  not the static `Edit`/`Write` label. `renderCallInner` subscribes the
+  shared 20 FPS gradient tick (`subscribeStandaloneTick`) so the verb
+  animates; `renderResultInner` drops the tick and snaps to the muted
+  past-tense label on completion. When a second member joins the group
+  (`appendToGroup`), the standalone tick is dropped in favor of the group
+  tick. `hardExitGroup` and `resetForSession` also clear it. This matches the
+  group child row path so the verb is identical whether the call is
+  standalone or grouped.
 - Edit matching ladder ownership: Pi core `edit-diff.ts` (resolved from the
   installed `@earendil-works/pi-coding-agent` package) owns the canonical edit
   matching ladder. The pipeline is rung 1 exact `indexOf`, rung 2 LF
@@ -575,10 +622,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
   distinct errors for empty oldText, not found, no change, and overlap.
   Successful fuzzy matches apply through `applyReplacementsPreservingUnchangedLines`
   so unchanged line blocks keep their original bytes. `pi-cursor-auth`
-  `normalize_tool_arguments` only remaps Cursor-style arg names
-  (`old_string`/`new_string` → `oldText`/`newText`) and must not do its own
-  whitespace normalization; `pi-compact-tools` only renders live counts and
-  must not touch matching. Per the override-delegation rule, any future
+  `normalize_tool_arguments` remaps Cursor-style arg names back to Pi schema
+  names (`old_string`/`new_string` → `oldText`/`newText`, `search_term` →
+  `query`, `response_id` → `responseId`, plus `file_path` → `path`) for every
+  tool whose outbound name is renamed in `PI_TO_CURSOR_ARG_NAMES` (`read`,
+  `write`, `edit`, `ls`, `grep`, `find`, `web_search`, `fetch_content`,
+  `get_search_content`) and must not do its own whitespace normalization;
+  `pi-compact-tools` only renders live counts and must not touch matching. Per the override-delegation rule, any future
   indentation-insensitive rung, candidate-location reporting on failure, or
   line-range/hash/stable-context anchors belong upstream in pi-mono, not as a
   pi-ember-stack edit override.
@@ -636,7 +686,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `currentGroup` was lost so another `Explored` header is not spawned.
     **Inter-run planning text** (`text_delta` while `isInterRunGap()`, including
     OpenAI/Codex narration between tool batches) is a soft boundary — groups
-    stay reopenable; never `hardExitGroup()`. **Final answer text**
+    stay reopenable; never `hardExitGroup()`. The `message_update` planning
+    path calls `renderer.armInGroupThinkingForPlanning()` to arm the in-group
+    `└ Thinking` lane without folding children so the external header does
+    not duplicate it. **Final answer text**
     (`text_delta` after the agent is no longer pending / outside the inter-run
     gap), user message, different group key, or hard non-groupable tool
     (`subagent`, `quiz`, … via `noteInterveningToolCall`) →
@@ -655,16 +708,18 @@ field. Keep that mechanism aligned with the actual plugin folders.
     every visible `thinking_delta` / `thinking_start` hard-exits via
     `noteVisibleThinking()`, including inter-run reasoning, so the next
     same-key batch gets a fresh header downstream. Hidden reasoning uses
-    `noteHiddenThinking()` for its in-group lane. Hard group splits on visible text use non-empty `text_delta` only — bare
+    `noteHiddenThinking()` for its in-group lane and stays reopenable (hidden
+    reasoning is not a transcript block) — never `reopenClosed`. Hard group splits on visible text use non-empty `text_delta` only — bare
     `text_start` must not split.
   - **Running / lingering children:** Under the unified work header
     (`• Edited N files, explored M files, … +N -N`), every member in the
     current Pi turn renders as a `├`/`└` child row (`childAbsorbBefore` = 0
     until fold). Sequential tool calls in the same turn stay listed through
     `turn_end`. Prior rows fold only on a **genuinely new tool wave**
-    (`appendToGroup` when all prior members are complete and the incoming call
-    is not a repeat of a visible same-signature call), or a **hard boundary**
-    (`noteUserMessage`, `noteVisibleText`). Soft boundaries (`todo`) and thinking
+    (`appendToGroup` when all prior members are complete and the incoming
+    tool name differs from the last visible child), or a **hard boundary**
+    (`noteUserMessage`, `noteVisibleText`). Same-name calls (e.g. read a.ts →
+    read b.ts) append below without folding priors. Soft boundaries (`todo`) and thinking
     streams settle the header and may paint in-group `└ Thinking`, but they do
     **not** absorb lingering children. `noteThinking()` appends in-group
     `└ Thinking` after lingering tool rows and suppresses the external
@@ -739,7 +794,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
 
 ### `pi-custom-agents`
 
-- **Quiz for material uncertainty:** All parent modes (`plan`, `code`, `debug`,
+- **Quiz for material uncertainty:** All parent modes (`plan`, `code`,
   `orchestrate`) tell the model to ask clarifying questions via the `quiz` tool
   when uncertain about a materially important requirement, tradeoff, or
   interpretation. Trivial or low-risk decisions remain autonomous. The canonical
@@ -749,7 +804,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   choosing `apply_patch` vs `edit`, `SUBAGENT_DELEGATION_TOOLS`
   (`subagent` / `subagent_resume`), and `without_subagent_delegation_tools()`.
   Code mode (`build_full_tools`) has no subagent tools — delegation lives in
-  plan (Scout-only), debug, and orchestrate via `READONLY_DELEGATING_TOOLS`.
+  plan (Scout-only) and orchestrate via `READONLY_DELEGATING_TOOLS` / `ORCHESTRATE_TOOLS`.
   Subagent child tool lists expose `apply_patch` only when the active model
   provider is `openai-codex`; all other providers get `edit` instead. `setActiveTools`,
   mode prompts, and the `tool_call` guard all flow through this helper — never
@@ -757,7 +812,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   refreshes the active tool set and sends a hidden `pi-agents-tool-access`
   reminder when the patch tool changes.
 - **Plain-text output directive:** The `OUTPUT_STYLE_DIRECTIVE` constant in
-  `index.ts` is injected into every mode prompt (`plan`, `code`, `debug`,
+  `index.ts` is injected into every mode prompt (`plan`, `code`,
   `orchestrate`) and mode transitions (`exit_to_coder_prompt`,
   `plan_implement_prompt`).
   Plan mode's output contract uses labeled lines (`Task:`, `Investigation:`,
@@ -1001,12 +1056,38 @@ field. Keep that mechanism aligned with the actual plugin folders.
   rows. `truncateToWidth` is the SSOT lever for ANSI-aware truncation; the
   `TOOL_ROW_WIDTH_FRACTION` constant is the single source for the half-width
   threshold.
+  When thinking blocks are visible (`!isThinkingBlocksHidden()`), a running
+  subagent also renders its live child tool calls directly below the agent
+  name via `SubagentLiveOutputText` (a multi-line `Component` defined in
+  `render.ts`), replacing the single latest-tool / `└ Thinking` preview row.
+  Each child tool call renders as a compact row — bullet (`statusBulletColor`)
+  + gradient verb (`formatGroupChildGradientVerb`) + details
+  (`formatGroupedCallDetails`) + diff stats (`formatGroupChildEditWriteStats`)
+  — reusing the SSOT formatters from `pi-compact-tools/renderer.ts` so the
+  subagent's tool rows look identical to the main agent's compact rows. No
+  top horizontal rule; a bottom `──` rule (via `chatboxBorderColor`) appears
+  only when the agent settles. Each row is prefixed with the tree-gutter
+  continuation string and ANSI-aware truncated via `truncateToWidth`. When
+  more than one subagent is shown, a dim full-width `──` separator
+  (`DimSeparator`, same `chatboxBorderColor` SSOT) is inserted between
+  consecutive agent blocks. The live tool-call buffer
+  (`SubAgentResult.liveToolRows`, `SubagentLiveToolRow[]`) is accumulated in
+  `apply_subagent_stream_event` (`runner.ts` SSOT) from child
+  `tool_execution_start`/`tool_execution_update`/`tool_execution_end`
+  events; it is bounded to the last `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` (15)
+  rows and cleared at session start. The tray is gated by thinking-block
+  visibility and only appears for running agents; completed / failed agents
+  collapse back to the normal row. It reuses the shared 20 FPS gradient clock
+  for invalidation (no new timer) and never writes directly to the terminal
+  or mutates Pi's private render state. Never duplicate the live-tool-row
+  buffer, the 15-row cap, the compact-row rendering, or the border logic in
+  other plugins.
   The subagent extension delegates Pi's native `ToolExecutionComponent.render`
   and removes only its self-shell leading separator for `subagent` and
   `subagent_resume`, keeping successive compact agent rows tight without
   touching Pi's render scheduler or differential state.
 - Keep read-only modes read-only through their active-tool allowlists.
-  Plan/debug/orchestrate include `SUBAGENT_DELEGATION_TOOLS`; code mode does
+  Plan and orchestrate include `SUBAGENT_DELEGATION_TOOLS`; code mode does
   not. Plan mode is Scout-only for exploration (`subagent-policy.ts` SSOT:
   `validate_plan_mode_subagent` blocks Coder and other agents in `tool_call`;
   `PLAN_SUBAGENT_AWARENESS_PROMPT` in `index.ts`).
@@ -1132,7 +1213,12 @@ field. Keep that mechanism aligned with the actual plugin folders.
   native Read/Grep/Glob/LS/Shell tools, which are intentionally rejected.
   **Inbound mapping SSOT:** `CURSOR_TO_PI_TOOL_NAME`, `TOOL_ALIASES` +
   `normalize_tool_arguments` + `resolve_pi_tool_name` at the `stream.ts` tool-call
-  boundary only — never duplicate these maps. **Final arg normalization SSOT:**
+  boundary only — never duplicate these maps. `normalize_tool_arguments` is the
+  inbound inverse of `PI_TO_CURSOR_ARG_NAMES` for every renamed tool (`read`,
+  `write`, `edit`, `ls`, `grep`, `find`, `web_search`, `fetch_content`,
+  `get_search_content`); without it Pi schema validation strips the Cursor wire
+  name (e.g. `search_term`, `response_id`) and the tool executes with empty
+  args. **Final arg normalization SSOT:**
   `finalize_cursor_tool_arguments()` in `stream.ts` (used on both streaming deltas
   and `close_tool_call`) — never parse final JSON without normalization.
 - **MCP routing instructions:** `request.ts` populates Cursor's
@@ -1140,7 +1226,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   only `pi_ember_*` MCP tools. The provider identifier `pi-ember-stack` is
   centralized in `EMBER_MCP_PROVIDER_IDENTIFIER` and reused by `history.ts`.
 - Mode directives prepend to the system prompt on the first turn and after Pi
-  mode changes (`stream.ts`; `plan` / `code` / `debug` / `orchestrate`).
+  mode changes (`stream.ts`; `plan` / `code` / `orchestrate`).
 - **Reasoning models:** `CURSOR_REASONING_MODEL_PATTERNS` in `src/constants.ts`;
   cloud `thinkingDelta` events forward as native `thinking_*` stream events.
 - Protobuf schemas vendored from
@@ -1228,7 +1314,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
 
 - Owns the `todo` tool and `/todos` slash command (task list with `blockedBy`
   DAG, branch replay, and disk fallback under `~/.pi/ember-todo/`).
-- Available in all parent modes (`plan`, `code`, `debug`, `orchestrate`) via
+- Available in all parent modes (`plan`, `code`, `orchestrate`) via
   `BASE_RESEARCH_TOOLS` / `build_full_tools` in `pi-custom-agents`, and on the Coder
   subagent tool list. Scout stays without `todo`.
 - Renders in the **chat transcript** only (`renderShell: "self"`) — no

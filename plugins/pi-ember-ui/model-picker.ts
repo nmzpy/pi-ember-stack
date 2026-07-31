@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import {
 	CustomEditor,
@@ -244,6 +246,39 @@ export type PickModelInEditorOptions = {
 	};
 };
 
+/** Read per-mode model memory from the persisted JSON file. */
+function read_mode_models(): Partial<Record<string, { readonly provider: string; readonly modelId: string }>> {
+	try {
+		const home =
+			process.env.PI_HOME ||
+			path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent");
+		const raw = JSON.parse(fs.readFileSync(path.join(home, "pi-ember-stack.json"), "utf8")) as Record<
+			string,
+			unknown
+		>;
+		const modeModels = raw.modeModels;
+		if (!modeModels || typeof modeModels !== "object" || Array.isArray(modeModels)) return {};
+		const result: Partial<Record<string, { provider: string; modelId: string }>> = {};
+		for (const [key, value] of Object.entries(modeModels)) {
+			if (
+				value &&
+				typeof value === "object" &&
+				!Array.isArray(value) &&
+				typeof (value as Record<string, unknown>).provider === "string" &&
+				typeof (value as Record<string, unknown>).modelId === "string"
+			) {
+				result[key] = {
+					provider: (value as Record<string, unknown>).provider as string,
+					modelId: (value as Record<string, unknown>).modelId as string,
+				};
+			}
+		}
+		return result;
+	} catch {
+		return {};
+	}
+}
+
 /** Open the in-editor Switch Model list (chatbox stays; models grow below). */
 function open_model_selector_ui(editor: any, options: string | PickModelInEditorOptions = ""): void {
 	if (!model_picker_ctx || !model_picker_pi) return;
@@ -257,6 +292,8 @@ function open_model_selector_ui(editor: any, options: string | PickModelInEditor
 	open_model_picker_in_editor(editor, ctx, pi, {
 		initialSearch: normalized.initialSearch ?? "",
 		currentModel: normalized.currentModel,
+		modeModels: read_mode_models(),
+		currentMode: (pi as { getMode?: () => string }).getMode?.() ?? undefined,
 		onConfirm: async (selected) => {
 			model_selector_busy = false;
 			finalize_editor_input_after(live_editor);

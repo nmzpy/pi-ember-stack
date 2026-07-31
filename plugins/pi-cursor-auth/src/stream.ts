@@ -31,7 +31,6 @@ let directive_pending = true;
 const MODE_DIRECTIVES: Record<string, string> = {
 	plan: "You are in plan mode. Design your approach before coding. Reply in labeled lines: Task:, Investigation:, Module N:, Acceptance Criteria:. Do not write code until the plan is approved.",
 	code: "You are in code mode. Implement the task directly. Prefer parallel read and edit calls for independent files. Explain briefly after changes.",
-	debug: "You are in debug mode. Investigate the root cause, then fix it. Use read and bash to gather evidence. Prefer parallel independent reads.",
 	orchestrate:
 		"You are in orchestrate mode. Break the task into independent subtasks, delegate where possible, and synthesize results. Prefer parallel tool calls.",
 };

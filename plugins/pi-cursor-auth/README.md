@@ -59,7 +59,7 @@ Pi agent loop
   are collected and emitted as several `toolcall_*` blocks with a single
   `toolUse` finish so Pi can execute them in one turn.
 - **Mode directives** prepend to the system prompt on the first turn and after
-  Pi mode changes (`plan`, `code`, `debug`, `orchestrate`).
+  Pi mode changes (`plan`, `code`, `orchestrate`).
 - **Reasoning models** are detected via `CURSOR_REASONING_MODEL_PATTERNS` and
   forward `thinking_*` events natively.
 - **Windows HTTP/2** uses an isolated Node `h2-bridge.mjs` child process

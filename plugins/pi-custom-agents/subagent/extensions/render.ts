@@ -8,12 +8,14 @@
 
 import * as os from "node:os";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { renderLiveGradient, formatElapsed } from "../../../pi-ember-ui/index.ts";
+import { renderLiveGradient, formatElapsed, chatboxBorderColor } from "../../../pi-ember-ui/index.ts";
 import { format_in_group_thinking_row } from "../../../pi-ember-ui/thinking-status-render.ts";
+import { isThinkingBlocksHidden } from "../../../pi-ember-ui/mode-colors.ts";
 import {
 	BULLET,
 	formatCallBody,
 	formatGroupChildGradientVerb,
+	formatGroupChildEditWriteStats,
 	formatGroupedCallDetails,
 	groupBulletColorFromFlags,
 	statusBulletColor,
@@ -22,11 +24,14 @@ import {
 	TREE_NESTED_LAST,
 	TREE_NESTED_PIPE,
 	TREE_SINGLE_TOOL,
+	type CompactCall,
 } from "../../../pi-compact-tools/renderer.ts";
-import { Container, type Component, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, type Component, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Message } from "@earendil-works/pi-ai";
 import {
 	type SubAgentResult,
+	type SubagentLiveToolRow,
+	SUBAGENT_LIVE_OUTPUT_MAX_ROWS,
 	getResultOutput,
 	isFailedResult,
 	resolve_failure_message,
@@ -80,6 +85,91 @@ export class SubagentToolText implements Component {
 	render(width: number): string[] {
 		const maxToolWidth = Math.max(1, Math.floor(width * TOOL_ROW_WIDTH_FRACTION));
 		return [truncateToWidth(this.text, maxToolWidth)];
+	}
+}
+
+/**
+ * Full-width dim horizontal separator between consecutive subagent blocks.
+ * Reuses the SSOT `chatboxBorderColor` (DIM_COLOR token) — same rule as the
+ * Ember bash/chatbox borders. Renders a single `──` row at the supplied width.
+ */
+export class DimSeparator implements Component {
+	invalidate(): void {}
+	render(width: number): string[] {
+		return [chatboxBorderColor("\u2500".repeat(Math.max(1, width)))];
+	}
+}
+
+/**
+ * Multi-line live output tray for a running subagent. Renders the last
+ * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` child tool calls as compact rows — the
+ * same bullet + gradient verb + details + diff-stats shape the main agent
+ * produces via `pi-compact-tools/renderer.ts` — in a chatbox-style bordered
+ * tray (top `──` rule always; bottom rule only when settled), matching the
+ * Ember bash renderer. Each row is prefixed with the tree-gutter
+ * continuation string and ANSI-aware truncated to the nested available
+ * width so a long bash command never wraps. Reuses the SSOT formatters; no
+ * duplicate tool-row rendering logic.
+ */
+export class SubagentLiveOutputText implements Component {
+	rows: SubagentLiveToolRow[] = [];
+	treePrefix = "";
+	running = true;
+	theme: ThemeLike | undefined;
+
+	constructor(rows: SubagentLiveToolRow[] = [], treePrefix = "", running = true, theme?: ThemeLike) {
+		this.rows = rows;
+		this.treePrefix = treePrefix;
+		this.running = running;
+		this.theme = theme;
+	}
+
+	setRows(rows: SubagentLiveToolRow[]): void {
+		this.rows = rows;
+	}
+
+	setRunning(running: boolean): void {
+		this.running = running;
+	}
+
+	setTreePrefix(treePrefix: string): void {
+		this.treePrefix = treePrefix;
+	}
+
+	setTheme(theme: ThemeLike): void {
+		this.theme = theme;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const theme = this.theme;
+		if (!theme) return [];
+		const prefixWidth = visibleWidth(this.treePrefix);
+		const contentWidth = Math.max(1, width - prefixWidth);
+		const lines: string[] = [];
+		const visible = this.rows.slice(-SUBAGENT_LIVE_OUTPUT_MAX_ROWS);
+		for (const row of visible) {
+			const completed = row.completed;
+			const bullet = statusBulletColor(row.error, completed, theme);
+			const verb = completed
+				? formatCallBody(row.name, row.args as any, theme, true, true)
+				: formatGroupChildGradientVerb(row.name, row.args);
+			const details = formatGroupedCallDetails(row.name, row.args as any, theme, completed);
+			const stats = formatGroupChildEditWriteStats(
+				row.name,
+				row.args as any,
+				completed,
+				row.details as any,
+				theme,
+			);
+			const body = bullet + verb + details + stats;
+			lines.push(this.treePrefix + truncateToWidth(body, contentWidth));
+		}
+		if (!this.running && lines.length > 0) {
+			lines.push(chatboxBorderColor("\u2500".repeat(width)));
+		}
+		return lines;
 	}
 }
 
@@ -432,21 +522,31 @@ function renderAgentRow(
 type FlatEntry =
 	| { type: "agent"; descriptor: AgentRowDescriptor; agentIndex: number }
 	| { type: "tool"; descriptor: AgentRowDescriptor; parentAgentIndex: number }
-	| { type: "thinking"; descriptor: AgentRowDescriptor; parentAgentIndex: number };
+	| { type: "thinking"; descriptor: AgentRowDescriptor; parentAgentIndex: number }
+	| { type: "liveOutput"; descriptor: AgentRowDescriptor; parentAgentIndex: number };
 
-function buildFlatEntries(rows: AgentRowDescriptor[]): FlatEntry[] {
+function buildFlatEntries(rows: AgentRowDescriptor[], thinkingBlocksVisible: boolean): FlatEntry[] {
 	const entries: FlatEntry[] = [];
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i];
 		entries.push({ type: "agent", descriptor: row, agentIndex: i });
-		// Latest tool call preview is shown only for running agents. Completed
-		// and failed agents have a checkmark/X and no nested tool row, so the
-		// group stays compact when a child finishes earlier than its siblings.
-		// Thinking only appears for currently running agents.
-		if (row.status === "running" && row.result?.latestToolCall) {
-			entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });
-		} else if (row.status === "running" && row.result?.isThinking && row.result.reasoning !== false) {
-			entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });
+		const has_live_output =
+			row.status === "running" &&
+			thinkingBlocksVisible &&
+			Array.isArray(row.result?.liveToolRows) &&
+			(row.result?.liveToolRows?.length ?? 0) > 0;
+		// When the live output tray is active, the actual compact tool rows
+		// replace the single latest-tool/thinking preview row — no duplicate
+		// `└ Searching` line above the tray.
+		if (!has_live_output) {
+			if (row.status === "running" && row.result?.latestToolCall) {
+				entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });
+			} else if (row.status === "running" && row.result?.isThinking && row.result.reasoning !== false) {
+				entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });
+			}
+		}
+		if (has_live_output) {
+			entries.push({ type: "liveOutput", descriptor: row, parentAgentIndex: i });
 		}
 	}
 	return entries;
@@ -638,6 +738,7 @@ function fillSubagentLayoutContainer(
 	rows: AgentRowDescriptor[],
 	theme: ThemeLike,
 	elapsedMs?: number,
+	thinkingBlocksVisible = false,
 ): void {
 	const fg = theme.fg.bind(theme);
 	const hasHeader = headerLabel !== undefined;
@@ -646,11 +747,18 @@ function fillSubagentLayoutContainer(
 		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
 		container.addChild(new Text(renderGroupLabel(headerLabel, hasError, allDone, theme, elapsedMs), 0, 0));
 	}
-	const flatEntries = buildFlatEntries(rows);
+	const flatEntries = buildFlatEntries(rows, thinkingBlocksVisible);
+	let agent_seen = 0;
 	for (const entry of flatEntries) {
 		const row = entry.descriptor;
 		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
 		if (entry.type === "agent") {
+			// Dim separator between consecutive agents when more than one is
+			// shown and thinking blocks are visible (SSOT chatbox border color).
+			if (agent_seen > 0 && rows.length > 1 && thinkingBlocksVisible) {
+				container.addChild(new DimSeparator());
+			}
+			agent_seen += 1;
 			const rowText = renderAgentRow(
 				row.status,
 				row.name,
@@ -663,6 +771,11 @@ function fillSubagentLayoutContainer(
 				row.isSingle ? elapsedMs : undefined,
 			);
 			container.addChild(new Text(rowText, 0, 0));
+		} else if (entry.type === "liveOutput") {
+			const liveRows = Array.isArray(row.result?.liveToolRows) ? row.result!.liveToolRows! : [];
+			container.addChild(
+				new SubagentLiveOutputText(liveRows, fg("dim", treePrefix), row.status === "running", theme),
+			);
 		} else {
 			const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
 			if (childRow) container.addChild(new SubagentToolText(childRow));
@@ -765,7 +878,7 @@ export function renderSubagentLayout(
 		const hasError = rows.some((r) => r.status === "failed");
 		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
 		lines.push(renderGroupLabel("Subagents", hasError, allDone, theme, elapsedMs));
-		const flatEntries = buildFlatEntries(rows);
+		const flatEntries = buildFlatEntries(rows, false);
 		for (const entry of flatEntries) {
 			const row = entry.descriptor;
 			const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
@@ -803,7 +916,7 @@ export function renderSubagentLayout(
 		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
 		lines.push(renderGroupLabel(headerLabel, hasError, allDone, theme, elapsedMs));
 	}
-	const flatEntries = buildFlatEntries(rows);
+	const flatEntries = buildFlatEntries(rows, false);
 	for (const entry of flatEntries) {
 		const row = entry.descriptor;
 		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
@@ -852,11 +965,12 @@ export function buildSubagentLayoutComponent(
 	terminal = false,
 	toolCallId?: string,
 	failureMessage?: string,
+	thinkingBlocksVisible = false,
 ): Container {
 	const container = new Container();
 	if (groupedMembers && groupedMembers.length > 1) {
 		const rows = memberRecordsToRows(groupedMembers);
-		fillSubagentLayoutContainer(container, "Subagents", rows, theme, elapsedMs);
+		fillSubagentLayoutContainer(container, "Subagents", rows, theme, elapsedMs, thinkingBlocksVisible);
 		return container;
 	}
 	if (shouldShowSubagentDelegating(results, terminal) && isSingleModeSubagentArgs(args)) {
@@ -864,7 +978,7 @@ export function buildSubagentLayoutComponent(
 		return container;
 	}
 	const { headerLabel, rows } = deriveAgentRows(args, results, terminal, toolCallId, failureMessage);
-	fillSubagentLayoutContainer(container, headerLabel, rows, theme, elapsedMs);
+	fillSubagentLayoutContainer(container, headerLabel, rows, theme, elapsedMs, thinkingBlocksVisible);
 	return container;
 }
 

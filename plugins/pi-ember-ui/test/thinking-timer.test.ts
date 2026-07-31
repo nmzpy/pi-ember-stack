@@ -8,6 +8,8 @@ import {
 	is_thinking_pass_timer_armed,
 	reset_thinking_pass_timer,
 	set_thinking_pass_started_at_for_tests,
+	status_can_update_previous_line,
+	status_requires_leading_spacer,
 	thinking_status_terminal_layout,
 } from "../index.ts";
 import { format_in_group_thinking_row, render_thinking_gradient_label } from "../thinking-status-render.ts";
@@ -33,6 +35,13 @@ describe("thinking pass timer", () => {
 	test("thinking_status_terminal_layout keeps one row for each host", () => {
 		expect(thinking_status_terminal_layout("widget")).toEqual({ padAbove: 0, padBelow: 0 });
 		expect(thinking_status_terminal_layout("in_message")).toEqual({ padAbove: 1, padBelow: 0 });
+	});
+
+	test("final turn status stays distinct with exactly one leading spacer", () => {
+		expect(status_can_update_previous_line(true, false)).toBe(true);
+		expect(status_can_update_previous_line(true, true)).toBe(false);
+		expect(status_requires_leading_spacer(true)).toBe(false);
+		expect(status_requires_leading_spacer(false)).toBe(true);
 	});
 
 	test("Thinking label is gradient-colored", () => {

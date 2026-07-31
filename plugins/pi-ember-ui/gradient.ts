@@ -9,8 +9,8 @@ import chalk from "chalk";
 import {
 	DIM_COLOR,
 	getActiveModeColor,
-	hexToRgbTriplet,
 	MUTED_COLOR,
+	hexToRgbTriplet,
 	TEXT_COLOR,
 } from "./mode-colors.ts";
 
@@ -41,6 +41,17 @@ type GradientPalette = {
 
 /** Tick interval: 20 FPS (50 ms). */
 export const GRADIENT_TICK_MS = 50;
+
+/**
+ * External Thinking rows repaint at the shared 20 FPS clock cadence — the
+ * same rate as in-group `└ Thinking` and compact group child verbs — so the
+ * standalone/widget/in-message header animates as smoothly as the in-group
+ * lane. The staged ANSI row still advances on every clock tick; the
+ * identical-text guard in thinking-status-tick.ts suppresses redundant
+ * public renders when the phase produced no visible change. This is a
+ * cadence gate, not a second animation clock.
+ */
+export const EXTERNAL_THINKING_RENDER_INTERVAL_MS = GRADIENT_TICK_MS;
 
 /** Sweep cycle duration: 1.6 s (faster sweep feels more responsive). */
 export const GRADIENT_DURATION_MS = 1600;
@@ -169,9 +180,8 @@ export function neutral_pulse_hex(phase: number): string {
 }
 
 /**
- * Accent palette: 3-stop dim→accent glow.
- *   DIM_COLOR base → 50% toward live accent → accent peak
- * Used by: working, subagent.
+ * Accent palette: dim→accent glow for working/subagent labels.
+ * Cached per live mode generation.
  */
 function get_accent_palette(): GradientPalette {
 	if (!cached_accent_palette) {

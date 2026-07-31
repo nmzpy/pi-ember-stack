@@ -3,11 +3,11 @@ import { fromBinary } from "@bufbuild/protobuf";
 import {
 	AgentClientMessageSchema,
 	ConversationStepSchema,
-	McpInstructionsSchema,
 } from "../src/cloud-direct/proto/agent_pb.ts";
 import { map_context_to_cursor } from "../src/context-map.ts";
 import {
 	build_cursor_request,
+	build_request_context,
 	format_tool_results_for_cursor,
 	read_turn_structure_blob,
 } from "../src/cloud-direct/request.ts";
@@ -41,14 +41,15 @@ describe("build_cursor_request history encoding", () => {
 		expect(run_request?.conversationState?.turns.length).toBe(0);
 		expect(run_request?.action?.action.case).toBe("userMessageAction");
 		expect(run_request?.mcpTools?.mcpTools.length).toBe(0);
-		expect(run_request?.requestContext?.mcpInstructions.length).toBe(1);
-		const mcp_instruction = run_request?.requestContext?.mcpInstructions[0];
-		if (mcp_instruction) {
-			const decoded = fromBinary(McpInstructionsSchema, mcp_instruction);
-			expect(decoded.serverName).toBe("pi-ember-stack");
-			expect(decoded.instructions).toContain("pi_ember_");
-			expect(decoded.instructions).toContain("not available");
-		}
+		// requestContext (with mcpInstructions) is sent via the exec response
+		// channel (chat.ts handles requestContextArgs), not embedded in
+		// AgentRunRequest. Verify it through build_request_context instead.
+		const request_context = build_request_context([], undefined);
+		expect(request_context.mcpInstructions.length).toBe(1);
+		const mcp_instruction = request_context.mcpInstructions[0];
+		expect(mcp_instruction?.serverName).toBe("pi-ember-stack");
+		expect(mcp_instruction?.instructions).toContain("pi_ember_");
+		expect(mcp_instruction?.instructions).toContain("not available");
 	});
 
 	test("embeds assistant tool calls into rebuilt conversation turns", () => {

@@ -206,11 +206,78 @@ describe("Cursor tool serialization", () => {
 });
 
 describe("Mode directive builder", () => {
-	test("maps debug mode to a directive", () => {
-		expect(__test_only.build_mode_directive("debug")).toContain("debug mode");
+	test("maps orchestrate mode to a directive", () => {
+		expect(__test_only.build_mode_directive("orchestrate")).toContain("orchestrate mode");
 	});
 
 	test("falls back to code directive for unknown modes", () => {
 		expect(__test_only.build_mode_directive("unknown")).toContain("You are in code mode");
+	});
+});
+
+describe("Inbound tool argument normalization", () => {
+	test("web_search reverses search_term -> query and preserves optional fields", () => {
+		const out = __test_only.normalize_tool_arguments("web_search", {
+			search_term: "react vs vue",
+			numResults: 7,
+			includeContent: true,
+			recencyFilter: "week",
+			domainFilter: ["example.com"],
+			provider: "exa",
+			workflow: "auto-summary",
+		});
+		expect(out).toEqual({
+			query: "react vs vue",
+			numResults: 7,
+			includeContent: true,
+			recencyFilter: "week",
+			domainFilter: ["example.com"],
+			provider: "exa",
+			workflow: "auto-summary",
+		});
+	});
+
+	test("web_search passes queries[] through unchanged", () => {
+		const out = __test_only.normalize_tool_arguments("web_search", {
+			queries: ["a", "b"],
+		});
+		expect(out).toEqual({ queries: ["a", "b"] });
+	});
+
+	test("get_search_content reverses response_id -> responseId", () => {
+		const out = __test_only.normalize_tool_arguments("get_search_content", {
+			response_id: "resp-123",
+			queryIndex: 2,
+			url: "https://example.com",
+		});
+		expect(out).toEqual({
+			responseId: "resp-123",
+			queryIndex: 2,
+			url: "https://example.com",
+		});
+	});
+
+	test("fetch_content passes url/urls and optional fields through", () => {
+		const out = __test_only.normalize_tool_arguments("fetch_content", {
+			urls: ["https://a.com", "https://b.com"],
+			forceClone: true,
+			prompt: "describe the intro",
+			timestamp: "1:23",
+			frames: 4,
+			model: "gemini-2.5-flash",
+		});
+		expect(out).toEqual({
+			urls: ["https://a.com", "https://b.com"],
+			forceClone: true,
+			prompt: "describe the intro",
+			timestamp: "1:23",
+			frames: 4,
+			model: "gemini-2.5-flash",
+		});
+	});
+
+	test("unknown tool names pass through unchanged", () => {
+		const out = __test_only.normalize_tool_arguments("compress", { range: [0, 5] });
+		expect(out).toEqual({ range: [0, 5] });
 	});
 });

@@ -16,12 +16,12 @@ import {
 	type Component,
 	Container,
 	type DefaultTextStyle,
-	type Editor,
+	Editor,
 	getKeybindings,
-	isKeyRelease,
 	Key,
 	Markdown,
 	type MarkdownTheme,
+	isKeyRelease,
 	matchesKey,
 	Spacer,
 	Text,
@@ -31,6 +31,18 @@ import {
 import { CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { sync_compact_group_flags } from "../pi-compact-tools/group-flags.ts";
 import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
+import {
+	THINKING_ELAPSED_MIN_MS,
+	render_thinking_gradient_label,
+} from "./thinking-status-render.ts";
+import {
+	bind_thinking_in_message_host,
+	bind_thinking_status_tick_should_paint,
+	bind_thinking_status_tick_host_resolver,
+	bind_thinking_widget_host,
+	sync_thinking_status_tick,
+	unbind_thinking_status_hosts,
+} from "./thinking-status-tick.ts";
 import {
 	apply_assistant_stream_boundary,
 	resolve_assistant_stream_boundary_event,
@@ -53,9 +65,9 @@ import {
 	get_gradient_phase_with_offset,
 	get_logo_phase,
 	gradient_reason_active,
+	neutral_pulse_hex,
 	invalidate_gradient_cache,
 	MUTED_GROUP_GRADIENT_PRESET,
-	neutral_pulse_hex,
 	render_gradient,
 	set_gradient_render_request,
 	shutdown_gradient_clock,
@@ -69,53 +81,52 @@ import {
 	reset_slash_command_tracking,
 } from "./layout.ts";
 import {
-	begin_work_group_boundary_suppression,
 	buildThemeBgColors,
 	buildThemeExportColors,
 	buildThemeFgColors,
 	DIM_COLOR,
-	end_work_group_boundary_suppression,
-	is_agent_thinking_wait,
-	isAgentRunPending,
-	isCurrentTurnAssistantTimestamp,
-	isGroupThinkingChildActive,
-	isInterRunGap,
+	getActiveModeColor,
 	isQuizActive,
 	isShellMode,
-	isSubagentDelegationActive,
-	isThinkingBlocksHidden,
-	isTurnToolTranscriptActive,
-	isToolCallPending,
 	isUserBashRunning,
-	isUserTurnCommitted,
+	isGroupThinkingChildActive,
+	isSubagentDelegationActive,
 	MUTED_COLOR,
 	MUTED_MESSAGE_BG,
+	PAGE_BG,
 	markSubagentDelegationEnded,
 	markSubagentDelegationStarted,
-	markToolCallAnnounced,
-	markToolExecutionEnded,
-	markToolExecutionStarted,
-	PAGE_BG,
 	resetSubagentDelegation,
-	resetToolExecutionInFlight,
-	setAgentRunPending,
-	setGroupReopenableActive,
-	setGroupThinkingChildActive,
 	setLatestSubagentRunning,
 	setPlanAutoContinuing,
 	setShellMode,
-	setThinkingBlocksHidden,
-	setToolGroupActive,
-	setTurnToolTranscriptActive,
 	setUserBashRunning,
-	setUserTurnAnchorTimestamp,
+	isAgentRunPending,
+	isInterRunGap,
+	isThinkingBlocksHidden,
+	isUserTurnCommitted,
+	is_agent_thinking_wait,
+	begin_work_group_boundary_suppression,
+	end_work_group_boundary_suppression,
+	markToolExecutionEnded,
+	markToolExecutionStarted,
+	resetToolExecutionInFlight,
+	setAgentRunPending,
+	setGroupReopenableActive,
+	setToolGroupActive,
+	setGroupThinkingChildActive,
+	setTurnToolTranscriptActive,
+	setThinkingBlocksHidden,
 	setUserTurnCommitted,
+	setUserTurnAnchorTimestamp,
+	isCurrentTurnAssistantTimestamp,
 	TEXT_COLOR,
+	isTurnToolTranscriptActive,
 } from "./mode-colors.ts";
 import {
 	bind_model_picker_session,
-	install_model_picker_input_listener,
 	install_model_picker_patches,
+	install_model_picker_input_listener,
 	reset_model_picker_session,
 	uninstall_model_picker_input_listener,
 } from "./model-picker.ts";
@@ -128,20 +139,6 @@ import {
 	bind_select_list_theme_resolver,
 	install_select_list_theme_patches,
 } from "./select-list-theme.ts";
-import {
-	render_thinking_gradient_label,
-	THINKING_ELAPSED_MIN_MS,
-} from "./thinking-status-render.ts";
-import {
-	bind_thinking_in_message_host,
-	bind_thinking_status_tick_builder,
-	bind_thinking_status_tick_host_resolver,
-	bind_thinking_status_tick_should_paint,
-	bind_thinking_widget_host,
-	render_cached_thinking_status_lines,
-	sync_thinking_status_tick,
-	unbind_thinking_status_hosts,
-} from "./thinking-status-tick.ts";
 
 export {
 	cancel_footer_stats_schedule as cancelFooterStatsSchedule,
@@ -173,9 +170,9 @@ export {
 	install_shell_history_sync_patch as installShellHistorySyncPatch,
 	intercept_shell_input as interceptShellInput,
 	process_shell_input as processShellInput,
+	submit_shell_command_from_editor as submitShellCommandFromEditor,
 	type ShellModeEditor,
 	set_shell_sync_callback as setShellSyncCallback,
-	submit_shell_command_from_editor as submitShellCommandFromEditor,
 	sync_shell_mode_from_editor_text as syncShellModeFromEditorText,
 } from "./shell-mode.ts";
 
@@ -311,8 +308,6 @@ const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
 let turnStartedAt = 0;
 /** Monotonic start of the current Thinking pass — reset on each arm, shown inline. */
 let thinkingPassStartedAt = 0;
-/** True only while the terminal status patch is receiving the final turn timer. */
-let sessionEndStatusPending = false;
 /** Rebound on latest assistant updateContent — drives 20 FPS in-message gradient. */
 let latestAssistantMessageTimestamp: number | undefined;
 /** Latest assistant message has mounted an in-transcript Thinking host. */
@@ -357,20 +352,12 @@ export function format_thinking_pass_elapsed_suffix(theme: {
 	return theme.fg("dim", ` ${formatElapsed(elapsedMs)}`);
 }
 
-/** SSOT horizontal inset (columns) for the external Thinking status row —
- *  the above-editor widget and the in-message host. The in-group `└ Thinking`
- *  lane is owned by the compact renderer (tree-branch prefix) and does not
- *  use this inset. */
-const THINKING_STATUS_INSET_COLUMNS = 1;
+/** SSOT padding for the above-editor Thinking widget row. */
+const WIDGET_INSET_COLUMNS = 2;
 
-/** SSOT row builder for the external Thinking status row. Called by the
- *  20 FPS gradient tick (via thinking-status-tick.ts) to pre-bake the ANSI
- *  gradient label into the shared cache, and by the render() safety net
- *  when the clock was stopped by a race. Same string shape as before:
- *  leftPad + gradient label + elapsed suffix + rightPad. */
-export function build_thinking_status_row_text(host: "widget" | "in_message"): string {
-	const leftPad = " ".repeat(THINKING_STATUS_INSET_COLUMNS);
-	const rightPad = host === "widget" ? " ".repeat(THINKING_STATUS_INSET_COLUMNS) : "";
+function build_thinking_status_row_text(host: "widget" | "in_message"): string {
+	const leftPad = " ".repeat(WIDGET_INSET_COLUMNS);
+	const rightPad = host === "widget" ? " ".repeat(WIDGET_INSET_COLUMNS) : "";
 	const theme = resolve_live_theme();
 	const labelGradient = render_thinking_gradient_label();
 	const elapsedColored = format_thinking_pass_elapsed_suffix(theme);
@@ -418,19 +405,17 @@ export function lingering_tool_children_visible_for_tests(): boolean {
 export function compact_thinking_lane_owns_status(): boolean {
 	if (!isThinkingBlocksHidden() || !isTurnToolTranscriptActive()) return false;
 	if (getSharedRenderer().hasGroupThinkingChild()) return true;
-	// A live group (settled or running) owns the transcript Thinking slot;
-	// external hosts must not duplicate it even while a tool wave is still
-	// in flight and the group has not yet settled.
+	// A settled/reopenable group without a visible child row also claims the
+	// transcript Thinking slot; external hosts must not duplicate it.
 	return getSharedRenderer().hasReopenableGroup();
 }
 
 /** SSOT: mutually exclusive surface for the gradient Thinking row. */
 export function resolve_thinking_status_host(): "in_message" | "widget" | null {
 	if (!thinking_status_should_show()) return null;
-	// A live compact group (running tool wave, lingering children, or settled
-	// Thinking lane) owns the slot. External hosts paint only when the
-	// transcript is empty of any live group.
 	if (compact_thinking_lane_owns_status()) return null;
+	// Reopenable/settled work groups already show in-group `└ Thinking`.
+	// Do not duplicate that with an external header.
 	if (getSharedRenderer().hasReopenableGroup()) return null;
 	// Pre-tool: above-editor widget until the first tool row lands in the transcript.
 	if (is_pre_tool_thinking_gap()) return "widget";
@@ -446,9 +431,6 @@ export function is_pre_tool_thinking_gap(): boolean {
 /** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
-	// A streamed tool call is deterministic work intent. Hide Thinking from
-	// its first toolcall_start, before Pi emits tool_execution_start.
-	if (isToolCallPending()) return false;
 
 	const pre_tool = is_pre_tool_thinking_gap();
 	if (pre_tool) return !thinkingHeaderSuppressed;
@@ -501,10 +483,9 @@ export function should_suppress_thinking_header_for_stream_event(ev: {
 }
 
 /** SSOT terminal padding around the Thinking status row. */
-export function thinking_status_terminal_layout(host: "widget" | "in_message" | "compact"): {
-	padAbove: number;
-	padBelow: number;
-} {
+export function thinking_status_terminal_layout(
+	host: "widget" | "in_message" | "compact",
+): { padAbove: number; padBelow: number } {
 	if (host === "compact") return { padAbove: 0, padBelow: 0 };
 	// In-message: one blank row above the gradient Thinking label so it sits
 	// below the assistant bubble like a distinct status line, not appended text.
@@ -515,11 +496,7 @@ export function thinking_status_terminal_layout(host: "widget" | "in_message" | 
 	return { padAbove: 0, padBelow: 0 };
 }
 
-/** Shared Thinking status row — reads the pre-baked gradient text from the
- *  20 FPS tick cache (same pattern as the in-group `└ Thinking` lane). Pi's
- *  render() only truncates the cached ANSI string; the gradient
- *  colorization happens once per tick in thinking-status-tick.ts, so the
- *  external header animates at the same stable cadence as the in-group row. */
+/** Shared Thinking status row — live gradient at render time (same path as in-group rows). */
 function render_thinking_status_lines(width: number): string[] {
 	const host = resolve_thinking_status_host();
 	if (!host) return [];
@@ -532,15 +509,9 @@ function render_thinking_status_lines(width: number): string[] {
 		activate_gradient("thinking");
 		sync_thinking_status_tick(true);
 	}
-	const rows = render_cached_thinking_status_lines(Math.max(1, width), host);
+	const row = truncateToWidth(build_thinking_status_row_text(host), Math.max(1, width));
 	const { padAbove, padBelow } = thinking_status_terminal_layout(host);
-	if (rows.length === 0) {
-		// Cache miss before the first tick staged text — build once inline so
-		// the first frame is never empty. Subsequent frames come from the tick.
-		const row = truncateToWidth(build_thinking_status_row_text(host), Math.max(1, width));
-		return [...Array(padAbove).fill(""), row, ...Array(padBelow).fill("")];
-	}
-	return [...Array(padAbove).fill(""), ...rows, ...Array(padBelow).fill("")];
+	return [...Array(padAbove).fill(""), row, ...Array(padBelow).fill("")];
 }
 
 /** Update status state; request a render only when Thinking visibility changes. */
@@ -614,9 +585,7 @@ class ThinkingStatusComponent implements Component {
 let requestRender: (() => void) | undefined;
 
 /** Bind Pi's public TUI render request — ctx.ui has no requestRender API. */
-function bind_live_tui_render(
-	tui: { requestRender?: (force?: boolean) => void } | undefined,
-): void {
+function bind_live_tui_render(tui: { requestRender?: (force?: boolean) => void } | undefined): void {
 	if (!tui?.requestRender) return;
 	tuiRef = tui;
 	const schedule_render = (): void => {
@@ -657,10 +626,7 @@ function recompute_latest_subagent_running(): boolean {
 		const msg = entry.message;
 		if (msg?.role !== "assistant") continue;
 		for (const part of msg.content ?? []) {
-			if (
-				part?.type === "toolCall" &&
-				(part?.name === "subagent" || part?.name === "subagent_resume")
-			) {
+			if (part?.type === "toolCall" && (part?.name === "subagent" || part?.name === "subagent_resume")) {
 				latestSubagentCallId = part.id;
 				break;
 			}
@@ -832,7 +798,6 @@ export function reset_thinking_header_session_state(): void {
 	latestAssistantMessageTimestamp = undefined;
 	thinkingPassStartedAt = 0;
 	turnStartedAt = 0;
-	sessionEndStatusPending = false;
 	thinking_status_last_painted = false;
 	setAgentRunPending(false);
 	setUserTurnCommitted(false);
@@ -877,10 +842,11 @@ export function arm_pre_token_thinking_status(): void {
 		refresh_thinking_status();
 		return;
 	}
-	// If the current wave is still being finalized, the real thinking
-	// stream appends the in-group `└ Thinking` lane after lingering tool
-	// rows — thinking never folds prior tool children. A settled group
-	// was armed above and intentionally keeps its children lingering.
+	// If the current wave is still being finalized, let the real thinking
+	// stream replace those stale child rows once it arrives. A settled group
+	// was armed above and intentionally keeps its children lingering beside
+	// the in-group status row.
+	renderer.requestFoldChildrenForThinking();
 	activate_gradient("thinking");
 	refresh_thinking_status();
 }
@@ -1133,10 +1099,10 @@ function installProxiedTheme(
 }
 
 function applyDynamicTheme(options: { invalidate?: boolean; render?: boolean } = {}): void {
-	const accent = MUTED_COLOR;
 	markdownThemeGeneration += 1;
 	clearMarkdownRenderCache();
 	invalidate_gradient_cache();
+	const accent = getActiveModeColor();
 	const fgColors = buildThemeFgColors(accent);
 	const bgColors = buildThemeBgColors(accent);
 	const codeBg = MUTED_MESSAGE_BG;
@@ -1334,7 +1300,11 @@ function render_shell_aware_editor(
 	const topRule = bottomRule;
 	const slashMiddleSep =
 		" ".repeat(SLASH_MIDDLE_INSET) +
-		chatboxBorderColor("\u2500".repeat(Math.max(1, width - SLASH_MIDDLE_INSET * 2)));
+		colorWithOpacity(
+			"\u2500".repeat(Math.max(1, width - SLASH_MIDDLE_INSET * 2)),
+			TEXT_COLOR,
+			0.5,
+		);
 	const middleSep = padRule(
 		isSlashMode || modelPickerActive
 			? slashMiddleSep
@@ -1435,7 +1405,10 @@ function installAssistantMessagePatch(): void {
 			this._emberThinkingStatus = new ThinkingStatusComponent();
 		}
 		this._emberThinkingStatus.messageTimestamp = msgTimestamp;
-		if (msgTimestamp !== undefined && msgTimestamp === latestAssistantMessageTimestamp) {
+		if (
+			msgTimestamp !== undefined &&
+			msgTimestamp === latestAssistantMessageTimestamp
+		) {
 			bind_thinking_in_message_host(this._emberThinkingStatus);
 			if (
 				(isUserTurnCommitted() || isAgentRunPending()) &&
@@ -1584,6 +1557,7 @@ function installAssistantMessagePatch(): void {
 		if (hasVisibleContent && !hasToolCalls && !isInMessageTarget) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
+
 	};
 
 	const originalRender = assistantPrototype.render;
@@ -1694,26 +1668,20 @@ function installUpdateNotificationPatch(): void {
 
 		// Consecutive info statuses still update the previous status line.
 		if (
-			status_can_update_previous_line(
-				Boolean(
-					last &&
-						last === this.lastStatusText &&
-						secondLast &&
-						secondLast === this.lastStatusSpacer,
-				),
-				sessionEndStatusPending,
-			)
+			last &&
+			last === this.lastStatusText &&
+			secondLast &&
+			secondLast === this.lastStatusSpacer
 		) {
 			this.lastStatusText.setText(theme.fg("dim", message));
 			this.ui.requestRender();
 			return;
 		}
 
-		// The final model + elapsed status is a standalone session-end row. Keep
-		// one explicit row above it even when the preceding transcript component
-		// already ends in a blank row; ordinary status messages retain the native
-		// compact spacing behavior.
-		if (status_requires_leading_spacer(component_ends_with_blank_row(last))) {
+		// Only add a spacer if the previous component does not already end
+		// with a blank row. This prevents two blank rows after an assistant
+		// message or a compact tool block that already ends with a spacer.
+		if (!component_ends_with_blank_row(last)) {
 			const spacer = new Spacer(1);
 			this.chatContainer.addChild(spacer);
 			this.lastStatusSpacer = spacer;
@@ -1741,21 +1709,6 @@ function installUpdateNotificationPatch(): void {
 	proto.showStartupNoticesIfNeeded = function emberShowStartupNoticesIfNeeded() {
 		return;
 	};
-}
-
-/** Ordinary consecutive statuses may update the existing status row. The
- * final model + elapsed notification must remain a distinct row. */
-export function status_can_update_previous_line(
-	has_previous_status_line: boolean,
-	is_final_turn_status: boolean,
-): boolean {
-	return has_previous_status_line && !is_final_turn_status;
-}
-
-/** Exactly one leading blank row: reuse a component's existing trailing blank
- * instead of stacking a second spacer above the final status. */
-export function status_requires_leading_spacer(last_component_ends_blank: boolean): boolean {
-	return !last_component_ends_blank;
 }
 
 const STATUS_PATCH_MARKER = Symbol.for("pi-ember-ui:status-patched");
@@ -1998,7 +1951,9 @@ function installCompactionSummaryPatch(): void {
 		);
 		const expandKey = (globalThis as any).process?.env?.["PI_EXPAND_KEY"] || "ctrl+o";
 		const callText = new CompactGroupText();
-		callText.setText(this.expanded ? row : row + theme.fg("dim", ` (${expandKey} to expand)`));
+		callText.setText(
+			this.expanded ? row : row + theme.fg("dim", ` (${expandKey} to expand)`),
+		);
 		this.addChild(callText);
 
 		if (this.expanded && this.message.summary) {
@@ -2010,6 +1965,17 @@ function installCompactionSummaryPatch(): void {
 			);
 		}
 	};
+}
+
+function colorWithOpacity(text: string, hex: string, opacity: number): string {
+	const source = hex.slice(1);
+	const base = hexToRgbTriplet(PAGE_BG);
+	const rgb = [
+		parseInt(source.slice(0, 2), 16),
+		parseInt(source.slice(2, 4), 16),
+		parseInt(source.slice(4, 6), 16),
+	].map((value, index) => Math.round(base[index] + (value - base[index]) * opacity));
+	return `\u001b[38;2;${rgb.join(";")}m${text}\u001b[39m`;
 }
 
 function hexToRgbTriplet(hex: string): [number, number, number] {
@@ -2384,8 +2350,6 @@ function invalidateLoadedResources(): void {
 	}
 }
 
-
-
 function installStartupHeader(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 
@@ -2454,7 +2418,7 @@ function ensureThemeInstalled(): void {
 	// Seed export colors from the SSOT builder (default accent). Do this
 	// only at install — mid-session writes trigger Pi's theme watcher,
 	// which reloads a Theme without custom bg keys (subagentBg) and crashes.
-	updateInstalledThemeExport(buildThemeExportColors(MUTED_COLOR));
+	updateInstalledThemeExport(buildThemeExportColors(getActiveModeColor()));
 }
 
 /** Update the `export` section of the installed ember.json on disk so
@@ -2515,9 +2479,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		getThinkingActive: () => thinkingActive,
 		clearStaleBlockers: clear_stale_thinking_wait_blockers,
 	});
-	bind_thinking_status_tick_should_paint(() => thinking_status_should_show());
+	bind_thinking_status_tick_should_paint(
+		() => thinking_status_should_show(),
+	);
 	bind_thinking_status_tick_host_resolver(resolve_thinking_status_host);
-	bind_thinking_status_tick_builder(build_thinking_status_row_text);
 	// /model + /resume: prototype intercepts only (no registerCommand — that
 	// conflicts with built-ins and shows in Extension issues).
 	install_model_picker_patches();
@@ -2591,9 +2556,20 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	// Re-render header/footer when the active agent mode changes. Emitted by
 	// pi-custom-agents (and any other extension) via the shared event bus.
-	pi.events.on("pi-ember-ui:mode-change", (_event: any) => {
-		// Mode switches only need a new frame; the live theme is static.
-		requestRender?.();
+	pi.events.on("pi-ember-ui:mode-change", (event: any) => {
+		if (event?.liveOnly === true) {
+			// Mode switches rebuild live theme colors (mdHeading, accent, …)
+			// and invalidate the TUI. applyDynamicTheme bumps
+			// markdownThemeGeneration; the updateContent skip-guard includes
+			// that generation so assistant messages fully rebuild their
+			// CachedMarkdown children with the new accent — MD headers
+			// and links recolor; list markers stay muted.
+			applyDynamicTheme({ invalidate: true, render: false });
+			invalidateLoadedResources();
+			requestRender?.();
+			return;
+		}
+		applyDynamicTheme();
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -2610,18 +2586,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		const isText = ev?.type === "text_start" || ev?.type === "text_delta";
 		const isThinking = ev?.type === "thinking_start" || ev?.type === "thinking_delta";
 
-		if (ev?.type === "toolcall_start") {
-			const tool_call = ev.partial?.content?.[ev.contentIndex];
-			markToolCallAnnounced(
-				tool_call?.type === "toolCall" && typeof tool_call.id === "string"
-					? tool_call.id
-					: undefined,
-			);
-			setTurnToolTranscriptActive(true);
-			suppress_thinking_header_for_work();
-			refresh_thinking_status();
-		}
-
 		if (ev) {
 			const boundary = resolve_assistant_stream_boundary_event(ev);
 			if (boundary === "visible_text" || boundary === "thinking") {
@@ -2630,16 +2594,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 				if (planning === "planning_text") {
 					resume_thinking_header_for_think_stream();
 					if (!thinkingActive) startThinkingAnimation();
-					// Inter-run planning text is a soft boundary: arm the in-group
-					// `└ Thinking` lane alongside lingering tool children so it owns
-					// the transcript slot instead of showing a duplicate external
-					// header. Children stay visible (no fold) per the soft-boundary
-					// contract; a later real thinking stream or tool wave reopens.
-					const planning_renderer = getSharedRenderer();
-					if (planning_renderer.hasVisibleGroupChildren() && isThinkingBlocksHidden()) {
-						planning_renderer.armInGroupThinkingForPlanning();
-						sync_compact_group_flags(planning_renderer);
-					}
 					reconcile_thinking_wait_ui();
 				}
 			}
@@ -2658,14 +2612,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			if (planning) {
 				resume_thinking_header_for_think_stream();
 				if (!thinkingActive) startThinkingAnimation();
-				// Same soft-boundary in-group arming as the boundary path above:
-				// inter-run planning text owns the transcript slot inside the
-				// work group, not as a duplicate external header.
-				const planning_renderer = getSharedRenderer();
-				if (planning_renderer.hasVisibleGroupChildren() && isThinkingBlocksHidden()) {
-					planning_renderer.armInGroupThinkingForPlanning();
-					sync_compact_group_flags(planning_renderer);
-				}
 				reconcile_thinking_wait_ui();
 			}
 		}
@@ -2777,7 +2723,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setUserTurnCommitted(false);
 		thinkingHeaderSuppressed = false;
 		setTurnToolTranscriptActive(false);
-		resetToolExecutionInFlight();
 		resetSubagentDelegation();
 		stopLogoAnimation();
 		stopThinkingAnimation();
@@ -2791,12 +2736,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			if (ctx.mode === "tui" && duration >= 1000) {
 				const model = ctx.model;
 				const modelName = model?.name ?? model?.id ?? "model";
-				sessionEndStatusPending = true;
-				try {
-					ctx.ui.notify(`${modelName} · ${formatElapsed(duration)}`, "info");
-				} finally {
-					sessionEndStatusPending = false;
-				}
+				ctx.ui.notify(`${modelName} · ${formatElapsed(duration)}`, "info");
 			}
 			if (ctx.mode === "tui") refresh_thinking_status();
 		} catch {
@@ -2815,7 +2755,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("tool_execution_start", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		markToolExecutionStarted(event.toolCallId);
+		markToolExecutionStarted();
 		suppress_thinking_header_for_work();
 		setTurnToolTranscriptActive(true);
 		if (is_subagent_delegation_tool(event.toolName)) {
@@ -2831,7 +2771,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		} catch {
 			return;
 		}
-		markToolExecutionEnded(event.toolCallId);
+		markToolExecutionEnded();
 		schedule_footer_stats(ctx);
 		if (is_subagent_delegation_tool(event.toolName)) {
 			recompute_latest_subagent_running();

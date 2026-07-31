@@ -45,7 +45,6 @@ const PI_TO_CURSOR_ARG_NAMES: Record<string, Record<string, string>> = {
 const MODE_DIRECTIVES: Record<string, string> = {
 	plan: "You are in plan mode. Design your approach before coding. Reply in labeled lines: Task:, Investigation:, Module N:, Acceptance Criteria:. Do not write code until the plan is approved.",
 	code: "You are in code mode. Implement the task directly. Prefer parallel read and edit calls for independent files. Explain briefly after changes.",
-	debug: "You are in debug mode. Investigate the root cause, then fix it. Use read and bash to gather evidence. Prefer parallel independent reads.",
 	orchestrate: "You are in orchestrate mode. Break the task into independent subtasks, delegate where possible, and synthesize results. Prefer parallel tool calls.",
 };
 
@@ -413,6 +412,46 @@ export function normalize_tool_arguments(
 		// before Pi's schema validation strips unknown keys like `todos`.
 		return prepare_todo_arguments(input) as Record<string, unknown>;
 	}
+	if (tool_name === "web_search") {
+		// Inbound inverse of PI_TO_CURSOR_ARG_NAMES (query -> search_term).
+		// Without this, Pi's schema validation strips `search_term` and the
+		// web_search execute path sees an empty query.
+		const output: Record<string, unknown> = {};
+		const query = first_defined(input, ["query", "search_term", "searchTerm"]);
+		if (query !== undefined) output.query = query;
+		if (input.queries !== undefined) output.queries = input.queries;
+		if (input.numResults !== undefined) output.numResults = input.numResults;
+		if (input.includeContent !== undefined) output.includeContent = input.includeContent;
+		if (input.recencyFilter !== undefined) output.recencyFilter = input.recencyFilter;
+		if (input.domainFilter !== undefined) output.domainFilter = input.domainFilter;
+		if (input.provider !== undefined) output.provider = input.provider;
+		if (input.workflow !== undefined) output.workflow = input.workflow;
+		return output;
+	}
+	if (tool_name === "fetch_content") {
+		// No outbound rename (url -> url is identity); pass through explicitly so
+		// future Cursor-native aliases still resolve to the Pi schema.
+		const output: Record<string, unknown> = {};
+		if (input.url !== undefined) output.url = input.url;
+		if (input.urls !== undefined) output.urls = input.urls;
+		if (input.forceClone !== undefined) output.forceClone = input.forceClone;
+		if (input.prompt !== undefined) output.prompt = input.prompt;
+		if (input.timestamp !== undefined) output.timestamp = input.timestamp;
+		if (input.frames !== undefined) output.frames = input.frames;
+		if (input.model !== undefined) output.model = input.model;
+		return output;
+	}
+	if (tool_name === "get_search_content") {
+		// Inbound inverse of PI_TO_CURSOR_ARG_NAMES (responseId -> response_id).
+		const output: Record<string, unknown> = {};
+		const response_id = first_defined(input, ["responseId", "response_id", "responseID"]);
+		if (response_id !== undefined) output.responseId = response_id;
+		if (input.query !== undefined) output.query = input.query;
+		if (input.queryIndex !== undefined) output.queryIndex = input.queryIndex;
+		if (input.url !== undefined) output.url = input.url;
+		if (input.urlIndex !== undefined) output.urlIndex = input.urlIndex;
+		return output;
+	}
 	return input;
 }
 
@@ -422,5 +461,6 @@ export const __test_only = {
 	is_forwardable_user_ask,
 	is_non_ask_user_message,
 	last_user_text,
+	normalize_tool_arguments,
 	user_message_is_visible,
 };

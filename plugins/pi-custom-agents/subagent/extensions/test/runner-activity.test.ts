@@ -105,3 +105,96 @@ describe("apply_subagent_stream_event", () => {
 		expect(result.latestToolCall).toEqual({ name: "bash", args: { command: "ls" } });
 	});
 });
+
+describe("apply_subagent_stream_event live tool rows", () => {
+	test("tool_execution_start appends a running row", () => {
+		const result = make_running_result();
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolName: "read", args: { path: "a.ts" } },
+			() => {},
+		);
+		expect(result.liveToolRows?.length).toBe(1);
+		expect(result.liveToolRows?.[0]).toEqual({
+			name: "read",
+			args: { path: "a.ts" },
+			completed: false,
+			error: false,
+		});
+	});
+
+	test("tool_execution_update updates args of the latest running row", () => {
+		const result = make_running_result();
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolName: "edit", args: { path: "a.ts" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_update", toolName: "edit", args: { path: "a.ts", oldText: "x" } },
+			() => {},
+		);
+		expect(result.liveToolRows?.length).toBe(1);
+		expect(result.liveToolRows?.[0].args).toEqual({ path: "a.ts", oldText: "x" });
+		expect(result.liveToolRows?.[0].completed).toBe(false);
+	});
+
+	test("tool_execution_end marks the row completed", () => {
+		const result = make_running_result();
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{
+				type: "tool_execution_end",
+				toolName: "bash",
+				result: { isError: true, details: { diff: "..." } },
+			},
+			() => {},
+		);
+		expect(result.liveToolRows?.length).toBe(1);
+		expect(result.liveToolRows?.[0].completed).toBe(true);
+		expect(result.liveToolRows?.[0].error).toBe(true);
+		expect(result.liveToolRows?.[0].details).toEqual({ diff: "..." });
+	});
+
+	test("multiple distinct tools append separate rows", () => {
+		const result = make_running_result();
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolName: "read", args: { path: "a.ts" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolName: "grep", args: { pattern: "x" } },
+			() => {},
+		);
+		expect(result.liveToolRows?.length).toBe(2);
+		expect(result.liveToolRows?.[0].name).toBe("read");
+		expect(result.liveToolRows?.[1].name).toBe("grep");
+	});
+
+	test("liveToolRows trims to last 15 rows", () => {
+		const result = make_running_result();
+		for (let i = 0; i < 20; i++) {
+			apply_subagent_stream_event(
+				result,
+				{ type: "tool_execution_start", toolName: "read", args: { path: `f${i}.ts` } },
+				() => {},
+			);
+			apply_subagent_stream_event(
+				result,
+				{ type: "tool_execution_end", toolName: "read", result: {} },
+				() => {},
+			);
+		}
+		expect(result.liveToolRows?.length).toBe(15);
+		expect(result.liveToolRows?.[0].args).toEqual({ path: "f5.ts" });
+		expect(result.liveToolRows?.[14].args).toEqual({ path: "f19.ts" });
+	});
+});

@@ -55,6 +55,7 @@ import {
 	setUserTurnCommitted,
 	resetToolExecutionInFlight,
 	markToolExecutionStarted,
+	markToolExecutionEnded,
 	setLatestSubagentRunning,
 } from "../mode-colors.ts";
 import {
@@ -274,6 +275,9 @@ describe("thinking header visibility", () => {
 		try {
 			arm_pre_token_thinking_status();
 			expect(thinking_status_should_show()).toBe(true);
+			markToolExecutionStarted("call-scout-a");
+			expect(thinking_status_should_show()).toBe(false);
+			markToolExecutionEnded("call-scout-a");
 			markSubagentDelegationStarted("call-scout-a");
 			markSubagentDelegationStarted("call-scout-b");
 			expect(thinking_status_should_show()).toBe(false);
@@ -611,8 +615,77 @@ describe("thinking header visibility", () => {
 			renderer.noteThinking();
 			setGroupThinkingChildActive(renderer.hasGroupThinkingChild());
 			expect(renderer.hasGroupThinkingChild()).toBe(true);
-			expect(renderer.hasVisibleGroupChildren()).toBe(false);
+			// Thinking never folds prior tool children — they linger beside the
+			// in-group `└ Thinking` lane.
+			expect(renderer.hasVisibleGroupChildren()).toBe(true);
 			expect(compact_thinking_lane_owns_status()).toBe(true);
+		} finally {
+			renderer.resetForSession();
+			setGroupThinkingChildActive(false);
+			setAgentRunPending(false);
+			setTurnToolTranscriptActive(false);
+			setUserTurnCommitted(false);
+			resetToolExecutionInFlight();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("inter-run planning text arms in-group Thinking so external header stays hidden", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(true);
+		setAgentRunPending(true);
+		setUserTurnCommitted(true);
+		resetToolExecutionInFlight();
+		const renderer = getSharedRenderer();
+		renderer.resetForSession();
+		const theme = { fg: (t: string, s: string) => `[${t}:${s}]`, bold: (s: string) => s };
+		const owner_ctx = {
+			args: {},
+			toolCallId: "plan-owner",
+			invalidate: () => {},
+			state: {} as Record<string, unknown>,
+		};
+		const child_ctx = {
+			args: {},
+			toolCallId: "plan-child",
+			invalidate: () => {},
+			state: {},
+		};
+		try {
+			renderer.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+			renderer.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+			renderer.renderResult(
+				"read",
+				{ path: "a.ts" },
+				{ content: [{ type: "text", text: "a" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...owner_ctx, isError: false },
+			);
+			renderer.renderResult(
+				"grep",
+				{ pattern: "x", path: "b.ts" },
+				{ content: [{ type: "text", text: "b" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...child_ctx, isError: false },
+			);
+			expect(isInterRunGap()).toBe(true);
+			expect(renderer.hasVisibleGroupChildren()).toBe(true);
+			// Pre-token arm requests a fold for the next real thinking stream.
+			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(false);
+			// Planning text arrives: arm the in-group lane without folding.
+			renderer.armInGroupThinkingForPlanning();
+			setGroupThinkingChildActive(renderer.hasGroupThinkingChild());
+			expect(renderer.hasGroupThinkingChild()).toBe(true);
+			// Children linger (soft boundary — no fold).
+			expect(renderer.hasVisibleGroupChildren()).toBe(true);
+			expect(compact_thinking_lane_owns_status()).toBe(true);
+			// External Thinking header must not duplicate the in-group lane.
+			expect(thinking_status_should_show()).toBe(false);
+			expect(resolve_thinking_status_host()).toBe(null);
 		} finally {
 			renderer.resetForSession();
 			setGroupThinkingChildActive(false);

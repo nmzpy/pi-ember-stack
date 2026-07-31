@@ -4,13 +4,6 @@ export const MUTED_BULLET_COLOR = "#666666";
 export const DIM_COLOR = MUTED_BULLET_COLOR;
 export const MUTED_COLOR = "#808080";
 
-export const MODE_COLORS: Record<string, string> = {
-	code: MUTED_COLOR,
-	plan: MUTED_COLOR,
-	debug: MUTED_COLOR,
-	orchestrate: MUTED_COLOR,
-};
-
 export const PAGE_BG = "#18181e";
 export const TEXT_COLOR = "#d4d4d4";
 
@@ -25,6 +18,12 @@ export const MUTED_MESSAGE_BG = desaturateHex(
 	blendToHex("#ffffff", PAGE_BG, 0.05),
 	1,
 );
+
+export const MODE_COLORS: Record<string, string> = {
+	code: MUTED_COLOR,
+	plan: MUTED_COLOR,
+	orchestrate: MUTED_COLOR,
+};
 
 let activeModeId = "code";
 
@@ -41,7 +40,7 @@ export function getActiveModeColor(): string {
 }
 
 export function setActiveMode(modeId: string): void {
-	activeModeId = modeId in MODE_COLORS ? modeId : "code";
+	activeModeId = modeId || "code";
 }
 
 /** Shell-mode flag stored on `globalThis` via a `Symbol.for` key so it
@@ -109,6 +108,10 @@ const AGENT_RUN_PENDING_KEY = Symbol.for("pi-ember-ui:agent-run-pending");
 const USER_TURN_COMMITTED_KEY = Symbol.for("pi-ember-ui:user-turn-committed");
 const USER_TURN_ANCHOR_TIMESTAMP_KEY = Symbol.for("pi-ember-ui:user-turn-anchor-timestamp");
 const TOOL_EXECUTION_IN_FLIGHT_KEY = Symbol.for("pi-ember-ui:tool-execution-in-flight");
+const PENDING_TOOL_CALL_IDS_KEY = Symbol.for("pi-ember-ui:pending-tool-call-ids");
+const PENDING_TOOL_CALL_COUNT_KEY = Symbol.for("pi-ember-ui:pending-tool-call-count");
+const STARTED_TOOL_CALL_IDS_KEY = Symbol.for("pi-ember-ui:started-tool-call-ids");
+const COMPLETED_TOOL_CALL_IDS_KEY = Symbol.for("pi-ember-ui:completed-tool-call-ids");
 
 /** Whether Pi may still auto-retry, compact, or continue follow-ups this turn. */
 export function isAgentRunPending(): boolean {
@@ -163,6 +166,7 @@ export function is_agent_thinking_wait(thinkingActive = false): boolean {
 	if (!isAgentRunPending() && !thinkingActive) return false;
 	if (!isUserTurnCommitted() && !isAgentRunPending()) return false;
 	if (isToolExecutionInFlight()) return false;
+	if (isToolCallPending()) return false;
 	if (isSubagentDelegationActive()) return false;
 	if ((globalThis as GlobalThis)[QUIZ_ACTIVE_KEY] === true) return false;
 	return true;
@@ -173,22 +177,93 @@ function tool_execution_in_flight_count(): number {
 	return typeof value === "number" && value > 0 ? value : 0;
 }
 
+function tool_call_id_set(key: symbol): Set<string> {
+	const g = globalThis as GlobalThis;
+	if (!g[key]) g[key] = new Set<string>();
+	return g[key] as Set<string>;
+}
+
+/** True from the first streamed toolCall until its matching execution starts. */
+export function isToolCallPending(): boolean {
+	const count = (globalThis as GlobalThis)[PENDING_TOOL_CALL_COUNT_KEY];
+	return (typeof count === "number" && count > 0) || tool_call_id_set(PENDING_TOOL_CALL_IDS_KEY).size > 0;
+}
+
+function pending_tool_call_count(): number {
+	const value = (globalThis as GlobalThis)[PENDING_TOOL_CALL_COUNT_KEY];
+	return typeof value === "number" && value > 0 ? value : 0;
+}
+
+function adjust_pending_tool_call_count(delta: number): void {
+	const next = Math.max(0, pending_tool_call_count() + delta);
+	if (next === 0) delete (globalThis as GlobalThis)[PENDING_TOOL_CALL_COUNT_KEY];
+	else (globalThis as GlobalThis)[PENDING_TOOL_CALL_COUNT_KEY] = next;
+}
+
+function consume_pending_tool_call_id(toolCallId?: string): boolean {
+	const pending = tool_call_id_set(PENDING_TOOL_CALL_IDS_KEY);
+	if (toolCallId) {
+		if (!pending.delete(toolCallId)) return false;
+		adjust_pending_tool_call_count(-1);
+		return true;
+	}
+	const first = pending.values().next().value;
+	if (typeof first !== "string") return false;
+	pending.delete(first);
+	adjust_pending_tool_call_count(-1);
+	return true;
+}
+
+/**
+ * Record a streamed/announced tool call before Pi begins executing it. This
+ * closes the deterministic gap between a provider's tool-call delta and
+ * tool_execution_start, so Thinking cannot occupy that interval. Some
+ * providers do not expose an id until toolcall_end, so the count is the
+ * authoritative fallback and the id set is only a deduplication aid.
+ */
+export function markToolCallAnnounced(toolCallId?: string): void {
+	if (toolCallId) {
+		if (tool_call_id_set(COMPLETED_TOOL_CALL_IDS_KEY).has(toolCallId)) return;
+		if (tool_call_id_set(STARTED_TOOL_CALL_IDS_KEY).has(toolCallId)) return;
+		const pending = tool_call_id_set(PENDING_TOOL_CALL_IDS_KEY);
+		if (pending.has(toolCallId)) return;
+		pending.add(toolCallId);
+	}
+	adjust_pending_tool_call_count(1);
+}
+
 export function isToolExecutionInFlight(): boolean {
 	return tool_execution_in_flight_count() > 0;
 }
 
-export function markToolExecutionStarted(): void {
+export function markToolExecutionStarted(toolCallId?: string): void {
 	const g = globalThis as GlobalThis;
 	g[TOOL_EXECUTION_IN_FLIGHT_KEY] = tool_execution_in_flight_count() + 1;
+	consume_pending_tool_call_id(toolCallId);
+	if (toolCallId) tool_call_id_set(STARTED_TOOL_CALL_IDS_KEY).add(toolCallId);
 }
 
-export function markToolExecutionEnded(): void {
+export function markToolExecutionEnded(toolCallId?: string): void {
 	const g = globalThis as GlobalThis;
 	g[TOOL_EXECUTION_IN_FLIGHT_KEY] = Math.max(0, tool_execution_in_flight_count() - 1);
+	consume_pending_tool_call_id(toolCallId);
+	if (toolCallId) {
+		tool_call_id_set(STARTED_TOOL_CALL_IDS_KEY).delete(toolCallId);
+		tool_call_id_set(COMPLETED_TOOL_CALL_IDS_KEY).add(toolCallId);
+	}
+}
+
+/** Clear the per-turn tool-call lifecycle bridge and execution counter. */
+export function resetToolCallTracking(): void {
+	delete (globalThis as GlobalThis)[TOOL_EXECUTION_IN_FLIGHT_KEY];
+	delete (globalThis as GlobalThis)[PENDING_TOOL_CALL_COUNT_KEY];
+	tool_call_id_set(PENDING_TOOL_CALL_IDS_KEY).clear();
+	tool_call_id_set(STARTED_TOOL_CALL_IDS_KEY).clear();
+	tool_call_id_set(COMPLETED_TOOL_CALL_IDS_KEY).clear();
 }
 
 export function resetToolExecutionInFlight(): void {
-	delete (globalThis as GlobalThis)[TOOL_EXECUTION_IN_FLIGHT_KEY];
+	resetToolCallTracking();
 }
 
 /** Between tool batches while the agent is still working (OpenAI/Codex planning text). */
@@ -362,17 +437,7 @@ export function colorize(hex: string, text: string): string {
 	return `\x1b[38;2;${hexToRgb(hex)}m${text}\x1b[39m`;
 }
 
-/**
- * Render `text` in the live accent color, bypassing `theme.fg("accent")`
- * which reads from the global theme proxy that can briefly hold the
- * disk-seed Coder accent after Pi's theme watcher reloads `ember.json`.
- * Uses the same accent derivation as `buildThemeFgColors` (`accentDesat`
- * = accent blended 80% toward TEXT_COLOR) so the footer matches the
- * theme's own accent token exactly.
- */
-export function liveAccentFg(text: string): string {
-	return colorize(blendToHex(getActiveModeColor(), TEXT_COLOR, 0.8), text);
-}
+
 
 export function mutedBullet(): string {
 	return colorize(MUTED_BULLET_COLOR, "\u2022");

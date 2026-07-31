@@ -24,7 +24,6 @@ import {
 	getActiveModeId,
 	isShellMode,
 	isUserBashRunning,
-	liveAccentFg,
 } from "./mode-colors.ts";
 import {
 	format_effort_display_label,
@@ -250,11 +249,11 @@ export function installEmberFooter(ctx: any): void {
 							? theme.fg("muted", `${tpsStr} tps`)
 							: tps < 100
 								? theme.fg("text", `${tpsStr} tps`)
-								: liveAccentFg(`${tpsStr} tps`);
+								: theme.fg("accent", `${tpsStr} tps`);
 					tpsSegment = ` ${tpsColored}`;
 				}
 				const rightSide =
-					liveAccentFg(modeLabel) +
+					theme.fg("accent", modeLabel) +
 					` ${theme.fg("dim", "\u2022")} ` +
 					theme.fg("text", `${displayName}${variant}`) +
 					theme.fg("dim", ` ${provider}`) +

@@ -167,6 +167,21 @@ export interface UsageStats {
 	turns: number;
 }
 
+/** Maximum tool-call rows retained in the live output buffer (SSOT). */
+export const SUBAGENT_LIVE_OUTPUT_MAX_ROWS = 15;
+
+/** A captured child tool call for the live output tray. */
+export interface SubagentLiveToolRow {
+	name: string;
+	args: Record<string, unknown>;
+	/** Whether the tool has completed (`tool_execution_end` fired). */
+	completed: boolean;
+	/** Whether the tool result reported an error. */
+	error: boolean;
+	/** Structured diff/match stats from the result, when available. */
+	details?: Record<string, unknown>;
+}
+
 export interface SubAgentResult {
 	agent: string;
 	task: string;
@@ -182,6 +197,16 @@ export interface SubAgentResult {
 	stopReason?: string;
 	errorMessage?: string;
 	latestToolCall?: { name: string; args: Record<string, unknown> };
+	/**
+	 * Bounded live tool-call buffer from the child session: the last
+	 * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` child tool calls, formatted by the
+	 * subagent renderer as compact rows (bullet + gradient verb + details)
+	 * reusing the SSOT `pi-compact-tools/renderer.ts` formatters — the same
+	 * shape the main agent produces. Updated on every tool event so the
+	 * subagent renderer can show a live output tray while the agent runs.
+	 * Cleared at session start and on hard boundaries.
+	 */
+	liveToolRows?: SubagentLiveToolRow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +332,87 @@ type SubagentStreamToolEvent = {
 	input?: unknown;
 	args?: unknown;
 	arguments?: unknown;
+	/** `tool_execution_end` carries the tool result object. */
+	result?: unknown;
+	/** `message_end` / `turn_end` carry the finalized message(s). */
+	message?: unknown;
+	toolResults?: unknown;
 };
+
+/** Shape of `assistantMessageEvent` deltas we capture for live output. */
+type SubagentStreamAssistantEvent = {
+	type?: string;
+	delta?: unknown;
+	content?: unknown;
+};
+
+/** Coerce an unknown args payload to a Record (defensive — providers vary). */
+function coerce_args(value: unknown): Record<string, unknown> {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: {};
+}
+
+/** Extract structured diff/match stats from a tool result, when present. */
+function extract_result_details(result: unknown): Record<string, unknown> | undefined {
+	if (result == null || typeof result !== "object") return undefined;
+	const details = (result as { details?: unknown }).details;
+	if (details && typeof details === "object" && !Array.isArray(details)) {
+		return details as Record<string, unknown>;
+	}
+	return undefined;
+}
+
+/** Whether a tool result reported an error. */
+function result_is_error(result: unknown): boolean {
+	if (result == null) return false;
+	if (typeof result === "object" && "isError" in result) {
+		return Boolean((result as { isError?: unknown }).isError);
+	}
+	return false;
+}
+
+/**
+ * Register or update a tool-call row in the bounded `liveToolRows` buffer.
+ * `tool_execution_start`/`tool_call`/`tool_execution_update` append a running
+ * row (or update the args of the latest same-name row); `tool_execution_end`
+ * marks it completed. The buffer keeps only the last
+ * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` rows. Returns true when the buffer changed.
+ */
+function note_live_tool_row(
+	result: SubAgentResult,
+	name: string,
+	args: Record<string, unknown>,
+	options: { completed?: boolean; error?: boolean; details?: Record<string, unknown> } = {},
+): boolean {
+	const rows = result.liveToolRows ?? [];
+	if (!result.liveToolRows) result.liveToolRows = rows;
+	const last = rows[rows.length - 1];
+	const completed = options.completed ?? false;
+	// Update the latest same-name running row in place (args refresh while
+	// streaming, or mark it completed on tool_execution_end) instead of
+	// appending a duplicate row.
+	if (last && last.name === name && !last.completed) {
+		last.args = args;
+		if (completed) {
+			last.completed = true;
+			last.error = options.error ?? false;
+			last.details = options.details;
+		}
+		return true;
+	}
+	rows.push({
+		name,
+		args,
+		completed,
+		error: options.error ?? false,
+		details: options.details,
+	});
+	if (rows.length > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
+		result.liveToolRows = rows.slice(rows.length - SUBAGENT_LIVE_OUTPUT_MAX_ROWS);
+	}
+	return true;
+}
 
 /** Whether a child-session event counts as output for idle-timeout reset. */
 function is_subagent_output_progress_event(event: {
@@ -338,7 +443,7 @@ function is_subagent_output_progress_event(event: {
 /** Apply live child-session events that drive nested tool/thinking rows in the subagent renderer. */
 export function apply_subagent_stream_event(
 	result: SubAgentResult,
-	event: { type: string; assistantMessageEvent?: { type?: string } } & SubagentStreamToolEvent,
+	event: { type: string; assistantMessageEvent?: SubagentStreamAssistantEvent } & SubagentStreamToolEvent,
 	notify: () => void,
 ): void {
 	if (event.type === "turn_start" || event.type === "agent_start") {
@@ -367,23 +472,34 @@ export function apply_subagent_stream_event(
 	}
 	if (event.type === "tool_execution_start" || event.type === "tool_call") {
 		result.isThinking = false;
-		result.latestToolCall = {
-			name: event.toolName ?? event.name ?? "unknown",
-			args: (event.input ?? event.args ?? event.arguments ?? {}) as Record<string, unknown>,
-		};
+		const name = event.toolName ?? event.name ?? "unknown";
+		const args = coerce_args(event.input ?? event.args ?? event.arguments);
+		result.latestToolCall = { name, args };
+		note_live_tool_row(result, name, args);
 		notify();
 		return;
 	}
 	if (event.type === "tool_execution_update") {
 		result.isThinking = false;
-		result.latestToolCall = {
-			name: event.toolName ?? event.name ?? result.latestToolCall?.name ?? "unknown",
-			args: (event.args ?? event.input ?? event.arguments ?? result.latestToolCall?.args ?? {}) as Record<
-				string,
-				unknown
-			>,
-		};
+		const name = event.toolName ?? event.name ?? result.latestToolCall?.name ?? "unknown";
+		const args = coerce_args(
+			event.args ?? event.input ?? event.arguments ?? result.latestToolCall?.args,
+		);
+		result.latestToolCall = { name, args };
+		note_live_tool_row(result, name, args);
 		notify();
+		return;
+	}
+	if (event.type === "tool_execution_end") {
+		const name = event.toolName ?? result.latestToolCall?.name ?? "unknown";
+		const args = result.latestToolCall?.args ?? {};
+		note_live_tool_row(result, name, args, {
+			completed: true,
+			error: result_is_error(event.result),
+			details: extract_result_details(event.result),
+		});
+		notify();
+		return;
 	}
 	// Keep latestToolCall visible after tool_execution_end until the next tool or thinking stream.
 }

@@ -695,6 +695,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			grouped_members,
 			!batch_running && terminal,
 			context.toolCallId,
+			undefined,
+			!isThinkingBlocksHidden(),
 		);
 		context.state.layout = layout;
 		(shell as Container).addChild(layout);
@@ -777,6 +779,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				!isRunning && terminal,
 				context.toolCallId,
 				failureMessage,
+				!isThinkingBlocksHidden(),
 			);
 			context.state.layout = layout;
 			shell.addChild(layout);

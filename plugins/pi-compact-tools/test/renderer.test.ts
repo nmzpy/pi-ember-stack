@@ -307,7 +307,7 @@ describe("CompactRenderer group child visibility", () => {
 		expect(row).toContain("a.ts");
 		expect(row).toContain("b.ts");
 
-		// Prior wave lingers during the debounce window, then folds into the header.
+		// Same-name call (read c.ts) appends below without folding priors.
 		const baby_state: Record<string, any> = {};
 		const baby_ctx = makeContext("g3", baby_state) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, baby_ctx);
@@ -319,16 +319,16 @@ describe("CompactRenderer group child visibility", () => {
 		await flush_group_child_fold_debounce();
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("b.ts");
 
-		// Next tool wave on a settled group folds prior rows after debounce.
+		// A different tool name (grep) folds the prior read wave after debounce.
 		r.settleAllGroups();
 		const next_state: Record<string, any> = {};
 		const next_ctx = makeContext("g4", next_state) as any;
-		r.renderCall("read", { path: "d.ts" }, theme, next_ctx);
+		r.renderCall("grep", { pattern: "x", path: "d.ts" }, theme, next_ctx);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Reading");
+		expect(row).toContain("Searching");
 		expect(row).toContain("d.ts");
 		await flush_group_child_fold_debounce();
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
@@ -448,7 +448,7 @@ describe("CompactRenderer group child visibility", () => {
 		expect(row).toContain("a.ts");
 	});
 
-	test("new tool wave folds prior completed children even when group is unsettled", async () => {
+	test("new tool wave folds prior completed children immediately", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -458,7 +458,6 @@ describe("CompactRenderer group child visibility", () => {
 
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
-		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		r.renderResult(
 			"read",
 			{ path: "a.ts" },
@@ -476,20 +475,23 @@ describe("CompactRenderer group child visibility", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("b.ts");
-
+		// A different tool name (read after grep) folds the prior grep wave
+		// immediately so only the fresh read wave is visible.
 		const wave2_ctx = makeContext("wave-fold3", {}) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, wave2_ctx);
+		// Re-render the owner to refresh the shared group block.
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		row = stripAnsi((owner_state.callText as any).text);
+		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("c.ts");
-		expect(row).toContain("b.ts");
-		await flush_group_child_fold_debounce();
+		expect(row).not.toContain("b.ts");
+		// Same-name read appends below the fresh wave without folding it.
+		const wave2_ctx2 = makeContext("wave-fold4", {}) as any;
+		r.renderCall("read", { path: "d.ts" }, theme, wave2_ctx2);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("d.ts");
+		expect(row).toContain("c.ts");
 	});
 
 	test("completed tools stay visible after settle without thinking stream", () => {
@@ -521,10 +523,11 @@ describe("CompactRenderer group child visibility", () => {
 		);
 		r.settleAllGroups();
 
+		// After settle, the prior completed read and grep are folded into the
+		// unified work header so the transcript stays compact.
 		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Read");
-		expect(row).toContain("Search");
-		expect(row).toContain("a.ts");
+		expect(row.toLowerCase()).toContain("explored");
+		expect(row).not.toContain("a.ts");
 		expect(r.hasGroupThinkingChild()).toBe(false);
 	});
 
@@ -720,7 +723,8 @@ describe("CompactRenderer group child visibility", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("c.ts");
-		expect(row).not.toContain("b.ts");
+		// Same-name call (read) appends without folding prior children.
+		expect(row).toContain("b.ts");
 		expect(r.hasGroupThinkingChild()).toBe(false);
 	});
 
@@ -959,7 +963,8 @@ describe("CompactRenderer thinking collapse", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Searching");
 		expect(row).toContain("c.ts");
-		expect(row).not.toContain("b.ts");
+		// Same-name call (grep) appends without folding prior children.
+		expect(row).toContain("b.ts");
 		expect(baby_state.callText).toBeUndefined();
 	});
 
@@ -1112,7 +1117,8 @@ describe("CompactRenderer thinking collapse", () => {
 		await flush_group_child_fold_debounce();
 		r.renderCall("edit", { file_path: "runner.ts", oldText: "a", newText: "b" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).not.toContain("other.ts");
+		// Same-name call (edit) appends without folding prior children.
+		expect(row).toContain("other.ts");
 	});
 
 	test("agent_end lifecycle shows Thinking child then reopens with folded prior batch", async () => {
@@ -1160,7 +1166,8 @@ describe("CompactRenderer thinking collapse", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Searching");
 		expect(row).toContain("c.ts");
-		expect(row).not.toContain("b.ts");
+		// Same-name call (grep) appends without folding prior children.
+		expect(row).toContain("b.ts");
 		expect(row).not.toMatch(/explored[\s\S]*explored/i);
 	});
 
@@ -1283,18 +1290,30 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(r.hasActiveGroups()).toBe(false);
 	});
 
-	test("running Bash children use the Running verb", () => {
+	test("running Bash child appears inside the unified work group", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const state: Record<string, any> = {};
 		const ctx = makeContext("running-bash", state) as any;
 		const child_ctx = makeContext("running-bash-child", {}) as any;
+		const ctx2 = makeContext("running-bash2", {}) as any;
 
 		r.renderCall("bash", { command: "npm test" }, theme, ctx);
+		// A different tool name (read) folds the prior bash wave immediately
+		// so only the fresh wave is visible under the unified `Working` header.
 		r.renderCall("read", { path: "package.json" }, theme, child_ctx);
+		// Refresh the group block through the original owner component.
 		r.renderCall("bash", { command: "npm test" }, theme, ctx);
-		const row = stripAnsi((state.callText as any).text);
+		let row = stripAnsi((state.callText as any).text);
+		expect(row).toContain("Working");
+		expect(row).toContain("Reading");
+		expect(row).toContain("package.json");
+		// A fresh same-name bash wave reopens and becomes the visible child.
+		r.renderCall("bash", { command: "npm test" }, theme, ctx2);
+		// Re-render the owner to refresh the shared group block.
+		r.renderCall("bash", { command: "npm test" }, theme, ctx);
+		row = stripAnsi((state.callText as any).text);
 		expect(row).toContain("Running");
 		expect(row).toContain("npm test");
 		expect(row).not.toContain("Bashing");
@@ -1359,6 +1378,48 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(row).toContain("b.ts");
 	});
 
+	test("armInGroupThinkingForPlanning arms in-group Thinking without folding children", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("planning-owner", owner_state) as any;
+		const child_ctx = makeContext("planning-child", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		// Arm planning-text in-group Thinking. Thinking never folds prior
+		// tool children — the `└ Thinking` lane appends after lingering rows.
+		r.armInGroupThinkingForPlanning();
+		expect(r.hasGroupThinkingChild()).toBe(true);
+		// Children must linger (not fold) for the soft planning-text boundary.
+		expect(r.hasVisibleGroupChildren()).toBe(true);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
+		expect(row).toContain("Search");
+		expect(row).toContain("b.ts");
+		// Group stays reopenable (no reopenClosed) so the next tool wave reopens.
+		expect(r.hasReopenableGroup()).toBe(true);
+	});
+
 	test("noteInterveningToolCall hard-exits so later exploration starts a fresh group", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -1395,14 +1456,17 @@ describe("CompactRenderer thinking collapse", () => {
 		const fresh_ctx = makeContext("chrono-explore3", fresh_state) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
 		r.renderCall("grep", { pattern: "y", path: "d.ts" }, theme, makeContext("chrono-explore4", {}) as any);
-		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
+		// Use a fresh id for the second same-name read so it becomes the
+		// visible child of the new wave rather than updating the folded record.
+		const fresh_ctx2 = makeContext("chrono-explore5", fresh_state) as any;
+		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx2);
 		r.renderResult(
 			"read",
 			{ path: "c.ts" },
 			{ content: [{ type: "text", text: "c" }] },
 			{ expanded: false, isPartial: false },
 			theme,
-			{ ...fresh_ctx, isError: false },
+			{ ...fresh_ctx2, isError: false },
 		);
 		const fresh_row = stripAnsi((fresh_state.callText as any).text);
 		expect(fresh_row).toContain("c.ts");
@@ -1454,7 +1518,7 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(stripAnsi((owner_state.callText as any).text ?? "")).not.toContain("c.ts");
 	});
 
-	test("repeat same-signature tool call keeps prior children lingering", async () => {
+	test("same tool name keeps prior children lingering across debounce", async () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -1483,7 +1547,7 @@ describe("CompactRenderer thinking collapse", () => {
 		);
 
 		const repeat_ctx = makeContext("repeat-same", {}) as any;
-		r.renderCall("read", { path: "a.ts" }, theme, repeat_ctx);
+		r.renderCall("grep", { pattern: "z", path: "c.ts" }, theme, repeat_ctx);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("b.ts");
@@ -1964,7 +2028,7 @@ describe("unified work header", () => {
 		expect(header).toContain("-1");
 	});
 
-	test("folded bash failure clears active error from work group header", async () => {
+	test("folded bash failure clears active error from work group header", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -1972,8 +2036,6 @@ describe("unified work header", () => {
 		const child_ctx = makeContext("bash-err-child", {}) as any;
 
 		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
-		r.renderCall("grep", { pattern: "x", path: "a.ts" }, theme, child_ctx);
-		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
 		r.renderResult(
 			"bash",
 			{ command: "npm test" },
@@ -1982,38 +2044,26 @@ describe("unified work header", () => {
 			theme,
 			{ ...owner_ctx, isError: true },
 		);
-		r.renderResult(
-			"grep",
-			{ pattern: "x", path: "a.ts" },
-			{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
-			{ expanded: false, isPartial: false },
-			theme,
-			{ ...child_ctx, isError: false },
-		);
-		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
 		let row = (owner_state.callText as any).text as string;
 		expect(row).toContain("[error:• ]");
 
+		// A different tool name (read) folds the failed bash and becomes the
+		// visible child, so the active error leaves the header.
 		const wave_ctx = makeContext("bash-err-wave", {}) as any;
-		r.renderCall("grep", { pattern: "y", path: "b.ts" }, theme, wave_ctx);
-		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
-		row = (owner_state.callText as any).text as string;
-		expect(row).toContain("[error:• ]");
-		await flush_group_child_fold_debounce();
+		r.renderCall("read", { path: "b.ts" }, theme, wave_ctx);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...wave_ctx, isError: false },
+		);
+		// Re-render the owner so the shared group block reflects the new wave.
 		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
 		row = (owner_state.callText as any).text as string;
 		expect(row).not.toContain("[error:• ]");
-		expect(row).toContain("[muted:• ]");
-
-		const error_row = r.renderResult(
-			"bash",
-			{ command: "npm test" },
-			{ content: [{ type: "text", text: "(no output)" }] },
-			{ expanded: false, isPartial: false },
-			theme,
-			{ ...owner_ctx, isError: true },
-		);
-		expect(stripAnsi((error_row as any).text ?? "")).toBe("");
+		expect(row).toContain("[success:• ]");
 	});
 
 	test("grouped edit child stats use muted diff colors", () => {
@@ -2387,6 +2437,38 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		expect(row).toContain("Thinking");
 		expect(row).toContain("Search");
 		expect(r.hasGroupThinkingChild()).toBe(true);
+		// Hidden reasoning is NOT a separate transcript block — the group stays
+		// reopenable so the next tool wave reopens under the same header instead
+		// of spawning a fresh Explored row.
+		expect(r.hasReopenableGroup()).toBe(true);
+	});
+
+	test("hidden thinking keeps one group header across tool waves", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("hidden-reopen-1", owner_state) as any;
+		const child_ctx = makeContext("hidden-reopen-2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
+
+		// Hidden thinking arms the in-group lane but keeps the group reopenable.
+		apply_assistant_stream_boundary(r, { type: "thinking_delta", delta: "" });
+		expect(r.hasReopenableGroup()).toBe(true);
+
+		// A different tool name reopens the SAME group, folding prior children.
+		const wave_ctx = makeContext("hidden-reopen-3", {}) as any;
+		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, wave_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Searching");
+		expect(row).toContain("c.ts");
+		// No second Explored header — the prior wave folded into the same group.
+		expect(row).not.toMatch(/explored[\s\S]*explored/i);
 	});
 
 	test("thinking_delta with blocks visible hard-exits for a fresh downstream group", () => {

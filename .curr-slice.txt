@@ -1,0 +1,231 @@
+ */
+function resolve_live_theme(): any {
+	return liveTheme ?? (globalThis as any)[THEME_KEY];
+}
+
+/**
+ * Custom markdown heading style: when the heading text contains a colon,
+ * only the portion up to and including the first colon is accent-colored;
+ * the remainder reverts to plain text color. When there is no colon the
+ * entire heading is accent-colored (the default behavior).
+ *
+ * Always reads `mdHeading` from the live Theme so mode switches recolor
+ * existing transcript headers. The input `text` may already carry ANSI
+ * codes (bold, underline) from the markdown renderer before `heading()`.
+ */
+function emberHeadingStyle(text: string): string {
+	const theme = resolve_live_theme();
+	const visible = text.replace(ANSI_STRIP, "");
+	// Hide the leading hash prefix ("### ", "## ", etc.) that pi-tui's
+	// markdown renderer prepends for h3+ headings. The heading text
+	// itself is rendered as a separate call, so suppressing the prefix
+	// here removes the raw hashes from the rendered row.
+	if (/^#+\s*$/.test(visible)) {
+		return "";
+	}
+	const colonIdx = visible.indexOf(":");
+	if (colonIdx < 0) {
+		return theme.fg("mdHeading", text);
+	}
+	const [prefix, suffix] = splitAtVisibleChar(text, ":");
+	// prefix includes the colon; suffix is the rest (may start with a space).
+	// Re-color: accent for prefix, plain text for suffix. We strip any
+	// existing foreground ANSI from each part first to avoid color stacking.
+	const prefixStripped = prefix.replace(ANSI_STRIP, "");
+	const suffixStripped = suffix.replace(ANSI_STRIP, "");
+	// Preserve bold/underline from the original by re-applying via theme.
+	// The markdown renderer wraps h1 as bold+underline, h2+ as bold.
+	// We re-apply bold to both parts; underline only if it was in the original.
+	const hasUnderline =
+		text.includes("\x1b[4m") || text.includes("\x1b[1;4m") || text.includes("\x1b[4;1m");
+	const stylePrefix = (s: string): string => {
+		let styled = theme.bold(s);
+		if (hasUnderline) styled = theme.underline(styled);
+		return styled;
+	};
+	return (
+		theme.fg("mdHeading", stylePrefix(prefixStripped)) +
+		theme.fg("text", stylePrefix(suffixStripped))
+	);
+}
+
+/**
+ * Canonical Markdown-theme binding for Ember. Pi creates Markdown instances
+ * through several component types (assistant, custom, compaction, branch,
+ * skills, changelog). Every one must share this live heading callback rather
+ * than retaining getMarkdownTheme()'s global-theme closure.
+ */
+function bind_live_markdown_theme(markdown_theme: MarkdownTheme): MarkdownTheme {
+	markdown_theme.heading = emberHeadingStyle;
+	return markdown_theme;
+}
+
+/**
+ * Enforce the canonical live heading callback at the Markdown boundary. This
+ * covers every Pi Markdown-bearing component without duplicating patches per
+ * component. TUI invalidation clears each Markdown render cache on mode changes;
+ * CachedMarkdown additionally keys its bounded cache by theme generation.
+ */
+function install_markdown_theme_patch(): void {
+	type MarkdownPrototype = {
+		[EMBER_PATCH_MARKER]?: boolean;
+		render(this: Markdown, width: number): string[];
+	};
+	const proto = Markdown.prototype as unknown as MarkdownPrototype;
+	if (proto[EMBER_PATCH_MARKER]) return;
+	proto[EMBER_PATCH_MARKER] = true;
+	const originalRender = proto.render;
+	proto.render = function renderWithLiveHeading(this: Markdown, width: number): string[] {
+		const markdown_theme = (this as unknown as { theme?: MarkdownTheme }).theme;
+		if (markdown_theme) bind_live_markdown_theme(markdown_theme);
+		return originalRender.call(this, width);
+	};
+}
+
+function folderNameFromCwd(cwd: string): string {
+	return cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
+}
+
+function welcomeConfigPath(): string {
+	return path.join(
+		process.env.PI_HOME ||
+			path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent"),
+		"welcome.json",
+	);
+}
+
+function setWelcomeUpdates(enabled: boolean): void {
+	const file = welcomeConfigPath();
+	let config: Record<string, unknown> = {};
+	try {
+		config = JSON.parse(fs.readFileSync(file, "utf8"));
+	} catch {
+		/* first-run, no file yet */
+	}
+	config.updates = enabled;
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${JSON.stringify(config, null, "\t")}\n`);
+}
+
+type RadialPoint = { x: number; y: number; r: number; g: number; b: number; falloff: number };
+
+function radialColorForCell(x: number, y: number, points: RadialPoint[]): [number, number, number] {
+	let totalWeight = 0;
+	let r = 0,
+		g = 0,
+		b = 0;
+	for (const p of points) {
+		const dx = x - p.x;
+		const dy = y - p.y;
+		const dist = Math.sqrt(dx * dx + dy * dy);
+		const weight = Math.exp(-(dist * dist) / (p.falloff * p.falloff));
+		r += p.r * weight;
+		g += p.g * weight;
+		b += p.b * weight;
+		totalWeight += weight;
+	}
+	return [Math.round(r / totalWeight), Math.round(g / totalWeight), Math.round(b / totalWeight)];
+}
+
+let logo_tick_cb: (() => void) | undefined;
+
+function drop_logo_tick(): void {
+	if (!logo_tick_cb) return;
+	unsubscribe_gradient_tick(logo_tick_cb);
+	logo_tick_cb = undefined;
+}
+
+function startLogoAnimation(): void {
+	logo_settled_by_user_message = false;
+	logoAnimating = false;
+	logoStatic = true;
+	drop_logo_tick();
+}
+
+function stopLogoAnimation(): void {
+	if (!logoAnimating && logoStatic) return;
+	logoAnimating = false;
+	logoStatic = true;
+	drop_logo_tick();
+	requestRender?.();
+}
+
+/** Stop the startup logo when the user commits their first visible message. */
+function stopLogoOnFirstUserMessage(): void {
+	if (logo_settled_by_user_message) return;
+	logo_settled_by_user_message = true;
+	stopLogoAnimation();
+}
+
+/** @deprecated Logo no longer stops on editor keystrokes — only on first send. */
+export function stopLogoOnEditorInput(): void {}
+
+function renderLogoWithGradient(): string[] {
+	const logoRows = LOGO.length;
+	const logoCols = LOGO[0].length;
+	const gridCols = logoCols + SHADOW_OFFSET_X + 1;
+	const gridRows = logoRows + SHADOW_OFFSET_Y;
+
+	// Static state: 2-stop vertical gradient (top = muted, bottom = text).
+	// No radial points, no per-frame sweep.
+	if (!logoAnimating && logoStatic) {
+		const mutedRgb = hexToRgbTriplet(MUTED_COLOR);
+		const textRgb = hexToRgbTriplet(TEXT_COLOR);
+		const grid: Grid = [];
+		for (let row = 0; row < gridRows; row++) {
+			grid.push(new Array(gridCols).fill(null).map(() => ({ ch: " " })));
+		}
+		const colorForRow = (row: number): [number, number, number] => {
+			const t = logoRows > 1 ? row / (logoRows - 1) : 0;
+			return clamp_lerp(mutedRgb, textRgb, t);
+		};
+		for (let row = 0; row < logoRows; row++) {
+			const rgb = colorForRow(row);
+			for (let col = 0; col < LOGO[row].length; col++) {
+				if (LOGO[row][col] === "\u2588") {
+					grid[row][col] = { ch: "\u2588", rgb };
+				}
+			}
+		}
+		placeBoxShadow(grid, gridRows, gridCols, colorForRow);
+		return gridToLines(grid);
+	}
+
+	const dimRgb = hexToRgbTriplet(DIM_COLOR);
+	const mutedRgb = hexToRgbTriplet(MUTED_COLOR);
+	const textRgb = hexToRgbTriplet(TEXT_COLOR);
+	const points: RadialPoint[] = [
+		{ x: 2, y: 0, r: dimRgb[0], g: dimRgb[1], b: dimRgb[2], falloff: 3 },
+		{ x: 10, y: 1, r: mutedRgb[0], g: mutedRgb[1], b: mutedRgb[2], falloff: 4 },
+		{ x: 5, y: 3, r: textRgb[0], g: textRgb[1], b: textRgb[2], falloff: 3.5 },
+		{ x: 11, y: 5, r: mutedRgb[0], g: mutedRgb[1], b: mutedRgb[2], falloff: 2.5 },
+		{ x: 0, y: 4, r: dimRgb[0], g: dimRgb[1], b: dimRgb[2], falloff: 2 },
+	];
+
+	const grid: Grid = [];
+	for (let row = 0; row < gridRows; row++) {
+		grid.push(new Array(gridCols).fill(null).map(() => ({ ch: " " })));
+	}
+
+	// Logo-specific ping-pong phase so the sweep travels right then left
+	// smoothly instead of snapping back to the start.
+	const phase = get_logo_phase();
+	const sweep_center = -EDGE_PADDING + phase * (Math.max(0, logoCols - 1) + 2 * EDGE_PADDING);
+
+	for (let row = 0; row < logoRows; row++) {
+		for (let col = 0; col < LOGO[row].length; col++) {
+			const ch = LOGO[row][col];
+			if (ch === "\u2588") {
+				let [r, g, b] = radialColorForCell(col, row, points);
+				if (logoAnimating) {
+					const dist = col - sweep_center;
+					const intensity = gaussian_intensity(dist, GRADIENT_SIGMA);
+					r = Math.round(r + (textRgb[0] - r) * intensity);
+					g = Math.round(g + (textRgb[1] - g) * intensity);
+					b = Math.round(b + (textRgb[2] - b) * intensity);
+				}
+				grid[row][col] = { ch: "\u2588", rgb: [r, g, b] };
+			}
+		}
+	}
+

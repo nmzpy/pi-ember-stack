@@ -9,6 +9,7 @@ import {
 	formatSubagentElapsedSuffix,
 	memberRecordsToRows,
 	SubagentToolText,
+	SubagentLiveOutputText,
 	renderSubagentExpanded,
 	renderSubagentThinkingRow,
 } from "../render.ts";
@@ -93,6 +94,73 @@ describe("SubagentToolText", () => {
 		const comp = new SubagentToolText("");
 		const out = comp.render(80);
 		expect(out).toEqual([""]);
+	});
+});
+
+describe("SubagentLiveOutputText", () => {
+	test("renders compact tool rows with no top rule while running", () => {
+		const theme = makeTheme() as any;
+		const rows = [
+			{ name: "read", args: { path: "a.ts" }, completed: false, error: false },
+			{ name: "grep", args: { pattern: "x" }, completed: true, error: false },
+		];
+		const comp = new SubagentLiveOutputText(rows, "  \u2502 \u2502", true, theme);
+		const out = comp.render(60);
+		expect(out.length).toBe(2);
+		expect(stripAnsi(out[0])).toContain("a.ts");
+		expect(stripAnsi(out[1])).toContain("x");
+		expect(stripAnsi(out[0]).startsWith("  \u2502 \u2502")).toBe(true);
+	});
+
+	test("adds bottom rule when settled", () => {
+		const theme = makeTheme() as any;
+		const rows = [
+			{ name: "read", args: { path: "a.ts" }, completed: true, error: false },
+		];
+		const comp = new SubagentLiveOutputText(rows, "", false, theme);
+		const out = comp.render(40);
+		expect(out.length).toBe(2);
+		expect(stripAnsi(out[1])).toBe("\u2500".repeat(40));
+	});
+
+	test("running has no bottom rule", () => {
+		const theme = makeTheme() as any;
+		const rows = [
+			{ name: "bash", args: { command: "ls" }, completed: false, error: false },
+		];
+		const comp = new SubagentLiveOutputText(rows, "", true, theme);
+		const out = comp.render(40);
+		expect(out.length).toBe(1);
+	});
+
+	test("truncates long rows to available width", () => {
+		const theme = makeTheme() as any;
+		const rows = [
+			{ name: "bash", args: { command: "x".repeat(120) }, completed: false, error: false },
+		];
+		const comp = new SubagentLiveOutputText(rows, "  \u2502 \u2502", true, theme);
+		const out = comp.render(40);
+		expect(out.length).toBe(1);
+		expect(stripAnsi(out[0]).length).toBeLessThanOrEqual(40);
+	});
+
+	test("caps at 15 rows", () => {
+		const theme = makeTheme() as any;
+		const rows = Array.from({ length: 20 }, (_, i) => ({
+			name: "read",
+			args: { path: `f${i}.ts` },
+			completed: true,
+			error: false,
+		}));
+		const comp = new SubagentLiveOutputText(rows, "", false, theme);
+		const out = comp.render(80);
+		expect(out.length).toBe(16);
+	});
+
+	test("empty rows renders nothing", () => {
+		const theme = makeTheme() as any;
+		const comp = new SubagentLiveOutputText([], "", true, theme);
+		expect(comp.render(40)).toEqual([]);
 	});
 });
 
@@ -840,5 +908,79 @@ describe("renderSubagentExpanded", () => {
 		expect(stripAnsi(out)).toContain("Scout A");
 		expect(stripAnsi(out)).toContain("result2");
 		expect(out).not.toContain("[bg:subagentBg:");
+	});
+});
+
+describe("buildSubagentLayoutComponent live output tray", () => {
+	test("emits compact tool rows when thinking blocks visible and agent running", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveToolRows = [
+			{ name: "read", args: { path: "src/a.ts" }, completed: true, error: false },
+			{ name: "grep", args: { pattern: "auth" }, completed: false, error: false },
+		];
+		result.latestToolCall = { name: "grep", args: { pattern: "auth" } };
+		result.isThinking = false;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			true,
+		);
+		const out = renderComponent(component);
+		expect(stripAnsi(out)).toContain("src/a.ts");
+		expect(stripAnsi(out)).toContain("auth");
+		// No duplicate single latest-tool preview row above the tray.
+		const grepCount = (stripAnsi(out).match(/auth/g) ?? []).length;
+		expect(grepCount).toBe(1);
+	});
+
+	test("omits live tool rows when thinking blocks hidden", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveToolRows = [
+			{ name: "read", args: { path: "secret.ts" }, completed: true, error: false },
+		];
+		result.latestToolCall = undefined;
+		result.isThinking = false;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			false,
+		);
+		const out = renderComponent(component);
+		expect(stripAnsi(out)).not.toContain("secret.ts");
+	});
+
+	test("omits live tool rows for completed agents even when thinking blocks visible", () => {
+		const theme = makeTheme() as any;
+		const result = makeResult("Coder", 0);
+		result.liveToolRows = [
+			{ name: "read", args: { path: "leftover.ts" }, completed: true, error: false },
+		];
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			true,
+		);
+		const out = renderComponent(component);
+		expect(stripAnsi(out)).not.toContain("leftover.ts");
 	});
 });

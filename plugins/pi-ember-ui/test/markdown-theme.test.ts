@@ -8,7 +8,7 @@ import piEmberUiPlugin from "../index.ts";
 import {
 	buildThemeBgColors,
 	buildThemeFgColors,
-	MODE_COLORS,
+	MUTED_COLOR,
 	setActiveMode,
 } from "../mode-colors.ts";
 
@@ -39,11 +39,10 @@ function make_pi(): {
 	return { pi, events, handlers };
 }
 
-function make_theme(mode_id: keyof typeof MODE_COLORS): Theme {
-	const accent = MODE_COLORS[mode_id];
+function make_theme(_mode_id: string): Theme {
 	return new Theme(
-		buildThemeFgColors(accent) as never,
-		buildThemeBgColors(accent) as never,
+		buildThemeFgColors(MUTED_COLOR) as never,
+		buildThemeBgColors(MUTED_COLOR) as never,
 		"truecolor",
 	);
 }
@@ -102,7 +101,7 @@ describe("live Markdown headings", () => {
 
 		const code_theme = make_theme("code");
 		const plan_theme = make_theme("plan");
-		const debug_theme = make_theme("debug");
+		const orchestrate_theme = make_theme("orchestrate");
 		// mdHeading / mdListBullet are mode-independent MUTED_COLOR — same ANSI
 		// in every mode. The live-theme patch must still resolve headings through
 		// the live Theme (not a construction-time closure).
@@ -141,19 +140,19 @@ describe("live Markdown headings", () => {
 		// List markers must not pick up the plan purple accent.
 		expect(plan_list_output).not.toContain(plan_theme.getFgAnsi("accent"));
 
-		setActiveMode("debug");
+		setActiveMode("orchestrate");
 		mode_change?.({ liveOnly: true }, {});
 		(globalThis as Record<PropertyKey, unknown>)[THEME_KEY] = code_theme;
 		markdown.invalidate();
 		split_markdown.invalidate();
 		list_markdown.invalidate();
-		const debug_output = markdown.render(80).join("\n");
-		const debug_split_output = split_markdown.render(80).join("\n");
-		const debug_list_output = list_markdown.render(80).join("\n");
-		expect(debug_output).toContain(debug_theme.getFgAnsi("mdHeading"));
-		expect(debug_split_output).toContain(debug_theme.getFgAnsi("mdHeading"));
-		expect(debug_split_output).toContain(debug_theme.getFgAnsi("text"));
-		expect(debug_list_output).toContain(debug_theme.getFgAnsi("mdListBullet"));
-		expect(debug_list_output).not.toContain(debug_theme.getFgAnsi("accent"));
+		const orchestrate_output = markdown.render(80).join("\n");
+		const orchestrate_split_output = split_markdown.render(80).join("\n");
+		const orchestrate_list_output = list_markdown.render(80).join("\n");
+		expect(orchestrate_output).toContain(orchestrate_theme.getFgAnsi("mdHeading"));
+		expect(orchestrate_split_output).toContain(orchestrate_theme.getFgAnsi("mdHeading"));
+		expect(orchestrate_split_output).toContain(orchestrate_theme.getFgAnsi("text"));
+		expect(orchestrate_list_output).toContain(orchestrate_theme.getFgAnsi("mdListBullet"));
+		expect(orchestrate_list_output).not.toContain(orchestrate_theme.getFgAnsi("accent"));
 	});
 });

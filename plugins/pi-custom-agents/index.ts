@@ -11,8 +11,7 @@
  * Modes:
  *   /plan         — read-only planning, analysis, and architecture
  *   /code         — full access (default mode, restores all tools)
- *   /debug        — read-only health-check auditor + UI/Qt diagnostics
- *   /orchestrate  — read-only task decomposition + delegation planner
+ *   /orchestrate  — read-only task decomposition, health-check auditor, and delegation planner
  */
 
 import * as fs from "node:fs";
@@ -69,6 +68,7 @@ import {
 	model_provider_of,
 	resolve_patch_tool_name,
 	SUBAGENT_DELEGATION_TOOLS,
+	SUBAGENT_RESUME_TOOL_NAME,
 } from "./edit-tools.ts";
 import {
 	bind_mode_model,
@@ -246,8 +246,14 @@ function writePersistedState(state: {
 // every mode so the agent can do web research regardless of mode.
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
 const BASE_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "quiz", "todo", ...WEB_ACCESS_TOOLS];
-const READONLY_TOOLS = [...BASE_RESEARCH_TOOLS];
 const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATION_TOOLS];
+const ORCHESTRATE_TOOLS = [
+	"quiz",
+	"todo",
+	"subagent",
+	SUBAGENT_RESUME_TOOL_NAME,
+	...WEB_ACCESS_TOOLS,
+];
 function mode_tools_for_provider(modeId: string, provider: string | undefined): string[] {
 	if (modeId === "code") return build_full_tools(provider);
 	return MODES[modeId]?.tools ?? build_full_tools(provider);
@@ -455,41 +461,19 @@ Output format — use markdown section headers and bullets:
 - <cleanup complete>
 - <named suites pass>`);
 
-const DOCTOR_PROMPT = compose_mode_prompt(`Debug mode is active. You are read-only. Investigate, diagnose, and report findings. Do not edit, write, or run mutating shell commands.
-
-${mode_intro(
-	"debug",
-	READONLY_DELEGATING_TOOLS,
-	`Delegate implementation to the Coder subagent when a fix is straightforward; otherwise report the issue and recommended correction. ${QUIZ_UNCERTAINTY_GUIDANCE}`,
-)}${SUBAGENT_AWARENESS_PROMPT}
-
-Focus areas: ownership conflicts, hidden coupling, duplicated state or mirrored config, SSOT violations, fail-fast behavior, and high-change-entropy files. Label each finding as 'Confirmed issue' or 'Needs owner decision' and include File, Evidence, Impact, Correction, and Risks.
-
-Output format — plain labeled lines, no markdown headers or bullets:
-
-Classification: <Confirmed issue | Needs owner decision>
-Category: <focus area>
-File: <file_path:line_number>
-Evidence: <tool output or call-site proof>
-Impact: <what breaks or degrades>
-Correction: <smallest architectural change>
-Risks: <regression surfaces>`);
-
 const ORCHESTRATOR_PROMPT = compose_mode_prompt(`Orchestrate mode is active. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.
 
 ${mode_intro(
 	"orchestrate",
-	READONLY_DELEGATING_TOOLS,
+	ORCHESTRATE_TOOLS,
 	`Subagent delegation is your primary mechanism for getting work done. ${QUIZ_UNCERTAINTY_GUIDANCE}`,
 )}${SUBAGENT_AWARENESS_PROMPT}
 
 Decomposition rules:
 - One owner per file; if two modules need the same file, merge them or extract a prerequisite module.
-- Right-size modules so each can be validated with bash t.gate.sh <files>.
+- Right-size modules so each can be validated with the Coder subagent running bash t.gate.sh <files>.
 - Group independent modules into parallel clusters; chain dependent modules.
 - Pin shared interfaces in every dependent subagent prompt.
-
-Delegation prompt quality: include goal, exact owned files with "do not touch anything else", anchored context (file:line references), interface contract, step sequence, AGENTS.md constraints, acceptance criteria, validation command, risks, and edge cases.
 
 Output format — plain labeled lines, no markdown headers or bullets:
 
@@ -517,6 +501,10 @@ Execution Order:
   2. Cluster B (parallel): Module 3, Module 4
 
 Delegation Prompts: <self-contained prompt for each module, ready for the Coder subagent>`);
+
+const HEALTH_CHECK_PROMPT_APPENDIX = `If the user's request is a health-check or diagnostic task, classify each finding as 'Confirmed issue' or 'Needs owner decision' and include File, Evidence, Impact, Correction, and Risks.
+
+Focus areas: ownership conflicts, hidden coupling, duplicated state or mirrored config, SSOT violations, fail-fast behavior, and high-change-entropy files.`;
 
 function coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`Code mode is active. You have full tool access. Implement, test, and verify code with autonomy.
@@ -551,8 +539,6 @@ function mode_reminder(modeId: string, provider: string | undefined): string {
 			return ARCHITECT_PROMPT;
 		case "code":
 			return coder_prompt(provider);
-		case "debug":
-			return DOCTOR_PROMPT;
 		case "orchestrate":
 			return ORCHESTRATOR_PROMPT;
 		default:
@@ -594,21 +580,12 @@ const MODES: Record<string, ModeConfig> = {
 		enterMessage: coder_prompt(undefined),
 		exitMessage: coder_prompt(undefined),
 	},
-	debug: {
-		id: "debug",
-		label: "debug",
-		icon: "D",
-		color: "warning",
-		tools: READONLY_DELEGATING_TOOLS,
-		enterMessage: DOCTOR_PROMPT,
-		exitMessage: exit_to_coder_prompt(undefined),
-	},
 	orchestrate: {
 		id: "orchestrate",
 		label: "orchestrate",
 		icon: "O",
 		color: "warning",
-		tools: READONLY_DELEGATING_TOOLS,
+		tools: ORCHESTRATE_TOOLS,
 		enterMessage: ORCHESTRATOR_PROMPT,
 		exitMessage: exit_to_coder_prompt(undefined),
 	},
@@ -616,7 +593,7 @@ const MODES: Record<string, ModeConfig> = {
 
 const MODE_IDS = Object.keys(MODES);
 const DEFAULT_MODE = "code";
-const CYCLE_ORDER = ["code", "plan", "orchestrate", "debug"];
+const CYCLE_ORDER = ["code", "plan", "orchestrate"];
 
 function getLastModeFromSession(ctx: any): string | null {
 	const entries = ctx.sessionManager.getEntries();
@@ -1236,8 +1213,16 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		pi.sendUserMessage(msg, { deliverAs: "followUp" });
 	}
 
+	function is_health_check_prompt(prompt: string | undefined): boolean {
+		return typeof prompt === "string" && /health\s*check/i.test(prompt);
+	}
+
 	function build_system_prompt(event: any, modeReminder: string): string {
-		return `${event.systemPrompt}${PARALLEL_TOOL_CALL_GUIDANCE}\n\n${modeReminder}`;
+		let reminder = modeReminder;
+		if (currentMode === "orchestrate" && is_health_check_prompt(event.prompt)) {
+			reminder = `${reminder}\n\n${HEALTH_CHECK_PROMPT_APPENDIX}`;
+		}
+		return `${event.systemPrompt}${PARALLEL_TOOL_CALL_GUIDANCE}\n\n${reminder}`;
 	}
 
 	pi.on("before_agent_start", async (event: any, ctx: any) => {

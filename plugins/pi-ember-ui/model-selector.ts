@@ -36,6 +36,10 @@ import {
 } from "./mode-colors.ts";
 import { resolve_select_list_theme } from "./select-list-theme.ts";
 import { find_exact_model_reference } from "./model-reference.ts";
+import {
+	rank_families_by_recents,
+	recent_identities_from_mode_models,
+} from "./model-recent.ts";
 
 export const MODEL_COMMAND_PREFIX = "/model";
 
@@ -85,6 +89,9 @@ export interface OpenModelPickerOptions {
 		name?: string;
 		thinkingLevel?: string;
 	};
+	/** Per-mode saved model bindings used to rank recent picks at the top. */
+	modeModels?: Readonly<Partial<Record<string, { readonly provider: string; readonly modelId: string }>>>;
+	currentMode?: string;
 	onConfirm?: (result: ModelSelectorResult) => void;
 	onCancel?: () => void;
 }
@@ -178,6 +185,7 @@ type PickerState = {
 				thinkingLevel: string;
 		  }
 		| undefined;
+	recent: { provider: string; id: string }[];
 };
 
 let picker_active = false;
@@ -297,12 +305,18 @@ function filtered_families(state: PickerState, filter: string): ModelFamily[] {
 /** Pin the live/current family to the top when the filter is empty. */
 function display_families(state: PickerState, filter: string): ModelFamily[] {
 	const list = filtered_families(state, filter);
-	if (filter || !state.currentInfo) return list;
-	const current_idx = list.findIndex((family) =>
+	if (filter) return list;
+
+	const ranked = state.recent?.length
+		? rank_families_by_recents(list, state.recent)
+		: list;
+
+	if (!state.currentInfo) return ranked;
+	const current_idx = ranked.findIndex((family) =>
 		family_contains_model(family, state.currentInfo?.provider, state.currentInfo?.id),
 	);
-	if (current_idx <= 0) return list;
-	const reordered = [...list];
+	if (current_idx <= 0) return ranked;
+	const reordered = [...ranked];
 	const [current] = reordered.splice(current_idx, 1);
 	reordered.unshift(current);
 	return reordered;
@@ -426,6 +440,8 @@ export function open_model_picker_in_editor(
 		currentInfo,
 	);
 
+	const recent = recent_identities_from_mode_models(options?.modeModels, options?.currentMode);
+
 	picker_state = {
 		families,
 		familyIndex: open_state.family_index,
@@ -434,6 +450,7 @@ export function open_model_picker_in_editor(
 		effortExpanded: false,
 		lastFilter: open_state.editor_filter,
 		currentInfo,
+		recent,
 	};
 	picker_active = true;
 	bound_editor = editor;
