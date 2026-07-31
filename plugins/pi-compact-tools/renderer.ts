@@ -820,10 +820,31 @@ export function format_unified_work_segments(group: DiscoveryGroup): string[] {
 	return segments;
 }
 
+/** Derive a present-tense verb from the group's running (non-completed) records. */
+function running_work_label(group: DiscoveryGroup): string {
+	const running = group.records.filter((r) => !r._completed);
+	if (running.length === 0) return "Working";
+	const types = new Set<CompactGroupType | undefined>();
+	for (const r of running) {
+		types.add(resolve_compact_group_type(r.name, r.args));
+	}
+	if (types.size === 1) {
+		const t = types.values().next().value;
+		switch (t) {
+			case "discovery": return "Exploring";
+			case "editing": return "Editing";
+			case "writing": return "Writing";
+			case "bashing": return "Running";
+			case "patching": return "Patching";
+		}
+	}
+	return "Working";
+}
+
 /** Unified work-bundle header (`Edited N files, explored M files, … +N -N`). */
 export function formatUnifiedWorkHeader(group: DiscoveryGroup, theme: ThemeLike): string {
 	const segments = format_unified_work_segments(group);
-	const label = segments.length > 0 ? segments.join(", ") : "Working";
+	const label = segments.length > 0 ? segments.join(", ") : running_work_label(group);
 	const base = theme.fg("muted", theme.bold(label));
 	const stats = formatEditStatsFromCounts(work_header_diff_stats(group), theme);
 	if (!stats) return base;

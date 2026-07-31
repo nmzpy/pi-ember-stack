@@ -3,7 +3,7 @@ import {
 	apply_assistant_stream_boundary,
 	resolve_assistant_stream_boundary_event,
 } from "../../pi-ember-ui/assistant-stream-boundary.ts";
-import { CompactRenderer, formatCallBody, strip_bash_command_preview, GROUP_CHILD_FOLD_DEBOUNCE_MS } from "../renderer.ts";
+import { CompactRenderer, formatCallBody, formatUnifiedWorkHeader, strip_bash_command_preview, GROUP_CHILD_FOLD_DEBOUNCE_MS } from "../renderer.ts";
 import {
 	deactivate_gradient,
 	dispatch_gradient_tick,
@@ -2667,5 +2667,102 @@ describe("strip_bash_command_preview", () => {
 		expect(result).toContain("Bash");
 		expect(result).toContain("$ t.gate.sh gui/components/ignit");
 		expect(result).not.toContain("$ bash ");
+	});
+});
+
+describe("running_work_label via formatUnifiedWorkHeader", () => {
+	function makeRecord(name: string, args: Record<string, any>, completed: boolean) {
+		return {
+			id: `${name}-${Math.random().toString(36).slice(2)}`,
+			name,
+			args,
+			isError: false,
+			_completed: completed,
+		};
+	}
+
+	function makeGroup(records: any[]): any {
+		return { records, key: "__work__", type: "work" };
+	}
+
+	function headerLabel(group: any): string {
+		const theme = makeTheme() as any;
+		const raw = formatUnifiedWorkHeader(group, theme);
+		// Strip both ANSI codes and the mock theme format `[tag:*text*]`
+		return stripAnsi(raw).replace(/^\[[^:]+:\*/, "").replace(/\*\]$/, "");
+	}
+
+	test("Exploring when all running records are discovery type (read, ls)", () => {
+		const group = makeGroup([
+			makeRecord("read", { file_path: "a.ts" }, false),
+			makeRecord("ls", { path: "." }, false),
+		]);
+		expect(headerLabel(group)).toBe("Exploring");
+	});
+
+	test("Editing when all running records are editing type (edit)", () => {
+		const group = makeGroup([
+			makeRecord("edit", { file_path: "a.ts", oldText: "x", newText: "y" }, false),
+		]);
+		expect(headerLabel(group)).toBe("Editing");
+	});
+
+	test("Writing when all running records are writing type (write)", () => {
+		const group = makeGroup([
+			makeRecord("write", { file_path: "a.ts", content: "hello" }, false),
+		]);
+		expect(headerLabel(group)).toBe("Writing");
+	});
+
+	test("Running when all running records are bashing type (bash, non-grep)", () => {
+		const group = makeGroup([
+			makeRecord("bash", { command: "npm test" }, false),
+		]);
+		expect(headerLabel(group)).toBe("Running");
+	});
+
+	test("Patching when all running records are patching type (apply_patch)", () => {
+		const group = makeGroup([
+			makeRecord("apply_patch", { patch: "*** Begin Patch\n*** End Patch" }, false),
+		]);
+		expect(headerLabel(group)).toBe("Patching");
+	});
+
+	test("Working when running records are mixed types", () => {
+		const group = makeGroup([
+			makeRecord("read", { file_path: "a.ts" }, false),
+			makeRecord("edit", { file_path: "b.ts", oldText: "x", newText: "y" }, false),
+		]);
+		expect(headerLabel(group)).toBe("Working");
+	});
+
+	test("Working when there are no running records (all completed)", () => {
+		const group = makeGroup([
+			makeRecord("read", { file_path: "a.ts" }, true),
+			makeRecord("edit", { file_path: "b.ts", oldText: "x", newText: "y" }, true),
+		]);
+		// All completed -> segments will be non-empty (past tense), so
+		// running_work_label is not used. But if somehow segments were empty
+		// and all completed, the fallback would be "Working".
+		// Here we verify segments are produced so the header is past-tense.
+		const label = headerLabel(group);
+		expect(label).toContain("Explored");
+		expect(label).toContain("Edited");
+	});
+
+	test("formatUnifiedWorkHeader uses running_work_label as fallback when segments is empty", () => {
+		// All running, no completed -> segments empty -> fallback to running_work_label
+		const group = makeGroup([
+			makeRecord("grep", { query: "foo", file_pattern: "*.ts" }, false),
+			makeRecord("find", { pattern: "*.ts" }, false),
+		]);
+		expect(headerLabel(group)).toBe("Exploring");
+	});
+
+	test("bash grep counts as discovery, not bashing", () => {
+		const group = makeGroup([
+			makeRecord("bash", { command: "grep -rn foo src/" }, false),
+		]);
+		expect(headerLabel(group)).toBe("Exploring");
 	});
 });

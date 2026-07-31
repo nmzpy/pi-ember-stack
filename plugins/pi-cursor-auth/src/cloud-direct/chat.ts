@@ -107,6 +107,7 @@ interface StreamState {
 
 const REJECT_REASON =
 	"Tool not available in this environment. Use the MCP tools provided instead.";
+const MCP_IDLE_CLOSE_MS = 1000;
 
 function build_stream_failure_message(options: {
 	trailer?: ConnectTrailerError | null;
@@ -236,6 +237,27 @@ function handle_exec_message(
 			tool_name: mcp_args.toolName || mcp_args.name,
 			decoded_args: JSON.stringify(decoded),
 		});
+		// Send placeholder McpResult to unblock the Cursor exec channel.
+		// Pi owns the tool loop — the real result is sent in the next turn's
+		// history blobs. This response satisfies the bidirectional exec protocol
+		// so Cursor does not deadlock waiting for a result.
+		const mcp_result = create(McpResultSchema, {
+			result: {
+				case: "success",
+				value: create(McpSuccessSchema, {
+					content: [
+						create(McpToolResultContentItemSchema, {
+							content: {
+								case: "text",
+								value: create(McpTextContentSchema, { text: "ok" }),
+							},
+						}),
+					],
+					isError: false,
+				}),
+			},
+		});
+		send_exec_result(exec_msg, "mcpResult", mcp_result, send_frame);
 		return;
 	}
 
@@ -382,8 +404,13 @@ function handle_interaction_update(
 	update: { message?: { case?: string; value?: { text?: string; tokens?: number } } },
 	state: StreamState,
 	on_text: (text: string, is_thinking?: boolean) => void,
+	on_turn_ended?: () => void,
 ): void {
 	const update_case = update.message?.case;
+	if (update_case === "turnEnded") {
+		on_turn_ended?.();
+		return;
+	}
 	if (update_case === "textDelta") {
 		const delta = update.message?.value?.text || "";
 		if (delta) on_text(delta, false);
@@ -410,10 +437,11 @@ function process_server_message(
 	on_checkpoint?: (checkpoint: Uint8Array) => void,
 	on_usage?: (total_tokens: number) => void,
 	workspace_path?: string,
+	on_turn_ended?: () => void,
 ): void {
 	const msg_case = msg.message.case;
 	if (msg_case === "interactionUpdate") {
-		handle_interaction_update(msg.message.value as never, state, on_text);
+		handle_interaction_update(msg.message.value as never, state, on_text, on_turn_ended);
 		return;
 	}
 	if (msg_case === "kvServerMessage") {
@@ -503,9 +531,11 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 	let done = false;
 	let stream_error: Error | undefined;
 	let tool_batch_finished = false;
+	let last_event_time = Date.now();
 
 	const push_event = (event: CursorChatEvent): void => {
 		event_queue.push(event);
+		last_event_time = Date.now();
 	};
 
 	const finalize_tool_batch = (): void => {
@@ -517,6 +547,7 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 	};
 
 	const on_mcp_exec = (exec: PendingMcpExec): void => {
+		if (done) return;
 		saw_tool_call = true;
 		__chat_test_only_push_mcp_tool(push_event, exec);
 		// Keep the Run stream open so Cursor can emit additional MCP tools in one batch.
@@ -525,6 +556,10 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 	const mark_stream_done = (): void => {
 		finalize_tool_batch();
 		done = true;
+	};
+
+	const on_turn_ended = (): void => {
+		mark_stream_done();
 	};
 
 	bridge.on_close((info) => {
@@ -559,6 +594,7 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 							state.total_tokens = total_tokens;
 						},
 						req.workspace_path,
+						on_turn_ended,
 					);
 				} catch (error) {
 					stream_error =
@@ -585,6 +621,9 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 			]);
 			if (req.signal?.aborted) {
 				throw new CursorChatError("Cursor request aborted");
+			}
+			if (saw_tool_call && !done && Date.now() - last_event_time > MCP_IDLE_CLOSE_MS) {
+				mark_stream_done();
 			}
 		}
 

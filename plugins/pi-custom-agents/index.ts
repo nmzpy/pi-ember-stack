@@ -245,7 +245,7 @@ function writePersistedState(state: {
 // get_search_content) registered by the pi-ember-webtools plugin. They belong in
 // every mode so the agent can do web research regardless of mode.
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
-const BASE_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "quiz", "todo", ...WEB_ACCESS_TOOLS];
+const BASE_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "bash", "quiz", "todo", ...WEB_ACCESS_TOOLS];
 const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATION_TOOLS];
 const ORCHESTRATE_TOOLS = [
 	"quiz",
@@ -377,7 +377,7 @@ function compose_plan_prompt(body: string): string {
 ${style}`;
 }
 
-const ARCHITECT_PROMPT = compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands.
+const ARCHITECT_PROMPT = compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands. You may run non-mutating shell commands (e.g. git log, find, grep) to inform the plan.
 
 ${mode_intro(
 	"plan",

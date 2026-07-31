@@ -1205,6 +1205,26 @@ field. Keep that mechanism aligned with the actual plugin folders.
   API model id for Auto routing; legacy `auto` ids map to `default` via
   `resolve_cursor_model_id` in `request.ts`. `bridge.end()` in `transport.ts` is idempotent and swallows
   `EPIPE` when the h2 child has already exited.
+  **MCP exec channel deadlock prevention:** Cursor's AgentService/Run is a
+  bidirectional Connect-RPC stream. When the server sends an `mcpArgs`
+  ExecServerMessage, the client MUST respond with an `mcpResult`
+  ExecClientMessage. After receiving `mcpArgs` and pushing tool-call events
+  to Pi's queue, `handle_exec_message` in `chat.ts` sends a placeholder
+  `McpResult` (`McpSuccess` with text `"ok"`, `isError: false`) back to
+  Cursor via `send_exec_result` to unblock the exec channel. Pi owns the
+  tool loop — the real result is sent in the next turn's history blobs
+  (`build_tool_call_step_bytes` in `history.ts`). Every other exec case
+  (`readArgs`, `lsArgs`, `grepArgs`, `writeArgs`, `shellArgs`, etc.) already
+  sends a rejection; only `mcpArgs` was missing a response.
+  **turnEnded handling:** when Cursor signals `turnEnded` via an
+  `interactionUpdate`, the stream is finalized and closed immediately via
+  `mark_stream_done` (passed as `on_turn_ended` through `process_server_message`
+  to `handle_interaction_update`).
+  **Debounce fallback:** if no new events arrive within `MCP_IDLE_CLOSE_MS`
+  (1000ms) after tool calls and the stream is not yet done, the stream is
+  closed proactively. This covers cases where `turnEnded` does not arrive.
+  The `on_mcp_exec` callback has a `done` guard to ignore late tool calls
+  that arrive after the stream has been finalized.
 - **Outbound tool schema SSOT:** `PI_TO_CURSOR_TOOL_NAME` and
   `PI_TO_CURSOR_ARG_NAMES` in `src/context.ts` (`cursor_serialize_tool`;
   covers core tools plus `todo`, `apply_patch`, `subagent`, `quiz`, `task`,
