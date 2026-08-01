@@ -1,6 +1,6 @@
 ---
-thinking: default
-model: devin/glm-5-2
+thinking: xhigh
+model: openrouter/openai/gpt-5.6-luna
 name: Scout
 description: Fast agent specialized for exploring codebases. Use when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase.
 tools: read, bash, grep, find, ls
