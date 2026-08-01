@@ -20,6 +20,7 @@ import {
 	groupBulletColorFromFlags,
 	statusBulletColor,
 	TREE_BRANCH_LAST,
+	TREE_BRANCH_PIPE,
 	TREE_BRANCH_TEE,
 	TREE_NESTED_LAST,
 	TREE_NESTED_PIPE,
@@ -145,13 +146,18 @@ export class SubagentLiveOutputText implements Component {
 	render(width: number): string[] {
 		const theme = this.theme;
 		if (!theme) return [];
-		const prefixWidth = visibleWidth(this.treePrefix);
-		const contentWidth = Math.max(1, width - prefixWidth);
+		const fg = theme.fg.bind(theme);
 		const lines: string[] = [];
 		const visible = this.rows.slice(-SUBAGENT_LIVE_OUTPUT_MAX_ROWS);
-		for (const row of visible) {
+		for (let i = 0; i < visible.length; i++) {
+			const row = visible[i];
+			const isLastRow = i === visible.length - 1;
+			const innerPrefix = isLastRow ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE;
+			const fullPrefix = this.treePrefix + fg("dim", innerPrefix);
+			const prefixWidth = visibleWidth(fullPrefix);
+			const contentWidth = Math.max(1, width - prefixWidth);
+
 			const completed = row.completed;
-			const bullet = statusBulletColor(row.error, completed, theme);
 			const verb = completed
 				? formatCallBody(row.name, row.args as any, theme, true, true)
 				: formatGroupChildGradientVerb(row.name, row.args);
@@ -163,8 +169,8 @@ export class SubagentLiveOutputText implements Component {
 				row.details as any,
 				theme,
 			);
-			const body = bullet + verb + details + stats;
-			lines.push(this.treePrefix + truncateToWidth(body, contentWidth));
+			const body = verb + details + stats;
+			lines.push(fullPrefix + truncateToWidth(body, contentWidth));
 		}
 		if (!this.running && lines.length > 0) {
 			lines.push(chatboxBorderColor("\u2500".repeat(width)));
@@ -557,19 +563,29 @@ function agentTreePrefix(agentIndex: number, agentCount: number): string {
 	return agentIndex < agentCount - 1 ? TREE_BRANCH_TEE : TREE_BRANCH_LAST;
 }
 
-/** Tool rows nest under their agent; the last agent's tool closes with └. */
-function toolTreePrefix(parentAgentIndex: number, agentCount: number): string {
-	return parentAgentIndex < agentCount - 1 ? TREE_NESTED_PIPE : TREE_NESTED_LAST;
+/** Outer tree prefix for items under an agent (spaces or group tree pipe). */
+export function outerPrefixForAgent(agentIndex: number, agentCount: number, hasHeader: boolean): string {
+	if (!hasHeader) return "  ";
+	return agentIndex < agentCount - 1 ? TREE_BRANCH_PIPE : "  ";
+}
+
+/** Full tree prefix for a child item (tool, thinking, liveOutput) under an agent. */
+export function childTreePrefix(
+	agentIndex: number,
+	agentCount: number,
+	hasHeader: boolean,
+	isLastChild = true,
+): string {
+	const outer = outerPrefixForAgent(agentIndex, agentCount, hasHeader);
+	const inner = isLastChild ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE;
+	return outer + inner;
 }
 
 function treePrefixForEntry(entry: FlatEntry, hasHeader: boolean, agentCount: number): string {
-	if (!hasHeader) {
-		return TREE_SINGLE_TOOL;
-	}
 	if (entry.type === "agent") {
-		return agentTreePrefix(entry.agentIndex, agentCount);
+		return hasHeader ? agentTreePrefix(entry.agentIndex, agentCount) : "";
 	}
-	return toolTreePrefix(entry.parentAgentIndex, agentCount);
+	return childTreePrefix(entry.parentAgentIndex, agentCount, hasHeader, true);
 }
 
 /** Nested Thinking row while a running subagent waits between tool calls. */
@@ -773,8 +789,9 @@ function fillSubagentLayoutContainer(
 			container.addChild(new Text(rowText, 0, 0));
 		} else if (entry.type === "liveOutput") {
 			const liveRows = Array.isArray(row.result?.liveToolRows) ? row.result!.liveToolRows! : [];
+			const outerPrefix = outerPrefixForAgent(entry.parentAgentIndex, rows.length, hasHeader);
 			container.addChild(
-				new SubagentLiveOutputText(liveRows, fg("dim", treePrefix), row.status === "running", theme),
+				new SubagentLiveOutputText(liveRows, fg("dim", outerPrefix), row.status === "running", theme),
 			);
 		} else {
 			const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);

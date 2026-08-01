@@ -93,8 +93,8 @@ const GROUP_CHILD_LAST = "  └";
  *  (`├ ` / `└ ` place the name at column 2; tool └ goes there too). */
 export const TREE_NESTED_PIPE = "│ └";
 export const TREE_NESTED_LAST = "  └";
-/** Single subagent tool row — └ flush with the left margin. */
-export const TREE_SINGLE_TOOL = "└";
+/** Single subagent tool row — └ sits at column 2 below the agent name's first letter. */
+export const TREE_SINGLE_TOOL = "  └";
 
 export { BULLET, CompactGroupText } from "./compact-text.ts";
 

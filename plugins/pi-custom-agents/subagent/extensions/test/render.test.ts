@@ -589,7 +589,7 @@ describe("renderSubagentLayout (string)", () => {
 		expect(TREE_NESTED_PIPE.indexOf("\u2514")).toBe(2);
 		expect(TREE_NESTED_LAST.indexOf("\u2514")).toBe(2);
 		expect(BULLET.length).toBe(2);
-		expect(TREE_SINGLE_TOOL.indexOf("\u2514")).toBe(0);
+		expect(TREE_SINGLE_TOOL.indexOf("\u2514")).toBe(2);
 	});
 
 	test("running parallel mode uses full Exploring-style tree with nested tool rows", () => {
@@ -982,5 +982,54 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		);
 		const out = renderComponent(component);
 		expect(stripAnsi(out)).not.toContain("leftover.ts");
+	});
+
+	test("multi-row live output renders straight pipes until the last row which gets the only L pipe, without bullets", () => {
+		const theme = makeTheme() as any;
+		const rows = [
+			{ name: "bash", args: { command: "python script.py" }, completed: true, error: false },
+			{ name: "read", args: { path: "a.ts" }, completed: true, error: false },
+			{ name: "grep", args: { pattern: "test" }, completed: false, error: false },
+		];
+		const comp = new SubagentLiveOutputText(rows, "  ", true, theme);
+		const out = comp.render(80);
+		expect(out.length).toBe(3);
+		const line0 = stripAnsi(out[0]);
+		const line1 = stripAnsi(out[1]);
+		const line2 = stripAnsi(out[2]);
+		// Straight pipes on intermediate lines, L pipe on last line
+		expect(line0).toContain("│");
+		expect(line0).not.toContain("└");
+		expect(line1).toContain("│");
+		expect(line1).not.toContain("└");
+		expect(line2).toContain("└");
+		expect(line2).not.toContain("│");
+		// No bullet points
+		expect(line0).not.toContain("\u2022");
+		expect(line1).not.toContain("\u2022");
+		expect(line2).not.toContain("\u2022");
+	});
+
+	test("single subagent when thinking blocks hidden places L pipe below first letter of header at column 2", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Scout B");
+		result.latestToolCall = { name: "read", args: { path: "index.ts" } };
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Scout B", task: "find index" },
+			[result],
+			theme,
+			undefined,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			false,
+		);
+		const out = renderComponent(component);
+		const lines = stripAnsi(out).split("\n");
+		expect(lines.length).toBe(2);
+		expect(lines[0]).toContain("Scout B"); // Pos 0: •, Pos 2: S
+		expect(lines[1]).toContain("└"); // L pipe
+		expect(lines[1]).not.toContain("\u2022"); // No bullet point
 	});
 });
