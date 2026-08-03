@@ -10,8 +10,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { infer_bare_agent_name } from "../../subagent-policy.ts";
 import { SUBAGENT_DELEGATION_TOOLS } from "../../edit-tools.ts";
+import { infer_bare_agent_name } from "../../subagent-policy.ts";
 import type { SubAgentResult } from "./runner.ts";
 
 const SUBAGENT_SESSIONS_DIR = "subagent-sessions";
@@ -52,11 +52,21 @@ interface SubagentDetailsLike {
 	results?: SubAgentResult[];
 }
 
-export type ResolveResumeResult =
-	| { ok: true; target: ResumeTarget }
-	| { ok: false; error: string };
+export type ResolveResumeResult = { ok: true; target: ResumeTarget } | { ok: false; error: string };
+
+let subagent_sessions_root_override: string | undefined;
+
+/**
+ * Test/embedding seam: redirect the sessions store root away from the real
+ * ~/.pi/agent. Pass undefined to restore the default. Runtime paths never set
+ * this; it keeps regression tests hermetic (no writes into ~/.pi/agent).
+ */
+export function set_subagent_sessions_root_override(root: string | undefined): void {
+	subagent_sessions_root_override = root;
+}
 
 export function get_subagent_sessions_root(): string {
+	if (subagent_sessions_root_override) return subagent_sessions_root_override;
 	return path.join(getAgentDir(), SUBAGENT_SESSIONS_DIR);
 }
 
@@ -75,10 +85,33 @@ export function get_checkpoint_dir(parentSessionId: string, originToolCallId: st
 	);
 }
 
+/**
+ * Deterministic directory bootstrap for every open/write/append under
+ * subagent-sessions. `fs.mkdirSync(..., { recursive: true })` is atomic and
+ * idempotent, so parallel child sessions writing into the same parent dir are
+ * safe and no existsSync pre-check or prior async op is ever required for
+ * correctness. Call this immediately before recording / checkpoint / resume
+ * writes; the returned path is guaranteed to exist.
+ */
+export function subagent_sessions_dir_for(
+	parentSessionId: string,
+	originToolCallId: string,
+	root: string = get_subagent_sessions_root(),
+): string {
+	const dir = path.join(root, parentSessionId, filesystem_safe_tool_call_id(originToolCallId));
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
 function checkpoint_meta_path(parentSessionId: string, originToolCallId: string): string {
 	const primary = path.join(get_checkpoint_dir(parentSessionId, originToolCallId), META_FILE);
 	if (fs.existsSync(primary)) return primary;
-	const legacy = path.join(get_subagent_sessions_root(), parentSessionId, originToolCallId, META_FILE);
+	const legacy = path.join(
+		get_subagent_sessions_root(),
+		parentSessionId,
+		originToolCallId,
+		META_FILE,
+	);
 	if (legacy !== primary && fs.existsSync(legacy)) return legacy;
 	return primary;
 }
@@ -98,7 +131,11 @@ function write_json_file(file_path: string, value: unknown): void {
 }
 
 function read_resume_index(parentSessionId: string): ResumeIndex {
-	return read_json_file<ResumeIndex>(path.join(get_subagent_sessions_root(), parentSessionId, INDEX_FILE)) ?? {};
+	return (
+		read_json_file<ResumeIndex>(
+			path.join(get_subagent_sessions_root(), parentSessionId, INDEX_FILE),
+		) ?? {}
+	);
 }
 
 function write_resume_index(parentSessionId: string, index: ResumeIndex): void {
@@ -115,7 +152,7 @@ export function read_resume_meta(
 }
 
 export function persist_checkpoint_meta(meta: ResumeCheckpointMeta): void {
-	const dir = get_checkpoint_dir(meta.parentSessionId, meta.originToolCallId);
+	const dir = subagent_sessions_dir_for(meta.parentSessionId, meta.originToolCallId);
 	// Do not persist a checkpoint whose session file has already disappeared.
 	if (meta.sessionFile && !fs.existsSync(meta.sessionFile)) return;
 	write_json_file(path.join(dir, META_FILE), meta);
@@ -154,9 +191,13 @@ function normalize_display_name(name: string): string {
 	return name.trim();
 }
 
-function is_tool_result_entry(
-	entry: { type?: string; message?: { role?: string; toolName?: string } },
-): entry is { type: "message"; message: { role: "toolResult"; toolName?: string; toolCallId?: string; details?: unknown } } {
+function is_tool_result_entry(entry: {
+	type?: string;
+	message?: { role?: string; toolName?: string };
+}): entry is {
+	type: "message";
+	message: { role: "toolResult"; toolName?: string; toolCallId?: string; details?: unknown };
+} {
 	return entry.type === "message" && entry.message?.role === "toolResult";
 }
 
@@ -177,8 +218,14 @@ function find_origin_from_branch(
 		const msg = entry.message;
 		if (!msg) continue;
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
-			for (const part of msg.content as Array<{ type?: string; id?: string; name?: string; arguments?: unknown }>) {
-				if (part.type !== "toolCall" || !part.id || !RESUMABLE_TOOL_NAMES.has(part.name ?? "")) continue;
+			for (const part of msg.content as Array<{
+				type?: string;
+				id?: string;
+				name?: string;
+				arguments?: unknown;
+			}>) {
+				if (part.type !== "toolCall" || !part.id || !RESUMABLE_TOOL_NAMES.has(part.name ?? ""))
+					continue;
 				const args = (part.arguments ?? {}) as { agent?: string; cwd?: string };
 				assistant_args.set(part.id, args);
 			}
@@ -195,7 +242,7 @@ function find_origin_from_branch(
 		};
 		if (!msg.toolName || !RESUMABLE_TOOL_NAMES.has(msg.toolName)) continue;
 		const details = parse_subagent_details(msg.details);
-		if (!details || details.mode !== "single") continue;
+		if (details?.mode !== "single") continue;
 		const result = details.results?.[0];
 		if (!result) continue;
 		if (normalize_display_name(result.agent) !== normalized) continue;
@@ -298,7 +345,14 @@ export function resolve_resume_target(
 export function prune_foreign_checkpoints(activeParentSessionId: string): void {
 	const root = get_subagent_sessions_root();
 	if (!fs.existsSync(root)) return;
-	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		// Root removed between existsSync and readdir (TOCTOU) — nothing to prune.
+		return;
+	}
+	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		if (entry.name === activeParentSessionId) continue;
 		fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });

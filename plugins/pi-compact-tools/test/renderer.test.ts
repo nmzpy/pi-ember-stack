@@ -764,6 +764,156 @@ describe("CompactRenderer group child visibility", () => {
 	});
 });
 
+describe("CompactRenderer same-file child merge", () => {
+	test("consecutive edits to the same file merge into one row with accumulated stats", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("merge-e1", owner_state) as any;
+		const child_ctx = makeContext("merge-e2", {}) as any;
+		const third_ctx = makeContext("merge-e3", {}) as any;
+
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "x\ny" }, theme, owner_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "y", newText: "y\nz" }, theme, child_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "z", newText: "z\nw" }, theme, third_ctx);
+		// Re-render the owner to refresh the shared group block onto its callText.
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "x\ny" }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Editing");
+		expect(row).toContain("a.ts");
+		expect(row).toContain("+3");
+		// Mock theme wraps tokens in [tag:…], so count tree glyphs rather than
+		// matching line starts: exactly one child row for the file.
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+	});
+
+	test("different files stay as separate child rows", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("merge-f1", owner_state) as any;
+		const child_ctx = makeContext("merge-f2", {}) as any;
+		const third_ctx = makeContext("merge-f3", {}) as any;
+
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "x\ny" }, theme, owner_ctx);
+		r.renderCall("edit", { file_path: "b.ts", oldText: "p", newText: "p\nq" }, theme, child_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "a\nb" }, theme, third_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "x\ny" }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("a.ts");
+		expect(row).toContain("b.ts");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(2);
+	});
+
+	test("completed same-file edits accumulate authoritative diff stats", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("merge-c1", owner_state) as any;
+		const child_ctx = makeContext("merge-c2", {}) as any;
+		const third_ctx = makeContext("merge-c3", {}) as any;
+
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "y" }, theme, owner_ctx);
+		r.renderResult(
+			"edit",
+			{ file_path: "a.ts", oldText: "x", newText: "y" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+one\n+two\n" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "y", newText: "z" }, theme, child_ctx);
+		r.renderResult(
+			"edit",
+			{ file_path: "a.ts", oldText: "y", newText: "z" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+three\n" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "q", newText: "r" }, theme, third_ctx);
+		r.renderResult(
+			"edit",
+			{ file_path: "a.ts", oldText: "q", newText: "r" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+four\n" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...third_ctx, isError: false },
+		);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "y" }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Edited");
+		expect(row).toContain("a.ts");
+		expect(row).toContain("+4");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+	});
+
+	test("write to the same file merges without a duplicate row", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("merge-w1", owner_state) as any;
+		const child_ctx = makeContext("merge-w2", {}) as any;
+		const third_ctx = makeContext("merge-w3", {}) as any;
+
+		r.renderCall("write", { file_path: "a.ts", content: "one\ntwo" }, theme, owner_ctx);
+		r.renderCall("write", { file_path: "a.ts", content: "three" }, theme, child_ctx);
+		r.renderCall("write", { file_path: "a.ts", content: "four" }, theme, third_ctx);
+		r.renderCall("write", { file_path: "a.ts", content: "one\ntwo" }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Writing");
+		expect(row).toContain("a.ts");
+		expect(row).toContain("+4");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+	});
+
+	test("same-file read calls still append as separate rows", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("merge-r1", owner_state) as any;
+		const child_ctx = makeContext("merge-r2", {}) as any;
+		const third_ctx = makeContext("merge-r3", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, third_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Reading");
+		expect(row).toContain("a.ts");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(3);
+	});
+
+	test("pure apply_patch run merges duplicate per-file rows", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("merge-p1", owner_state) as any;
+		const child_ctx = makeContext("merge-p2", {}) as any;
+		const third_ctx = makeContext("merge-p3", {}) as any;
+
+		const patch1 = "*** Update File: src/a.ts\n@@\n+one\n+two\n*** Update File: src/b.ts\n@@\n+one\n";
+		const patch2 = "*** Update File: src/a.ts\n@@\n+three\n";
+		const patch3 = "*** Update File: src/a.ts\n@@\n+four\n";
+		r.renderCall("apply_patch", { input: patch1 }, theme, owner_ctx);
+		r.renderCall("apply_patch", { input: patch2 }, theme, child_ctx);
+		r.renderCall("apply_patch", { input: patch3 }, theme, third_ctx);
+		r.renderCall("apply_patch", { input: patch1 }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Patching");
+		expect(row).toContain("src/a.ts");
+	expect(row).toContain("src/b.ts");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(2);
+	});
+});
+
 describe("CompactRenderer thinking collapse", () => {
 	test("noteThinking soft-settles header and appends Thinking after tool rows", () => {
 		setThinkingBlocksHidden(true);
@@ -2661,12 +2811,20 @@ describe("strip_bash_command_preview", () => {
 		expect(strip_bash_command_preview("cd src && bash npm test", true)).toBe("npm test");
 	});
 
-	test("formatCallBody bash row omits redundant bash prefix", () => {
+	test("formatCallBody bash row uses Ran verb without shell-prompt prefix", () => {
 		const theme = makeTheme() as any;
 		const result = formatCallBody("bash", { command: "bash t.gate.sh gui/components/ignit" }, theme);
-		expect(result).toContain("Bash");
-		expect(result).toContain("$ t.gate.sh gui/components/ignit");
-		expect(result).not.toContain("$ bash ");
+		expect(result).toContain("Ran");
+		expect(result).toContain("t.gate.sh gui/components/ignit");
+		expect(result).not.toContain("$");
+	});
+
+	test("formatCallBody bash running row uses Running verb", () => {
+		const theme = makeTheme() as any;
+		const result = formatCallBody("bash", { command: "npm test" }, theme, false, false);
+		expect(result).toContain("Running");
+		expect(result).toContain("npm test");
+		expect(result).not.toContain("$");
 	});
 });
 

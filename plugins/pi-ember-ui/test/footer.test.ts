@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { model_name_has_thinking_variant } from "../footer.ts";
+import {
+	blendToHex,
+	buildThemeFgColors,
+	getActiveModeColor,
+	MUTED_COLOR,
+	PAGE_BG,
+	tps_color_hex,
+} from "../mode-colors.ts";
 
 describe("model_name_has_thinking_variant", () => {
 	test("returns true for model names that already contain a known variant", () => {
@@ -25,5 +33,13 @@ describe("model_name_has_thinking_variant", () => {
 		expect(model_name_has_thinking_variant("lowercase")).toBe(false);
 		expect(model_name_has_thinking_variant("mediumwell")).toBe(false);
 		expect(model_name_has_thinking_variant("highland")).toBe(false);
+	});
+});
+
+describe("TPS color", () => {
+	test("blends the active TPS token toward the page background by alpha", () => {
+		expect(tps_color_hex(25, 0.5)).toBe(blendToHex(MUTED_COLOR, PAGE_BG, 0.5));
+		expect(tps_color_hex(25, 0)).toBe(PAGE_BG);
+		expect(tps_color_hex(125)).toBe(buildThemeFgColors(getActiveModeColor()).accent);
 	});
 });

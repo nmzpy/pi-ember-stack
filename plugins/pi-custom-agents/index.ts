@@ -17,23 +17,28 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import {
 	copyToClipboard,
 	CustomEditor,
+	type AgentSettledEvent,
+	type BeforeAgentStartEvent,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
 	type KeybindingsManager,
 	type SessionManager,
+	type SessionShutdownEvent,
+	type SessionStartEvent,
+	type ToolCallEvent,
+	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { install_bash_rules } from "./bash-rules.ts";
 import { install_bash_timeout } from "./bash-timeout.ts";
 import { validate_plan_mode_subagent } from "./subagent-policy.ts";
-import {
-	mutedBullet,
-	setActiveMode,
-	setPlanAutoContinuing,
-	setShellMode,
-} from "../pi-ember-ui/mode-colors.ts";
+import { setActiveMode, setPlanAutoContinuing, setShellMode } from "../pi-ember-ui/mode-colors.ts";
 import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
 import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
 import {
@@ -86,8 +91,21 @@ import {
 	type ModelIdentity,
 } from "./mode-models.ts";
 import { build_plan_implement_message_content } from "./plan-implement.ts";
-import { get_new_session_fn, install_new_session_capture } from "./plan-fresh-session.ts";
-import { arm_plan_turn, build_plan_review_questions, resolve_plan_review_answer, should_show_plan_review } from "./plan-review.ts";
+import {
+	get_fresh_context_mode,
+	get_new_session_fn,
+	install_new_session_capture,
+	seed_fresh_context_mode,
+} from "./plan-fresh-session.ts";
+import {
+	arm_plan_turn,
+	build_plan_implementation_questions,
+	build_plan_review_questions,
+	resolve_plan_implementation_mode,
+	resolve_plan_review_answer,
+	should_show_plan_review,
+	type PlanImplementationMode,
+} from "./plan-review.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
 
@@ -95,7 +113,9 @@ import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
  * Promisify ctx.compact() into a result discriminated union.
  * Never throws — both callback errors and synchronous throws are caught.
  */
-function compact_async(ctx: any): Promise<{ ok: true } | { ok: false; error: Error }> {
+function compact_async(ctx: Pick<ExtensionContext, "compact">): Promise<
+	{ ok: true } | { ok: false; error: Error }
+> {
 	return new Promise((resolve) => {
 		try {
 			ctx.compact({
@@ -153,12 +173,18 @@ function assistant_text(message: unknown): string {
  * runs the autocomplete cancel path (tui.select.cancel is also Ctrl+C). Cancel
  * autocomplete first so clear/quit does not leave a stale overlay or stall exit.
  */
-function prepare_app_clear_input(data: string, editor: any): void {
+type SlashPreHandlerEditor = {
+	cancelAutocomplete?: () => void;
+	getText?: () => string;
+	setText?: (text: string) => void;
+};
+
+function prepare_app_clear_input(data: string, editor: SlashPreHandlerEditor): void {
 	if (!getKeybindings().matches(data, "app.clear")) return;
 	editor.cancelAutocomplete?.();
 }
 
-function intercept_slash_escape(data: string, editor: any): boolean {
+function intercept_slash_escape(data: string, editor: SlashPreHandlerEditor): boolean {
 	if (!matchesKey(data, "escape")) return false;
 	const text = editor.getText?.() ?? "";
 	if (!text.trimStart().startsWith("/")) return false;
@@ -525,7 +551,15 @@ ${mode_intro("code", build_full_tools(provider))}`);
 function plan_implement_prompt(
 	provider: string | undefined,
 	plan_reference: "above" | "below" = "above",
+	implementation_mode: PlanImplementationMode = "code",
 ): string {
+	if (implementation_mode === "orchestrate") {
+		return compose_mode_prompt(`The user has approved the plan ${plan_reference}. Orchestrate its implementation now.
+
+Use the approved plan as the source of truth. Decompose the modules into delegated tasks and use the Coder subagent to implement them. Do not edit files, write files, or run mutating shell commands yourself. Report delegation progress and any deviations from the plan.
+
+${mode_intro("orchestrate", ORCHESTRATE_TOOLS, "")}`);
+	}
 	return compose_mode_prompt(`The user has approved the plan ${plan_reference}. Execute it now in full.
 
 Follow the plan modules in order. Implement, test, and verify each module before moving to the next. Run bash t.gate.sh <files> after each logical change. Report what you did and any deviations from the plan.
@@ -594,13 +628,14 @@ const MODES: Record<string, ModeConfig> = {
 const MODE_IDS = Object.keys(MODES);
 const DEFAULT_MODE = "code";
 const CYCLE_ORDER = ["code", "plan", "orchestrate"];
+type SessionManagerReference = Pick<SessionManager, "getEntries">;
 
-function getLastModeFromSession(ctx: any): string | null {
+function getLastModeFromSession(ctx: { sessionManager: SessionManagerReference }): string | null {
 	const entries = ctx.sessionManager.getEntries();
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry.type === "custom_message") {
-			const customEntry = entry as any;
+			const customEntry = entry as { customType?: string };
 			if (customEntry.customType?.startsWith("pi-agents-enter-")) {
 				return customEntry.customType.replace("pi-agents-enter-", "");
 			}
@@ -614,7 +649,7 @@ function getLastModeFromSession(ctx: any): string | null {
 
 const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
 
-export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
+export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<void> {
 	install_new_session_capture();
 	install_bash_rules(pi);
 	install_bash_timeout(pi);
@@ -624,15 +659,15 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	let lastMessagedMode: string | null = null;
 	let waitingForPlan = false;
 	let latest_plan_text = "";
-	let active_session_manager: any;
+	let active_session_manager: SessionManagerReference | undefined;
 	let session_ready = false;
 	let pending_mode_id: string | undefined;
 
-	function is_live_session(ctx: any): boolean {
+	function is_live_session(ctx: ExtensionContext): boolean {
 		return session_ready && ctx.sessionManager === active_session_manager;
 	}
 
-	function request_live_mode_render(ctx: any): void {
+	function request_live_mode_render(ctx: ExtensionContext): void {
 		if (ctx.mode === "tui") {
 			// setStatus only invalidates the footer/editor frame. Do not append a
 			// transcript notification or invalidate the resumed chat history.
@@ -667,34 +702,53 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	}
 
-	function sync_footer_after_model_restore(ctx: any, bound_thinking_level?: string): void {
+	function sync_footer_after_model_restore(
+		ctx: ExtensionContext,
+		bound_thinking_level?: string,
+	): void {
 		setFooterThinkingLevel(bound_thinking_level ?? get_pi_thinking_level(pi) ?? "off");
 		refresh_footer(ctx);
 	}
 
 	pi.events.on(
 		PI_AGENTS_BIND_MODE_MODEL_EVENT,
-		(payload: {
-			provider: string;
-			modelId: string;
-			name?: string;
-			thinkingLevel?: string;
-			syncThinkingLevelToPi?: boolean;
-		}) => {
+		(data: unknown) => {
+			if (!data || typeof data !== "object") return;
+			const payload = data as {
+				provider?: unknown;
+				modelId?: unknown;
+				name?: unknown;
+				thinkingLevel?: unknown;
+				syncThinkingLevelToPi?: unknown;
+			};
+			if (typeof payload.provider !== "string" || typeof payload.modelId !== "string") {
+				return;
+			}
 			const identity = model_identity_from_user_selection(
-				{ provider: payload.provider, id: payload.modelId, name: payload.name },
 				{
-					thinkingLevel: payload.thinkingLevel,
-					syncThinkingLevelToPi: payload.syncThinkingLevelToPi,
+					provider: payload.provider,
+					id: payload.modelId,
+					name: typeof payload.name === "string" ? payload.name : undefined,
+				},
+				{
+					thinkingLevel:
+						typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : undefined,
+					syncThinkingLevelToPi:
+						typeof payload.syncThinkingLevelToPi === "boolean"
+							? payload.syncThinkingLevelToPi
+							: undefined,
 				},
 			);
 			if (identity) bind_current_mode_model(identity);
 		},
 	);
 
-	async function apply_bound_thinking_level(ctx: any, bound: ModelIdentity): Promise<void> {
+	async function apply_bound_thinking_level(
+		ctx: ExtensionContext,
+		bound: ModelIdentity,
+	): Promise<void> {
 		if (!bound.thinkingLevel || bound_identity_uses_baked_effort(bound)) return;
-		const model = ctx.model as Model<any> | undefined;
+		const model = ctx.model as Model<Api> | undefined;
 		const modelName = model?.name ?? model?.id ?? "";
 		if (modelNameHasThinkingVariant(modelName)) return;
 		applying_mode_thinking_level = true;
@@ -710,9 +764,9 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	}
 
-	async function apply_bound_model(ctx: any, bound: ModelIdentity): Promise<void> {
+	async function apply_bound_model(ctx: ExtensionContext, bound: ModelIdentity): Promise<void> {
 		const canonical = canonicalize_persisted_identity(bound);
-		const current = ctx.model as Model<any> | undefined;
+		const current = ctx.model as Model<Api> | undefined;
 		const liveThinking = get_pi_thinking_level(pi);
 		if (bound_model_matches_live(canonical, current, liveThinking)) {
 			// A mode switch still needs to refresh the footer. The live model and
@@ -725,7 +779,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		const target = ctx.modelRegistry.find(
 			canonical.provider,
 			canonical.modelId,
-		) as Model<any> | undefined;
+		) as Model<Api> | undefined;
 		const needs_model =
 			current?.provider !== canonical.provider || current?.id !== canonical.modelId;
 		if (needs_model && (!target || !ctx.modelRegistry.hasConfiguredAuth(target))) return;
@@ -757,7 +811,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		});
 	}
 
-	function updateStatus(ctx: any): void {
+	function updateStatus(ctx: ExtensionContext): void {
 		pi.events.emit("powerbar:update", {
 			id: `pi-agents-${currentMode}`,
 			text: MODES[currentMode].label,
@@ -774,12 +828,12 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		request_live_mode_render(ctx);
 	}
 
-	function sync_active_tools(ctx: any): void {
+	function sync_active_tools(ctx: ExtensionContext): void {
 		if (currentMode !== "code") return;
 		pi.setActiveTools(build_full_tools(model_provider_of(ctx.model)));
 	}
 
-	async function apply_mode(modeId: string, ctx: any): Promise<void> {
+	async function apply_mode(modeId: string, ctx: ExtensionContext): Promise<void> {
 		const mode = MODES[modeId];
 		if (!mode) return;
 
@@ -836,7 +890,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		writePersistedState({ mode: currentMode, modeModels: mode_models });
 	}
 
-	async function switchMode(modeId: string, ctx: any): Promise<void> {
+	async function switchMode(modeId: string, ctx: ExtensionContext): Promise<void> {
 		if (!MODES[modeId]) return;
 		if (!is_live_session(ctx)) {
 			// Queue only for the session that is currently binding. Never retain a
@@ -853,7 +907,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			description: `Toggle ${mode.label} mode${
 				modeId === DEFAULT_MODE ? " (full access)" : " (read-only)"
 			}`,
-			handler: async (_args: any, ctx: any) => {
+			handler: async (_args: string, ctx: ExtensionCommandContext) => {
 				if (currentMode === modeId) {
 					await switchMode(DEFAULT_MODE, ctx);
 				} else {
@@ -863,7 +917,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		});
 	}
 
-	const cycleMode = async (ctx: any): Promise<void> => {
+	const cycleMode = async (ctx: ExtensionContext): Promise<void> => {
 		const baseMode = pending_mode_id ?? currentMode;
 		const idx = CYCLE_ORDER.indexOf(baseMode);
 		const next = CYCLE_ORDER[(idx + 1) % CYCLE_ORDER.length];
@@ -877,7 +931,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	let thinking_editor_installed = false;
 
-	const install_thinking_editor = (ctx: any): void => {
+	const install_thinking_editor = (ctx: ExtensionContext): void => {
 		if (!ctx.hasUI) return;
 		if (thinking_editor_installed) return;
 
@@ -889,28 +943,53 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			// @earendil-works/pi-tui from a different module copy than the extension,
 			// so the prototype patch in pi-ember-ui/index.ts may not affect the live
 			// Editor class that actually renders the chatbox.
-			wrapEditorRenderForShell(editor);
+			wrapEditorRenderForShell(
+				editor as unknown as Parameters<typeof wrapEditorRenderForShell>[0],
+			);
 			const original_handle_input = editor.handleInput.bind(editor);
 			editor.handleInput = (data: string): void => {
-				prepare_app_clear_input(data, editor);
-				const shellResult = processShellInput(data, editor);
+				prepare_app_clear_input(
+					data,
+					editor as unknown as Parameters<typeof prepare_app_clear_input>[1],
+				);
+				const shellResult = processShellInput(
+					data,
+					editor as unknown as Parameters<typeof processShellInput>[1],
+				);
 				if (shellResult?.consume) {
-					requestShellModeVisualRefresh(editor, ctx);
+					requestShellModeVisualRefresh(
+						editor as unknown as Parameters<typeof requestShellModeVisualRefresh>[0],
+						ctx,
+					);
 					return;
 				}
 				if (shellResult?.data !== undefined && shellResult.data !== data) {
 					data = shellResult.data;
 				}
-				if (interceptShellInput(data, editor)) {
+				if (
+					interceptShellInput(
+						data,
+						editor as unknown as Parameters<typeof interceptShellInput>[1],
+					)
+				) {
 					// Shell mode was entered/exited — the editor text didn't change
 					// (empty → empty) so Pi's differential renderer won't re-render
 					// the chatbox row. Force a render so the prompt glyph (`>` ↔ `!`)
 					// and border color update immediately, and refresh the footer so
 					// the left stats flip to / from `shell`.
-					requestShellModeVisualRefresh(editor, ctx);
+					requestShellModeVisualRefresh(
+						editor as unknown as Parameters<typeof requestShellModeVisualRefresh>[0],
+						ctx,
+					);
 					return;
 				}
-				if (intercept_slash_escape(data, editor)) return;
+				if (
+					intercept_slash_escape(
+						data,
+						editor as unknown as Parameters<typeof intercept_slash_escape>[1],
+					)
+				)
+					return;
 				// Detect the thinking-blocks toggle (Ctrl+T by default, user-remappable)
 				// before Pi's handler runs. Component-tree changes are followed by
 				// one normal public render request; Pi owns shrink handling and all
@@ -942,12 +1021,24 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				// stripped back into the chatbox.
 				if (consumePendingShellSubmitEnter()) {
 					withSuppressedShellHistorySync(() => editor.setText?.(""));
-					requestShellModeVisualRefresh(editor, ctx);
-				} else if (syncShellModeFromEditorText(editor)) {
-					requestShellModeVisualRefresh(editor, ctx);
+					requestShellModeVisualRefresh(
+						editor as unknown as Parameters<typeof requestShellModeVisualRefresh>[0],
+						ctx,
+					);
+				} else if (
+					syncShellModeFromEditorText(
+						editor as unknown as Parameters<typeof syncShellModeFromEditorText>[0],
+					)
+				) {
+					requestShellModeVisualRefresh(
+						editor as unknown as Parameters<typeof requestShellModeVisualRefresh>[0],
+						ctx,
+					);
 				}
 
-				finalizeEditorInputAfter(editor);
+				finalizeEditorInputAfter(
+					editor as unknown as Parameters<typeof finalizeEditorInputAfter>[0],
+				);
 				if (is_thinking_toggle) {
 					queueMicrotask(() => requestTuiRender());
 				}
@@ -960,7 +1051,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	pi.registerCommand("subagent-model", {
 		description: "Set the model and thinking level for subagents on next spawn",
-		handler: async (_args: any, ctx: any) => {
+		handler: async (_args: string, ctx: ExtensionCommandContext) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("subagent-model requires interactive UI.", "error");
 				return;
@@ -1022,7 +1113,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		},
 	});
 
-	async function copy_plan_to_clipboard(ctx: any): Promise<void> {
+	async function copy_plan_to_clipboard(ctx: ExtensionContext): Promise<void> {
 		const plan = latest_plan_text.trim();
 		if (!plan) {
 			ctx.ui.notify("No plan text is available to copy.", "error");
@@ -1037,13 +1128,27 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	}
 
-	async function showPlanReview(ctx: any) {
+	async function showPlanReview(ctx: ExtensionContext) {
 		const answers = await askQuiz(ctx, "Plan Review", build_plan_review_questions());
 		return resolve_plan_review_answer(answers?.[0]);
 	}
 
+	async function showPlanImplementationMode(
+		ctx: ExtensionContext,
+	): Promise<PlanImplementationMode | undefined> {
+		const answers = await askQuiz(
+			ctx,
+			"Implement via",
+			build_plan_implementation_questions(),
+			{ includeNone: false },
+		);
+		const mode = resolve_plan_implementation_mode(answers?.[0]);
+		if (!mode) ctx.ui.notify("Plan implementation cancelled.");
+		return mode;
+	}
+
 	async function showLoopRecovery(
-		ctx: any,
+		ctx: ExtensionContext,
 	): Promise<{ action: "end" | "retry" | "custom"; instruction?: string } | undefined> {
 		const questions: QuizQuestion[] = [
 			{
@@ -1064,7 +1169,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		return undefined;
 	}
 
-	async function handlePlanImplementFreshContext(ctx: any) {
+	async function handlePlanImplementFreshContext(ctx: ExtensionContext) {
 		const plan = latest_plan_text.trim();
 		if (!plan) {
 			ctx.ui.notify("No plan text is available.", "error");
@@ -1075,6 +1180,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			ctx.ui.notify("Fresh-context implement is unavailable in this mode.", "error");
 			return;
 		}
+		const implementation_mode = await showPlanImplementationMode(ctx);
+		if (!implementation_mode) return;
 
 		waitingForPlan = false;
 		latest_plan_text = "";
@@ -1082,24 +1189,24 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		//
 		// Session replacement invalidates the module-level `pi` (the ExtensionAPI
 		// bound to the plan session's runtime). The new session re-invokes this
-		// plugin factory with a fresh `pi`, and its `session_start` → `restoreMode`
-		// lands on code mode automatically: the fresh session has no
-		// `pi-agents-enter-*` custom messages, so `getLastModeFromSession` returns
-		// null and `restoreMode` sets `currentMode = DEFAULT_MODE` with the full
-		// code tool set via the new (valid) `pi`. Calling `apply_mode` here would
-		// touch the stale `pi` and throw, which the interactive-mode wrapper turns
-		// into `handleFatalRuntimeError` → `process.exit(1)` (the "Ctrl+C" quit).
+		// plugin factory with a fresh `pi`; seed an explicit mode marker so its
+		// `session_start` → `restoreMode` cannot inherit the persisted plan mode.
+		// Calling `apply_mode` here would touch the stale `pi` and throw, which the
+		// interactive-mode wrapper turns into `handleFatalRuntimeError` →
+		// `process.exit(1)` (the "Ctrl+C" quit).
 		//
 		// So: never touch the stale module-level `pi` after `newSession()`. Seed
-		// the plan as the first user message via `setup`, then send the hidden
-		// implement directive + follow-up via the fresh `ReplacedSessionContext`
-		// (`newCtx`). Any error is notified, never thrown out of `withSession` —
+		// the target mode and plan as the first session entries via `setup`, then
+		// send the mode-specific hidden directive + follow-up via the fresh
+		// `ReplacedSessionContext` (`newCtx`). Any error is notified, never thrown
+		// out of `withSession` —
 		// the wrapper exits the process on an uncaught `withSession` throw.
 		//
 		try {
 			const result = await newSession({
 				parentSession,
 				setup: async (sm: SessionManager) => {
+					seed_fresh_context_mode(sm, implementation_mode);
 					sm.appendMessage({
 						role: "user",
 						content: [{ type: "text", text: plan }],
@@ -1108,21 +1215,36 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 				},
 				withSession: async (newCtx) => {
 					try {
+						writePersistedState({ mode: implementation_mode, modeModels: mode_models });
+						await newCtx.sendMessage({
+							customType: `pi-agents-enter-${implementation_mode}`,
+							content: `Entered ${MODES[implementation_mode].label} mode.`,
+							display: false,
+						});
 						await newCtx.sendMessage({
 							customType: "pi-agents-plan-implement",
 							content: build_plan_implement_message_content(
 								plan,
-								plan_implement_prompt(model_provider_of(newCtx.model)),
+								plan_implement_prompt(
+									model_provider_of(newCtx.model),
+									"above",
+									implementation_mode,
+								),
 							),
 							display: false,
 						});
-						await newCtx.sendUserMessage("Execute the plan following the modules.", {
-							deliverAs: "followUp",
-						});
+						await newCtx.sendUserMessage(
+							implementation_mode === "orchestrate"
+								? "Delegate the plan to subagents."
+								: "Execute the plan following the modules.",
+							{
+								deliverAs: "followUp",
+							},
+						);
 					} catch (err) {
 						// Never let a withSession throw escape: the interactive-mode
 						// command-context wrapper turns it into a fatal process exit.
-						ctx.ui.notify(
+						newCtx.ui.notify(
 							`Fresh-context implement failed to start: ${
 								err instanceof Error ? err.message : String(err)
 							}`,
@@ -1144,7 +1266,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	}
 
-	async function handlePlanImplement(ctx: any) {
+	async function handlePlanImplement(ctx: ExtensionContext) {
 		const plan = latest_plan_text.trim();
 		if (!plan) {
 			ctx.ui.notify("No plan text is available.", "error");
@@ -1165,38 +1287,11 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			pi.sendUserMessage("Execute the plan following the modules.");
 			return;
 		}
-		const implementQuestions: QuizQuestion[] = [
-			{
-				id: "implement-via",
-				label: "Implement",
-				prompt: "Implement the plan via which mode?",
-				options: [
-					{
-						value: "code",
-						label: "Code",
-						description: "Execute the plan with full tool access.",
-					},
-					{
-						value: "orchestrate",
-						label: "Orchestrate",
-						description: "Delegate the plan to subagents.",
-					},
-				],
-			},
-		];
-		const answers = await askQuiz(ctx, "Implement via", implementQuestions, {
-			includeNone: false,
-		});
-		const answer = answers?.[0];
-		if (!answer) {
-			ctx.ui.notify("Plan implementation cancelled.");
-			return;
-		}
-		const target = answer.value === "orchestrate" ? "Orchestrate" : "Code";
-		const targetMode = answer.value === "orchestrate" ? "orchestrate" : DEFAULT_MODE;
-		await switchMode(targetMode, ctx);
+		const implementation_mode = await showPlanImplementationMode(ctx);
+		if (!implementation_mode) return;
+		await switchMode(implementation_mode, ctx);
 		const msg =
-			target === "Orchestrate"
+			implementation_mode === "orchestrate"
 				? "Delegate the plan to subagents."
 				: "Execute the plan following the modules.";
 		const provider = model_provider_of(ctx.model);
@@ -1204,7 +1299,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			customType: "pi-agents-plan-implement",
 			content: build_plan_implement_message_content(
 				plan,
-				plan_implement_prompt(provider, "below"),
+				plan_implement_prompt(provider, "below", implementation_mode),
 			),
 			display: false,
 		});
@@ -1217,7 +1312,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		return typeof prompt === "string" && /health\s*check/i.test(prompt);
 	}
 
-	function build_system_prompt(event: any, modeReminder: string): string {
+	function build_system_prompt(event: BeforeAgentStartEvent, modeReminder: string): string {
 		let reminder = modeReminder;
 		if (currentMode === "orchestrate" && is_health_check_prompt(event.prompt)) {
 			reminder = `${reminder}\n\n${HEALTH_CHECK_PROMPT_APPENDIX}`;
@@ -1225,7 +1320,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		return `${event.systemPrompt}${PARALLEL_TOOL_CALL_GUIDANCE}\n\n${reminder}`;
 	}
 
-	pi.on("before_agent_start", async (event: any, ctx: any) => {
+	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: ExtensionContext) => {
 		const provider = model_provider_of(ctx.model);
 		const plan_arm = arm_plan_turn(currentMode, event.prompt);
 		if (plan_arm.armed) {
@@ -1289,7 +1384,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	 * resume directive built by build_auto_continue_content — it does NOT
 	 * re-paste the compaction summary.
 	 */
-	async function resume_after_output_limit(ctx: any): Promise<void> {
+	async function resume_after_output_limit(ctx: ExtensionContext): Promise<void> {
 		setPlanAutoContinuing(true);
 		const branch = (ctx?.sessionManager?.getBranch?.() ?? []) as
 			| Array<{ type?: string } | null | undefined>
@@ -1328,7 +1423,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		loop_prompt_active = false;
 	});
 
-	pi.on("tool_call", (event: any, ctx: any) => {
+	pi.on("tool_call", (event: ToolCallEvent, ctx: ExtensionContext) => {
 		const provider = model_provider_of(ctx.model);
 		const activeTools = mode_tools_for_provider(currentMode, provider);
 		if (!activeTools.includes(event.toolName)) {
@@ -1377,8 +1472,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		}
 	});
 
-	pi.on("turn_end", (event: any) => {
-		const msg = event?.message;
+	pi.on("turn_end", (event: TurnEndEvent) => {
+		const msg = event.message as AssistantMessage | undefined;
 		const plan_text = waitingForPlan && currentMode === "plan" ? assistant_text(msg) : "";
 		if (plan_text) {
 			latest_plan_text = latest_plan_text ? `${latest_plan_text}\n\n${plan_text}` : plan_text;
@@ -1396,10 +1491,10 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			is_non_generic_error((msg?.content as { errorMessage?: string })?.errorMessage);
 	});
 
-	pi.on("agent_settled", async (_event: any, ctx: any) => {
+	pi.on("agent_settled", async (_event: AgentSettledEvent, ctx: ExtensionContext) => {
 		if (loop_detected && !loop_prompt_active) {
 			loop_prompt_active = true;
-			const model = ctx.model as Model<any> | undefined;
+			const model = ctx.model as Model<Api> | undefined;
 			const model_name = model?.name ?? model?.id ?? "The model";
 			if (ctx.hasUI) {
 				ctx.ui.notify(
@@ -1489,17 +1584,19 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		lastTurnError = false;
 	});
 
-	async function restore_mode_model(ctx: any, modeId: string): Promise<void> {
+	async function restore_mode_model(ctx: ExtensionContext, modeId: string): Promise<void> {
 		const bound = get_mode_model(mode_models, modeId);
 		if (!bound) return;
 		await apply_bound_model(ctx, bound);
 	}
 
-	async function restoreMode(ctx: any): Promise<void> {
+	async function restoreMode(ctx: ExtensionContext): Promise<void> {
 		const persisted = readPersistedState();
 		const provider = model_provider_of(ctx.model);
+		const fresh_context_mode = get_fresh_context_mode(ctx, MODE_IDS);
 		const savedMode =
-			persisted.mode && persisted.mode in MODES ? persisted.mode : getLastModeFromSession(ctx);
+			fresh_context_mode ??
+			(persisted.mode && persisted.mode in MODES ? persisted.mode : getLastModeFromSession(ctx));
 		if (savedMode && savedMode !== DEFAULT_MODE) {
 			currentMode = savedMode;
 			lastMessagedMode = savedMode;
@@ -1513,7 +1610,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		pi.events.emit("pi-ember-ui:mode-change", { mode: currentMode, liveOnly: true });
 	}
 
-	pi.on("session_start", async (_event: any, ctx: any) => {
+	pi.on("session_start", async (_event: SessionStartEvent, ctx: ExtensionContext) => {
 		// The TUI can accept input while /resume is still rebinding extensions.
 		// Keep mode switching lazy until all session-bound setup has finished.
 		active_session_manager = ctx.sessionManager;
@@ -1537,8 +1634,8 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 
 	let last_patch_tool_provider: string | undefined;
 
-	pi.on("model_select", async (event: any, ctx: any) => {
-		const model = event.model as Model<any> | undefined;
+	pi.on("model_select", async (event: { model: Model<Api>; source: string }, ctx: ExtensionContext) => {
+		const model = event.model as Model<Api> | undefined;
 		if (!model) return;
 		const provider = model_provider_of(model);
 		const prev_provider = last_patch_tool_provider;
@@ -1577,12 +1674,12 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 		last_patch_tool_provider = provider;
 	});
 
-	pi.on("thinking_level_select", (event: any, ctx: any) => {
+	pi.on("thinking_level_select", (event: { level: string }, ctx: ExtensionContext) => {
 		if (!is_live_session(ctx)) return;
 		if (applying_mode_model || applying_mode_thinking_level) return;
 		const level = normalize_thinking_level(event?.level);
 		if (!level) return;
-		const identity = model_identity_of(ctx.model as Model<any> | undefined, level);
+		const identity = model_identity_of(ctx.model as Model<Api> | undefined, level);
 		if (identity) bind_current_mode_model(identity);
 		request_live_mode_render(ctx);
 	});
@@ -1590,7 +1687,7 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 	// Mark footer stats dirty when usage/context changes. A zero-delay timer
 	// coalesces parallel tool completions into one O(n) recomputation per
 	// event-loop burst, away from the footer render closure.
-	pi.on("message_end", (event: any, ctx: any) => {
+	pi.on("message_end", (event: { message: AgentMessage }, ctx: ExtensionContext) => {
 		scheduleFooterStats(ctx);
 		// Set the auto-continue suppression flag BEFORE the TUI renders the
 		// assistant message (extension message_end fires before the interactive-mode
@@ -1608,11 +1705,14 @@ export default async function piCustomAgentsPlugin(pi: any): Promise<void> {
 			setPlanAutoContinuing(true);
 		}
 	});
-	pi.on("tool_execution_end", (_event: any, ctx: any) => {
+	pi.on("tool_execution_end", (
+		_event: { toolCallId: string; toolName: string },
+		ctx: ExtensionContext,
+	) => {
 		scheduleFooterStats(ctx);
 	});
 
-	pi.on("session_shutdown", (_event: any, _ctx: any) => {
+	pi.on("session_shutdown", (_event: SessionShutdownEvent, _ctx: ExtensionContext) => {
 		// Invalidate shortcut contexts before the old runtime is disposed. A Tab
 		// press during /resume is ignored instead of calling setActiveTools or
 		// mutating UI state through a stale session.

@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
 import {
 	CustomEditor,
 	type ExtensionAPI,
+	type ExtensionContext,
 	ExtensionRunner,
 	type SessionInfo,
 	SessionManager,
@@ -98,15 +98,52 @@ type PendingModelPick = {
 	resolve: (result: ModelPickResult) => void;
 };
 
-let model_picker_ctx: any;
+/**
+ * Narrow contract for the live editor this module intercepts. pi-tui's public
+ * Editor type hides submitValue / requestAutocomplete / cancelAutocomplete /
+ * state / autocompleteProvider (private members), and the live instance may be
+ * any EditorComponent (CustomEditor or a previous factory component), so this
+ * structural view is the shared internal surface. Exported entry points keep
+ * `editor: any` because the actual instances cannot be assigned to a type that
+ * names those private members.
+ */
+type ModelPickerEditor = {
+	getText?: () => string;
+	getExpandedText?: () => string;
+	setText?: (text: string) => void;
+	handleInput?: (data: string) => void;
+	isShowingAutocomplete?: () => boolean;
+	cancelAutocomplete?: () => void;
+	requestAutocomplete?: (options?: { force?: boolean; explicitTab?: boolean }) => void;
+	submitValue?: () => void;
+	tui?: { requestRender?: () => void };
+	state?: { lines: string[]; cursorLine: number; cursorCol: number };
+	autocompleteProvider?: unknown;
+};
+
+let model_picker_ctx: ExtensionContext | undefined;
 let model_picker_pi: ExtensionAPI | undefined;
-let live_editor: any;
+let live_editor: ModelPickerEditor | undefined;
 let pending_pick: PendingModelPick | null = null;
 /** True while the in-editor Switch Model list is open. */
 let model_selector_busy = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:model-picker-patched");
 /** Per-editor native submit — instance patch may differ from Editor.prototype. */
 const NATIVE_SUBMIT_KEY = Symbol.for("pi-ember-ui:native-submit");
+
+/** Mutable surface of `Editor.prototype` members this module patches (private in pi-tui). */
+type EditorPrototypePatchSurface = {
+	createAutocompleteList?: (this: Editor, prefix: string, items: AutocompleteItem[]) => void;
+	submitValue?: (this: Editor) => void;
+	handleTabCompletion?: (this: Editor) => void;
+};
+
+/** Editor internals the Tab-completion slash-args patch must read (private in pi-tui). */
+type EditorTabCompletionInternals = {
+	autocompleteProvider?: unknown;
+	state: { lines: string[]; cursorLine: number; cursorCol: number };
+	requestAutocomplete: (options?: { force?: boolean; explicitTab?: boolean }) => void;
+};
 /** Pre-patch Editor.submitValue fallback when instance key is missing. */
 let native_editor_submit_value: ((this: Editor) => void) | undefined;
 
@@ -121,16 +158,16 @@ export function cancel_pending_model_pick(): void {
 	pending_pick = null;
 }
 
-function editor_is_showing_autocomplete(editor: any): boolean {
+function editor_is_showing_autocomplete(editor: ModelPickerEditor): boolean {
 	return editor.isShowingAutocomplete?.() === true;
 }
 
-function request_editor_render(editor: any): void {
+function request_editor_render(editor: ModelPickerEditor): void {
 	editor?.tui?.requestRender?.();
 }
 
 /** Request slash-command argument completions (e.g. /model provider/id). */
-function trigger_slash_argument_autocomplete(editor: any): void {
+function trigger_slash_argument_autocomplete(editor: ModelPickerEditor): void {
 	// Never simulate Tab via handleInput(keyName): custom bindings like ctrl+space
 	// are not real terminal sequences and get inserted as literal editor text.
 	const request = editor.requestAutocomplete;
@@ -140,7 +177,11 @@ function trigger_slash_argument_autocomplete(editor: any): void {
 }
 
 /** Open a slash command + optional arg search inside the editor chat pill. */
-function open_slash_autocomplete(editor: any, command: string, initialSearch = ""): void {
+function open_slash_autocomplete(
+	editor: ModelPickerEditor,
+	command: string,
+	initialSearch = "",
+): void {
 	live_editor = editor;
 	const text = initialSearch ? `${command} ${initialSearch}` : `${command} `;
 	editor.setText?.(text);
@@ -157,7 +198,7 @@ export function open_resume_autocomplete(editor: any, initialSearch = ""): void 
 
 async function apply_model_selection(
 	pi: ExtensionAPI,
-	ctx: any,
+	ctx: ExtensionContext,
 	selection: {
 		provider: string;
 		id: string;
@@ -172,7 +213,7 @@ async function apply_model_selection(
 		return false;
 	}
 	try {
-		await pi.setModel(model as Model<any>);
+		await pi.setModel(model);
 		if (selection.thinkingLevel) {
 			set_footer_thinking_level(selection.thinkingLevel);
 			if (selection.syncThinkingLevelToPi) {
@@ -220,7 +261,7 @@ async function apply_model_selection(
 
 async function apply_model_from_command(
 	pi: ExtensionAPI,
-	ctx: any,
+	ctx: ExtensionContext,
 	searchTerm: string,
 ): Promise<void> {
 	const models = ctx.modelRegistry.getAvailable();
@@ -280,7 +321,10 @@ function read_mode_models(): Partial<Record<string, { readonly provider: string;
 }
 
 /** Open the in-editor Switch Model list (chatbox stays; models grow below). */
-function open_model_selector_ui(editor: any, options: string | PickModelInEditorOptions = ""): void {
+function open_model_selector_ui(
+	editor: ModelPickerEditor,
+	options: string | PickModelInEditorOptions = "",
+): void {
 	if (!model_picker_ctx || !model_picker_pi) return;
 	const ctx = model_picker_ctx;
 	const pi = model_picker_pi;
@@ -296,7 +340,7 @@ function open_model_selector_ui(editor: any, options: string | PickModelInEditor
 		currentMode: (pi as { getMode?: () => string }).getMode?.() ?? undefined,
 		onConfirm: async (selected) => {
 			model_selector_busy = false;
-			finalize_editor_input_after(live_editor);
+			if (live_editor) finalize_editor_input_after(live_editor);
 			if (pending_pick) {
 				const pick = pending_pick;
 				pending_pick = null;
@@ -312,7 +356,7 @@ function open_model_selector_ui(editor: any, options: string | PickModelInEditor
 		},
 		onCancel: () => {
 			model_selector_busy = false;
-			finalize_editor_input_after(live_editor);
+			if (live_editor) finalize_editor_input_after(live_editor);
 			if (pending_pick) {
 				pending_pick.resolve(undefined);
 				pending_pick = null;
@@ -329,7 +373,7 @@ function open_model_selector_ui(editor: any, options: string | PickModelInEditor
  * Route `/model` typing into the single in-editor family picker and keep Pi's
  * argument autocomplete suppressed.
  */
-function route_model_slash_input(editor: any): void {
+function route_model_slash_input(editor: ModelPickerEditor): void {
 	const trimmed = editor.getText?.()?.trim() ?? "";
 	if (is_model_picker_active()) {
 		bind_picker_editor(editor);
@@ -345,7 +389,7 @@ function route_model_slash_input(editor: any): void {
 	open_model_picker_from_slash(editor, normalize_picker_filter(trimmed));
 }
 
-function clear_editor_without_submit(editor: any): void {
+function clear_editor_without_submit(editor: ModelPickerEditor): void {
 	editor.cancelAutocomplete?.();
 	editor.setText?.("");
 	finalize_editor_input_after(editor);
@@ -360,7 +404,7 @@ function should_open_model_picker_while_typing(text: string): boolean {
 }
 
 /** Open the in-editor picker immediately (no microtask — avoids arrow-key races). */
-function open_model_picker_from_slash(editor: any, initialSearch = ""): void {
+function open_model_picker_from_slash(editor: ModelPickerEditor, initialSearch = ""): void {
 	if (is_model_picker_active()) return;
 	live_editor = editor;
 	editor?.cancelAutocomplete?.();
@@ -381,7 +425,7 @@ function open_model_picker_from_slash(editor: any, initialSearch = ""): void {
 /**
  * @deprecated Alias — opens synchronously; kept for call-site clarity.
  */
-function prepare_and_schedule_model_selector(editor: any, initialSearch = ""): void {
+function prepare_and_schedule_model_selector(editor: ModelPickerEditor, initialSearch = ""): void {
 	open_model_picker_from_slash(editor, initialSearch);
 }
 
@@ -394,7 +438,7 @@ function is_resume_command_text(text: string): boolean {
  * `provider/id` still applies immediately on submit. Never fall through to Pi's
  * ModelSelectorComponent overlay or argument autocomplete list.
  */
-function handle_model_command_text(editor: any, text: string): boolean {
+function handle_model_command_text(editor: ModelPickerEditor, text: string): boolean {
 	if (!is_model_command_text(text)) return false;
 
 	// Enter while the in-editor model list is open must not reopen it.
@@ -436,7 +480,7 @@ function handle_model_command_text(editor: any, text: string): boolean {
  * SessionSelectorComponent overlay. Mirrors /model — never registerCommand("resume")
  * (that conflicts with the built-in and triggers the extension-issues warning).
  */
-function handle_resume_command_text(editor: any, text: string): boolean {
+function handle_resume_command_text(editor: ModelPickerEditor, text: string): boolean {
 	if (!is_resume_command_text(text)) return false;
 	const searchTerm = text.slice(RESUME_PREFIX.length).trim();
 	if (text === RESUME_PREFIX || !searchTerm) {
@@ -485,7 +529,7 @@ function fallback_to_native_resume(session_path: string): boolean {
 	const native_submit = get_editor_native_submit(editor);
 	if (!editor || typeof native_submit !== "function") return false;
 	editor.setText?.(`${RESUME_PREFIX} ${session_path}`);
-	native_submit.call(editor);
+	native_submit.call(editor as unknown as Editor);
 	return true;
 }
 
@@ -513,22 +557,22 @@ export function set_native_editor_submit_value_for_tests(
 
 /** Test seam: bind live editor for /resume fallback tests. */
 export function bind_live_editor_for_tests(editor: unknown): void {
-	live_editor = editor;
+	live_editor = editor as ModelPickerEditor | undefined;
 }
 
 /** Test seam: bind ctx for /resume tests. */
 export function bind_model_picker_ctx_for_tests(ctx: unknown): void {
-	model_picker_ctx = ctx;
+	model_picker_ctx = ctx as ExtensionContext | undefined;
 }
 
 /** Route shared slash overrides before Pi's overlay selectors. */
-function handle_slash_override_text(editor: any, text: string): boolean {
+function handle_slash_override_text(editor: ModelPickerEditor, text: string): boolean {
 	if (handle_model_command_text(editor, text)) return true;
 	if (handle_resume_command_text(editor, text)) return true;
 	return false;
 }
 
-function intercept_slash_override_command(data: string, editor: any): boolean {
+function intercept_slash_override_command(data: string, editor: ModelPickerEditor): boolean {
 	const kb = getKeybindings();
 	if (!kb.matches(data, "tui.select.confirm") && !kb.matches(data, "tui.input.submit")) {
 		return false;
@@ -566,7 +610,11 @@ export function should_auto_submit_resume_text(text: string): boolean {
 }
 
 /** Outermost editor wrap — call from pi-custom-agents editor factory after other wraps. */
-export function wrap_model_picker_editor(editor: any, pi: ExtensionAPI, ctx: any): void {
+export function wrap_model_picker_editor(
+	editor: any,
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+): void {
 	live_editor = editor;
 	model_picker_ctx = ctx;
 	model_picker_pi = pi;
@@ -735,7 +783,7 @@ function session_to_autocomplete_item(session: SessionInfo): AutocompleteItem {
 	};
 }
 
-async function load_sessions_for_ctx(ctx: any): Promise<SessionInfo[]> {
+async function load_sessions_for_ctx(ctx: ExtensionContext): Promise<SessionInfo[]> {
 	const sm = ctx?.sessionManager;
 	const cwd = typeof sm?.getCwd === "function" ? sm.getCwd() : (ctx?.cwd as string | undefined);
 	if (!cwd) return [];
@@ -838,18 +886,18 @@ export function create_resume_autocomplete_provider(
 }
 
 function install_model_picker_prototype_patches(): void {
-	const runnerProto = ExtensionRunner.prototype as any;
+	const runnerProto = ExtensionRunner.prototype as unknown as { [EMBER_PATCH_MARKER]?: boolean };
 	if (runnerProto[EMBER_PATCH_MARKER]) return;
 	runnerProto[EMBER_PATCH_MARKER] = true;
 
 	install_command_context_capture();
 
-	const editorProto = Editor.prototype as any;
+	const editorProto = Editor.prototype as unknown as EditorPrototypePatchSurface;
 	if (typeof editorProto.createAutocompleteList === "function") {
 		editorProto.createAutocompleteList = function createAutocompleteListPatched(
 			this: Editor,
 			prefix: string,
-			items: any[],
+			items: AutocompleteItem[],
 		) {
 			const text = this.getText?.()?.trim() ?? "";
 			if (is_model_picker_active() || is_model_command_text(text)) {
@@ -882,7 +930,7 @@ function install_model_picker_prototype_patches(): void {
 		editorProto.submitValue = function submitValueSlashOverridePatched(this: Editor): void {
 			if (is_model_picker_active()) return;
 			const trimmed = this.getText().trim();
-			if (handle_slash_override_text(this, trimmed)) return;
+			if (handle_slash_override_text(this as unknown as ModelPickerEditor, trimmed)) return;
 			originalSubmitValue.call(this);
 		};
 	}
@@ -892,7 +940,7 @@ function install_model_picker_prototype_patches(): void {
 		editorProto.handleTabCompletion = function handleTabCompletionSlashArgsPatched(
 			this: Editor,
 		): void {
-			const self = this as any;
+			const self = this as unknown as EditorTabCompletionInternals;
 			if (!self.autocompleteProvider) return;
 			const currentLine = self.state.lines[self.state.cursorLine] || "";
 			const beforeCursor = currentLine.slice(0, self.state.cursorCol);
@@ -912,7 +960,7 @@ function install_model_picker_prototype_patches(): void {
 	): void {
 		const kb = getKeybindings();
 		if (kb.matches(data, "app.model.select")) {
-			prepare_and_schedule_model_selector(this);
+			prepare_and_schedule_model_selector(this as unknown as ModelPickerEditor);
 			return;
 		}
 		if (kb.matches(data, "app.session.resume")) {
@@ -978,7 +1026,7 @@ export function uninstall_model_picker_input_listener(): void {
 }
 
 /** Bind per-session ctx used by /model and /resume routing and pending picks. */
-export function bind_model_picker_session(ctx: any, pi: ExtensionAPI): void {
+export function bind_model_picker_session(ctx: ExtensionContext, pi: ExtensionAPI): void {
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
 	model_picker_ctx = ctx;
 	model_picker_pi = pi;
@@ -1008,7 +1056,7 @@ export function reset_model_picker_session(): void {
  * Same editor-replacement UI as `/model` / `app.model.select`.
  */
 export async function pick_model_in_editor(
-	ctx: any,
+	ctx: ExtensionContext,
 	pi: ExtensionAPI,
 	options: string | PickModelInEditorOptions = "",
 ): Promise<ModelPickResult> {
@@ -1017,12 +1065,13 @@ export async function pick_model_in_editor(
 		ctx.ui.notify("Model picker requires the editor.", "warning");
 		return undefined;
 	}
+	const editor = live_editor;
 	model_picker_ctx = ctx;
 	model_picker_pi = pi;
 	const normalized =
 		typeof options === "string" ? { initialSearch: options } : (options ?? {});
 	return new Promise((resolve) => {
 		pending_pick = { resolve };
-		open_model_selector_ui(live_editor, normalized);
+		open_model_selector_ui(editor, normalized);
 	});
 }

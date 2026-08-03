@@ -84,13 +84,27 @@ export class SubagentGroupRenderer {
 			}
 			if (invalidate) existing.invalidate = invalidate;
 			if (failureMessage) existing.failureMessage = failureMessage;
+			// A call that joined the batch while its args were still streaming may
+			// turn out to be a native parallel/chain call once the brace closes;
+			// eject it back into its own isolated batch so the singles group does
+			// not absorb a multi-mode layout.
+			if (
+				isNativeMultiModeSubagentArgs(args) &&
+				this.batch &&
+				this.batch.length > 1 &&
+				this.batch.includes(existing)
+			) {
+				const remaining = this.batch.filter((member) => member !== existing);
+				this.batch = remaining;
+				remaining[0]?.invalidate?.();
+			}
 			return existing;
 		}
 
 		const record: SubagentCallRecord = { toolCallId, args, results, invalidate, failureMessage };
 		this.by_id.set(toolCallId, record);
 
-		if (isNativeMultiModeSubagentArgs(args) || !isSingleModeSubagentArgs(args)) {
+		if (isNativeMultiModeSubagentArgs(args)) {
 			this.hardExit();
 			this.batch = [record];
 			return record;
@@ -102,11 +116,14 @@ export class SubagentGroupRenderer {
 		}
 
 		const anchor = this.batch[0];
-		if (!isSingleModeSubagentArgs(anchor.args)) {
+		if (isNativeMultiModeSubagentArgs(anchor.args)) {
 			this.batch = [record];
 			return record;
 		}
 
+		// Single-mode AND still-streaming calls (args brace not closed yet) share
+		// one consecutive batch, so an orchestrator emitting several `subagent`
+		// tool calls in a burst does not render a fresh "Delegating" row per call.
 		const prev_owner = anchor;
 		this.batch.push(record);
 		if (this.batch.length === 2) {

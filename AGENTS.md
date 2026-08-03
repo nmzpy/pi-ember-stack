@@ -392,7 +392,16 @@
   or a hard boundary — never on thinking, todo, bare
   `tool_execution_end` / tool success, or Pi `turn_start`. Same-name calls
   (e.g. read a.ts → read b.ts) append below without folding priors;
-  only a different tool name folds the prior wave. Thinking never folds
+  only a different tool name folds the prior wave. **Same-file diff calls
+  merge:** consecutive (or any visible) `edit`/`write`/`apply_patch` calls
+  targeting the same path collapse into ONE child row at render time
+  (`merge_group_child_rows` in `renderer.ts` — identity is the normalized
+  target path, or the first patched file for `apply_patch`) with the `+N -N`
+  accumulated across the merged records (`merged_child_diff_stats`), so
+  `edit a.ts; edit a.ts` shows a single `Editing a.ts +N -N` row instead of a
+  duplicate; each call keeps its own record for results/rebuilds, and the
+  pure `Patching` group dedupes duplicate per-file children the same way.
+  Thinking never folds
   prior tool children — the in-group `└ Thinking` lane appends after
   lingering tool rows. Same-key batches reopen the latest
   settled group (`findReopenableGroup`) instead of spawning another
@@ -847,12 +856,18 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `latest_plan_text` in the hidden `pi-agents-plan-implement` message via
   `build_plan_implement_message_content` in `plan-implement.ts` so compaction
   cannot reduce the approved plan to the short summary),
-  `Implement with fresh context` (`ctx.newSession()` pastes the plan as the
-  first user message, switches to code mode, and kicks implementation),
+  `Implement with fresh context` first opens the same `Implement via` picker;
+  then `ctx.newSession()` pastes the plan as the first user message and starts
+  in the selected Code or Orchestrate mode. A one-shot session marker overrides
+  the persisted Plan mode during replacement startup, is superseded after the
+  new session binds, and the selected mode is persisted for later resume.
   `Copy Plan`, plus the automatic custom `None` option for typed refinements.
-  The `Implement via` follow-up uses the quiz renderer (not `ctx.ui.select`)
-  so its dim chatbox borders stay out of the live plan accent; the selected
-  option uses `text` color like every other quiz screen.
+  The `Implement via` picker is built once in `plan-review.ts` and uses the
+  quiz renderer (not `ctx.ui.select`) so its dim chatbox borders stay out of
+  the live plan accent; the selected option uses `text` color like every other
+  quiz screen. Its hidden implementation directive is mode-specific: Code
+  executes, while Orchestrate delegates to Coder subagents without claiming
+  edit access.
 - **Output-limit auto-continue:** When the model hits the maximum output
   token limit (`stopReason === "length"`) in any mode, the extension
   silently sends a hidden `pi-agents-auto-continue` custom message
@@ -986,6 +1001,22 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `Subagents` header + `└ agent` children with the same status treatment. No
   `⏳`, `[scope]`, or `parallel (N tasks)` labels. Chain mode only shows
   running + completed steps (pending steps hidden until they start).
+  **Streaming delegation collapse:** consecutive `subagent` tool calls whose
+  args brace is still open (or whose results have not arrived) join the same
+  `SubagentGroupRenderer` batch instead of hard-exiting, so an orchestrator
+  emitting a burst of delegations renders ONE gradient `Delegating` header
+  (`renderGroupHeaderLine` SSOT in `render.ts`) rather than one redundant
+  `Delegating` row per call. While the group is still delegating, child rows
+  surface each unveiled agent type (`memberRecordsToRows` SSOT — agent type
+  from `displayName` or streamed `args.agent`, never bare `subagent`) with the
+  shared subagent gradient on the *current* member only; prior members settle
+  to static text when the next invocation starts (`lastDelegatingIndex` +
+  `renderDelegatingAgentLabel`). Unknown-agent members render no child row so
+  `Delegating` never repeats. A streaming member that closes as a native
+  parallel/chain call is ejected back into its own isolated batch. Once every
+  member has results the header reverts to the static `Subagents` label — no
+  gradient on settled headers. `subagent-group.ts` `register()` is the SSOT
+  for batch join/eject; never duplicate the streaming-join logic in providers.
   The completed/failed bullet logic reuses `statusBulletColor` from
   `pi-compact-tools/renderer.ts` — never duplicate it. Failed rows append
   the real failure reason inline next to the agent name in `theme.fg("error", …)`
@@ -1025,7 +1056,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
   providers. Never recreate child auth storage in `index.ts` or `service.ts`.
   `session.prompt()` is async and does not block the TUI
   render loop. Child sessions load a minimal extension set via
-  `discoverAndLoadExtensions()`: shared Ember compaction wiring
+  `discoverAndLoadExtensions()`: the canonical `pi-ember-todo` tool plus shared
+  Ember compaction wiring
   (`plugins/pi-custom-agents/compaction-wiring.ts` on `session_before_compact`,
   same prompts as parent via `stack-compaction.ts`) plus optional DCP outbound
   strategies when global DCP is enabled (`pi-ember-dcp/subagent-wiring.ts` —
@@ -1334,6 +1366,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
 
 - Owns the `todo` tool and `/todos` slash command (task list with `blockedBy`
   DAG, branch replay, and disk fallback under `~/.pi/ember-todo/`).
+- Todo ids are canonical positive integers, with provider strings such as `"1"`
+  and `"#1"` normalized before validation. `update`/`get`/`delete` may target
+  an exact `task` subject when an id is unavailable; agents should use the id
+  returned by `create` and call `list` only when they genuinely need discovery.
 - Available in all parent modes (`plan`, `code`, `orchestrate`) via
   `BASE_RESEARCH_TOOLS` / `build_full_tools` in `pi-custom-agents`, and on the Coder
   subagent tool list. Scout stays without `todo`.
@@ -1345,17 +1381,22 @@ field. Keep that mechanism aligned with the actual plugin folders.
   in-progress uses `text`, completed uses `muted` + strikethrough (no status
   glyphs on child rows). No accent, `toolTitle`, or `warning` tokens on task
   rows. Transcript layout lives in `render.ts` (`task_subject_token`,
-  `format_transcript_task_line`, `TodoTranscriptComponent`).
+  `TodoTranscriptComponent`). Tree child rows (`├─`/`└─`) are indented 2
+  columns (`TODO_TREE_INDENT`) so the pipe starts below the `T` of the
+  `• Todo` header (bullet + space = 2 columns), not below the `d` or the
+  bullet point.
 - Consecutive `todo` calls in one assistant burst fold into a single `• Todo`
   header with tree child rows at the **latest** todo's transcript position;
   earlier todo slots in the burst collapse to zero height. The live block
   updates via shared `CompactGroupText` on `record.group` (rebuild-safe).
   Only a **user message** or **compaction** starts a fresh todo group — edits/grep/bash
   between todo calls do not split the group (`timeline.ts` boundary on rebuild;
-  `message_start` user settle live; `session_compact` resets renderer + replays
-  post-compact state only (pre-compaction todo rows collapse to zero height;
-  `seed_todo_renderer_from_branch` and `is_post_compaction_todo_call` use the
-  post-compact branch slice). `todo` does not hard-split the unified
+  `message_start` user settle live; `session_compact` **resets the task-list
+  state to fresh** — pre-compaction tasks and rows are dropped, the durable
+  disk copy is overwritten with the empty state, and the next `todo create`
+  restarts at `#1`; `replay_from_branch` honors only post-compaction todo
+  results via `branch_entries_after_last_compaction`; `seed_todo_renderer_from_branch`
+  and `is_post_compaction_todo_call` use the post-compact branch slice). `todo` does not hard-split the unified
   work bundle either — `pi-compact-tools` `noteSoftInterveningToolCall()`
   (`WORK_GROUP_SOFT_BOUNDARY_TOOLS`) keeps the `__work__` header reopenable
   after a todo row and migrates the work header below the todo on the next
@@ -1374,6 +1415,16 @@ field. Keep that mechanism aligned with the actual plugin folders.
   → `todo`) covers Cursor-native names and is separate from this rewrite.
 - DCP lists `todo` in `ALWAYS_PROTECTED_TOOLS` — context pruning never
   compresses todo results.
+
+### `pi-ember-tps`
+
+- Owns the live tokens-per-second metric and its five-second inactivity fade.
+  Fade timing and the 250ms in-out sine opacity progression live in `index.ts`; TPS color thresholds
+  and alpha blending live in `pi-ember-ui/mode-colors.ts` (`tps_color_hex`).
+  The footer only formats the row and reads the shared state.
+- Completed TPS fading subscribes to Pi Ember's shared gradient clock and
+  requests ordinary public footer renders; it never starts a parallel render
+  loop or writes terminal output directly.
 
 ### `pi-ember-applypatch`
 

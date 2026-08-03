@@ -17,7 +17,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { coerce_id, prepare_todo_arguments } from "./normalize.ts";
 import { getSharedTodoRenderer, seed_todo_renderer_from_branch } from "./render.ts";
-import { flatten_todo_timeline, todo_group_boundary_before, branch_entries_after_last_compaction, branch_had_compaction, is_post_compaction_todo_call } from "./timeline.ts";
+import { flatten_todo_timeline, todo_group_boundary_before, branch_entries_after_last_compaction, is_post_compaction_todo_call } from "./timeline.ts";
 
 /**
  * String enum as `{ type: "string", enum: [...] }` (provider-safe + TypeBox
@@ -45,6 +45,7 @@ export const COMMAND_NAME = "todos";
 
 export type TaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 export type TaskAction = "create" | "update" | "list" | "get" | "delete" | "clear" | "batch";
+const VALID_STATUSES = new Set<TaskStatus>(["pending", "in_progress", "completed", "deleted"]);
 
 export interface Task {
 	id: number;
@@ -84,6 +85,9 @@ export const TodoParamsSchema = Type.Object({
 			description: "Present-continuous spinner label shown while status is in_progress",
 		}),
 	),
+	task: Type.Optional(
+		Type.String({ description: "Existing task subject to target when id is unknown" }),
+	),
 	status: Type.Optional(
 		string_enum(["pending", "in_progress", "completed", "deleted"] as const, {
 			description: "Target status (update) or list filter (list)",
@@ -102,7 +106,7 @@ export const TodoParamsSchema = Type.Object({
 	metadata: Type.Optional(
 		Type.Record(Type.String(), Type.Unknown(), { description: "Arbitrary metadata" }),
 	),
-	id: Type.Optional(Type.Number({ description: "Task id (required for update, get, delete)" })),
+	id: Type.Optional(Type.Number({ description: "Task id for update, get, or delete" })),
 	includeDeleted: Type.Optional(
 		Type.Boolean({ description: "If true, list returns deleted tasks too" }),
 	),
@@ -159,8 +163,6 @@ const replay_cache = new Map<string, { len: number; tail: unknown; state: TaskSt
 
 // Test seam: how many times replay_from_branch actually recomputed state.
 let replay_compute_count = 0;
-/** Set on `session_before_compact`; cleared after `session_compact` reset. */
-let pending_compact_reset = false;
 
 // Disk persistence: survive agent/session restarts. The branch message
 // history remains the source of truth; this is a fallback when history isn't
@@ -197,9 +199,7 @@ function restore_session_state(id: string): TaskState | undefined {
 	try {
 		if (!existsSync(persist_path(id))) return undefined;
 		const parsed = JSON.parse(readFileSync(persist_path(id), "utf8")) as TaskState;
-		if (parsed && Array.isArray(parsed.tasks) && typeof parsed.nextId === "number") {
-			return { tasks: parsed.tasks, nextId: parsed.nextId };
-		}
+		return normalize_task_state(parsed?.tasks, parsed?.nextId);
 	} catch {
 		// Corrupt or unreadable file — ignore.
 	}
@@ -258,7 +258,64 @@ export function rewrite_dotted_todo_calls(message: AgentMessage): AgentMessage |
 	if (!changed) return null;
 	return { ...message, content: new_content } as AgentMessage;
 }
-const get_session_state = (id: string): TaskState => sessions.get(id) ?? fresh_state();
+/** Normalize snapshots from older/provider-specific tool calls before lookup. */
+function normalize_task_state(tasks_value: unknown, next_id_value: unknown): TaskState | undefined {
+	if (!Array.isArray(tasks_value)) return undefined;
+	const tasks: Task[] = [];
+	const ids = new Set<number>();
+	for (const value of tasks_value) {
+		if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+		const raw = value as Record<string, unknown>;
+		const id = coerce_id(raw.id);
+		const subject = typeof raw.subject === "string" ? raw.subject : undefined;
+		const status = raw.status;
+		if (id === undefined || subject === undefined || !VALID_STATUSES.has(status as TaskStatus)) continue;
+		if (ids.has(id)) continue;
+		ids.add(id);
+		const blocked = Array.isArray(raw.blockedBy)
+			? [...new Set(raw.blockedBy.map(coerce_id).filter((dep): dep is number => dep !== undefined))]
+			: undefined;
+		const task: Task = {
+			id,
+			subject,
+			status: status as TaskStatus,
+			...(typeof raw.description === "string" && { description: raw.description }),
+			...(typeof raw.activeForm === "string" && { activeForm: raw.activeForm }),
+			...(blocked && blocked.length > 0 ? { blockedBy: blocked } : {}),
+			...(typeof raw.owner === "string" && { owner: raw.owner }),
+			...(raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata)
+				? { metadata: { ...(raw.metadata as Record<string, unknown>) } }
+				: {}),
+		};
+		tasks.push(task);
+	}
+	const parsed_next_id = coerce_id(next_id_value) ?? 1;
+	const highest_id = tasks.reduce((max, task) => Math.max(max, task.id), 0);
+	return { tasks, nextId: Math.max(parsed_next_id, highest_id + 1, 1) };
+}
+
+function branch_has_todo_result(branch: SessionEntry[]): boolean {
+	return branch_entries_after_last_compaction(branch).some(
+		(entry) =>
+			entry.type === "message" &&
+			entry.message?.role === "toolResult" &&
+			entry.message.toolName === TOOL_NAME,
+	);
+}
+
+/** Recover state when a tool call arrives before a session_start refresh. */
+const get_session_state = (ctx: ExtensionContext): TaskState => {
+	const id = session_id(ctx);
+	const current = sessions.get(id);
+	if (current) return current;
+	const branch = ctx.sessionManager.getBranch() ?? [];
+	const recovered = branch_has_todo_result(branch)
+		? replay_from_branch(ctx)
+		: restore_session_state(id);
+	const state = recovered ?? fresh_state();
+	sessions.set(id, state);
+	return state;
+};
 
 // Reconstruct tasks state from session messages history.
 export function replay_from_branch(ctx: ExtensionContext): TaskState {
@@ -277,12 +334,8 @@ export function replay_from_branch(ctx: ExtensionContext): TaskState {
 		const msg = entry.message;
 		if (msg?.role !== "toolResult" || msg.toolName !== TOOL_NAME) continue;
 		const details = msg.details as TaskDetails | undefined;
-		if (details && Array.isArray(details.tasks) && typeof details.nextId === "number") {
-			result = {
-				tasks: details.tasks.map((t) => ({ ...t })),
-				nextId: details.nextId,
-			};
-		}
+		const snapshot = details && normalize_task_state(details.tasks, details.nextId);
+		if (snapshot) result = snapshot;
 	}
 	replay_cache.set(id, { len, tail, state: result });
 	return result;
@@ -348,6 +401,39 @@ function coerce_id_list(value: unknown): number[] | undefined {
 	return out;
 }
 
+type TaskReference = { index: number; id: number } | { error: string };
+
+/** Resolve either the canonical numeric id or an unambiguous subject reference. */
+function resolve_task_reference(tasks: Task[], params: TodoParams, action: TaskAction): TaskReference {
+	if (params.id !== undefined) {
+		const id = coerce_id(params.id);
+		if (id === undefined) return { error: "id must be a positive whole number" };
+		const index = tasks.findIndex((task) => task.id === id);
+		if (index < 0) {
+			const available = tasks.filter((task) => task.status !== "deleted").map((task) => `#${task.id}`);
+			return {
+				error: `#${id} not found${available.length ? `; available ids: ${available.join(", ")}` : "; no tasks exist in this session"}`,
+			};
+		}
+		return { index, id };
+	}
+
+	const subject = typeof params.task === "string" ? params.task.trim().toLowerCase() : "";
+	if (subject) {
+		const matches = tasks
+			.map((task, index) => ({ task, index }))
+			.filter(({ task }) => task.subject.trim().toLowerCase() === subject);
+		if (matches.length === 1) {
+			const match = matches[0];
+			return { index: match.index, id: match.task.id };
+		}
+		if (matches.length > 1) return { error: `task ${JSON.stringify(params.task)} is ambiguous; use id` };
+		return { error: `task ${JSON.stringify(params.task)} not found; use the id returned by create` };
+	}
+
+	return { error: `id required for ${action} (or provide task with the exact subject)` };
+}
+
 interface ReducerOutput {
 	state: TaskState;
 	text: string;
@@ -408,11 +494,9 @@ function apply_mutation(state: TaskState, action: TaskAction, params: TodoParams
 				} as TodoParams);
 			}
 
-			if (params.id === undefined) return err("id required for update");
-			const id = coerce_id(params.id);
-			if (id === undefined) return err("id must be a number");
-			const idx = tasks.findIndex((t) => t.id === id);
-			if (idx === -1) return err(`#${id} not found`);
+			const reference = resolve_task_reference(tasks, params, "update");
+			if ("error" in reference) return err(reference.error);
+			const idx = reference.index;
 			const cur = tasks[idx];
 			if (cur.status === "deleted") return err(`#${cur.id} is deleted`);
 
@@ -546,11 +630,9 @@ function apply_mutation(state: TaskState, action: TaskAction, params: TodoParams
 		}
 
 		case "get": {
-			if (params.id === undefined) return err("id required for get");
-			const id = coerce_id(params.id);
-			if (id === undefined) return err("id must be a number");
-			const task = tasks.find((t) => t.id === id);
-			if (!task) return err(`#${id} not found`);
+			const reference = resolve_task_reference(tasks, params, "get");
+			if ("error" in reference) return err(reference.error);
+			const task = tasks[reference.index];
 
 			const blocks: number[] = [];
 			for (const t of tasks) {
@@ -568,11 +650,9 @@ function apply_mutation(state: TaskState, action: TaskAction, params: TodoParams
 		}
 
 		case "delete": {
-			if (params.id === undefined) return err("id required for delete");
-			const id = coerce_id(params.id);
-			if (id === undefined) return err("id must be a number");
-			const idx = tasks.findIndex((t) => t.id === id);
-			if (idx === -1) return err(`#${id} not found`);
+			const reference = resolve_task_reference(tasks, params, "delete");
+			if ("error" in reference) return err(reference.error);
+			const idx = reference.index;
 			const cur = tasks[idx];
 			if (cur.status === "deleted") return err(`#${cur.id} is already deleted`);
 			tasks[idx] = { ...cur, status: "deleted" };
@@ -640,7 +720,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		promptSnippet: "Manage a task list to track multi-step progress",
 		promptGuidelines: [
 			"Use `todo` for complex work with 3+ steps.",
-			"`update`, `get`, and `delete` require numeric `id` — run `list` first or use the id returned by `create`.",
+			"Use the numeric id returned by `create` directly; call `list` only when the id is unknown. Updates can also target an exact subject with `task`.",
 			"Batch `todo` updates with other tool calls — do not make `todo` the only tool in a turn unless the user asked about task status.",
 			"Mark a task `in_progress` before beginning, and `completed` immediately when done.",
 			"Task status: pending → in_progress → completed, plus deleted as a tombstone.",
@@ -653,7 +733,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		async execute(_tool_call_id, params, _signal, _on_update, ctx) {
 			const action = params.action as TaskAction;
 			const id = session_id(ctx);
-			const state = get_session_state(id);
+			const state = get_session_state(ctx);
 			// Defensive copy: some runtimes pass a frozen/partial params object.
 			const raw = { ...((params ?? {}) as Record<string, unknown>) } as TodoParams;
 			const result = apply_mutation(state, action, raw);
@@ -712,7 +792,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 				ctx.ui.notify("/todos requires interactive mode", "error");
 				return;
 			}
-			const state = get_session_state(session_id(ctx));
+			const state = get_session_state(ctx);
 			const visible = state.tasks.filter((t) => t.status !== "deleted");
 			if (visible.length === 0) {
 				ctx.ui.notify("No todos yet.", "info");
@@ -753,21 +833,13 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		},
 	});
 
-	const branch_has_todo_history = (ctx: ExtensionContext): boolean => {
-		const branch = branch_entries_after_last_compaction(ctx.sessionManager.getBranch() ?? []);
-		return branch.some(
-			(e: SessionEntry) => {
-				if (e.type !== "message") return false;
-				return e.message?.role === "toolResult" && e.message?.toolName === TOOL_NAME;
-			},
-		);
-	};
+	const branch_has_todo_history = (ctx: ExtensionContext): boolean =>
+		branch_has_todo_result(ctx.sessionManager.getBranch() ?? []);
 
 	/** Resolve state for compact/tree: post-compact branch wins when it has todo results. */
 	const resolve_state_for_refresh = (ctx: ExtensionContext): TaskState => {
 		const id = session_id(ctx);
-		const branch = ctx.sessionManager.getBranch() ?? [];
-		if (branch_had_compaction(branch) || branch_has_todo_history(ctx)) {
+		if (branch_has_todo_history(ctx)) {
 			return replay_from_branch(ctx);
 		}
 		// No todo tool results on the branch yet. Do not clobber in-memory progress
@@ -822,7 +894,7 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 			active_render_session = id;
 			const branch = ctx.sessionManager.getBranch() ?? [];
 			seed_todo_renderer_from_branch(branch, todo_renderer);
-			if (branch_had_compaction(branch) || branch_has_todo_history(ctx)) {
+			if (branch_has_todo_history(ctx)) {
 				sessions.set(id, replay_from_branch(ctx));
 			} else {
 				// Restart recovery: disk fallback when message history has no todo results.
@@ -840,20 +912,18 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_before_compact", async () => {
-		pending_compact_reset = true;
-	});
-
 	pi.on("session_compact", async (_event, ctx) => {
 		try {
 			const id = session_id(ctx);
 			replay_cache.delete(id);
 			const branch = ctx.sessionManager.getBranch() ?? [];
-			let state = replay_from_branch(ctx);
-			if (pending_compact_reset && !branch_had_compaction(branch)) {
-				state = fresh_state();
-			}
-			pending_compact_reset = false;
+			// Compaction starts the todo list fresh: only todo results created
+			// after the new compaction entry survive. Pre-compaction tasks are
+			// dropped and the durable copy is overwritten with the fresh state so
+			// a restart cannot resurrect the old list.
+			const state = branch_has_todo_result(branch)
+				? replay_from_branch(ctx)
+				: fresh_state();
 			sessions.set(id, state);
 			save_session_state(id, state);
 			todo_renderer.resetForSession();
@@ -888,7 +958,6 @@ export function __reset_state(): void {
 	sessions.clear();
 	replay_cache.clear();
 	replay_compute_count = 0;
-	pending_compact_reset = false;
 	if (active_render_session) {
 		try {
 			unlinkSync(persist_path(active_render_session));

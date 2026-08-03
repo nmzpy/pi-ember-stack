@@ -1,14 +1,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
 	AssistantMessageComponent,
 	BashExecutionComponent,
 	CompactionSummaryMessageComponent,
 	DynamicBorder,
 	type ExtensionAPI,
+	type ExtensionContext,
 	InteractiveMode,
 	Theme,
+	type ThemeColor,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -17,12 +20,8 @@ import {
 	Container,
 	type DefaultTextStyle,
 	type Editor,
-	getKeybindings,
-	isKeyRelease,
-	Key,
 	Markdown,
 	type MarkdownTheme,
-	matchesKey,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -60,7 +59,6 @@ import {
 	set_gradient_render_request,
 	shutdown_gradient_clock,
 	stop_all_gradient_animation,
-	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
 import {
@@ -84,8 +82,8 @@ import {
 	isShellMode,
 	isSubagentDelegationActive,
 	isThinkingBlocksHidden,
-	isTurnToolTranscriptActive,
 	isToolCallPending,
+	isTurnToolTranscriptActive,
 	isUserBashRunning,
 	isUserTurnCommitted,
 	MUTED_COLOR,
@@ -117,7 +115,6 @@ import {
 	install_model_picker_input_listener,
 	install_model_picker_patches,
 	reset_model_picker_session,
-	uninstall_model_picker_input_listener,
 } from "./model-picker.ts";
 import {
 	bind_picker_editor,
@@ -192,6 +189,7 @@ import {
 	install_shell_history_sync_patch as installShellHistorySyncPatch,
 	process_shell_input as processShellInput,
 	type ShellModeEditor,
+	type ShellModeInputResult,
 	set_shell_sync_callback as setShellSyncCallback,
 } from "./shell-mode.ts";
 import { notify_theme_refresh } from "./theme-refresh.ts";
@@ -307,6 +305,26 @@ let logoStatic = true;
 let logo_settled_by_user_message = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
 
+/** Component-tree node shape used by the trailing-blank-row scan. */
+type BlankRowProbeNode = {
+	children?: BlankRowProbeNode[];
+	contentContainer?: { children?: BlankRowProbeNode[] };
+};
+
+/** Runtime shape of Pi's compaction status indicator read by the patch. */
+type CompactionStatusIndicatorLike = {
+	kind?: string;
+	stop?: () => void;
+	render?: (width: number) => string[];
+};
+
+/** ExtensionContext plus the dynamic hide-thinking fields accessed at runtime. */
+type ThinkingBlocksSyncContext = ExtensionContext & {
+	settings?: { hideThinkingBlock?: boolean };
+	hideThinkingBlock?: boolean;
+	session?: { hideThinkingBlock?: boolean };
+};
+
 /** Monotonic start of the visible user turn — used only for the final elapsed notify. */
 let turnStartedAt = 0;
 /** Monotonic start of the current Thinking pass — reset on each arm, shown inline. */
@@ -349,7 +367,7 @@ export function set_thinking_pass_started_at_for_tests(at: number): void {
 
 /** Dim elapsed suffix for Thinking labels — SSOT for widget + in-group rows. */
 export function format_thinking_pass_elapsed_suffix(theme: {
-	fg: (color: string, text: string) => string;
+	fg(color: string, text: string): string;
 }): string {
 	if (thinkingPassStartedAt <= 0) return "";
 	const elapsedMs = performance.now() - thinkingPassStartedAt;
@@ -632,7 +650,23 @@ function bind_live_tui_render(
 	}
 }
 
-let sessionCtx: any;
+/** Structural view of Pi's live TUI sufficient for the input listeners and
+ *  focused-editor access used by shell mode and the model picker. The real
+ *  TUI class keeps `focusedComponent` private; this shape exposes the fields
+ *  this module reads at runtime. */
+type LiveTuiLike = {
+	requestRender?: (force?: boolean) => void;
+	invalidate?: () => void;
+	addInputListener?: (listener: (data: string) => ShellModeInputResult) => () => void;
+	hasOverlay?: () => boolean;
+	focusedComponent?: {
+		getText?: () => string;
+		setText?: (text: string) => void;
+		tui?: { requestRender?: () => void };
+	};
+};
+
+let sessionCtx: ExtensionContext | undefined;
 let shellInputUnsubscribe: (() => void) | undefined;
 let getShellEditor: (() => ShellModeEditor | undefined) | undefined;
 
@@ -768,8 +802,10 @@ export function requestShellModeVisualRefresh(
  */
 export function wrapEditorRenderForShell(editor: EditorWithBorder): void {
 	const marker = Symbol.for("pi-ember-ui:shell-render-wrapped");
-	if ((editor as any)[marker]) return;
-	(editor as any)[marker] = true;
+	// Symbol-keyed marker so jiti module copies share one wrap state.
+	const wrapped = editor as EditorWithBorder & { [key: symbol]: unknown };
+	if (wrapped[marker]) return;
+	wrapped[marker] = true;
 	const originalRender = editor.render.bind(editor);
 	editor.render = function shellAwareRender(width: number): string[] {
 		return render_shell_aware_editor(editor, originalRender, width);
@@ -781,8 +817,11 @@ export function wrapEditorRenderForShell(editor: EditorWithBorder): void {
  *  handleInput wrap because Pi may replace or unwrap the focused editor,
  *  while `tui.addInputListener` persists for the TUI session.
  */
-function installShellModeInputListener(ctx: any): void {
-	const tui = tuiRef ?? ctx?.ui;
+function installShellModeInputListener(ctx: ExtensionContext): void {
+	// ctx.ui is the live TUI in TUI mode even though ExtensionUIContext only
+	// declares the UI helper surface — the fallback below is exercised before
+	// bind_live_tui_render has run (widget creation is lazy).
+	const tui = tuiRef ?? (ctx?.ui as unknown as LiveTuiLike | undefined);
 	if (!tui?.addInputListener) return;
 	if (shellInputUnsubscribe) {
 		shellInputUnsubscribe();
@@ -790,7 +829,7 @@ function installShellModeInputListener(ctx: any): void {
 	}
 
 	getShellEditor = (): ShellModeEditor | undefined => {
-		const focused = tui.focusedComponent as any;
+		const focused = tui.focusedComponent;
 		if (!focused) return undefined;
 		// Only wrap actual editor instances. Custom UI components (e.g. the
 		// quiz overlay) sit in the editor container while focused but are
@@ -799,7 +838,7 @@ function installShellModeInputListener(ctx: any): void {
 		if (typeof focused.getText !== "function" || typeof focused.setText !== "function") {
 			return undefined;
 		}
-		wrapEditorRenderForShell(focused);
+		wrapEditorRenderForShell(focused as unknown as EditorWithBorder);
 		return focused as ShellModeEditor;
 	};
 
@@ -861,7 +900,7 @@ export function arm_pre_token_thinking_status(): void {
 	if (isQuizActive() || isSubagentDelegationActive()) return;
 	const renderer = getSharedRenderer();
 	sync_compact_group_flags(renderer);
-	reset_thinking_pass_timer();
+	if (!is_thinking_pass_timer_armed()) reset_thinking_pass_timer();
 	setAgentRunPending(true);
 	thinkingHeaderSuppressed = false;
 	// A settled work group owns the slot. Arm the actual compact child now;
@@ -902,19 +941,21 @@ export function arm_thinking_stream_status(): void {
 
 /** Above-editor Thinking host: pre-tool wait (before transcript tools) and
  *  every later agent-work gap with no live tool children on screen. */
-function installThinkingWidget(ctx: any): void {
+function installThinkingWidget(ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui") return;
-	ctx.ui.setWidget("ember-thinking", (tui: any, _theme: any) => {
+	ctx.ui.setWidget("ember-thinking", (tui, _theme) => {
 		bind_live_tui_render(tui);
 		ensure_chatbox_leading_spacer(tui);
 		const host = {
 			render(width: number): string[] {
 				if (resolve_thinking_status_host() !== "widget") return [];
 				const lines = render_thinking_status_lines(width);
-				if (lines.length === 0) {
-					ensure_chatbox_leading_spacer(tui);
-					return [];
-				}
+				// SSOT: the above-editor widget container owns the single leading
+				// spacer. Ensure it is in place on every visible frame so the
+				// gradient Thinking row sits 1 row above the chatbox border from
+				// the first paint, instead of jumping after the first tick.
+				ensure_chatbox_leading_spacer(tui);
+				if (lines.length === 0) return [];
 				return lines;
 			},
 			invalidate(): void {
@@ -930,20 +971,13 @@ function installThinkingWidget(ctx: any): void {
 
 function wrapThemeWithCodeBg(base: Theme): Theme {
 	return new Proxy(base, {
-		get(target: Theme, prop: string | symbol, receiver: any) {
+		get(target: Theme, prop: string | symbol, receiver) {
 			if (prop === "fg") {
 				return (color: string, text: string) => {
 					if (color === "mdCode") {
-						return (
-							liveCodeBgAnsi +
-							target.getFgAnsi("mdCode" as any) +
-							" " +
-							text +
-							" " +
-							"\x1b[39m\x1b[49m"
-						);
+						return `${liveCodeBgAnsi}${target.getFgAnsi("mdCode")} ${text} \x1b[39m\x1b[49m`;
 					}
-					return target.fg(color as any, text);
+					return target.fg(color as ThemeColor, text);
 				};
 			}
 			const val = Reflect.get(target, prop, receiver);
@@ -964,6 +998,18 @@ function bgAnsi(hex: string): string {
 
 const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
 const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
+
+/** Read the live Theme from the shared symbol-keyed global slot. */
+function readGlobalThemeSlot(): Theme {
+	return (globalThis as unknown as Record<symbol, unknown>)[THEME_KEY] as Theme;
+}
+
+/** Write the live Theme into both shared symbol-keyed global slots. */
+function writeGlobalThemeSlot(value: Theme): void {
+	const slots = globalThis as unknown as Record<symbol, unknown>;
+	slots[THEME_KEY] = value;
+	slots[THEME_KEY_OLD] = value;
+}
 
 let liveTheme: Theme | undefined;
 let liveCodeBgAnsi = "";
@@ -1110,9 +1156,7 @@ const THEME_REASSERT_MS = 150;
 
 function reassertLiveTheme(): void {
 	if (!liveTheme) return;
-	const wrapped = wrapThemeWithCodeBg(liveTheme);
-	(globalThis as any)[THEME_KEY] = wrapped;
-	(globalThis as any)[THEME_KEY_OLD] = wrapped;
+	writeGlobalThemeSlot(wrapThemeWithCodeBg(liveTheme));
 }
 
 function scheduleThemeReassert(): void {
@@ -1128,7 +1172,7 @@ function installProxiedTheme(
 	bgColors: Record<string, string>,
 	codeBg: string,
 ): void {
-	const base = new Theme(fgColors as any, bgColors as any, "truecolor", { name: "ember" });
+	const base = new Theme(fgColors, bgColors, "truecolor", { name: "ember" });
 	liveTheme = base;
 	liveCodeBgAnsi = bgAnsi(codeBg);
 	reassertLiveTheme();
@@ -1155,7 +1199,7 @@ function applyDynamicTheme(options: { invalidate?: boolean; render?: boolean } =
 		// our live Theme (with subagentBg) now and after the watcher debounce.
 		reassertLiveTheme();
 		scheduleThemeReassert();
-		if (options.invalidate !== false) (tuiRef as any)?.invalidate();
+		if (options.invalidate !== false) tuiRef?.invalidate?.();
 		if (options.render !== false) requestRender?.();
 		return;
 	}
@@ -1170,8 +1214,12 @@ function updateLiveThemeColors(
 	bgColors: Record<string, string>,
 ): void {
 	if (!liveTheme) return;
-	const fgMap = (liveTheme as any).fgColors as Map<string, string>;
-	const bgMap = (liveTheme as any).bgColors as Map<string, string>;
+	const colorMaps = liveTheme as unknown as {
+		fgColors: Map<string, string>;
+		bgColors: Map<string, string>;
+	};
+	const fgMap = colorMaps.fgColors;
+	const bgMap = colorMaps.bgColors;
 	for (const [key, hex] of Object.entries(fgColors)) {
 		fgMap.set(key, fgAnsi(hex));
 	}
@@ -1292,7 +1340,6 @@ function render_shell_aware_editor(
 	const integrate_user_bash = isUserBashRunning();
 	const borderHex = shell_aware_editor_border_hex();
 	const border = (text: string): string => colorize(text, borderHex);
-	const dimBorder = (text: string): string => colorize(text, DIM_COLOR);
 	const INSET = 0;
 	const innerPad = shell_aware_editor_inner_pad();
 	const SLASH_MIDDLE_INSET = 1;
@@ -1332,7 +1379,7 @@ function render_shell_aware_editor(
 	const gutter = "  ";
 	const fit = (s: string): string => fit_terminal_content_line(s, width);
 	const padRule = (s: string): string => pad_terminal_rule_line(s, width);
-	const bottomRule = " " + chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2))) + " ";
+	const bottomRule = ` ${chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2)))} `;
 	const topRule = bottomRule;
 	const slashMiddleSep =
 		" ".repeat(SLASH_MIDDLE_INSET) +
@@ -1424,7 +1471,7 @@ function installAssistantMessagePatch(): void {
 		};
 	}
 
-	assistantPrototype.updateContent = function (this: any, message: any): void {
+	assistantPrototype.updateContent = function (this: any, message: AssistantMessage): void {
 		const msgTimestamp = typeof message?.timestamp === "number" ? message.timestamp : undefined;
 		if (
 			msgTimestamp !== undefined &&
@@ -1481,7 +1528,7 @@ function installAssistantMessagePatch(): void {
 
 		this.contentContainer.clear();
 
-		const isVisibleBlock = (c: any): boolean => {
+		const isVisibleBlock = (c: { type?: string; text?: string; thinking?: string }): boolean => {
 			if (c.type === "text" && c.text?.trim()) return true;
 			if (c.type === "thinking" && c.thinking?.trim() && !hide) return true;
 			return false;
@@ -1492,7 +1539,7 @@ function installAssistantMessagePatch(): void {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 
-		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		const theme = resolve_live_theme();
 
 		// Always rebuild the markdown theme so heading (and any other
 		// overrides) resolve against the current live Theme. Never close
@@ -1534,7 +1581,7 @@ function installAssistantMessagePatch(): void {
 			}
 		}
 
-		const hasToolCalls = message.content.some((c: any) => c.type === "toolCall");
+		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
 		this.hasToolCalls = hasToolCalls;
 		// Suppress the output-limit error row entirely — auto-continue
 		// handles recovery within budget; when the budget is exhausted the
@@ -1663,7 +1710,7 @@ function installUpdateNotificationPatch(): void {
 	// We only walk Container children recursively; leaf components like Spacer
 	// are terminal. This avoids adding a second blank row when the previous
 	// assistant message (or compact tool block) already ends with one.
-	function component_ends_with_blank_row(component: any): boolean {
+	function component_ends_with_blank_row(component: BlankRowProbeNode | undefined): boolean {
 		if (!component) return false;
 		if (component instanceof Spacer) {
 			return component.render(1).length > 0;
@@ -1848,7 +1895,7 @@ function installCompactionStatusPatch(): void {
 	const originalShowStatusIndicator = proto.showStatusIndicator;
 	const originalClearStatusIndicator = proto.clearStatusIndicator;
 
-	function patch_compaction_status_indicator(indicator: any): void {
+	function patch_compaction_status_indicator(indicator: CompactionStatusIndicatorLike): void {
 		if (indicator?.kind !== "compaction") return;
 		// Stop Pi's stock spinner/timer — the shared 20 FPS gradient clock
 		// drives gradient text via bind_compaction_status_indicator.
@@ -1862,20 +1909,23 @@ function installCompactionStatusPatch(): void {
 		};
 	}
 
-	function clear_compaction_status_indicator(indicator: any): void {
+	function clear_compaction_status_indicator(indicator: CompactionStatusIndicatorLike): void {
 		if (indicator?.kind !== "compaction") return;
 		deactivate_gradient("compaction");
 		unbind_compaction_status_indicator();
 	}
 
-	proto.showStatusIndicator = function emberShowStatusIndicator(this: any, indicator: any): any {
+	proto.showStatusIndicator = function emberShowStatusIndicator(
+		this: any,
+		indicator: CompactionStatusIndicatorLike,
+	) {
 		if (indicator?.kind === "compaction") {
 			patch_compaction_status_indicator(indicator);
 		}
 		return originalShowStatusIndicator.call(this, indicator);
 	};
 
-	proto.clearStatusIndicator = function emberClearStatusIndicator(this: any, kind?: string): any {
+	proto.clearStatusIndicator = function emberClearStatusIndicator(this: any, kind?: string) {
 		const active = this.activeStatusIndicator;
 		const wasCompaction =
 			active?.kind === "compaction" &&
@@ -1909,7 +1959,7 @@ function installBashExecutionPatch(): void {
 			requestRender?.();
 		}
 		originalUpdateDisplay.call(this);
-		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		const theme = resolve_live_theme();
 		if (!theme) return;
 		const status = this.status;
 		const dollarColor =
@@ -1926,7 +1976,7 @@ function installBashExecutionPatch(): void {
 
 	proto.render = function renderEmberBash(this: any, width: number): string[] {
 		const running = this.status === "running";
-		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		const theme = resolve_live_theme();
 		if (!theme) return originalRender.call(this, width);
 
 		const innerWidth = Math.max(1, width - 2);
@@ -1998,7 +2048,7 @@ function installCompactionSummaryPatch(): void {
 			this.message.summary?.length ?? 0,
 			is_error,
 		);
-		const expandKey = (globalThis as any).process?.env?.["PI_EXPAND_KEY"] || "ctrl+o";
+		const expandKey = globalThis.process?.env?.PI_EXPAND_KEY || "ctrl+o";
 		const callText = new CompactGroupText();
 		callText.setText(this.expanded ? row : row + theme.fg("dim", ` (${expandKey} to expand)`));
 		this.addChild(callText);
@@ -2070,8 +2120,8 @@ function splitAtVisibleChar(text: string, sep: string): [string, string] {
  * active mode accent. Never close over a Theme from construction time —
  * mode switches mutate (or replace) the live Theme after messages exist.
  */
-function resolve_live_theme(): any {
-	return liveTheme ?? (globalThis as any)[THEME_KEY];
+function resolve_live_theme(): Theme {
+	return liveTheme ?? readGlobalThemeSlot();
 }
 
 /**
@@ -2309,89 +2359,12 @@ function renderLogoWithGradient(): string[] {
 	return gridToLines(grid);
 }
 
-let tuiRef: any;
+let tuiRef: LiveTuiLike | undefined;
 
-/** Known plain-accent Text rows that Pi builds once with baked ANSI and
- *  never re-evaluates. On a mode switch we re-color them through the live
- *  Theme so they track the new accent. The visible string is the key; the
- *  value is a function that re-renders the full ANSI for that row using the
- *  live Theme. SSOT: no hardcoded hex — all color flows through
- *  resolve_live_theme(). */
-const ACCENT_TEXT_RECOLORERS: Array<{
-	match: (stripped: string) => boolean;
-	recolor: (theme: any) => string;
-}> = [
-	{
-		match: (s) => s === "\u2713 New session started",
-		recolor: (theme) => `${theme.fg("text", "\u2713 New session started")}`,
-	},
-	{
-		match: (s) => s === "What's New",
-		recolor: (theme) => theme.bold(theme.fg("accent", "What's New")),
-	},
-	{
-		match: (s) => s === "Keyboard Shortcuts",
-		recolor: (theme) => theme.bold(theme.fg("accent", "Keyboard Shortcuts")),
-	},
-];
-
-/** Recursively walk a TUI component tree and recolor every node that
- *  depends on the live accent. Two cases:
- *
- *  1. ExpandableText ([Context]/[Skills]/[Extensions]/[Themes] and the
- *     built-in header): call invalidate() so the
- *     installExpandableTextPatch re-runs getCollapsedText/getExpandedText
- *     with the live mdHeading/accent.
- *  2. Plain accent Text rows (e.g. "✓ New session started", "What's New",
- *     "Keyboard Shortcuts"): Pi bakes their ANSI once at construction and
- *     never refreshes them. We match the ANSI-stripped visible text against
- *     ACCENT_TEXT_RECOLORERS and rewrite via setText() with the live Theme.
- *
- *  Bounded by the live TUI tree (header + chat container + loaded-resources
- *  container). Visited set guards against cycles. O(nodes) — typically a
- *  few dozen — well within the per-frame budget. */
-function invalidateLoadedResources(): void {
-	const root = tuiRef;
-	if (!root) return;
-	const theme = resolve_live_theme();
-	if (!theme) return;
-	const visited = new WeakSet();
-	const stack: any[] = [root];
-	while (stack.length > 0) {
-		const node = stack.pop();
-		if (!node || typeof node !== "object" || visited.has(node)) continue;
-		visited.add(node);
-
-		// ExpandableText: re-run getters via the patched invalidate.
-		if (typeof node.getCollapsedText === "function") {
-			node.invalidate?.();
-		}
-
-		// Plain accent Text: match visible text and rewrite ANSI.
-		if (typeof node.setText === "function" && typeof node.text === "string") {
-			const stripped = node.text.replace(ANSI_STRIP, "");
-			for (const entry of ACCENT_TEXT_RECOLORERS) {
-				if (entry.match(stripped)) {
-					node.setText(entry.recolor(theme));
-					break;
-				}
-			}
-		}
-
-		// Recurse into children.
-		const children = node.children;
-		if (Array.isArray(children)) {
-			for (const child of children) stack.push(child);
-		}
-	}
-}
-
-
-
-function installStartupHeader(ctx: any): void {
+function installStartupHeader(ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui") return;
 
-	ctx.ui.setHeader((tui: any, theme: any) => {
+	ctx.ui.setHeader((tui, theme) => {
 		bind_live_tui_render(tui);
 		const render_header = (width: number): string[] => {
 			// Re-read every render so model/dir/mode changes are reflected.
@@ -2493,7 +2466,7 @@ function updateInstalledThemeExport(exportColors: {
 }
 
 /** Best-effort sync of Ctrl+T hide state before the first assistant updateContent. */
-function sync_thinking_blocks_hidden_from_ctx(ctx: any): void {
+function sync_thinking_blocks_hidden_from_ctx(ctx: ThinkingBlocksSyncContext): void {
 	const settings = ctx?.settings;
 	if (settings && typeof settings.hideThinkingBlock === "boolean") {
 		setThinkingBlocksHidden(settings.hideThinkingBlock === true);
@@ -2524,14 +2497,14 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// conflicts with built-ins and shows in Extension issues).
 	install_model_picker_patches();
 	bind_select_list_theme_resolver(() => {
-		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		const theme = resolve_live_theme();
 		if (!theme) {
 			throw new Error("Theme not initialized");
 		}
 		return theme;
 	});
 	install_select_list_theme_patches(() => {
-		const theme = liveTheme ?? (globalThis as any)[THEME_KEY];
+		const theme = resolve_live_theme();
 		if (!theme) {
 			throw new Error("Theme not initialized");
 		}
@@ -2564,7 +2537,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHiddenThinkingLabel("");
 			setShellSyncCallback(() => {
-				const focused = tuiRef?.focusedComponent as any;
+				const focused = tuiRef?.focusedComponent as
+					| { tui?: { requestRender?: () => void } }
+					| undefined;
 				if (focused) requestShellModeVisualRefresh(focused, ctx);
 			});
 		}
@@ -2578,7 +2553,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			init_footer_thinking_level(pi, ctx);
 			recompute_footer_stats(ctx);
 			installShellModeInputListener(ctx);
-			install_model_picker_input_listener(() => tuiRef ?? ctx?.ui);
+			install_model_picker_input_listener(
+				() => tuiRef ?? (ctx?.ui as unknown as LiveTuiLike | undefined),
+			);
 		}
 	});
 
@@ -2593,7 +2570,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	// Re-render header/footer when the active agent mode changes. Emitted by
 	// pi-custom-agents (and any other extension) via the shared event bus.
-	pi.events.on("pi-ember-ui:mode-change", (_event: any) => {
+	pi.events.on("pi-ember-ui:mode-change", (_event) => {
 		// Mode switches only need a new frame; the live theme is static.
 		requestRender?.();
 	});
@@ -2757,7 +2734,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		reconcile_thinking_wait_ui();
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
+	pi.on("agent_end", (_event, _ctx) => {
 		stopThinkingAnimation();
 		// When the agent loop ends (including after abort/cancel/error), no
 		// subagent can still be running. Reset the flag so the editor border
@@ -2854,7 +2831,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.registerCommand("welcome", {
 		description: "Configure the startup welcome header",
-		handler: async (args: string, ctx: any) => {
+		handler: async (args: string, ctx) => {
 			const normalized = args.trim().toLowerCase();
 			if (normalized === "updates on") {
 				setWelcomeUpdates(true);

@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { has_baked_effort_variant } from "../pi-ember-ui/model-variants.ts";
 
 /** Per-mode model binding persisted in `pi-ember-stack.json`. */
@@ -54,7 +54,7 @@ export function canonical_model_identity(
 }
 
 export function model_identity_of(
-	model: Model<any> | undefined,
+	model: Model<Api> | undefined,
 	thinkingLevel?: string,
 ): ModelIdentity | undefined {
 	if (!model) return undefined;
@@ -143,7 +143,7 @@ export function model_identity_from_user_selection(
 /** Whether live model + thinking level already match a persisted binding. */
 export function bound_model_matches_live(
 	bound: ModelIdentity,
-	current: Model<any> | undefined,
+	current: Model<Api> | undefined,
 	currentThinkingLevel?: string,
 ): boolean {
 	const live = model_identity_of(current, currentThinkingLevel);

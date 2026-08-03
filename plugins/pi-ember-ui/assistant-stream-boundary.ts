@@ -23,7 +23,7 @@ export function resolve_assistant_stream_boundary_event(ev: {
 export function apply_assistant_stream_boundary(
 	renderer: CompactRenderer,
 	ev: { type: string; delta?: unknown },
-): "planning_text" | void {
+): "planning_text" | undefined {
 	if (is_work_group_boundary_suppressed()) return;
 
 	const boundary = resolve_assistant_stream_boundary_event(ev);

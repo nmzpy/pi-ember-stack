@@ -1,8 +1,8 @@
 /**
  * Ember bottom footer — owned by `pi-ember-ui`.
  *
- * The footer renders one row: `folder • context/cache/cost` on the left and
- * `Mode • model thinking-level provider tps` on the right, with a 1-column
+ * The footer renders one row: `folder • context/cache/cost tps` on the left and
+ * `Mode • model thinking-level provider` on the right, with a 1-column
  * inset on each side. It is installed via `ctx.ui.setFooter` and reads live
  * state (model, cwd, context usage, session entries) from the session ctx
  * captured at install time.
@@ -19,11 +19,13 @@
  */
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { getLiveTps } from "../pi-ember-tps/index.ts";
+import { format_live_tps, getLiveTps, getLiveTpsOpacity } from "../pi-ember-tps/index.ts";
 import {
+	colorize,
 	getActiveModeId,
 	isShellMode,
 	isUserBashRunning,
+	tps_color_hex,
 } from "./mode-colors.ts";
 import {
 	format_effort_display_label,
@@ -206,7 +208,7 @@ export function installEmberFooter(ctx: any): void {
 				const cwd = ctx.sessionManager.getCwd();
 				const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
 
-				// --- Left side: folderdir • context/cache/cost ---
+				// --- Left side: folder • context/cache/cost tps ---
 				const statsParts: string[] = [];
 				statsParts.push(`${usedLabel}/${formatTokens(contextWindow)}`);
 				if (latestCacheHitRate !== undefined) {
@@ -215,7 +217,18 @@ export function installEmberFooter(ctx: any): void {
 				if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
 					statsParts.push(`$${totalCost.toFixed(3)}`);
 				}
-				const statsStr = isShellMode() || isUserBashRunning() ? "shell" : statsParts.join(" ");
+				const tps = getLiveTps();
+				const tps_opacity = getLiveTpsOpacity();
+				let tpsSegment = "";
+				if (tps > 0 && tps_opacity > 0) {
+					const tps_text = `${format_live_tps(tps)} tps`;
+					const tpsColored = colorize(tps_color_hex(tps, tps_opacity), tps_text);
+					tpsSegment = ` ${theme.fg("dim", "\u2022")} ${tpsColored}`;
+				}
+				const statsStr =
+					isShellMode() || isUserBashRunning()
+						? "shell"
+						: `${statsParts.join(" ")}${tpsSegment}`;
 				const leftSide =
 					theme.fg("dim", folderName) +
 					` ${theme.fg("dim", "\u2022")} ` +
@@ -225,7 +238,7 @@ export function installEmberFooter(ctx: any): void {
 					statsLeft = truncateToWidth(statsLeft, innerWidth, "...");
 				}
 
-				// --- Right side: Mode • model thinking-level provider tps ---
+				// --- Right side: Mode • model thinking-level provider ---
 				const modeLabel = resolve_mode_label(getActiveModeId());
 				const modelName = model?.name ?? model?.id ?? "no model";
 				const provider = model?.provider ?? "unknown";
@@ -239,25 +252,11 @@ export function installEmberFooter(ctx: any): void {
 				} else if (level !== "off" && !model_name_has_thinking_variant(modelName)) {
 					variant = ` ${level}`;
 				}
-				const tps = getLiveTps();
-				let tpsSegment = "";
-				if (tps > 0) {
-					const tpsStr =
-						tps < 10 ? tps.toFixed(1) : tps < 100 ? tps.toFixed(0) : `${Math.round(tps)}`;
-					const tpsColored =
-						tps < 50
-							? theme.fg("muted", `${tpsStr} tps`)
-							: tps < 100
-								? theme.fg("text", `${tpsStr} tps`)
-								: theme.fg("accent", `${tpsStr} tps`);
-					tpsSegment = ` ${tpsColored}`;
-				}
 				const rightSide =
 					theme.fg("accent", modeLabel) +
 					` ${theme.fg("dim", "\u2022")} ` +
 					theme.fg("text", `${displayName}${variant}`) +
-					theme.fg("dim", ` ${provider}`) +
-					tpsSegment;
+					theme.fg("dim", ` ${provider}`);
 				const availableForRight = innerWidth - visibleWidth(statsLeft) - 2;
 				const displayedRight =
 					availableForRight > 0 ? truncateToWidth(rightSide, availableForRight, "") : "";

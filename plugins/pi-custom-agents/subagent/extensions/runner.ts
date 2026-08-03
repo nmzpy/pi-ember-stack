@@ -23,20 +23,20 @@ import {
 	createAgentSession,
 	discoverAndLoadExtensions,
 	getAgentDir,
-	loadProjectContextFiles,
 	type LoadExtensionsResult,
+	loadProjectContextFiles,
 	type ModelRegistry,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { is_benign_compact_error, should_skip_compact } from "../../auto-continue.ts";
 import { is_dcp_enabled_for_subagent } from "../../../pi-ember-dcp/lib/wiring.ts";
+import { is_benign_compact_error, should_skip_compact } from "../../auto-continue.ts";
 import { infer_bare_agent_name } from "../../subagent-policy.ts";
 import {
-	get_checkpoint_dir,
 	persist_checkpoint_meta,
-	read_resume_meta,
 	type ResumeCheckpointMeta,
+	read_resume_meta,
+	subagent_sessions_dir_for,
 } from "./resume-store.ts";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,7 @@ export function resolve_subagent_timeout_ms(timeout: unknown): number {
 }
 
 const SUBAGENT_EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const TODO_EXTENSION_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../../pi-ember-todo/index.ts");
 const COMPACTION_WIRING_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../compaction-wiring.ts");
 const DCP_SUBAGENT_WIRING_PATH = path.resolve(
 	SUBAGENT_EXT_DIR,
@@ -75,9 +76,8 @@ searching for different patterns), emit them all in a single response rather
 than one at a time. The runtime executes independent tool calls in parallel,
 so batching saves round-trips and reduces latency.
 
-## Todo
-
-\`todo\` update, get, and delete require a numeric \`id\`. Run \`todo list\` (or note the id from \`create\`) before updating — never call update without \`id\`.
+Todo is session-local: use ids returned by this child session's \`create\`, or an
+exact \`task\` subject. Do not reuse ids from the parent session.
 `;
 
 const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
@@ -106,7 +106,11 @@ export function is_context_overflow_error(message: string | undefined): boolean 
 }
 
 async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResult> {
-	const paths = [COMPACTION_WIRING_PATH];
+	// The child receives the same task-list tool as the parent. Without loading
+	// this extension, `todo` remains in the agent's allowlist but has no
+	// registration in the isolated AgentSession, which makes checklist updates
+	// fail or silently disappear.
+	const paths = [TODO_EXTENSION_PATH, COMPACTION_WIRING_PATH];
 	if (is_dcp_enabled_for_subagent(cwd)) {
 		paths.push(DCP_SUBAGENT_WIRING_PATH);
 	}
@@ -414,36 +418,13 @@ function note_live_tool_row(
 	return true;
 }
 
-/** Whether a child-session event counts as output for idle-timeout reset. */
-function is_subagent_output_progress_event(event: {
-	type: string;
-	assistantMessageEvent?: { type?: string };
-}): boolean {
-	if (
-		event.type === "message_end" ||
-		event.type === "tool_execution_start" ||
-		event.type === "tool_call" ||
-		event.type === "tool_execution_update" ||
-		event.type === "tool_execution_end"
-	) {
-		return true;
-	}
-	if (event.type === "message_update") {
-		const ev = event.assistantMessageEvent;
-		return (
-			ev?.type === "text_start" ||
-			ev?.type === "text_delta" ||
-			ev?.type === "thinking_start" ||
-			ev?.type === "thinking_delta"
-		);
-	}
-	return false;
-}
-
 /** Apply live child-session events that drive nested tool/thinking rows in the subagent renderer. */
 export function apply_subagent_stream_event(
 	result: SubAgentResult,
-	event: { type: string; assistantMessageEvent?: SubagentStreamAssistantEvent } & SubagentStreamToolEvent,
+	event: {
+		type: string;
+		assistantMessageEvent?: SubagentStreamAssistantEvent;
+	} & SubagentStreamToolEvent,
 	notify: () => void,
 ): void {
 	if (event.type === "turn_start" || event.type === "agent_start") {
@@ -462,7 +443,11 @@ export function apply_subagent_stream_event(
 				result.isThinking = true;
 				notify();
 			}
-		} else if (ev?.type === "thinking_end" || ev?.type === "text_start" || ev?.type === "text_delta") {
+		} else if (
+			ev?.type === "thinking_end" ||
+			ev?.type === "text_start" ||
+			ev?.type === "text_delta"
+		) {
 			if (result.isThinking) {
 				result.isThinking = false;
 				notify();
@@ -604,11 +589,17 @@ export async function runSubAgent(options: {
 	const model_runtime = resolve_parent_model_runtime(modelRegistry);
 	const legacy_registry = is_legacy_model_registry(modelRegistry);
 
+	// Deterministic bootstrap: mkdirSync(recursive) runs synchronously here, so
+	// the <originToolCallId> dir is guaranteed to exist before SessionManager
+	// records the <timestamp>_<childSessionId>.jsonl run-record and before any
+	// checkpoint/resume metadata write. Never rely on a prior async op or on an
+	// existsSync pre-check for correctness (a concurrent prune on session
+	// shutdown can remove the dir between events).
 	const checkpoint_dir =
 		checkpoint?.parentSessionId && checkpoint.originToolCallId
-			? get_checkpoint_dir(checkpoint.parentSessionId, checkpoint.originToolCallId)
+			? subagent_sessions_dir_for(checkpoint.parentSessionId, checkpoint.originToolCallId)
 			: resume?.parentSessionId && resume.originToolCallId
-				? get_checkpoint_dir(resume.parentSessionId, resume.originToolCallId)
+				? subagent_sessions_dir_for(resume.parentSessionId, resume.originToolCallId)
 				: undefined;
 
 	let sessionManager: SessionManager;
@@ -739,15 +730,15 @@ export async function runSubAgent(options: {
 		let length_continues = 0;
 		let pending_task = task;
 		while (true) {
+			// Re-ensure the checkpoint dir before each prompt so a concurrent prune
+			// (session_shutdown of a foreign parent session) cannot leave the SDK's
+			// next run-record write without a parent directory. Cheap and idempotent.
+			if (checkpoint_dir) fs.mkdirSync(checkpoint_dir, { recursive: true });
 			try {
 				await session.prompt(pending_task);
 			} catch (prompt_error) {
 				const overflow_message = extractFailureMessage(prompt_error);
-				if (
-					!overflow_retried &&
-					session &&
-					is_context_overflow_error(overflow_message)
-				) {
+				if (!overflow_retried && session && is_context_overflow_error(overflow_message)) {
 					overflow_retried = true;
 					await compact_subagent_session(session);
 					continue;
@@ -803,16 +794,20 @@ export async function runSubAgent(options: {
 			if (session && checkpoint_dir && (checkpoint || resume) && result.exitCode !== -1) {
 				const session_file = session.sessionManager.getSessionFile();
 				if (session_file) {
-					const meta: ResumeCheckpointMeta = {
-						parentSessionId: (checkpoint ?? resume)!.parentSessionId,
-						originToolCallId: (checkpoint ?? resume)!.originToolCallId,
-						displayName: checkpoint?.displayName ?? resume!.displayName,
-						agentName: checkpoint?.agentName ?? infer_bare_agent_name(resume!.displayName),
-						cwd,
-						sessionFile: session_file,
-						updatedAt: new Date().toISOString(),
-					};
-					persist_checkpoint_meta(meta);
+					const checkpoint_source = checkpoint ?? resume;
+					if (checkpoint_source) {
+						const meta: ResumeCheckpointMeta = {
+							parentSessionId: checkpoint_source.parentSessionId,
+							originToolCallId: checkpoint_source.originToolCallId,
+							displayName: checkpoint?.displayName ?? checkpoint_source.displayName,
+							agentName:
+								checkpoint?.agentName ?? infer_bare_agent_name(checkpoint_source.displayName),
+							cwd,
+							sessionFile: session_file,
+							updatedAt: new Date().toISOString(),
+						};
+						persist_checkpoint_meta(meta);
+					}
 				}
 			}
 			session?.dispose();

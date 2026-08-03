@@ -26,7 +26,7 @@ import {
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
-import { isQuizActive, setQuizActive } from "../pi-ember-ui/mode-colors.ts";
+import { setQuizActive } from "../pi-ember-ui/mode-colors.ts";
 import { BULLET, statusBulletColor } from "../pi-compact-tools/renderer.ts";
 
 export interface QuizOption {
@@ -628,7 +628,7 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 		renderResult(
 			result: { details?: { answers?: QuizAnswer[]; cancelled?: boolean } },
 			options: ToolRenderResultOptions,
-			theme: Theme,
+			_theme: Theme,
 			context: ToolRenderContext & { args?: QuizCallArgs },
 		): Component {
 			const details = result.details;

@@ -53,6 +53,13 @@ type ThemeLike = {
 	bold(text: string): string;
 };
 
+/** Structural mirror of the shared renderer's internal ToolResult (not exported). */
+type ApplyPatchResult = {
+	content?: Array<{ type: string; text?: string }>;
+	details?: { diff?: string; totalMatched?: number };
+	[key: string]: unknown;
+};
+
 export default function piEmberApplypatch(pi: ExtensionAPI): void {
 	const renderer = getSharedRenderer();
 
@@ -108,7 +115,7 @@ export default function piEmberApplypatch(pi: ExtensionAPI): void {
 		},
 
 		renderResult(
-			result: any,
+			result,
 			options: ToolRenderResultOptions,
 			theme: ThemeLike,
 			context: ToolRenderContext & { isError: boolean },
@@ -116,7 +123,7 @@ export default function piEmberApplypatch(pi: ExtensionAPI): void {
 			return renderer.renderResult(
 				TOOL_NAME,
 				context.args,
-				result,
+				result as unknown as ApplyPatchResult,
 				options,
 				theme,
 				context,

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
 	arm_plan_turn,
+	build_plan_implementation_questions,
 	build_plan_review_questions,
+	resolve_plan_implementation_mode,
 	resolve_plan_review_answer,
 	should_show_plan_review,
 } from "../plan-review.ts";
@@ -78,5 +80,22 @@ describe("resolve_plan_review_answer", () => {
 			action: "refine",
 			instruction: "tighten scope",
 		});
+	});
+});
+
+describe("plan implementation mode", () => {
+	test("uses one Code/Orchestrate picker for both implementation paths", () => {
+		const [question] = build_plan_implementation_questions();
+		expect(question.options.map((option) => option.value)).toEqual([
+			"code",
+			"orchestrate",
+		]);
+		expect(question.options.map((option) => option.label)).toEqual(["Code", "Orchestrate"]);
+	});
+
+	test("resolves the selected implementation mode", () => {
+		expect(resolve_plan_implementation_mode({ value: "code" })).toBe("code");
+		expect(resolve_plan_implementation_mode({ value: "orchestrate" })).toBe("orchestrate");
+		expect(resolve_plan_implementation_mode(undefined)).toBeUndefined();
 	});
 });
