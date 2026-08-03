@@ -280,7 +280,7 @@ export function render_gradient(text: string, preset: GradientPreset, phase: num
 
 const active_reasons = new Set<string>();
 const tick_subscribers = new Set<() => void>();
-let gradient_timer: ReturnType<typeof setInterval> | undefined;
+let gradient_timer: ReturnType<typeof setTimeout> | undefined;
 let _render_request: (() => void) | undefined;
 
 /**
@@ -291,6 +291,7 @@ export function set_gradient_render_request(cb: (() => void) | undefined): void 
 	_render_request = cb;
 }
 let clock_start = 0;
+let next_tick_deadline = 0;
 
 /** Current sweep phase in [0, 1), computed from elapsed monotonic time. */
 export function get_gradient_phase(): number {
@@ -347,16 +348,41 @@ function run_gradient_tick(): void {
 	dispatch_gradient_tick();
 }
 
+/**
+ * Schedule against a monotonic deadline rather than chaining a fixed delay.
+ * A delayed callback therefore does not move the whole animation schedule
+ * later and later. The event loop still owns actual execution, but every
+ * available tick remains anchored to the shared 50 ms / 20 FPS cadence.
+ */
+function schedule_gradient_tick(): void {
+	if (gradient_timer) return;
+	const delay = Math.max(0, next_tick_deadline - performance.now());
+	gradient_timer = setTimeout(() => {
+		gradient_timer = undefined;
+		run_gradient_tick();
+		if (active_reasons.size === 0 && tick_subscribers.size === 0) return;
+		const now = performance.now();
+		next_tick_deadline += GRADIENT_TICK_MS;
+		// Do not burst multiple callbacks after a blocked event loop. Resume at
+		// the next real frame while preserving the monotonic animation phase.
+		if (next_tick_deadline <= now) next_tick_deadline = now + GRADIENT_TICK_MS;
+		schedule_gradient_tick();
+	}, delay);
+}
+
 function start_clock(): void {
 	if (gradient_timer) return;
 	if (clock_start === 0) clock_start = performance.now();
-	gradient_timer = setInterval(run_gradient_tick, GRADIENT_TICK_MS);
+	next_tick_deadline = performance.now() + GRADIENT_TICK_MS;
+	schedule_gradient_tick();
 }
 
 function stop_clock(): void {
-	if (!gradient_timer) return;
-	clearInterval(gradient_timer);
-	gradient_timer = undefined;
+	if (gradient_timer) {
+		clearTimeout(gradient_timer);
+		gradient_timer = undefined;
+	}
+	next_tick_deadline = 0;
 }
 
 /** Mark a reason (e.g. "thinking", "working", "logo") as active. */
@@ -404,9 +430,10 @@ export function shutdown_gradient_clock(): void {
 	active_reasons.clear();
 	tick_subscribers.clear();
 	if (gradient_timer) {
-		clearInterval(gradient_timer);
+		clearTimeout(gradient_timer);
 		gradient_timer = undefined;
 	}
+	next_tick_deadline = 0;
 	clock_start = 0;
 	_render_request = undefined;
 	invalidate_gradient_cache();

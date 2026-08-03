@@ -3,6 +3,7 @@
  */
 import { fromBinary } from "@bufbuild/protobuf";
 import {
+	build_conversation_id,
 	build_cursor_request,
 	type CursorRequestPayload,
 } from "./request.js";
@@ -78,16 +79,16 @@ function persist_session_state(session_key: string, state: CursorConversationSta
 
 export function get_or_create_conversation_state(
 	session_key: string,
-	_mapped: CursorMappedContext,
+	mapped: CursorMappedContext,
 ): CursorConversationState {
 	let state = session_states.get(session_key);
 	if (!state) {
-		state =
-			load_persisted_session(session_key) ?? {
-				conversation_id: new_conversation_id(),
-				checkpoint: null,
-				blob_store: new Map(),
-			};
+		const loaded = load_persisted_session(session_key);
+		state = loaded ?? {
+			conversation_id: build_conversation_id(session_key, mapped),
+			checkpoint: null,
+			blob_store: new Map(),
+		};
 		session_states.set(session_key, state);
 	}
 	return state;

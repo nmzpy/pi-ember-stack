@@ -543,26 +543,28 @@ function render_thinking_status_lines(width: number): string[] {
 	return [...Array(padAbove).fill(""), ...rows, ...Array(padBelow).fill("")];
 }
 
-/** Update status state; request a render only when Thinking visibility changes. */
-function refresh_thinking_status(): void {
+/** Update status state; optionally force the native frame that removes a stale row. */
+function refresh_thinking_status(force_render = false): void {
 	const should_paint = thinking_status_paint_active();
 	sync_thinking_gradient_clock();
-	if (should_paint === thinking_status_last_painted) return;
+	if (!force_render && should_paint === thinking_status_last_painted) return;
 	thinking_status_last_painted = should_paint;
 	if (requestRender) {
 		thinking_status_render_pending = false;
 		requestRender();
 	} else {
-		thinking_status_render_pending = should_paint;
+		thinking_status_render_pending = force_render || should_paint;
 	}
 }
 
 /** Hide the gradient Thinking header while tools or visible assistant text run. */
 export function suppress_thinking_header_for_work(): void {
-	if (!thinkingHeaderSuppressed) {
-		thinkingHeaderSuppressed = true;
-		refresh_thinking_status();
-	}
+	thinkingHeaderSuppressed = true;
+	// Always force one normal Pi frame. The header may already be marked
+	// suppressed while its prior static row is still present in a cached
+	// assistant/widget component; waiting for the next lifecycle transition
+	// leaves that duplicate above the tool.
+	refresh_thinking_status(true);
 }
 
 /** Re-show the gradient Thinking header when a thinking stream resumes. */
@@ -2806,8 +2808,11 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", (event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		suppress_thinking_header_for_work();
+		if (typeof event.toolCallId === "string") {
+			markToolCallAnnounced(event.toolCallId);
+		}
 		setTurnToolTranscriptActive(true);
+		suppress_thinking_header_for_work();
 		if (is_subagent_delegation_tool(event.toolName)) {
 			refresh_thinking_status();
 		}

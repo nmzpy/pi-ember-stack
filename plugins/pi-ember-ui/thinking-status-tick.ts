@@ -1,5 +1,4 @@
 import {
-	EXTERNAL_THINKING_RENDER_INTERVAL_MS,
 	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
@@ -16,7 +15,6 @@ let thinking_status_tick_cb: (() => void) | undefined;
 let should_paint_fn: () => boolean = () => false;
 let resolve_host_fn: (() => ThinkingStatusHostKind) | undefined;
 let build_thinking_row_fn: ((host: "widget" | "in_message") => string) | undefined;
-let last_external_render_at = Number.NEGATIVE_INFINITY;
 
 /**
  * Pre-baked gradient text for the external Thinking status row. The 20 FPS
@@ -76,20 +74,14 @@ export function render_cached_thinking_status_lines(
 }
 
 function invalidate_external_host(host: "widget" | "in_message"): void {
-	const now = performance.now();
-	// The shared clock advances at 20 FPS for compact/group consumers, but an
-	// external host invalidation schedules a full native TUI frame. Do not even
-	// rebuild the ANSI row on skipped ticks; the next permitted tick stages it
-	// and repaints the one native frame that observes it.
-	if (now - last_external_render_at < EXTERNAL_THINKING_RENDER_INTERVAL_MS) return;
 	const prev = last_staged_text;
 	const next = stage_cached_thinking_row(host);
 	// Skip the invalidation when the staged text is identical to the last
-	// frame (clock stopped / phase produced no visible change) so we do
-	// not queue a redundant requestRender.
+	// frame. The shared clock is already the 20 FPS cadence authority; a
+	// second wall-clock gate here could drop a real frame when timer jitter
+	// places two callbacks just inside the 50 ms boundary.
 	if (next !== undefined && next === prev) return;
 	if (next !== undefined) last_staged_text = next;
-	last_external_render_at = now;
 	if (host === "widget") widget_host?.invalidate?.();
 	else in_message_host?.invalidate?.();
 }
@@ -149,6 +141,5 @@ export function unbind_thinking_status_hosts(): void {
 	cached_thinking_text.setText("");
 	cached_thinking_host = null;
 	last_staged_text = "";
-	last_external_render_at = Number.NEGATIVE_INFINITY;
 	drop_thinking_status_tick();
 }

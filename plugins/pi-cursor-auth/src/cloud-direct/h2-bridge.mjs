@@ -97,11 +97,11 @@ const client = http2.connect(url || "https://api2.cursor.sh");
 
 // Guard against initial connection failure. Reset on any h2 activity
 // so long-running agent conversations (with tool call round-trips) survive.
-let timeout = setTimeout(killBridge, 30_000);
+let timeout = setTimeout(killBridge, 90_000);
 
 function resetTimeout() {
   clearTimeout(timeout);
-  timeout = setTimeout(killBridge, 120_000);
+  timeout = setTimeout(killBridge, 300_000);
 }
 
 function killBridge() {

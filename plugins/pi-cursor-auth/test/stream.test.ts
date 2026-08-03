@@ -249,7 +249,7 @@ describe("Conversation key helpers", () => {
 			messages: [{ role: "user", content: "hello" }],
 			tools: [],
 		});
-		const key = derive_conversation_key(mapped);
+		const key = derive_conversation_key("test-session", mapped);
 		expect(key).toHaveLength(16);
 		const id = deterministic_conversation_id(key);
 		expect(id).toMatch(

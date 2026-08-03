@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { create, toBinary } from "@bufbuild/protobuf";
-import { ConversationStateStructureSchema } from "../src/cloud-direct/proto/agent_pb.ts";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import { AgentClientMessageSchema, ConversationStateStructureSchema } from "../src/cloud-direct/proto/agent_pb.ts";
 import { map_context_to_cursor } from "../src/context-map.ts";
 import { build_cursor_request } from "../src/cloud-direct/request.ts";
 import { blob_id_to_store_key } from "../src/cloud-direct/blobs.ts";
@@ -235,10 +235,10 @@ describe("Cursor conversation checkpoint blobs", () => {
 			tools: [],
 		});
 		const payload = build_cursor_request("grok-4.5", mapped, crypto.randomUUID(), null);
-		const system_json = JSON.stringify({ role: "system", content: mapped.system_prompt });
-		const system_blob_id = blob_id_to_store_key(
-			new Uint8Array(createHash("sha256").update(system_json).digest()),
-		);
+		const client_message = fromBinary(AgentClientMessageSchema, payload.request_bytes);
+		const run_request = client_message.message.case === "runRequest" ? client_message.message.value : undefined;
+		const system_blob_id = blob_id_to_store_key(run_request?.conversationState?.rootPromptMessagesJson[0] ?? new Uint8Array(0));
+		expect(system_blob_id.length).toBeGreaterThan(0);
 		expect(payload.blob_store.has(system_blob_id)).toBe(true);
 	});
 });

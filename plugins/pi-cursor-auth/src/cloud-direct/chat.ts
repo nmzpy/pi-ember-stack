@@ -107,7 +107,7 @@ interface StreamState {
 
 const REJECT_REASON =
 	"Tool not available in this environment. Use the MCP tools provided instead.";
-const MCP_IDLE_CLOSE_MS = 1000;
+const MCP_IDLE_CLOSE_MS = 5000;
 
 function build_stream_failure_message(options: {
 	trailer?: ConnectTrailerError | null;

@@ -22,7 +22,6 @@ import {
 	RequestContextSchema,
 	UserMessageActionSchema,
 	UserMessageSchema,
-	type ConversationStateStructure,
 	type ConversationTurnStructure,
 	type McpToolDefinition,
 	type RequestContext,
@@ -68,10 +67,10 @@ export function build_client_heartbeat_frame(): Buffer {
 	return frame_connect_message(toBinary(AgentClientMessageSchema, heartbeat));
 }
 
-export function derive_conversation_key(mapped: CursorMappedContext): string {
+export function derive_conversation_key(session_key: string, mapped: CursorMappedContext): string {
 	const first_user = mapped.turns[0]?.user_text ?? mapped.user_text;
 	return createHash("sha256")
-		.update(`conv:${first_user.slice(0, 200)}`)
+		.update(`conv:${session_key}:${first_user.slice(0, 200)}`)
 		.digest("hex")
 		.slice(0, 16);
 }
@@ -93,10 +92,19 @@ export function deterministic_conversation_id(conv_key: string): string {
 
 export const EMBER_MCP_PROVIDER_IDENTIFIER = "pi-ember-stack";
 
-const EMBER_MCP_INSTRUCTIONS = `
-Available MCP tools use the pi_ember_ name prefix (e.g. pi_ember_read, pi_ember_grep).
-Use only these MCP tools. The native tools Read, Grep, Glob, LS, Shell and Write are not available in this environment.
-`;
+interface NamedMcpTool {
+	name: string;
+}
+
+function build_ember_mcp_instructions(tools: readonly NamedMcpTool[]): string {
+	const names = tools.map((tool) => tool.name).join(", ");
+	return [
+		"You must use only the provided MCP tools with the pi_ember_ prefix.",
+		`Available MCP tools: ${names}.`,
+		"Do not call Read, Grep, Glob, LS, Shell, Write, or any other non-prefixed native tool — they are rejected in this environment.",
+		"Always prefer parallel pi_ember_read/pi_ember_grep/pi_ember_edit calls for independent work.",
+	].join(" ");
+}
 
 function build_mcp_tool_definitions(tools: readonly CursorToolDef[]): McpToolDefinition[] {
 	return tools.map((tool) => {
@@ -124,14 +132,14 @@ export function build_request_context(
 		rules: [],
 		repositoryInfo: [],
 		tools: mcp_tools,
-		gitRepos: [],
-		projectLayouts: [],
 		mcpInstructions: [
 			create(McpInstructionsSchema, {
 				serverName: EMBER_MCP_PROVIDER_IDENTIFIER,
-				instructions: EMBER_MCP_INSTRUCTIONS.trim(),
+				instructions: build_ember_mcp_instructions(mcp_tools),
 			}),
 		],
+		gitRepos: [],
+		projectLayouts: [],
 		fileContents: {},
 		customSubagents: [],
 		env: create(RequestContextEnvSchema, {
@@ -223,9 +231,12 @@ function build_root_prompt_blob_ids(
 	blob_store: Map<string, Uint8Array>,
 ): Uint8Array[] {
 	const ids: Uint8Array[] = [];
+	const system = [mapped.system_prompt, build_ember_mcp_instructions(mapped.tools)]
+		.filter(Boolean)
+		.join("\n\n");
 	push_root_prompt_json_blob(blob_store, ids, {
 		role: "system",
-		content: mapped.system_prompt,
+		content: system,
 	});
 
 	for (const turn of mapped.turns) {
@@ -308,6 +319,11 @@ export function read_turn_structure_blob(
 		throw new Error(`Cursor turn blob missing from store: ${blob_id_to_store_key(turn_blob_id).slice(0, 12)}`);
 	}
 	return fromBinary(ConversationTurnStructureSchema, turn_bytes);
+}
+
+/** Deterministic conversation id for a (session, first-message) pair. */
+export function build_conversation_id(session_key: string, mapped: CursorMappedContext): string {
+	return deterministic_conversation_id(derive_conversation_key(session_key, mapped));
 }
 
 export function build_cursor_request(

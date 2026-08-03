@@ -49,7 +49,7 @@ describe("build_cursor_request history encoding", () => {
 		const mcp_instruction = request_context.mcpInstructions[0];
 		expect(mcp_instruction?.serverName).toBe("pi-ember-stack");
 		expect(mcp_instruction?.instructions).toContain("pi_ember_");
-		expect(mcp_instruction?.instructions).toContain("not available");
+		expect(mcp_instruction?.instructions).toContain("rejected");
 	});
 
 	test("embeds assistant tool calls into rebuilt conversation turns", () => {
