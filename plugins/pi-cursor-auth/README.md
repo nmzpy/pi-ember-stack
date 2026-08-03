@@ -40,7 +40,7 @@ Pi agent loop
   → map_context_to_cursor() — full messages + tools
   → cloud-direct AgentService/Run (HTTP/2 via Node h2-bridge)
   → native text/thinking/toolcall events
-  → Pi executes tools (bash rules, DCP, compact rendering)
+  → Pi executes tools (bash rules, compact rendering)
 ```
 
 ### Key behaviors

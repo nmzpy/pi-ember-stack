@@ -87,6 +87,18 @@ function model_class_suffix_re(token: string): RegExp {
 
 const EFFORT_TOKEN_CAPTURE = "(no|none|minimal|low|medium|high|xhigh|max)";
 
+/**
+ * Optional short alpha tag directly after an effort token — aggregator
+ * catalogs append an upstream route code after the variant, e.g.
+ * "DeepSeek V4 Flash 0731 High cro" / `deepseek-v4-flash-0731-high-cro`.
+ * Global rule, not provider-specific: the tag must be 1-4 lowercase letters
+ * and not itself a variant token, so real-word suffixes like "Low Latency"
+ * or "High Quality" are never stripped. Single token only; multi-token
+ * tags ("High cro v2") do not match.
+ */
+const EFFORT_SUFFIX_TRAILING_TAG =
+	"(?:[-_.\\s]+(?!minimal|low|medium|high|xhigh|max|none|no)[a-z]{1,4})?";
+
 /** Cursor-style ids: `cursor-grok-4.5-high-fast` paired with `cursor-grok-4.5-high`. */
 const FAST_LINE_ID_RE = new RegExp(`^(.*)-${EFFORT_TOKEN_CAPTURE}-fast$`, "i");
 
@@ -158,7 +170,7 @@ export function extract_model_class_token(idOrName: string): ModelClassToken | u
 	// Class before a trailing effort suffix: "Grok 4.5 Fast High" / grok-4.5-fast-high
 	for (const token of MODEL_CLASS_TOKENS) {
 		const before_effort = new RegExp(
-			`(?:^|[-_.\\s])${token}[-_.\\s]+(?:minimal|low|medium|high|xhigh|max)$`,
+			`(?:^|[-_.\\s])${token}[-_.\\s]+(?:minimal|low|medium|high|xhigh|max)${EFFORT_SUFFIX_TRAILING_TAG}$`,
 			"i",
 		);
 		if (before_effort.test(trimmed)) return token;
@@ -228,7 +240,7 @@ export function get_baked_thinking_variant(modelName: string): string | undefine
 /**
  * Extract an effort/thinking variant from an id or name.
  * Handles Devin "High Thinking Fast" / "No Thinking", "Medium Fast" speed tiers,
- * and trailing -high suffixes.
+ * trailing -high suffixes, and aggregator-tagged variants ("High cro").
  */
 export function extract_variant_token(idOrName: string): ThinkingVariantToken | undefined {
 	const trimmed = idOrName.trim();
@@ -246,8 +258,12 @@ export function extract_variant_token(idOrName: string): ThinkingVariantToken | 
 		if (VARIANT_TOKEN_SET.has(level)) return level as ThinkingVariantToken;
 	}
 
-	// Trailing suffix after -, _, ., or whitespace: foo-high, foo_medium, "Foo High"
-	const suffix = /(?:^|[-_.\s])(minimal|low|medium|high|xhigh|max|none)$/i.exec(trimmed);
+	// Trailing suffix after -, _, ., or whitespace: foo-high, foo_medium, "Foo High".
+	// Also matches a trailing aggregator tag after the variant ("Foo High cro").
+	const suffix = new RegExp(
+		`(?:^|[-_.\\s])(minimal|low|medium|high|xhigh|max|none)${EFFORT_SUFFIX_TRAILING_TAG}$`,
+		"i",
+	).exec(trimmed);
 	if (suffix) {
 		const token = suffix[1].toLowerCase() as ThinkingVariantToken;
 		if (VARIANT_TOKEN_SET.has(token)) return token;
@@ -268,6 +284,7 @@ export function extract_variant_token(idOrName: string): ThinkingVariantToken | 
  * "GPT-5.2 High Thinking Fast" → "GPT-5.2"
  * "GPT-5.2-Codex Medium Fast" → "GPT-5.2-Codex"
  * "claude-opus-4-7-medium" → "claude-opus-4-7"
+ * "DeepSeek V4 Flash 0731 High cro" → "DeepSeek V4 Flash 0731" (aggregator tag)
  */
 export function strip_variant_token(idOrName: string): string {
 	const trimmed = idOrName.trim();
@@ -287,7 +304,10 @@ export function strip_variant_token(idOrName: string): string {
 	if (withoutParen !== trimmed) return withoutParen.trim();
 
 	const withoutSuffix = trimmed.replace(
-		/[-_.\s]+(minimal|low|medium|high|xhigh|max|none)$/i,
+		new RegExp(
+			`[-_.\\s]+(minimal|low|medium|high|xhigh|max|none)${EFFORT_SUFFIX_TRAILING_TAG}$`,
+			"i",
+		),
 		"",
 	);
 	if (withoutSuffix !== trimmed && withoutSuffix.length > 0) return withoutSuffix.trim();

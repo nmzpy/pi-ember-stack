@@ -3,7 +3,7 @@ import {
 	apply_assistant_stream_boundary,
 	resolve_assistant_stream_boundary_event,
 } from "../../pi-ember-ui/assistant-stream-boundary.ts";
-import { CompactRenderer, formatCallBody, formatUnifiedWorkHeader, strip_bash_command_preview, GROUP_CHILD_FOLD_DEBOUNCE_MS } from "../renderer.ts";
+import { CompactRenderer, formatCallBody, formatCompactChildRow, formatUnifiedWorkHeader, strip_bash_command_preview, GROUP_CHILD_FOLD_DEBOUNCE_MS } from "../renderer.ts";
 import {
 	deactivate_gradient,
 	dispatch_gradient_tick,
@@ -2454,7 +2454,7 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		r.settleAllGroups();
 	}
 
-	test("inter-run planning text does not fold child rows", () => {
+	test("inter-run planning text hard-exits the work group", () => {
 		setThinkingBlocksHidden(true);
 		setup_inter_run_gap();
 		const r = new CompactRenderer();
@@ -2468,20 +2468,23 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
 
-		const result = apply_assistant_stream_boundary(r, {
+		apply_assistant_stream_boundary(r, {
 			type: "text_delta",
 			delta: "Task: continue investigation",
 		});
-		expect(result).toBe("planning_text");
+		// Non-reasoning, non-tool text always hard-splits the work group so
+		// emitted text can never appear below an ongoing work group.
+		expect(r.hasReopenableGroup()).toBe(false);
 		expect(r.hasGroupThinkingChild()).toBe(false);
 
-		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Search");
-		expect(row).toContain("b.ts");
+		const fresh_ctx = makeContext("ir-plan3", {}) as any;
+		r.renderCall("grep", { pattern: "x", path: "c.ts" }, theme, fresh_ctx);
 		expect(r.hasReopenableGroup()).toBe(true);
 	});
 
-	test("inter-run non-planning text hard-exits the group", () => {
+	test("inter-run plain text with hidden thinking hard-exits", () => {
+		// Any visible non-reasoning, non-tool text hard-splits the work group
+		// even when thinking blocks are hidden and the agent is still pending.
 		setThinkingBlocksHidden(true);
 		setup_inter_run_gap();
 		const r = new CompactRenderer();
@@ -2495,15 +2498,29 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		settle_discovery_pair(r, theme, owner_ctx, child_ctx);
 
-		apply_assistant_stream_boundary(r, { type: "text_delta", delta: "Here is the final answer." });
-		expect(r.hasActiveGroups()).toBe(false);
+		apply_assistant_stream_boundary(r, {
+			type: "text_delta",
+			delta: "Here is some inter-tool narration.",
+		});
+		expect(r.hasReopenableGroup()).toBe(false);
 
+		// The next same-key call must start a FRESH header, not reopen the old one.
 		const fresh_ctx = makeContext("ir-gap3", {}) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, fresh_ctx);
+		r.renderResult(
+			"read",
+			{ path: "c.ts" },
+			{ content: [{ type: "text", text: "c" }], details: { totalMatched: 1 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...fresh_ctx, isError: false },
+		);
 		expect(stripAnsi((owner_state.callText as any).text)).not.toContain("c.ts");
 	});
 
-	test("three discovery batches with inter-run planning text keep one work header", () => {
+	test("three discovery batches separated by visible text create separate work headers", () => {
+		// Each visible text_delta between batches is a hard boundary, so each
+		// batch keeps its own work header instead of merging into one.
 		setThinkingBlocksHidden(true);
 		setup_inter_run_gap();
 		const r = new CompactRenderer();
@@ -2541,8 +2558,53 @@ describe("apply_assistant_stream_boundary inter-run gap", () => {
 		run_batch(["e.ts", "f.ts"]);
 
 		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("6 searches");
-		expect(row).not.toMatch(/6 searches[\s\S]*6 searches/);
+		expect(row).toContain("2 searches");
+		expect(row).not.toContain("6 searches");
+	});
+
+	test("three batches separated by hidden plain-text narration create separate work headers", () => {
+		// Any plain text_delta hard-exits the group, so consecutive exploration
+		// batches separated by narration get separate headers.
+		setThinkingBlocksHidden(true);
+		setup_inter_run_gap();
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("nar-owner", owner_state) as any;
+		let baby_id = 0;
+
+		const run_batch = (paths: string[]) => {
+			if (baby_id === 0) {
+				r.renderCall("grep", { pattern: "x", path: paths[0] }, theme, owner_ctx);
+			}
+			for (const file_path of paths) {
+				const child_ctx = makeContext(`nar-${baby_id++}`, {}) as any;
+				r.renderCall("grep", { pattern: "x", path: file_path }, theme, child_ctx);
+				r.renderResult(
+					"grep",
+					{ pattern: "x", path: file_path },
+					{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+					{ expanded: false, isPartial: false },
+					theme,
+					{ ...child_ctx, isError: false },
+				);
+			}
+			r.renderCall("grep", { pattern: "x", path: paths[0] }, theme, owner_ctx);
+			r.settleAllGroups();
+			// Non-planning plain narration ("Thinking"-style, not a Label:/header):
+			apply_assistant_stream_boundary(r, {
+				type: "text_delta",
+				delta: "let me check where that symbol is defined",
+			});
+		};
+
+		run_batch(["a.ts", "b.ts"]);
+		run_batch(["c.ts", "d.ts"]);
+		run_batch(["e.ts", "f.ts"]);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("2 searches");
+		expect(row).not.toContain("6 searches");
 	});
 
 	test("visible_text after agent settled still hardExits", () => {
@@ -2922,5 +2984,60 @@ describe("running_work_label via formatUnifiedWorkHeader", () => {
 			makeRecord("bash", { command: "grep -rn foo src/" }, false),
 		]);
 		expect(headerLabel(group)).toBe("Exploring");
+	});
+});
+
+describe("formatCompactChildRow (native SSOT)", () => {
+	test("running child resolves to the native compact row body", () => {
+		const theme = makeTheme() as any;
+		const body = stripAnsi(formatCompactChildRow("read", { path: "a.ts" }, false, undefined, theme));
+		expect(body).toContain("Reading");
+		expect(body).toContain("a.ts");
+		expect(body).not.toContain("+");
+	});
+
+	test("completed edit child includes +N -N from the result diff", () => {
+		const theme = makeTheme() as any;
+		const body = stripAnsi(
+			formatCompactChildRow(
+				"edit",
+				{ file_path: "foo.ts" },
+				true,
+				{ details: { diff: "+one\n+two\n" } },
+				theme,
+			),
+		);
+		expect(body).toContain("Edit");
+		expect(body).toContain("foo.ts");
+		expect(body).toContain("+2");
+	});
+
+	test("matches the shared formatter the group child rows use", () => {
+		// SSOT: the subagent live tray calls formatCompactChildRow, and the main
+		// agent's group children are built by the same formatter, so a group
+		// child line's body must equal formatCompactChildRow output.
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ssot-owner", owner_state) as any;
+		const child_ctx = makeContext("ssot-child", {}) as any;
+		r.renderCall("read", { path: "b.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "c.ts" }, theme, child_ctx);
+		// Rebind the owner so the shared group block (header + tree children)
+		// is repainted onto the owner's callText — same pattern as the group
+		// tests above. The last line is the trailing `└` child row.
+		r.renderCall("read", { path: "b.ts" }, theme, owner_ctx);
+		const group_text = stripAnsi((owner_state.callText as any).text);
+		const lines = group_text.split("\n");
+		const child_line = lines[lines.length - 1];
+		expect(child_line).toContain("Reading");
+		// Strip the dim tree-prefix wrapper around the trailing glyph (`[dim:  └]`).
+		const body = child_line.replace(/^\[dim:[^\]]*\]/, "");
+		const native = stripAnsi(
+			formatCompactChildRow("read", { path: "c.ts" }, false, undefined, theme),
+		);
+		expect(body).toBe(native);
 	});
 });

@@ -5,9 +5,7 @@
  * parent's canonical ModelRuntime through its extension-facing ModelRegistry
  * facade. This keeps every registered provider (Devin, xAI, built-ins, custom
  * models.json entries) and credential source available without re-registration.
- * Child sessions enable Pi compaction (Ember summarizer via compaction-wiring) and,
- * when global DCP is enabled, outbound pruning strategies without the DCP
- * compress tool.
+ * Child sessions enable Pi compaction (Ember summarizer via compaction-wiring).
  *
  * session.prompt() is async and does not block the TUI render loop — pi's
  * event loop keeps rendering while the subagent streams. This avoids the
@@ -29,14 +27,15 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { is_dcp_enabled_for_subagent } from "../../../pi-ember-dcp/lib/wiring.ts";
 import { is_benign_compact_error, should_skip_compact } from "../../auto-continue.ts";
 import { infer_bare_agent_name } from "../../subagent-policy.ts";
 import {
+	mark_checkpoint_dir_live,
 	persist_checkpoint_meta,
 	type ResumeCheckpointMeta,
 	read_resume_meta,
 	subagent_sessions_dir_for,
+	unmark_checkpoint_dir_live,
 } from "./resume-store.ts";
 
 // ---------------------------------------------------------------------------
@@ -62,10 +61,6 @@ export function resolve_subagent_timeout_ms(timeout: unknown): number {
 const SUBAGENT_EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TODO_EXTENSION_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../../pi-ember-todo/index.ts");
 const COMPACTION_WIRING_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../compaction-wiring.ts");
-const DCP_SUBAGENT_WIRING_PATH = path.resolve(
-	SUBAGENT_EXT_DIR,
-	"../../../pi-ember-dcp/subagent-wiring.ts",
-);
 
 const PARALLEL_TOOL_CALL_GUIDANCE = `
 
@@ -111,9 +106,6 @@ async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResu
 	// registration in the isolated AgentSession, which makes checklist updates
 	// fail or silently disappear.
 	const paths = [TODO_EXTENSION_PATH, COMPACTION_WIRING_PATH];
-	if (is_dcp_enabled_for_subagent(cwd)) {
-		paths.push(DCP_SUBAGENT_WIRING_PATH);
-	}
 	return discoverAndLoadExtensions(paths, cwd);
 }
 
@@ -130,7 +122,20 @@ async function compact_subagent_session(
 }
 
 const MAX_SUBAGENT_LENGTH_CONTINUES = 5;
+const MAX_SUBAGENT_WEBSOCKET_RETRIES = 3;
+const SUBAGENT_WEBSOCKET_PATTERNS: readonly RegExp[] = [
+	/websocket/i,
+	/socket hang up/i,
+	/ECONNRESET/i,
+	/connection was reset/i,
+];
+
 const SUBAGENT_CONTINUE_PROMPT = "continue from where you left off";
+
+function is_websocket_error(message: string | undefined): boolean {
+	if (!message) return false;
+	return SUBAGENT_WEBSOCKET_PATTERNS.some((pattern) => pattern.test(message));
+}
 
 /** Resume checkpoints may end with a partial/failed assistant turn. Move the leaf
  * to the last non-assistant entry so the next prompt starts from a valid turn. */
@@ -174,8 +179,13 @@ export interface UsageStats {
 /** Maximum tool-call rows retained in the live output buffer (SSOT). */
 export const SUBAGENT_LIVE_OUTPUT_MAX_ROWS = 15;
 
+/** Maximum characters retained per live agent text block (narration/answer). */
+export const SUBAGENT_LIVE_TEXT_MAX_CHARS = 400;
+
 /** A captured child tool call for the live output tray. */
 export interface SubagentLiveToolRow {
+	/** Child `tool_execution_*` event id — one row per tool call. */
+	toolCallId?: string;
 	name: string;
 	args: Record<string, unknown>;
 	/** Whether the tool has completed (`tool_execution_end` fired). */
@@ -185,6 +195,21 @@ export interface SubagentLiveToolRow {
 	/** Structured diff/match stats from the result, when available. */
 	details?: Record<string, unknown>;
 }
+
+/** A captured child assistant text block (narration between tools, or the
+ *  streaming answer). Rendered as plain text lines in the live tray. */
+export interface SubagentLiveTextBlock {
+	text: string;
+}
+
+/** Chronological live item from the child session: one tool call or one
+ *  assistant text block, in arrival order. `liveItems` is the single live
+ *  buffer — tools and agent messages interleave exactly as the child emitted
+ *  them, so the tray's fold boundaries (visible text hard-splits the work
+ *  bundle) never reorder content. */
+export type SubagentLiveItem =
+	| { kind: "tool"; row: SubagentLiveToolRow }
+	| { kind: "text"; text: string };
 
 export interface SubAgentResult {
 	agent: string;
@@ -202,15 +227,17 @@ export interface SubAgentResult {
 	errorMessage?: string;
 	latestToolCall?: { name: string; args: Record<string, unknown> };
 	/**
-	 * Bounded live tool-call buffer from the child session: the last
-	 * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` child tool calls, formatted by the
-	 * subagent renderer as compact rows (bullet + gradient verb + details)
-	 * reusing the SSOT `pi-compact-tools/renderer.ts` formatters — the same
-	 * shape the main agent produces. Updated on every tool event so the
-	 * subagent renderer can show a live output tray while the agent runs.
-	 * Cleared at session start and on hard boundaries.
+	 * Bounded chronological live buffer from the child session: the last
+	 * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` tool calls and assistant text blocks
+	 * (`liveItems`), rendered by the subagent renderer as a compact work-bundle
+	 * tray (unified `•` header + folded child waves + streamed agent messages)
+	 * that mirrors the main agent's `pi-compact-tools` grouping with the same
+	 * SSOT formatters. One tool item per child tool call (keyed by
+	 * `toolCallId`), so running rows complete in place instead of stacking
+	 * duplicate Reading/Searching rows. Updated on every tool/text event;
+	 * cleared at session start.
 	 */
-	liveToolRows?: SubagentLiveToolRow[];
+	liveItems?: SubagentLiveItem[];
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +358,7 @@ export interface SubAgentResume {
 }
 
 type SubagentStreamToolEvent = {
+	toolCallId?: unknown;
 	toolName?: string;
 	name?: string;
 	input?: unknown;
@@ -376,46 +404,99 @@ function result_is_error(result: unknown): boolean {
 	return false;
 }
 
+/** Keep only the last SUBAGENT_LIVE_OUTPUT_MAX_ROWS live items. */
+function trim_live_items(items: SubagentLiveItem[]): void {
+	if (items.length > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
+		items.splice(0, items.length - SUBAGENT_LIVE_OUTPUT_MAX_ROWS);
+	}
+}
+
 /**
- * Register or update a tool-call row in the bounded `liveToolRows` buffer.
- * `tool_execution_start`/`tool_call`/`tool_execution_update` append a running
- * row (or update the args of the latest same-name row); `tool_execution_end`
- * marks it completed. The buffer keeps only the last
- * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` rows. Returns true when the buffer changed.
+ * Register or update a tool-call item in the bounded `liveItems` buffer.
+ * `tool_execution_start`/`tool_call`/`tool_execution_update` refresh the
+ * existing row for that `toolCallId` (or append a new running row);
+ * `tool_execution_end` marks it completed in place — a call never stacks a
+ * running row AND a completed duplicate. Id-less events fall back to the
+ * latest same-name running row. The buffer keeps only the last
+ * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` items. Returns true when the buffer changed.
  */
 function note_live_tool_row(
 	result: SubAgentResult,
+	toolCallId: string | undefined,
 	name: string,
 	args: Record<string, unknown>,
 	options: { completed?: boolean; error?: boolean; details?: Record<string, unknown> } = {},
 ): boolean {
-	const rows = result.liveToolRows ?? [];
-	if (!result.liveToolRows) result.liveToolRows = rows;
-	const last = rows[rows.length - 1];
+	const items = result.liveItems ?? [];
+	if (!result.liveItems) result.liveItems = items;
 	const completed = options.completed ?? false;
-	// Update the latest same-name running row in place (args refresh while
-	// streaming, or mark it completed on tool_execution_end) instead of
-	// appending a duplicate row.
-	if (last && last.name === name && !last.completed) {
-		last.args = args;
+	let existing: SubagentLiveToolRow | undefined;
+	if (toolCallId !== undefined) {
+		for (let i = items.length - 1; i >= 0; i--) {
+			const item = items[i];
+			if (item.kind === "tool" && item.row.toolCallId === toolCallId) {
+				existing = item.row;
+				break;
+			}
+		}
+	}
+	if (!existing && toolCallId === undefined) {
+		const last = items[items.length - 1];
+		if (last?.kind === "tool" && last.row.name === name && !last.row.completed) {
+			existing = last.row;
+		}
+	}
+	if (existing) {
+		existing.args = args;
 		if (completed) {
-			last.completed = true;
-			last.error = options.error ?? false;
-			last.details = options.details;
+			existing.completed = true;
+			existing.error = options.error ?? false;
+			existing.details = options.details;
 		}
 		return true;
 	}
-	rows.push({
-		name,
-		args,
-		completed,
-		error: options.error ?? false,
-		details: options.details,
+	items.push({
+		kind: "tool",
+		row: {
+			toolCallId,
+			name,
+			args,
+			completed,
+			error: options.error ?? false,
+			details: options.details,
+		},
 	});
-	if (rows.length > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
-		result.liveToolRows = rows.slice(rows.length - SUBAGENT_LIVE_OUTPUT_MAX_ROWS);
-	}
+	trim_live_items(items);
 	return true;
+}
+
+/**
+ * Append an assistant text block to the live buffer. `openBlock` starts a
+ * fresh block (`text_start`) so a completed block from an earlier message is
+ * never appended to; deltas accumulate into the newest block, capped at
+ * `SUBAGENT_LIVE_TEXT_MAX_CHARS`.
+ */
+function note_live_text_delta(result: SubAgentResult, delta: string, openBlock = false): void {
+	if (!openBlock && delta.length === 0) return;
+	const items = result.liveItems ?? [];
+	if (!result.liveItems) result.liveItems = items;
+	if (openBlock || items[items.length - 1]?.kind !== "text") {
+		items.push({ kind: "text", text: "" });
+		trim_live_items(items);
+	}
+	const last = items[items.length - 1];
+	if (last?.kind === "text" && delta.length > 0) {
+		const next = last.text + delta;
+		last.text =
+			next.length > SUBAGENT_LIVE_TEXT_MAX_CHARS
+				? next.slice(0, SUBAGENT_LIVE_TEXT_MAX_CHARS)
+				: next;
+	}
+}
+
+/** Coerce a child event to a toolCallId when the provider supplies one. */
+function event_tool_call_id(event: { toolCallId?: unknown }): string | undefined {
+	return typeof event.toolCallId === "string" ? event.toolCallId : undefined;
 }
 
 /** Apply live child-session events that drive nested tool/thinking rows in the subagent renderer. */
@@ -443,15 +524,22 @@ export function apply_subagent_stream_event(
 				result.isThinking = true;
 				notify();
 			}
-		} else if (
-			ev?.type === "thinking_end" ||
-			ev?.type === "text_start" ||
-			ev?.type === "text_delta"
-		) {
+		} else if (ev?.type === "thinking_end") {
 			if (result.isThinking) {
 				result.isThinking = false;
 				notify();
 			}
+		} else if (ev?.type === "text_start") {
+			// Visible assistant text is a hard transcript boundary: open a fresh
+			// live text block (the tray folds the prior tool wave below it).
+			if (result.isThinking) result.isThinking = false;
+			note_live_text_delta(result, "", true);
+			notify();
+		} else if (ev?.type === "text_delta") {
+			if (result.isThinking) result.isThinking = false;
+			const delta = typeof ev.delta === "string" ? ev.delta : "";
+			note_live_text_delta(result, delta);
+			notify();
 		}
 		return;
 	}
@@ -460,7 +548,7 @@ export function apply_subagent_stream_event(
 		const name = event.toolName ?? event.name ?? "unknown";
 		const args = coerce_args(event.input ?? event.args ?? event.arguments);
 		result.latestToolCall = { name, args };
-		note_live_tool_row(result, name, args);
+		note_live_tool_row(result, event_tool_call_id(event), name, args);
 		notify();
 		return;
 	}
@@ -471,14 +559,25 @@ export function apply_subagent_stream_event(
 			event.args ?? event.input ?? event.arguments ?? result.latestToolCall?.args,
 		);
 		result.latestToolCall = { name, args };
-		note_live_tool_row(result, name, args);
+		note_live_tool_row(result, event_tool_call_id(event), name, args);
 		notify();
 		return;
 	}
 	if (event.type === "tool_execution_end") {
 		const name = event.toolName ?? result.latestToolCall?.name ?? "unknown";
-		const args = result.latestToolCall?.args ?? {};
-		note_live_tool_row(result, name, args, {
+		const toolCallId = event_tool_call_id(event);
+		let args = result.latestToolCall?.args ?? {};
+		if (toolCallId !== undefined) {
+			// Resolve the stored args so a parallel batch's end event never
+			// overwrites the row with another call's streaming args.
+			for (const item of result.liveItems ?? []) {
+				if (item.kind === "tool" && item.row.toolCallId === toolCallId) {
+					args = item.row.args;
+					break;
+				}
+			}
+		}
+		note_live_tool_row(result, toolCallId, name, args, {
 			completed: true,
 			error: result_is_error(event.result),
 			details: extract_result_details(event.result),
@@ -571,7 +670,7 @@ export async function runSubAgent(options: {
 		isThinking: false,
 	};
 
-	// Compaction + optional DCP strategies (no parent UI extensions/skills).
+	// Compaction (no parent UI extensions/skills).
 	const extensionsResult = await load_subagent_extensions(cwd);
 	const resourceLoader = {
 		getExtensions: () => extensionsResult,
@@ -601,6 +700,12 @@ export async function runSubAgent(options: {
 			: resume?.parentSessionId && resume.originToolCallId
 				? subagent_sessions_dir_for(resume.parentSessionId, resume.originToolCallId)
 				: undefined;
+
+	// Hold a live mark on the checkpoint dir for the entire run so a concurrent
+	// `prune_foreign_checkpoints()` (foreign session shutdown) can never delete
+	// it between the bootstrap above and the SDK's lazy first run-record write.
+	// Deterministically guarantees the directory exists for every SDK open/write.
+	if (checkpoint_dir) mark_checkpoint_dir_live(checkpoint_dir);
 
 	let sessionManager: SessionManager;
 	if (resume && checkpoint_dir) {
@@ -721,14 +826,35 @@ export async function runSubAgent(options: {
 					onMessage?.({ ...result, messages: [...result.messages] });
 				}
 			}
-			if (event.type === "agent_end" && result.messages.length === 0 && event.messages) {
-				result.messages = event.messages as Message[];
+			if (event.type === "agent_end" || event.type === "turn_end") {
+				// A provider error frequently arrives at run/turn end rather than a
+				// normal message_end (auth/network/stopReason errors). Pull the
+				// stopReason + non-generic errorMessage from those messages so a
+				// failed child run never degrades to a bare ✗ with no reason.
+				const end_msgs: Message[] = [];
+				if (event.type === "agent_end" && Array.isArray(event.messages)) {
+					end_msgs.push(...(event.messages as Message[]));
+				} else if (event.type === "turn_end" && event.message) {
+					end_msgs.push(event.message as Message);
+				}
+				for (const m of end_msgs) {
+					if (m && m.role === "assistant") {
+						if (m.stopReason) result.stopReason = m.stopReason;
+						if (m.errorMessage && !isGenericAbortMessage(m.errorMessage)) {
+							result.errorMessage = m.errorMessage;
+						}
+					}
+				}
+				if (result.messages.length === 0 && end_msgs.length > 0) {
+					result.messages = end_msgs;
+				}
 			}
 		});
 
 		let overflow_retried = false;
 		let length_continues = 0;
 		let pending_task = task;
+		let websocket_retries = 0;
 		while (true) {
 			// Re-ensure the checkpoint dir before each prompt so a concurrent prune
 			// (session_shutdown of a foreign parent session) cannot leave the SDK's
@@ -737,14 +863,27 @@ export async function runSubAgent(options: {
 			try {
 				await session.prompt(pending_task);
 			} catch (prompt_error) {
-				const overflow_message = extractFailureMessage(prompt_error);
-				if (!overflow_retried && session && is_context_overflow_error(overflow_message)) {
+				const prompt_error_message = extractFailureMessage(prompt_error);
+				if (!overflow_retried && session && is_context_overflow_error(prompt_error_message)) {
 					overflow_retried = true;
 					await compact_subagent_session(session);
 					continue;
 				}
+				if (
+					!aborted &&
+					session &&
+					is_websocket_error(prompt_error_message) &&
+					websocket_retries < MAX_SUBAGENT_WEBSOCKET_RETRIES
+				) {
+					websocket_retries++;
+					result.stopReason = undefined;
+					result.errorMessage = undefined;
+					trim_trailing_assistant_messages(session.sessionManager);
+					continue;
+				}
 				throw prompt_error;
 			}
+			websocket_retries = 0;
 			if (result.stopReason !== "length" || length_continues >= MAX_SUBAGENT_LENGTH_CONTINUES) {
 				break;
 			}
@@ -787,6 +926,7 @@ export async function runSubAgent(options: {
 			result.errorMessage = caught;
 		}
 	} finally {
+		if (checkpoint_dir) unmark_checkpoint_dir_live(checkpoint_dir);
 		if (timeoutId) clearTimeout(timeoutId);
 		if (combinedSignal) combinedSignal.removeEventListener("abort", onAbort);
 		unsubscribe?.();
@@ -840,9 +980,21 @@ export async function runSubAgent(options: {
 		const resolved = resolve_failure_message(result);
 		if (resolved) {
 			result.errorMessage = resolved;
-		} else if (isGenericAbortMessage(result.errorMessage)) {
+		} else {
+			// Never leave a failed result caption-less. Every consumer (compact
+			// TUI row, thread-viewer, expanded view, and the orchestrator tool
+			// result / model-visible content) resolves the reason through
+			// `resolve_failure_message`, so a failed run must always carry a
+			// concrete, actionable message instead of degrading to a bare ✗ or an
+			// unhelpful "(no output)" upstream.
 			result.errorMessage =
-				result.stopReason === "aborted" ? "Subagent aborted" : "Subagent failed";
+				result.stopReason === "timeout"
+					? `Subagent timed out${timeoutMs ? ` after ${Math.round(timeoutMs / 1000)}s` : ""}`
+					: result.stopReason === "aborted"
+						? "Subagent aborted"
+						: result.stopReason === "length"
+							? "Output limit reached"
+							: "Subagent failed";
 		}
 	}
 

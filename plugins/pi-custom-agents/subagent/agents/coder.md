@@ -1,5 +1,5 @@
 ---
-model: openrouter/deepseek/deepseek-v4-flash-0731
+model: openai-codex/gpt-5.6-luna
 name: Coder
 description: Implementation agent for writing, editing, testing, and verifying code. Spawn this for focused implementation tasks — bug fixes, feature additions, refactors, file edits. Full tool access.
 tools: read, bash, edit, write, grep, find, ls, todo

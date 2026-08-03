@@ -36,11 +36,11 @@ Built-in pi tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `
 
 The `subagent` tool is never available to sub-agents (prevents accidental recursion). Sub-agents run at one level of delegation only; they cannot spawn further sub-agents.
 
-Custom/extension tools are NOT available to sub-agents by default. Child sessions load Pi compaction plus optional DCP pruning strategies only — not the full parent extension stack.
+Custom/extension tools are NOT available to sub-agents by default. Child sessions load Pi compaction only — not the full parent extension stack.
 
 ## Context management
 
-Child sessions enable **Ember-owned Pi compaction** (threshold/overflow recovery) via the shared `compaction-wiring.ts` / `stack-compaction.ts` summarizer (same structured checkpoint as the parent session). When global DCP is enabled (`~/.pi-dcp/config.json`), outbound **DCP strategies** (deduplication, errored-input purge) run on each LLM call. The DCP `compress` tool and `/dcp` commands are **not** exposed to sub-agents.
+Child sessions enable **Ember-owned Pi compaction** (threshold/overflow recovery) via the shared `compaction-wiring.ts` / `stack-compaction.ts` summarizer (same structured checkpoint as the parent session).
 
 ## Model Resolution
 
@@ -62,7 +62,6 @@ Each sub-agent runs with:
 - **System prompt**: agent body only (~200-1K tokens typical)
 - **No AGENTS.md**: saves 500-5K tokens
 - **Pi compaction**: enabled with Ember summarizer checkpoints on threshold/overflow
-- **DCP strategies** (when globally enabled): outbound dedup/purge only — no DCP `compress` tool
 - **Thinking per role**: defaults off; bundled Scout/Coder choose high/medium
 
 This is ~10x leaner than spawning a full `pi` process.

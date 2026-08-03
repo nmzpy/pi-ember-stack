@@ -61,16 +61,55 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
 	maxPrimaryColumnWidth: 32,
 };
 
+/** Width of the live /resume autocomplete list, captured on each render so
+ *  `RESUME_SELECT_LIST_LAYOUT.truncatePrimary` can cap titles at half the
+ *  terminal content width. `SelectList.render(width)` receives the real
+ *  content width, whereas `truncatePrimary`'s `columnWidth` is the
+ *  data-driven primary-column width — capped at the widest label, so halving
+ *  THAT shrank every title to a narrow quarter of the screen. Only the live
+ *  resume list renders/reads this value, so a stale frame is never observed
+ *  by a different list.
+ */
+let resume_render_width = 0;
+
+/** Cap a resume title at half the terminal content width (mirrors the subagent
+ *  `TOOL_ROW_WIDTH_FRACTION` = 0.5 compact-row threshold). `contentWidth` is the
+ *  real list width captured by `ResumeSelectList.render`; `columnWidth` is the
+ *  fallback when unset. `maxWidth` is pi-tui's primary-column bound, so titles
+ *  shorter than half the screen are never truncated below their natural width.
+ */
+export function resume_truncate_text(
+	text: string,
+	contentWidth: number,
+	columnWidth: number,
+	maxWidth: number,
+): string {
+	return truncateToWidth(
+		text,
+		Math.max(1, Math.min(maxWidth, Math.floor((contentWidth || columnWidth) * 0.5))),
+	);
+}
+
+/** Thin SelectList subclass that only records the content width; rendering is
+ *  delegated entirely to pi-tui's SelectList so Pi keeps layout/cursor/diff
+ *  ownership.
+ */
+class ResumeSelectList extends SelectList {
+	override render(width: number): string[] {
+		resume_render_width = width;
+		return super.render(width);
+	}
+}
+
 /** Resume layout: allow conversation titles to use up to half the terminal
- *  width (mirrors the subagent `TOOL_ROW_WIDTH_FRACTION` = 0.5 compact-row
- *  threshold) so long titles wrap after the middle of the screen, not a
- *  narrow quarter. The description still gets the right-hand side.
+ *  width so long titles wrap after the middle of the screen, not a narrow
+ *  quarter. The description still gets the right-hand side.
  */
 const RESUME_SELECT_LIST_LAYOUT = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: Number.POSITIVE_INFINITY,
 	truncatePrimary: (context: { text: string; maxWidth: number; columnWidth: number }) =>
-		truncateToWidth(context.text, Math.min(context.maxWidth, Math.floor(context.columnWidth * 0.5))),
+		resume_truncate_text(context.text, resume_render_width, context.columnWidth, context.maxWidth),
 };
 
 /**
@@ -915,7 +954,8 @@ function install_model_picker_prototype_patches(): void {
 				: slashMode
 					? SLASH_COMMAND_SELECT_LIST_LAYOUT
 					: undefined;
-			return new SelectList(
+			const listClass = isResumeList ? ResumeSelectList : SelectList;
+			return new listClass(
 				items,
 				AUTOCOMPLETE_MAX_VISIBLE,
 				buildSelectListTheme(resolve_select_list_theme()),

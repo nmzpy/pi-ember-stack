@@ -162,6 +162,33 @@ describe("effort helpers", () => {
 		expect(format_effort_display_label("max")).toBe("Max");
 	});
 
+	test("extracts and strips effort variants with a trailing aggregator tag", () => {
+		expect(extract_variant_token("DeepSeek V4 Flash 0731 High cro")).toBe("high");
+		expect(extract_variant_token("deepseek-v4-flash-0731-high-cro")).toBe("high");
+		expect(extract_variant_token("DeepSeek V4 Flash 0731 Medium cro")).toBe("medium");
+		expect(extract_variant_token("DeepSeek V4 Flash 0731 Low cro")).toBe("low");
+		expect(strip_variant_token("DeepSeek V4 Flash 0731 High cro")).toBe(
+			"DeepSeek V4 Flash 0731",
+		);
+		expect(strip_variant_token("deepseek-v4-flash-0731-high-cro")).toBe(
+			"deepseek-v4-flash-0731",
+		);
+		expect(strip_variant_token("deepseek-v4-flash-0731-medium-cro")).toBe(
+			"deepseek-v4-flash-0731",
+		);
+		expect(strip_for_family_grouping("DeepSeek V4 Flash 0731 High cro")).toBe(
+			"DeepSeek V4 Flash 0731",
+		);
+	});
+
+	test("does not strip real-word suffixes after effort tokens", () => {
+		expect(extract_variant_token("gpt-4o-low-latency")).toBeUndefined();
+		expect(strip_variant_token("gpt-4o-low-latency")).toBe("gpt-4o-low-latency");
+		expect(extract_variant_token("High Quality")).toBeUndefined();
+		expect(strip_variant_token("foo-high-speed")).toBe("foo-high-speed");
+		expect(strip_variant_token("foo-high-turbo")).toBe("foo-high-turbo");
+	});
+
 	test("extracts none as a variant alias for no", () => {
 		expect(extract_variant_token("SWE-1.7 None")).toBe("none");
 		expect(extract_variant_token("swe-1-7-none")).toBe("none");

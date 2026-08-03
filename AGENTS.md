@@ -441,23 +441,21 @@
   `└ Thinking` lane and keeps the group reopenable — hidden reasoning is NOT
   a separate transcript block, so the next tool wave folds prior children
   (different tool name) and reopens under the same header instead of spawning
-  a fresh `Explored`/`Edited`/… row. **Inter-run planning text** (non-empty
-  `text_delta` while `isInterRunGap()` — `agentRunPending`, no tool in flight,
-  tools already on screen this turn, e.g. OpenAI/Codex between tool batches) is a
-  **soft** boundary: inter-run planning `text_delta` arms Thinking without
-  folding; inter-run non-planning text uses `noteVisibleText()`. The planning
-  path arms the in-group `└ Thinking` lane via
-  `renderer.armInGroupThinkingForPlanning()` (thinking never folds prior
-  tool children, so lingering tool rows stay visible beside the status row) so the
-  transcript slot is owned inside the work group, not duplicated by an
-  external header. The group stays reopenable (no `reopenClosed`) so the next
-  tool wave reopens under the same header. **Final answer text**
-  (`text_delta` outside the inter-run gap) remains a hard boundary
-  (`noteVisibleText()`). **Every visible `thinking_delta` / `thinking_start`**
+  a fresh `Explored`/`Edited`/… row. **Any visible (non-empty) `text_delta`
+  is a hard boundary** — `apply_assistant_stream_boundary` in
+  `assistant-stream-boundary.ts` collapses the work group to header-only via
+  `noteVisibleText()` → `hardExitGroup()`, whether the text is inter-run
+  narration (OpenAI/Codex commentary between batches) or the final answer, and
+  whether the agent is still pending. Streamed text owns the transcript slot: a
+  stale in-group `└ Thinking` lane with a running elapsed timer never lingers
+  over it, and `should_suppress_thinking_header_for_stream_event` suppresses
+  the external Thinking header for every non-empty `text_delta`. The next tool
+  wave starts a fresh header below the streamed text — there is no
+  `planning_text` soft boundary and no `armInGroupThinkingForPlanning`. **Every visible `thinking_delta` / `thinking_start`**
   hard-exits the work group (`noteVisibleThinking()`), including during an
   inter-run gap, so the next tool wave cannot update a header above visible
   reasoning. Hidden reasoning uses `noteHiddenThinking()` for the in-group
-  lane and stays reopenable (same as planning text) — never `reopenClosed`.
+  lane and stays reopenable (hidden reasoning is not a transcript block) — never `reopenClosed`.
   The
   `isToolGroupActive`/`setToolGroupActive` flag
   lives in `pi-ember-ui/mode-colors.ts` (SSOT), written from `pi-compact-tools`
@@ -469,8 +467,9 @@
   `isToolExecutionInFlight()` (incremented on `tool_execution_start`,
   decremented on `tool_execution_end`) live in `mode-colors.ts` — never duplicate
   the inter-run classifier. `suppress_thinking_header_for_work()` on
-  `text_delta` is skipped during the inter-run gap so gradient Thinking can show
-  between Codex tool batches. `thinkingBlocksHidden` syncs from session settings
+  `text_delta` runs for every non-empty delta regardless of the inter-run gap
+  (`should_suppress_thinking_header_for_stream_event`), so gradient Thinking
+  never lingers while the agent streams visible text or tools. `thinkingBlocksHidden` syncs from session settings
   on `session_start` and from `setHideThinkingBlock` (Ctrl+T) before the first
   assistant `updateContent`. `Ctrl+T` (show/hide thinking blocks)
   rebuilds the chat and can change the transcript line count — see the Running
@@ -518,6 +517,23 @@
   `pi-agents-loop-retry`) telling the model which tools it lost, which it
   gained, and its current tool set. This steers the next turn without
   cluttering the transcript. Never duplicate this reminder in other plugins.
+  **Deferred mode switch while an agent run is in flight:** a manual switch
+  (`/plan`/`/code`/`/orchestrate`, Tab cycle) during a running agent is
+  UI-only — `setActiveMode` + the live `mode-change` event + the powerbar
+  flip immediately, but the logical switch (`currentMode`, `setActiveTools`,
+  the hidden tool-access reminder, the bound-model restore) is deferred
+  (`deferred_mode_id`, flushed by `flush_deferred_mode_switch`) until
+  `agent_settled`, so it never mutates the ongoing stream (mid-run
+  `setModel`/tool-set/reminder injection) and never dismisses a pending Plan
+  Review (`agent_settled` gates the review on `currentMode === "plan"` — the
+  review still opens and resolves before the deferred switch applies).
+  `should_defer_mode_switch` in `mode-switch.ts` is the SSOT predicate
+  (defer only on a real mode change while `isAgentRunPending()`); same-mode
+  re-applies and settled switches stay immediate. Tab cycling resolves from
+  `pending_mode_id ?? deferred_mode_id ?? currentMode` so the visible mode is
+  the cycle anchor. `session_shutdown` clears the deferred switch and persists
+  it (`deferred_mode_id ?? currentMode`) so the next session resumes in the
+  mode the user actually selected.
 - **Frozen code-accent visuals:** The startup animated Pi header logo gradient
   and the startup header bullet (`•`) follow the live mode accent via
   `getActiveModeColor()`. Once the logo settles to static gray (after the user's
@@ -565,10 +581,10 @@ Pi
     │   └── subagent implementation and bundled agent definitions
     ├── plugins/devin-auth/
     │   └── Devin provider, OAuth, catalog, and streaming
+    ├── plugins/pi-crof-auth/
+    │   └── CrofAI OpenAI-compatible provider, API-key login, and model catalog
     ├── plugins/pi-cursor-auth/
     │   └── Cursor subscription auth, model discovery, and Pi-native streaming
-    ├── plugins/pi-ember-dcp/
-    │   └── Dynamic context pruning, compress tool, /dcp controls
     ├── plugins/pi-ember-fff/
     │   └── FFF-powered grep/find with external allowlist
     ├── plugins/pi-ember-todo/
@@ -693,14 +709,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `Thinking` replaces the lingering `Searching`/`Reading` child in the single
     `└` pipe row. Same-key batches reopen via `findReopenableGroup` when
     `currentGroup` was lost so another `Explored` header is not spawned.
-    **Inter-run planning text** (`text_delta` while `isInterRunGap()`, including
-    OpenAI/Codex narration between tool batches) is a soft boundary — groups
-    stay reopenable; never `hardExitGroup()`. The `message_update` planning
-    path calls `renderer.armInGroupThinkingForPlanning()` to arm the in-group
-    `└ Thinking` lane without folding children so the external header does
-    not duplicate it. **Final answer text**
-    (`text_delta` after the agent is no longer pending / outside the inter-run
-    gap), user message, different group key, or hard non-groupable tool
+    **Any visible (non-empty) `text_delta` is a hard boundary**
+    (`apply_assistant_stream_boundary` → `noteVisibleText()` →
+    `hardExitGroup()`), including OpenAI/Codex narration between batches and the
+    final answer — streamed text never renders below an open work group or a
+    stale `└ Thinking` lane. **Final answer text**
+    (`text_delta` after the agent is no longer pending), user message, different
+    group key, or hard non-groupable tool
     (`subagent`, `quiz`, … via `noteInterveningToolCall`) →
     `hardExitGroup()` (header-only, drop reopen, `hardExited` set);
     **`todo`** is a soft boundary (`WORK_GROUP_SOFT_BOUNDARY_TOOLS` /
@@ -1026,7 +1041,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `stderr`, or the last assistant text output. The runner's post-run
   finalization only rewrites the message on actual failures
   (`isFailedResult`); a successful stop with no `errorMessage` is never
-  force-marked failed. Timeout and parent-abort keep their specialized
+  force-marked failed. Provider errors that arrive on `agent_end`/`turn_end`
+  (not a normal `message_end`) have their `stopReason`/non-generic
+  `errorMessage` pulled into the result so they are never dropped. When a
+  failed run has no resolvable reason the finalization always sets a concrete
+  stopReason-based message (`Subagent timed out after Ns`, `Subagent aborted`,
+  `Output limit reached`, `Subagent failed`) — a failed result must never
+  leave the TUI row as a bare `✗` or degrade the orchestrator tool result to
+  an unhelpful `(no output)`. Timeout and parent-abort keep their specialized
   strings. Never duplicate failure-message resolution or the generic-abort
   guard in other plugins. Model-visible tool-result `content` (orchestrator
   context) uses `format_agent_tool_result_text` / `format_agent_tool_result_batch`
@@ -1047,6 +1069,19 @@ field. Keep that mechanism aligned with the actual plugin folders.
   Resume is unavailable for parallel/chain batches and is stripped from child
   tool lists alongside `subagent`. `resolve_resume_target()` scans the parent
   branch for the lettered name and requires an on-disk checkpoint.
+  **Deterministic run-record dir guarantee:** the SDK `SessionManager` writes
+  its `<timestamp>_<childSessionId>.jsonl` run-record lazily on the first
+  assistant message via `openSync(..., "wx")` — not at construction. If a
+  concurrent `prune_foreign_checkpoints()` (foreign session shutdown) deletes
+  the checkpoint dir in that window, the write throws `ENOENT` and fails the
+  whole subagent run with any provider. The runner bootstraps the dir
+  synchronously via `subagent_sessions_dir_for()` AND holds a live mark
+  (`mark_checkpoint_dir_live`/`unmark_checkpoint_dir_live` in `resume-store.ts`)
+  for the entire run, cleared in `finally`; `prune_foreign_checkpoints()`
+  never removes a dir containing a live-marked checkpoint, so the directory
+  deterministically exists for every SDK open/write. Never remove the live-mark
+  logic or weaken the prune guard — it is the deterministic fix for the
+  historical `ENOENT ... subagent-sessions/...` failure.
   The subagent runs **in-process** on the main thread — not in a
   `worker_thread`. The runner accepts the parent's extension-facing
   `ModelRegistry` and crosses to its canonical `ModelRuntime` exactly once in
@@ -1059,10 +1094,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `discoverAndLoadExtensions()`: the canonical `pi-ember-todo` tool plus shared
   Ember compaction wiring
   (`plugins/pi-custom-agents/compaction-wiring.ts` on `session_before_compact`,
-  same prompts as parent via `stack-compaction.ts`) plus optional DCP outbound
-  strategies when global DCP is enabled (`pi-ember-dcp/subagent-wiring.ts` —
-  dedup and errored-input purge only; no DCP `compress` tool, `/dcp`, skills, or
-  disk persistence). `build_subagent_settings()` enables Pi compaction
+  same prompts as parent via `stack-compaction.ts`). `build_subagent_settings()` enables Pi compaction
   (`compaction.enabled: true`) and disables retry. Overflow recovery may call
   `session.compact()` once before retrying the task prompt (hook supplies
   summarizer). Never
@@ -1089,30 +1121,53 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `TOOL_ROW_WIDTH_FRACTION` constant is the single source for the half-width
   threshold.
   When thinking blocks are visible (`!isThinkingBlocksHidden()`), a running
-  subagent also renders its live child tool calls directly below the agent
+  subagent also renders its live child activity directly below the agent
   name via `SubagentLiveOutputText` (a multi-line `Component` defined in
   `render.ts`), replacing the single latest-tool / `└ Thinking` preview row.
-  Each child tool call renders as a compact row — bullet (`statusBulletColor`)
-  + gradient verb (`formatGroupChildGradientVerb`) + details
-  (`formatGroupedCallDetails`) + diff stats (`formatGroupChildEditWriteStats`)
-  — reusing the SSOT formatters from `pi-compact-tools/renderer.ts` so the
-  subagent's tool rows look identical to the main agent's compact rows. No
-  top horizontal rule; a bottom `──` rule (via `chatboxBorderColor`) appears
-  only when the agent settles. Each row is prefixed with the tree-gutter
-  continuation string and ANSI-aware truncated via `truncateToWidth`. When
-  more than one subagent is shown, a dim full-width `──` separator
-  (`DimSeparator`, same `chatboxBorderColor` SSOT) is inserted between
-  consecutive agent blocks. The live tool-call buffer
-  (`SubAgentResult.liveToolRows`, `SubagentLiveToolRow[]`) is accumulated in
+  The tray mirrors the main agent's `pi-compact-tools` work bundle: the
+  chronological `liveItems` buffer splits at visible assistant text (a hard
+  transcript boundary, like the main agent's `noteVisibleText()`), and each
+  work burst renders ONE unified `•` header via the SSOT
+  `formatUnifiedWorkHeader` (past-tense `Edited N files, Explored M files, …
+  +N -N` summary once any member completed, present-tense
+  Exploring/Editing/… while everything is still running) with the shared
+  `groupBulletColorFromFlags` bullet. Only the current child wave stays
+  open — same-name calls append without folding, and a genuinely new tool
+  family folds the prior wave into the header summary once every prior
+  member completed (`currentWaveRows`, mirroring the compact renderer's
+  child-absorb rule), so stale `Reading`/`Searching` rows never linger past
+  the next tool family. Child rows reuse the SSOT
+  `merge_group_child_rows` + `formatGroupChildRows` formatters (gradient
+  verbs while running, muted past-tense when done, merged same-file
+  `edit`/`write`/`apply_patch` rows with accumulated `+N -N`), and an
+  in-group `└ Thinking` lane (shared 20 FPS gradient clock) paints while the
+  child reasons after its latest tool wave. Streamed assistant messages
+  (narration between tools or the streaming answer) render as plain
+  `theme.fg("text", …)` lines, ANSI-aware truncated via `truncateToWidth`,
+  capped at `LIVE_TEXT_MAX_LINES` (6) per block and
+  `SUBAGENT_LIVE_TEXT_MAX_CHARS` (400) per block. One blank spacer row
+  separates consecutive tray segments (tool bursts and text blocks), matching
+  the main transcript's block spacing; spacer rows carry no branch glyph and
+  count toward the 15-line budget. No top horizontal rule; a
+  bottom `──` rule (via `chatboxBorderColor`) appears only when the agent
+  settles. When more than one subagent is shown, a dim full-width `──`
+  separator (`DimSeparator`, same `chatboxBorderColor` SSOT) is inserted
+  between consecutive agent blocks. The live buffer
+  (`SubAgentResult.liveItems`, `SubagentLiveItem[]` — one `tool` item per
+  child call keyed by its `toolCallId` so running rows complete in place
+  instead of stacking a running row AND a completed duplicate, plus `text`
+  items for assistant messages) is accumulated in
   `apply_subagent_stream_event` (`runner.ts` SSOT) from child
-  `tool_execution_start`/`tool_execution_update`/`tool_execution_end`
-  events; it is bounded to the last `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` (15)
-  rows and cleared at session start. The tray is gated by thinking-block
+  `tool_execution_start`/`tool_execution_update`/`tool_execution_end`,
+  `text_start`, and `text_delta` events; it is bounded to the last
+  `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` (15) items and cleared at session start.
+  The tray is gated by thinking-block
   visibility and only appears for running agents; completed / failed agents
   collapse back to the normal row. It reuses the shared 20 FPS gradient clock
   for invalidation (no new timer) and never writes directly to the terminal
-  or mutates Pi's private render state. Never duplicate the live-tool-row
-  buffer, the 15-row cap, the compact-row rendering, or the border logic in
+  or mutates Pi's private render state. Never duplicate the live-item
+  buffer, the 15-item cap, the compact-row rendering, the wave-fold rule,
+  or the border logic in
   other plugins.
   The subagent extension delegates Pi's native `ToolExecutionComponent.render`
   and removes only its self-shell leading separator for `subagent` and
@@ -1182,6 +1237,42 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `anySignal` polyfill can escape as unhandled rejections. Non-abort
   rejections are re-emitted so genuine bugs still surface. The guard is
   removed on `session_shutdown`.
+
+### `pi-crof-auth`
+
+- Owns the `crof` provider for CrofAI, a fully OpenAI-compatible API at
+  `https://crof.ai/v1`. It uses the built-in `openai-completions` stream
+  (`CROF_API_IDENTIFIER` in `src/constants.ts`) — no custom `streamSimple` —
+  so chat, tool calls, structured outputs, and extended reasoning
+  (`reasoning_content`) are handled natively by Pi. Auth is a plain API key
+  resolved to `Authorization: Bearer <key>`.
+- **API-key `/login`:** The provider is registered with an `oauth` block whose
+  `login()` collects the key via `callbacks.onPrompt` and returns it as
+  `OAuthCredentials.access`; `getApiKey` returns the same key and
+  `refreshToken` is a no-op (keys don't expire). This gives `/login crof`
+  without a real OAuth flow. `login_crof` (`src/cli.ts`) reuses any existing
+  key from `CROF_API_KEY`/`CROFAI_API_KEY` env var or an `api_key`-type
+  `crof` credential in `~/.pi/agent/auth.json` before prompting. Never
+  duplicate the key-resolution order (`env` → `api_key` credential → prompt).
+- **Model discovery SSOT:** `discover_crof_models` (`src/catalog.ts`) hits the
+  public `/v1/models` endpoint (passing the bearer token when available) and
+  caches the result; `clear_cached_crof_models()` resets it on login/refresh/
+  logout. `build_crof_models` (`src/models.ts`) is the single mapping from the
+  catalog → `ProviderModelConfig`: `context_length` → `contextWindow`,
+  `max_completion_tokens` → `maxTokens`, `reasoning_effort`/`custom_reasoning`
+  → `reasoning`, and per-million-token `pricing` (`prompt`/`completion`/
+  `cache_prompt`) → `cost`. Reasoning models get `thinkingLevelMap`
+  (`CROF_REASONING_EFFORT_MAP`: `off→none`, `minimal/low→low`, `medium→medium`,
+  `high/xhigh/max→high`) and `compat` (`supportsReasoningEffort: true`,
+  `maxTokensField: "max_tokens"` — CrofAI lists `max_tokens`, not
+  `max_completion_tokens`). Never duplicate the catalog fetch or the model
+  mapping in other plugins.
+- Commands: `/login crof`, `/crof-status` (auth + catalog + usage probe),
+  `/crof-usage` (`/usage_api/` → requests left + credit balance),
+  `/crof-refresh-models`, `/crof-logout`. The extension re-primes the catalog
+  on `session_start` (covering `/login` and catalog-TTL expiry) and clears the
+  cache + `active_pi` on `session_shutdown`. Credentials stay machine-local;
+  never commit `auth.json`, API keys, or generated credential files.
 
 ### `pi-cursor-auth`
 
@@ -1285,53 +1376,6 @@ field. Keep that mechanism aligned with the actual plugin folders.
   [ephraimduncan/opencode-cursor](https://github.com/ephraimduncan/opencode-cursor)
   (`src/cloud-direct/proto/agent_pb.ts`, BSD-3-Clause, see `LICENSE`).
 
-### `pi-ember-dcp`
-
-- Owns dynamic context pruning for outbound LLM context and the `/dcp` command
-  surface (`context`, `stats`, `sweep`, `manual`, `decompress`, `recompress`,
-  `help`).
-- Adapted from `@davecodes/pi-dcp` 0.2.0 by Davidcreador
-  (AGPL-3.0-or-later; license retained in `plugins/pi-ember-dcp/LICENSE`).
-  Upstream: https://github.com/Davidcreador/pi-dcp.
-- **Outbound-only pruning:** A `context` handler runs the prune pipeline
-  (deduplication, errored-input purge, stored compressions) immediately before
-  each LLM call and returns a freshly built message array. Message objects share
-  identity with persisted session entries and must not be mutated in place;
-  session history on disk is never rewritten. Pipeline exceptions pass the
-  original messages through unchanged.
-- **Protected tools:** Always-protected tool names live once in
-  `ALWAYS_PROTECTED_TOOLS` (`compress`, `write`, `edit`, `apply_patch`, `todo`,
-  `task`, `skill`) — never hardcode a second membership set. User config may
-  extend protection lists; it cannot remove the always-protected set.
-- **`compress` tool:** Registers message-mode (`toolCallIds[]`) or range-mode
-  (`start`/`end`) based on config. Permission `deny` skips registration.
-  Compressions are stored in session state and reapplied on later context
-  builds; they do not rewrite the transcript.
-- **Config/state SSOT:** User config and runtime state live under `~/.pi-dcp/`
-  (global `config.json`, prompts, session files) with optional project override
-  at `<cwd>/.pi/dcp.json`. Defaults and load/merge live in `lib/config.ts` —
-  never duplicate thresholds or paths elsewhere. Config `enabled: false` skips
-  all wiring at factory time.
-- **Lifecycle:** Session-bound state is restored on `session_start`, saved on
-  `agent_end`/`session_shutdown`, and cleared on shutdown so jiti-cached
-  modules cannot leak session IDs. Runtime `/dcp manual` is not persisted;
-  `session_start` reseeds `manualMode` from live config so toggles cannot
-  leak across `/new`/`/resume`/`/fork`. `session_compact` resets ID-based
-  tracking while preserving user-requested compressions. Turn index and
-  errored tool observations update from `turn_start`/`tool_result` only —
-  never from a render path.
-- **Subagent child sessions:** `lib/wiring.ts` is the SSOT for event registration.
-  `create_subagent_dcp_extension(cwd)` wires the outbound pipeline only
-  (no `compress` tool, `/dcp`, skills, or `~/.pi-dcp` persistence). Loaded from
-  `plugins/pi-custom-agents/subagent/extensions/runner.ts` when global DCP
-  `enabled` is true. Subagent child sessions load the shared parent
-  `compaction-wiring.ts` (not a duplicate under subagent/extensions).
-- **Bundled skill:** `plugins/pi-ember-dcp/skills/pi-dcp/` is registered via
-  `resources_discover` (`skillPaths`) from the plugin entry — same pattern as
-  `pi-ember-webtools` librarian. Skill text must match current commands/schema
-  and retain upstream AGPL attribution.
-- Does not own compact tool rendering, modes, providers, or web tools.
-
 ### `pi-ember-fff`
 
 - Owns the Ember-owned `grep` and `find` tool registrations (override mode),
@@ -1413,8 +1457,6 @@ field. Keep that mechanism aligned with the actual plugin folders.
   before Pi core's tool-name lookup. This is the SSOT for the dotted-form rescue;
   never duplicate it in provider plugins. Cursor's `TOOL_ALIASES` (`updateTodos`
   → `todo`) covers Cursor-native names and is separate from this rewrite.
-- DCP lists `todo` in `ALWAYS_PROTECTED_TOOLS` — context pruning never
-  compresses todo results.
 
 ### `pi-ember-tps`
 

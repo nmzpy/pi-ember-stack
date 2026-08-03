@@ -24,7 +24,7 @@ import {
 	SUMMARIZATION_SYSTEM_PROMPT,
 	TURN_PREFIX_SUMMARIZATION_PROMPT,
 } from "./compaction-prompts.ts";
-import { count_tokens, trim_to_token_budget } from "../pi-ember-dcp/lib/tokens.ts";
+import { count_tokens, trim_to_token_budget } from "./stack-compaction-tokens.ts";
 
 const PROMPT_SAFETY_TOKENS = 200;
 

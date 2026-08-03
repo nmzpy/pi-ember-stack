@@ -64,6 +64,15 @@ import {
 	reconcile_thinking_wait_ui,
 } from "../thinking-wait.ts";
 
+function stripAnsi(s: string): string {
+	return s.replace(/\[[0-9;]*m/g, "");
+}
+
+function makeContext(id: string, state: Record<string, any> = {}) {
+	return { args: {}, toolCallId: id, invalidate: () => {}, state };
+}
+
+
 function bind_thinking_reconcile_handlers(): void {
 	bind_thinking_wait_handlers({
 		armPreTokenThinkingStatus: arm_pre_token_thinking_status,
@@ -957,4 +966,52 @@ describe("reconcile_thinking_wait_ui", () => {
 			setThinkingBlocksHidden(prev_hidden);
 		}
 	});
+
+
+
+	test("hidden assistant text_delta does not hard-exit compact work group", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		const renderer = getSharedRenderer();
+		renderer.resetForSession();
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("hidden-delta-owner", owner_state) as any;
+		const child_state: Record<string, any> = {};
+		const child_ctx = makeContext("hidden-delta-child", child_state) as any;
+		const theme = { fg: (tag: string, text: string) => `[${tag}:${text}]`, bold: (s: string) => `*${s}*` } as any;
+		try {
+			renderer.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+			renderer.renderResult(
+				"read",
+				{ path: "a.ts" },
+				{ content: [{ type: "text", text: "a" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...owner_ctx, isError: false },
+			);
+			renderer.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+			renderer.renderResult(
+				"grep",
+				{ pattern: "x", path: "b.ts" },
+				{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...child_ctx, isError: false },
+			);
+			renderer.settleAllGroups();
+			const before = stripAnsi((owner_state.callText as any)?.text ?? "");
+			expect(before).toContain("Explored 1 file");
+			expect(before).toContain("1 search");
+			// Simulate a hidden assistant text hard-exit: should fold.
+			renderer.noteVisibleText();
+			renderer.settleAllGroups();
+			const after = stripAnsi((owner_state.callText as any)?.text ?? "");
+			expect(after).toContain("Explored 1 file");
+			expect(after).toContain("1 search");
+		} finally {
+			renderer.resetForSession();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
 });

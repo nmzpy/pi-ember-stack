@@ -106,7 +106,7 @@ describe("apply_subagent_stream_event", () => {
 	});
 });
 
-describe("apply_subagent_stream_event live tool rows", () => {
+describe("apply_subagent_stream_event live items", () => {
 	test("tool_execution_start appends a running row", () => {
 		const result = make_running_result();
 		apply_subagent_stream_event(
@@ -114,72 +114,156 @@ describe("apply_subagent_stream_event live tool rows", () => {
 			{ type: "tool_execution_start", toolName: "read", args: { path: "a.ts" } },
 			() => {},
 		);
-		expect(result.liveToolRows?.length).toBe(1);
-		expect(result.liveToolRows?.[0]).toEqual({
-			name: "read",
-			args: { path: "a.ts" },
-			completed: false,
-			error: false,
+		expect(result.liveItems?.length).toBe(1);
+		expect(result.liveItems?.[0]).toEqual({
+			kind: "tool",
+			row: {
+				toolCallId: undefined,
+				name: "read",
+				args: { path: "a.ts" },
+				completed: false,
+				error: false,
+			},
 		});
 	});
 
-	test("tool_execution_update updates args of the latest running row", () => {
+	test("tool_execution_update updates args of the running row", () => {
 		const result = make_running_result();
 		apply_subagent_stream_event(
 			result,
-			{ type: "tool_execution_start", toolName: "edit", args: { path: "a.ts" } },
+			{ type: "tool_execution_start", toolCallId: "c1", toolName: "edit", args: { path: "a.ts" } },
 			() => {},
 		);
 		apply_subagent_stream_event(
 			result,
-			{ type: "tool_execution_update", toolName: "edit", args: { path: "a.ts", oldText: "x" } },
+			{ type: "tool_execution_update", toolCallId: "c1", toolName: "edit", args: { path: "a.ts", oldText: "x" } },
 			() => {},
 		);
-		expect(result.liveToolRows?.length).toBe(1);
-		expect(result.liveToolRows?.[0].args).toEqual({ path: "a.ts", oldText: "x" });
-		expect(result.liveToolRows?.[0].completed).toBe(false);
+		expect(result.liveItems?.length).toBe(1);
+		const row = result.liveItems?.[0];
+		expect(row?.kind).toBe("tool");
+		if (row?.kind === "tool") {
+			expect(row.row.args).toEqual({ path: "a.ts", oldText: "x" });
+			expect(row.row.completed).toBe(false);
+		}
 	});
 
 	test("tool_execution_end marks the row completed", () => {
 		const result = make_running_result();
 		apply_subagent_stream_event(
 			result,
-			{ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } },
+			{ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "ls" } },
 			() => {},
 		);
 		apply_subagent_stream_event(
 			result,
 			{
 				type: "tool_execution_end",
+				toolCallId: "c1",
 				toolName: "bash",
 				result: { isError: true, details: { diff: "..." } },
 			},
 			() => {},
 		);
-		expect(result.liveToolRows?.length).toBe(1);
-		expect(result.liveToolRows?.[0].completed).toBe(true);
-		expect(result.liveToolRows?.[0].error).toBe(true);
-		expect(result.liveToolRows?.[0].details).toEqual({ diff: "..." });
+		expect(result.liveItems?.length).toBe(1);
+		const row = result.liveItems?.[0];
+		expect(row?.kind).toBe("tool");
+		if (row?.kind === "tool") {
+			expect(row.row.completed).toBe(true);
+			expect(row.row.error).toBe(true);
+			expect(row.row.details).toEqual({ diff: "..." });
+		}
 	});
 
-	test("multiple distinct tools append separate rows", () => {
+	test("parallel batch completes each row in place by toolCallId (no duplicates)", () => {
 		const result = make_running_result();
 		apply_subagent_stream_event(
 			result,
-			{ type: "tool_execution_start", toolName: "read", args: { path: "a.ts" } },
+			{ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: { path: "a.ts" } },
 			() => {},
 		);
 		apply_subagent_stream_event(
 			result,
-			{ type: "tool_execution_start", toolName: "grep", args: { pattern: "x" } },
+			{ type: "tool_execution_start", toolCallId: "c2", toolName: "grep", args: { pattern: "x" } },
 			() => {},
 		);
-		expect(result.liveToolRows?.length).toBe(2);
-		expect(result.liveToolRows?.[0].name).toBe("read");
-		expect(result.liveToolRows?.[1].name).toBe("grep");
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_end", toolCallId: "c1", toolName: "read", result: {} },
+			() => {},
+		);
+		expect(result.liveItems?.length).toBe(2);
+		const first = result.liveItems?.[0];
+		const second = result.liveItems?.[1];
+		expect(first?.kind).toBe("tool");
+		expect(second?.kind).toBe("tool");
+		if (first?.kind === "tool" && second?.kind === "tool") {
+			expect(first.row.toolCallId).toBe("c1");
+			expect(first.row.completed).toBe(true);
+			expect(first.row.args).toEqual({ path: "a.ts" });
+			expect(second.row.toolCallId).toBe("c2");
+			expect(second.row.completed).toBe(false);
+		}
 	});
 
-	test("liveToolRows trims to last 15 rows", () => {
+	test("text_start opens a live text block; deltas append to it", () => {
+		const result = make_running_result();
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "text_start" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Let me " } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "check." } },
+			() => {},
+		);
+		expect(result.liveItems?.length).toBe(1);
+		expect(result.liveItems?.[0]).toEqual({ kind: "text", text: "Let me check." });
+		expect(result.isThinking).toBe(false);
+	});
+
+	test("a later message text block never appends to an earlier block", () => {
+		const result = make_running_result();
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "text_start" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "first" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: { path: "a.ts" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "text_start" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "second" } },
+			() => {},
+		);
+		expect(result.liveItems?.length).toBe(3);
+		expect(result.liveItems?.[0]).toEqual({ kind: "text", text: "first" });
+		expect(result.liveItems?.[2]).toEqual({ kind: "text", text: "second" });
+		const tool = result.liveItems?.[1];
+		expect(tool?.kind).toBe("tool");
+		if (tool?.kind === "tool") expect(tool.row.name).toBe("read");
+	});
+
+	test("liveItems trims to last 15 items", () => {
 		const result = make_running_result();
 		for (let i = 0; i < 20; i++) {
 			apply_subagent_stream_event(
@@ -193,8 +277,12 @@ describe("apply_subagent_stream_event live tool rows", () => {
 				() => {},
 			);
 		}
-		expect(result.liveToolRows?.length).toBe(15);
-		expect(result.liveToolRows?.[0].args).toEqual({ path: "f5.ts" });
-		expect(result.liveToolRows?.[14].args).toEqual({ path: "f19.ts" });
+		expect(result.liveItems?.length).toBe(15);
+		const first = result.liveItems?.[0];
+		const last = result.liveItems?.[14];
+		expect(first?.kind).toBe("tool");
+		expect(last?.kind).toBe("tool");
+		if (first?.kind === "tool") expect(first.row.args).toEqual({ path: "f5.ts" });
+		if (last?.kind === "tool") expect(last.row.args).toEqual({ path: "f19.ts" });
 	});
 });

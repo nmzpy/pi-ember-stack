@@ -4,10 +4,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import devinAuthPlugin from "./devin-auth/extensions/index.ts";
 import piCompactToolsPlugin, { getSharedRenderer } from "./pi-compact-tools/index.ts";
+import piCrofAuthPlugin from "./pi-crof-auth/extensions/index.ts";
 import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 import piEmberApplypatchPlugin from "./pi-ember-applypatch/index.ts";
-import piEmberDcpPlugin from "./pi-ember-dcp/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberTodoPlugin from "./pi-ember-todo/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
@@ -20,8 +20,8 @@ type PluginId =
 	| "pi-compact-tools"
 	| "pi-ember-applypatch"
 	| "pi-custom-agents"
-	| "pi-ember-dcp"
 	| "devin-auth"
+	| "pi-crof-auth"
 	| "pi-cursor-auth"
 	| "pi-ember-fff"
 	| "pi-ember-todo"
@@ -39,9 +39,9 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-compact-tools",
 	"pi-ember-applypatch",
 	"devin-auth",
+	"pi-crof-auth",
 	"pi-cursor-auth",
 	"pi-custom-agents",
-	"pi-ember-dcp",
 	"pi-ember-fff",
 	"pi-ember-todo",
 	"pi-ember-ui",
@@ -66,6 +66,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		extension: devinAuthPlugin,
 	},
 	{
+		id: "pi-crof-auth",
+		description: "CrofAI OpenAI-compatible provider, API-key login, and model catalog",
+		extension: piCrofAuthPlugin,
+	},
+	{
 		id: "pi-cursor-auth",
 		description: "Cursor subscription auth, model catalog, and native Pi streaming",
 		extension: piCursorAuthPlugin,
@@ -74,11 +79,6 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-custom-agents",
 		description: "Quiz, primary modes, plans, subagents, and bundled agent definitions",
 		extension: piCustomAgentsPlugin,
-	},
-	{
-		id: "pi-ember-dcp",
-		description: "Dynamic context pruning and compress tool for outbound LLM context",
-		extension: piEmberDcpPlugin,
 	},
 	{
 		id: "pi-ember-fff",
@@ -210,10 +210,7 @@ export default async function piEmberStackPlugin(pi: ExtensionAPI): Promise<void
 	for (const plugin of PLUGINS) {
 		if (!enabledPlugins.has(plugin.id)) continue;
 		if (plugin.id === "pi-compact-tools") {
-			await piCompactToolsPlugin(
-				pi,
-				fffEnabled ? { excludeTools: ["grep", "find"] } : undefined,
-			);
+			await piCompactToolsPlugin(pi, fffEnabled ? { excludeTools: ["grep", "find"] } : undefined);
 			continue;
 		}
 		await plugin.extension(pi);

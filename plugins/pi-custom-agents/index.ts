@@ -38,7 +38,12 @@ import { getKeybindings, matchesKey, type EditorTheme, type TUI } from "@earendi
 import { install_bash_rules } from "./bash-rules.ts";
 import { install_bash_timeout } from "./bash-timeout.ts";
 import { validate_plan_mode_subagent } from "./subagent-policy.ts";
-import { setActiveMode, setPlanAutoContinuing, setShellMode } from "../pi-ember-ui/mode-colors.ts";
+import {
+	isAgentRunPending,
+	setActiveMode,
+	setPlanAutoContinuing,
+	setShellMode,
+} from "../pi-ember-ui/mode-colors.ts";
 import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
 import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
 import {
@@ -108,14 +113,15 @@ import {
 } from "./plan-review.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
+import { should_defer_mode_switch } from "./mode-switch.ts";
 
 /**
  * Promisify ctx.compact() into a result discriminated union.
  * Never throws — both callback errors and synchronous throws are caught.
  */
-function compact_async(ctx: Pick<ExtensionContext, "compact">): Promise<
-	{ ok: true } | { ok: false; error: Error }
-> {
+function compact_async(
+	ctx: Pick<ExtensionContext, "compact">,
+): Promise<{ ok: true } | { ok: false; error: Error }> {
 	return new Promise((resolve) => {
 		try {
 			ctx.compact({
@@ -271,7 +277,16 @@ function writePersistedState(state: {
 // get_search_content) registered by the pi-ember-webtools plugin. They belong in
 // every mode so the agent can do web research regardless of mode.
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"];
-const BASE_RESEARCH_TOOLS = ["read", "grep", "find", "ls", "bash", "quiz", "todo", ...WEB_ACCESS_TOOLS];
+const BASE_RESEARCH_TOOLS = [
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"bash",
+	"quiz",
+	"todo",
+	...WEB_ACCESS_TOOLS,
+];
 const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATION_TOOLS];
 const ORCHESTRATE_TOOLS = [
 	"quiz",
@@ -403,7 +418,8 @@ function compose_plan_prompt(body: string): string {
 ${style}`;
 }
 
-const ARCHITECT_PROMPT = compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands. You may run non-mutating shell commands (e.g. git log, find, grep) to inform the plan.
+const ARCHITECT_PROMPT =
+	compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands. You may run non-mutating shell commands (e.g. git log, find, grep) to inform the plan.
 
 ${mode_intro(
 	"plan",
@@ -487,7 +503,8 @@ Output format — use markdown section headers and bullets:
 - <cleanup complete>
 - <named suites pass>`);
 
-const ORCHESTRATOR_PROMPT = compose_mode_prompt(`Orchestrate mode is active. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.
+const ORCHESTRATOR_PROMPT =
+	compose_mode_prompt(`Orchestrate mode is active. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.
 
 ${mode_intro(
 	"orchestrate",
@@ -535,11 +552,7 @@ Focus areas: ownership conflicts, hidden coupling, duplicated state or mirrored 
 function coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`Code mode is active. You have full tool access. Implement, test, and verify code with autonomy.
 
-${mode_intro(
-		"code",
-		build_full_tools(provider),
-		QUIZ_UNCERTAINTY_GUIDANCE,
-	)}`);
+${mode_intro("code", build_full_tools(provider), QUIZ_UNCERTAINTY_GUIDANCE)}`);
 }
 
 function exit_to_coder_prompt(provider: string | undefined): string {
@@ -662,6 +675,13 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 	let active_session_manager: SessionManagerReference | undefined;
 	let session_ready = false;
 	let pending_mode_id: string | undefined;
+	// Mode switch deferred while an agent run is still in flight: the live UI
+	// accent/label flips immediately, but the logical switch (tool set, mode
+	// prompt, bound model, tool-access reminder) waits until the run settles so
+	// it neither dismisses a pending Plan Review nor mutates the stream.
+	// Flushed at agent_settled (after any Plan Review decision); cleared on
+	// shutdown.
+	let deferred_mode_id: string | undefined;
 
 	function is_live_session(ctx: ExtensionContext): boolean {
 		return session_ready && ctx.sessionManager === active_session_manager;
@@ -710,38 +730,35 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		refresh_footer(ctx);
 	}
 
-	pi.events.on(
-		PI_AGENTS_BIND_MODE_MODEL_EVENT,
-		(data: unknown) => {
-			if (!data || typeof data !== "object") return;
-			const payload = data as {
-				provider?: unknown;
-				modelId?: unknown;
-				name?: unknown;
-				thinkingLevel?: unknown;
-				syncThinkingLevelToPi?: unknown;
-			};
-			if (typeof payload.provider !== "string" || typeof payload.modelId !== "string") {
-				return;
-			}
-			const identity = model_identity_from_user_selection(
-				{
-					provider: payload.provider,
-					id: payload.modelId,
-					name: typeof payload.name === "string" ? payload.name : undefined,
-				},
-				{
-					thinkingLevel:
-						typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : undefined,
-					syncThinkingLevelToPi:
-						typeof payload.syncThinkingLevelToPi === "boolean"
-							? payload.syncThinkingLevelToPi
-							: undefined,
-				},
-			);
-			if (identity) bind_current_mode_model(identity);
-		},
-	);
+	pi.events.on(PI_AGENTS_BIND_MODE_MODEL_EVENT, (data: unknown) => {
+		if (!data || typeof data !== "object") return;
+		const payload = data as {
+			provider?: unknown;
+			modelId?: unknown;
+			name?: unknown;
+			thinkingLevel?: unknown;
+			syncThinkingLevelToPi?: unknown;
+		};
+		if (typeof payload.provider !== "string" || typeof payload.modelId !== "string") {
+			return;
+		}
+		const identity = model_identity_from_user_selection(
+			{
+				provider: payload.provider,
+				id: payload.modelId,
+				name: typeof payload.name === "string" ? payload.name : undefined,
+			},
+			{
+				thinkingLevel:
+					typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : undefined,
+				syncThinkingLevelToPi:
+					typeof payload.syncThinkingLevelToPi === "boolean"
+						? payload.syncThinkingLevelToPi
+						: undefined,
+			},
+		);
+		if (identity) bind_current_mode_model(identity);
+	});
 
 	async function apply_bound_thinking_level(
 		ctx: ExtensionContext,
@@ -776,10 +793,9 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			return;
 		}
 
-		const target = ctx.modelRegistry.find(
-			canonical.provider,
-			canonical.modelId,
-		) as Model<Api> | undefined;
+		const target = ctx.modelRegistry.find(canonical.provider, canonical.modelId) as
+			| Model<Api>
+			| undefined;
 		const needs_model =
 			current?.provider !== canonical.provider || current?.id !== canonical.modelId;
 		if (needs_model && (!target || !ctx.modelRegistry.hasConfiguredAuth(target))) return;
@@ -811,21 +827,25 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		});
 	}
 
-	function updateStatus(ctx: ExtensionContext): void {
+	function render_mode_status(modeId: string, ctx: ExtensionContext): void {
 		pi.events.emit("powerbar:update", {
-			id: `pi-agents-${currentMode}`,
-			text: MODES[currentMode].label,
-			icon: MODES[currentMode].icon,
-			color: currentMode === DEFAULT_MODE ? "success" : MODES[currentMode].color,
+			id: `pi-agents-${modeId}`,
+			text: MODES[modeId].label,
+			icon: MODES[modeId].icon,
+			color: modeId === DEFAULT_MODE ? "success" : MODES[modeId].color,
 		});
-		for (const modeId of MODE_IDS) {
-			if (modeId === currentMode) continue;
+		for (const other of MODE_IDS) {
+			if (other === modeId) continue;
 			pi.events.emit("powerbar:update", {
-				id: `pi-agents-${modeId}`,
+				id: `pi-agents-${other}`,
 				text: undefined,
 			});
 		}
 		request_live_mode_render(ctx);
+	}
+
+	function updateStatus(ctx: ExtensionContext): void {
+		render_mode_status(currentMode, ctx);
 	}
 
 	function sync_active_tools(ctx: ExtensionContext): void {
@@ -841,10 +861,27 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		const prevMode = MODES[prevModeId];
 		const provider = model_provider_of(ctx.model);
 
+		// A manual mode switch while an agent run is still streaming must not
+		// mutate the ongoing stream — setActiveTools, the hidden tool-access
+		// reminder, or the bound-model restore would abort or poison the run —
+		// and must not dismiss a pending Plan Review (agent_settled gates the
+		// review on currentMode === "plan"). Flip the live accent/label now and
+		// defer the logical switch; agent_settled's flush applies it after the
+		// Plan Review decision, so the new mode takes effect with the next run.
+		if (prevMode && should_defer_mode_switch(prevModeId, modeId, isAgentRunPending())) {
+			setActiveMode(modeId);
+			pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
+			render_mode_status(modeId, ctx);
+			deferred_mode_id = modeId;
+			return;
+		}
+
 		// Mode changes are deliberately live-only. The active tool set and the
 		// next-turn prompt change immediately, while the transcript stays lazy
 		// and cached.
 		currentMode = modeId;
+		deferred_mode_id = undefined;
+		if (modeId !== "plan") waitingForPlan = false;
 		setActiveMode(modeId);
 		pi.setActiveTools(mode_tools_for_provider(modeId, provider));
 		pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
@@ -890,6 +927,19 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		writePersistedState({ mode: currentMode, modeModels: mode_models });
 	}
 
+	async function flush_deferred_mode_switch(ctx: ExtensionContext): Promise<void> {
+		const modeId = deferred_mode_id;
+		if (!modeId || modeId === currentMode) return;
+		if (!is_live_session(ctx)) {
+			// Session was replaced (fresh-context implement) — the new session
+			// seeds its own mode; drop the stale deferred switch.
+			deferred_mode_id = undefined;
+			return;
+		}
+		deferred_mode_id = undefined;
+		await apply_mode(modeId, ctx);
+	}
+
 	async function switchMode(modeId: string, ctx: ExtensionContext): Promise<void> {
 		if (!MODES[modeId]) return;
 		if (!is_live_session(ctx)) {
@@ -918,7 +968,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 	}
 
 	const cycleMode = async (ctx: ExtensionContext): Promise<void> => {
-		const baseMode = pending_mode_id ?? currentMode;
+		const baseMode = pending_mode_id ?? deferred_mode_id ?? currentMode;
 		const idx = CYCLE_ORDER.indexOf(baseMode);
 		const next = CYCLE_ORDER[(idx + 1) % CYCLE_ORDER.length];
 		await switchMode(next, ctx);
@@ -943,9 +993,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			// @earendil-works/pi-tui from a different module copy than the extension,
 			// so the prototype patch in pi-ember-ui/index.ts may not affect the live
 			// Editor class that actually renders the chatbox.
-			wrapEditorRenderForShell(
-				editor as unknown as Parameters<typeof wrapEditorRenderForShell>[0],
-			);
+			wrapEditorRenderForShell(editor as unknown as Parameters<typeof wrapEditorRenderForShell>[0]);
 			const original_handle_input = editor.handleInput.bind(editor);
 			editor.handleInput = (data: string): void => {
 				prepare_app_clear_input(
@@ -967,10 +1015,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					data = shellResult.data;
 				}
 				if (
-					interceptShellInput(
-						data,
-						editor as unknown as Parameters<typeof interceptShellInput>[1],
-					)
+					interceptShellInput(data, editor as unknown as Parameters<typeof interceptShellInput>[1])
 				) {
 					// Shell mode was entered/exited — the editor text didn't change
 					// (empty → empty) so Pi's differential renderer won't re-render
@@ -1107,9 +1152,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			}
 			fs.writeFileSync(filePath, currentContent, "utf-8");
 			const effortHint = format_model_effort_suffix({ id: picked.id }, picked.thinkingLevel);
-			ctx.ui.notify(
-				`${agentChoice} subagent: ${modelValue}${effortHint}. Will use on next spawn.`,
-			);
+			ctx.ui.notify(`${agentChoice} subagent: ${modelValue}${effortHint}. Will use on next spawn.`);
 		},
 	});
 
@@ -1136,12 +1179,9 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 	async function showPlanImplementationMode(
 		ctx: ExtensionContext,
 	): Promise<PlanImplementationMode | undefined> {
-		const answers = await askQuiz(
-			ctx,
-			"Implement via",
-			build_plan_implementation_questions(),
-			{ includeNone: false },
-		);
+		const answers = await askQuiz(ctx, "Implement via", build_plan_implementation_questions(), {
+			includeNone: false,
+		});
 		const mode = resolve_plan_implementation_mode(answers?.[0]);
 		if (!mode) ctx.ui.notify("Plan implementation cancelled.");
 		return mode;
@@ -1258,9 +1298,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			}
 		} catch (err) {
 			ctx.ui.notify(
-				`Fresh-context implement failed: ${
-					err instanceof Error ? err.message : String(err)
-				}`,
+				`Fresh-context implement failed: ${err instanceof Error ? err.message : String(err)}`,
 				"error",
 			);
 		}
@@ -1492,96 +1530,104 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 	});
 
 	pi.on("agent_settled", async (_event: AgentSettledEvent, ctx: ExtensionContext) => {
-		if (loop_detected && !loop_prompt_active) {
-			loop_prompt_active = true;
-			const model = ctx.model as Model<Api> | undefined;
-			const model_name = model?.name ?? model?.id ?? "The model";
-			if (ctx.hasUI) {
-				ctx.ui.notify(
-					`${model_name} has been looping for ${LOOP_TOOL_CALL_LIMIT} toolcalls`,
-					"warning",
-				);
-			}
-			const choice = ctx.hasUI ? await showLoopRecovery(ctx) : undefined;
-			loop_prompt_active = false;
-			reset_tool_loop_tracking();
-			lastTurnAborted = false;
-			lastTurnLengthStopped = false;
-			lastTurnError = false;
-			setPlanAutoContinuing(false);
-			if (choice?.action === "retry") {
-				pi.sendMessage(
-					{
-						customType: "pi-agents-loop-retry",
-						content: "You have been looping, back off and continue with a different tool.",
-						display: false,
-					},
-					{ triggerTurn: true },
-				);
-			} else if (choice?.action === "custom" && choice.instruction) {
-				pi.sendMessage(
-					{
-						customType: "pi-agents-loop-guidance",
-						content: choice.instruction,
-						display: false,
-					},
-					{ triggerTurn: true },
-				);
-			}
-			return;
-		}
-
-		// Output-limit recovery: when the model hits the max output token limit,
-		// compact is best-effort and resume is unconditional within budget.
-		// If the branch tip is already a compaction entry ("Already compacted"),
-		// compact is skipped. If compact fails with a non-benign error we still
-		// resume — the user never sees the error row or a recovery prompt.
-		// The suppression flag in mode-colors.ts is set in the message_end
-		// handler (before the TUI renders the error row) and cleared after the
-		// hidden pi-agents-auto-continue message is dispatched.
-		if (
-			lastTurnLengthStopped &&
-			!lastTurnAborted &&
-			planAutoContinueCount < PLAN_AUTO_CONTINUE_MAX
-		) {
-			planAutoContinueCount++;
-			lastTurnLengthStopped = false;
-			await resume_after_output_limit(ctx);
-			return;
-		}
-		// Reset auto-continue state once the turn completes normally.
-		setPlanAutoContinuing(false);
-		planAutoContinueCount = 0;
-		lastTurnLengthStopped = false;
-
-		if (waitingForPlan && currentMode === "plan") {
-			const turn_aborted = lastTurnAborted;
-			const turn_errored = lastTurnError;
-			lastTurnAborted = false;
-			lastTurnError = false;
-			if (turn_aborted || turn_errored) return;
-			if (!should_show_plan_review(latest_plan_text)) {
-				waitingForPlan = false;
+		try {
+			if (loop_detected && !loop_prompt_active) {
+				loop_prompt_active = true;
+				const model = ctx.model as Model<Api> | undefined;
+				const model_name = model?.name ?? model?.id ?? "The model";
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`${model_name} has been looping for ${LOOP_TOOL_CALL_LIMIT} toolcalls`,
+						"warning",
+					);
+				}
+				const choice = ctx.hasUI ? await showLoopRecovery(ctx) : undefined;
+				loop_prompt_active = false;
+				reset_tool_loop_tracking();
+				lastTurnAborted = false;
+				lastTurnLengthStopped = false;
+				lastTurnError = false;
+				setPlanAutoContinuing(false);
+				if (choice?.action === "retry") {
+					pi.sendMessage(
+						{
+							customType: "pi-agents-loop-retry",
+							content: "You have been looping, back off and continue with a different tool.",
+							display: false,
+						},
+						{ triggerTurn: true },
+					);
+				} else if (choice?.action === "custom" && choice.instruction) {
+					pi.sendMessage(
+						{
+							customType: "pi-agents-loop-guidance",
+							content: choice.instruction,
+							display: false,
+						},
+						{ triggerTurn: true },
+					);
+				}
 				return;
 			}
 
-			const action = await showPlanReview(ctx);
-			if (action === "implement") {
-				waitingForPlan = false;
-				await handlePlanImplement(ctx);
-			} else if (action === "implement-fresh") {
-				await handlePlanImplementFreshContext(ctx);
-			} else if (action === "copy") {
-				await copy_plan_to_clipboard(ctx);
-			} else if (action?.action === "refine") {
-				latest_plan_text = "";
-				pi.sendUserMessage(action.instruction);
+			// Output-limit recovery: when the model hits the max output token limit,
+			// compact is best-effort and resume is unconditional within budget.
+			// If the branch tip is already a compaction entry ("Already compacted"),
+			// compact is skipped. If compact fails with a non-benign error we still
+			// resume — the user never sees the error row or a recovery prompt.
+			// The suppression flag in mode-colors.ts is set in the message_end
+			// handler (before the TUI renders the error row) and cleared after the
+			// hidden pi-agents-auto-continue message is dispatched.
+			if (
+				lastTurnLengthStopped &&
+				!lastTurnAborted &&
+				planAutoContinueCount < PLAN_AUTO_CONTINUE_MAX
+			) {
+				planAutoContinueCount++;
+				lastTurnLengthStopped = false;
+				await resume_after_output_limit(ctx);
+				return;
 			}
-			return;
-		}
+			// Reset auto-continue state once the turn completes normally.
+			setPlanAutoContinuing(false);
+			planAutoContinueCount = 0;
+			lastTurnLengthStopped = false;
 
-		lastTurnAborted = false;
-		lastTurnError = false;
+			if (waitingForPlan && currentMode === "plan") {
+				const turn_aborted = lastTurnAborted;
+				const turn_errored = lastTurnError;
+				lastTurnAborted = false;
+				lastTurnError = false;
+				if (turn_aborted || turn_errored) return;
+				if (!should_show_plan_review(latest_plan_text)) {
+					waitingForPlan = false;
+					return;
+				}
+
+				const action = await showPlanReview(ctx);
+				if (action === "implement") {
+					waitingForPlan = false;
+					await handlePlanImplement(ctx);
+				} else if (action === "implement-fresh") {
+					await handlePlanImplementFreshContext(ctx);
+				} else if (action === "copy") {
+					await copy_plan_to_clipboard(ctx);
+				} else if (action?.action === "refine") {
+					latest_plan_text = "";
+					pi.sendUserMessage(action.instruction);
+				}
+				return;
+			}
+
+			lastTurnAborted = false;
+			lastTurnError = false;
+		} finally {
+			// Apply a mode switch deferred while the run was in flight. Runs
+			// after the Plan Review decision above (the review gate needs
+			// currentMode === "plan"); no-op when the review flow already
+			// switched or the session was replaced.
+			await flush_deferred_mode_switch(ctx);
+		}
 	});
 
 	async function restore_mode_model(ctx: ExtensionContext, modeId: string): Promise<void> {
@@ -1634,45 +1680,48 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 
 	let last_patch_tool_provider: string | undefined;
 
-	pi.on("model_select", async (event: { model: Model<Api>; source: string }, ctx: ExtensionContext) => {
-		const model = event.model as Model<Api> | undefined;
-		if (!model) return;
-		const provider = model_provider_of(model);
-		const prev_provider = last_patch_tool_provider;
-		// Suppress bind during our own programmatic setModel (mode restore).
-		if (applying_mode_model) {
+	pi.on(
+		"model_select",
+		async (event: { model: Model<Api>; source: string }, ctx: ExtensionContext) => {
+			const model = event.model as Model<Api> | undefined;
+			if (!model) return;
+			const provider = model_provider_of(model);
+			const prev_provider = last_patch_tool_provider;
+			// Suppress bind during our own programmatic setModel (mode restore).
+			if (applying_mode_model) {
+				last_patch_tool_provider = provider;
+				sync_active_tools(ctx);
+				return;
+			}
+			// Only bind on Ctrl+P cycle. `/model` and the Switch Model overlay emit
+			// pi-agents:bind-mode-model after model + effort are fully applied.
+			const source = event.source as string | undefined;
+			if (source === "cycle") {
+				const identity = model_identity_of(model, get_pi_thinking_level(pi));
+				if (identity) bind_current_mode_model(identity);
+			}
+			if (
+				currentMode === "code" &&
+				resolve_patch_tool_name(prev_provider) !== resolve_patch_tool_name(provider)
+			) {
+				sync_active_tools(ctx);
+				const patch_tool = resolve_patch_tool_name(provider);
+				const other = patch_tool === "apply_patch" ? "edit" : "apply_patch";
+				pi.sendMessage({
+					customType: "pi-agents-tool-access",
+					content: [
+						`The active model provider is now ${provider ?? "unknown"}.`,
+						`Use ${patch_tool} for file edits instead of ${other}.`,
+						`Your current tool set is: ${build_full_tools(provider).join(", ")}.`,
+					].join("\n"),
+					display: false,
+				});
+			} else {
+				sync_active_tools(ctx);
+			}
 			last_patch_tool_provider = provider;
-			sync_active_tools(ctx);
-			return;
-		}
-		// Only bind on Ctrl+P cycle. `/model` and the Switch Model overlay emit
-		// pi-agents:bind-mode-model after model + effort are fully applied.
-		const source = event.source as string | undefined;
-		if (source === "cycle") {
-			const identity = model_identity_of(model, get_pi_thinking_level(pi));
-			if (identity) bind_current_mode_model(identity);
-		}
-		if (
-			currentMode === "code" &&
-			resolve_patch_tool_name(prev_provider) !== resolve_patch_tool_name(provider)
-		) {
-			sync_active_tools(ctx);
-			const patch_tool = resolve_patch_tool_name(provider);
-			const other = patch_tool === "apply_patch" ? "edit" : "apply_patch";
-			pi.sendMessage({
-				customType: "pi-agents-tool-access",
-				content: [
-					`The active model provider is now ${provider ?? "unknown"}.`,
-					`Use ${patch_tool} for file edits instead of ${other}.`,
-					`Your current tool set is: ${build_full_tools(provider).join(", ")}.`,
-				].join("\n"),
-				display: false,
-			});
-		} else {
-			sync_active_tools(ctx);
-		}
-		last_patch_tool_provider = provider;
-	});
+		},
+	);
 
 	pi.on("thinking_level_select", (event: { level: string }, ctx: ExtensionContext) => {
 		if (!is_live_session(ctx)) return;
@@ -1705,12 +1754,12 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			setPlanAutoContinuing(true);
 		}
 	});
-	pi.on("tool_execution_end", (
-		_event: { toolCallId: string; toolName: string },
-		ctx: ExtensionContext,
-	) => {
-		scheduleFooterStats(ctx);
-	});
+	pi.on(
+		"tool_execution_end",
+		(_event: { toolCallId: string; toolName: string }, ctx: ExtensionContext) => {
+			scheduleFooterStats(ctx);
+		},
+	);
 
 	pi.on("session_shutdown", (_event: SessionShutdownEvent, _ctx: ExtensionContext) => {
 		// Invalidate shortcut contexts before the old runtime is disposed. A Tab
@@ -1719,6 +1768,11 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		session_ready = false;
 		active_session_manager = undefined;
 		pending_mode_id = undefined;
+		// A mode switch deferred while a run was in flight was never applied to
+		// the logical state; persist it so the next session resumes in the mode
+		// the user actually selected.
+		const persisted_mode = deferred_mode_id ?? currentMode;
+		deferred_mode_id = undefined;
 		setShellMode(false);
 		setPlanAutoContinuing(false);
 		planAutoContinueCount = 0;
@@ -1732,7 +1786,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		// Write per-mode model bindings only. Do NOT bind the current live model
 		// onto the current mode — only explicit user picks bind (model_select
 		// handler). Do NOT write top-level legacy `model` key.
-		writePersistedState({ mode: currentMode, modeModels: mode_models });
+		writePersistedState({ mode: persisted_mode, modeModels: mode_models });
 	});
 
 	await subagentPlugin(pi);

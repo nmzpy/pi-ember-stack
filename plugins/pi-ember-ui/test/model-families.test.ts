@@ -287,6 +287,51 @@ describe("build_model_families", () => {
 		expect(families[0].displayName).toBe("SWE-1.7");
 	});
 
+	test("collapses Crof-style tagged effort siblings into one family", () => {
+		const families = build_model_families([
+			{
+				provider: "crof",
+				id: "deepseek-v4-flash-0731",
+				name: "DeepSeek: DeepSeek V4 Flash 0731",
+			},
+			{
+				provider: "crof",
+				id: "deepseek-v4-flash-0731-low-cro",
+				name: "DeepSeek: DeepSeek V4 Flash 0731 Low cro",
+			},
+			{
+				provider: "crof",
+				id: "deepseek-v4-flash-0731-medium-cro",
+				name: "DeepSeek: DeepSeek V4 Flash 0731 Medium cro",
+			},
+			{
+				provider: "crof",
+				id: "deepseek-v4-flash-0731-high-cro",
+				name: "DeepSeek: DeepSeek V4 Flash 0731 High cro",
+			},
+		]);
+		expect(families).toHaveLength(1);
+		expect(families[0].kind).toBe("sibling");
+		expect(families[0].displayName).toBe("DeepSeek: DeepSeek V4 Flash 0731");
+		expect(families[0].efforts).toEqual(["low", "medium", "high"]);
+		expect(families[0].baseModel.id).toBe("deepseek-v4-flash-0731");
+		expect(families[0].variants.low?.id).toBe("deepseek-v4-flash-0731-low-cro");
+		expect(families[0].variants.medium?.id).toBe("deepseek-v4-flash-0731-medium-cro");
+		expect(families[0].variants.high?.id).toBe("deepseek-v4-flash-0731-high-cro");
+		expect(
+			resolve_family_selection(families[0], "high").model.id,
+		).toBe("deepseek-v4-flash-0731-high-cro");
+		expect(
+			family_contains_model(families[0], "crof", "deepseek-v4-flash-0731-medium-cro"),
+		).toBe(true);
+		expect(
+			initial_effort_for_family(families[0], {
+				provider: "crof",
+				id: "deepseek-v4-flash-0731-high-cro",
+			}),
+		).toBe("high");
+	});
+
 	test("collapses SWE-1.7 none and medium siblings without inventing high", () => {
 		const families = build_model_families([
 			{ provider: "devin", id: "swe-1-7-none", name: "SWE-1.7 None", reasoning: true },

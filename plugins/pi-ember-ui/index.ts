@@ -195,7 +195,6 @@ import {
 import { notify_theme_refresh } from "./theme-refresh.ts";
 import {
 	bind_thinking_wait_handlers,
-	is_planning_style_text_delta,
 	reconcile_thinking_wait_ui,
 } from "./thinking-wait.ts";
 import { build_transcript_entries } from "./transcript-entries.ts";
@@ -511,9 +510,7 @@ export function should_suppress_thinking_header_for_stream_event(ev: {
 	if (ev.type === "text_start") return false;
 	if (ev.type === "text_delta") {
 		const delta = typeof ev.delta === "string" ? ev.delta : "";
-		if (!delta.trim()) return false;
-		if (isThinkingBlocksHidden() && is_planning_style_text_delta(delta)) return false;
-		return true;
+		return delta.trim().length > 0;
 	}
 	return false;
 }
@@ -2601,26 +2598,13 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			refresh_thinking_status();
 		}
 
-		if (ev) {
+		const isHiddenAssistantMessage =
+			event.message?.role === "assistant" && (event.message as { display?: boolean }).display === false;
+		if (ev && !isHiddenAssistantMessage) {
 			const boundary = resolve_assistant_stream_boundary_event(ev);
 			if (boundary === "visible_text" || boundary === "thinking") {
-				const planning = apply_assistant_stream_boundary(getSharedRenderer(), ev);
+				apply_assistant_stream_boundary(getSharedRenderer(), ev);
 				sync_compact_group_flags(getSharedRenderer());
-				if (planning === "planning_text") {
-					resume_thinking_header_for_think_stream();
-					if (!thinkingActive) startThinkingAnimation();
-					// Inter-run planning text is a soft boundary: arm the in-group
-					// `└ Thinking` lane alongside lingering tool children so it owns
-					// the transcript slot instead of showing a duplicate external
-					// header. Children stay visible (no fold) per the soft-boundary
-					// contract; a later real thinking stream or tool wave reopens.
-					const planning_renderer = getSharedRenderer();
-					if (planning_renderer.hasVisibleGroupChildren() && isThinkingBlocksHidden()) {
-						planning_renderer.armInGroupThinkingForPlanning();
-						sync_compact_group_flags(planning_renderer);
-					}
-					reconcile_thinking_wait_ui();
-				}
 			}
 		}
 
@@ -2628,25 +2612,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			resume_thinking_header_for_think_stream();
 			if (!thinkingActive) startThinkingAnimation();
 			reconcile_thinking_wait_ui();
-		}
-		if (ev?.type === "text_delta" && typeof ev.delta === "string") {
-			const planning =
-				isThinkingBlocksHidden() &&
-				is_agent_thinking_wait(thinkingActive) &&
-				is_planning_style_text_delta(ev.delta);
-			if (planning) {
-				resume_thinking_header_for_think_stream();
-				if (!thinkingActive) startThinkingAnimation();
-				// Same soft-boundary in-group arming as the boundary path above:
-				// inter-run planning text owns the transcript slot inside the
-				// work group, not as a duplicate external header.
-				const planning_renderer = getSharedRenderer();
-				if (planning_renderer.hasVisibleGroupChildren() && isThinkingBlocksHidden()) {
-					planning_renderer.armInGroupThinkingForPlanning();
-					sync_compact_group_flags(planning_renderer);
-				}
-				reconcile_thinking_wait_ui();
-			}
 		}
 		if (ev && should_suppress_thinking_header_for_stream_event(ev)) {
 			suppress_thinking_header_for_work();

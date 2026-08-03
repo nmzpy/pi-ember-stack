@@ -10,6 +10,7 @@ import {
 	should_auto_submit_resume_text,
 	extract_model_command_search,
 	should_route_model_slash_to_picker,
+	resume_truncate_text,
 } from "../model-picker.ts";
 
 const MODELS = [
@@ -30,6 +31,40 @@ function session(partial: Partial<SessionInfo> & Pick<SessionInfo, "path" | "id"
 		...partial,
 	};
 }
+
+describe("resume_truncate_text", () => {
+	const long_title =
+		"This is a really long session title that keeps going and going well past the middle of the screen for the resume menu";
+	const strip_ansi = (s: string) => s.replace(/\u001b\[0m/g, "");
+
+	test("caps the title at half the terminal content width", () => {
+		// contentWidth 120 -> half is 60 visible columns, well past the old
+		// data-driven (narrow) primary column of 40.
+		const out = resume_truncate_text(long_title, 120, 40, 118);
+		const plain = strip_ansi(out);
+		expect(plain.endsWith("...")).toBe(true);
+		const visible = plain.slice(0, -3);
+		expect(visible.length).toBeGreaterThan(40);
+		expect(visible.length).toBeLessThanOrEqual(60);
+	});
+
+	test("falls back to the (narrow) column-width half when content width is unset", () => {
+		const out = resume_truncate_text(long_title, 0, 40, 118);
+		const plain = strip_ansi(out);
+		expect(plain.endsWith("...")).toBe(true);
+		expect(plain.slice(0, -3).length).toBeLessThanOrEqual(20);
+	});
+
+	test("never truncates a title shorter than half the screen", () => {
+		const short_title = "Fixing the Thinking header";
+		expect(resume_truncate_text(short_title, 120, 40, 40)).toBe(short_title);
+	});
+
+	test("respects pi-tui's primary-column bound (maxWidth)", () => {
+		const out = resume_truncate_text(long_title, 120, 40, 12);
+		expect(strip_ansi(out).slice(0, -3).length).toBeLessThanOrEqual(12);
+	});
+});
 
 describe("find_exact_model_reference", () => {
 	test("matches canonical provider/id", () => {

@@ -30,10 +30,14 @@ function isNativeMultiModeSubagentArgs(args: SubagentArgs): boolean {
 	return (args.tasks?.length ?? 0) > 0 || (args.chain?.length ?? 0) > 0;
 }
 
-/** Whether a snapshot still has live nested tool/thinking rows beneath the agent. */
+/** Whether a snapshot still has live nested tool/text/thinking rows beneath the agent. */
 export function has_live_nested_preview(results: SubAgentResult[]): boolean {
 	const head = results[0];
-	return Boolean(head?.latestToolCall || head?.isThinking);
+	return Boolean(
+		head?.latestToolCall ||
+			head?.isThinking ||
+			(head?.liveItems?.length ?? 0) > 0,
+	);
 }
 
 /** Keep live onToolCall partials when Pi renderCall replays stale context.state. */

@@ -54,6 +54,39 @@ interface SubagentDetailsLike {
 
 export type ResolveResumeResult = { ok: true; target: ResumeTarget } | { ok: false; error: string };
 
+/**
+ * Checkpoint dirs that a live subagent is currently writing its run-record
+ * into. `prune_foreign_checkpoints()` must NEVER remove one of these: the SDK
+ * SessionManager creates its `<timestamp>_<childSessionId>.jsonl` lazily on the
+ * first assistant write, and a prune in that window would make that write throw
+ * ENOENT (the root cause of `ENOENT ... subagent-sessions/...` failing whole
+ * runs with any provider). The runner marks a dir live at bootstrap and clears
+ * it in finally, so the directory deterministically exists for every SDK open.
+ */
+const live_checkpoint_dirs = new Set<string>();
+
+function normalize_checkpoint_dir(dir: string): string {
+	return path.normalize(dir);
+}
+
+/** Mark a checkpoint dir as being written by an in-flight subagent run. */
+export function mark_checkpoint_dir_live(dir: string): void {
+	live_checkpoint_dirs.add(normalize_checkpoint_dir(dir));
+}
+
+/** Drop the live mark once a subagent run finishes (success, error, or abort). */
+export function unmark_checkpoint_dir_live(dir: string): void {
+	live_checkpoint_dirs.delete(normalize_checkpoint_dir(dir));
+}
+
+function dir_contains_live_checkpoint(parent_dir: string): boolean {
+	const prefix = `${normalize_checkpoint_dir(parent_dir)}${path.sep}`;
+	for (const live of live_checkpoint_dirs) {
+		if (live === normalize_checkpoint_dir(parent_dir) || live.startsWith(prefix)) return true;
+	}
+	return false;
+}
+
 let subagent_sessions_root_override: string | undefined;
 
 /**
@@ -355,6 +388,10 @@ export function prune_foreign_checkpoints(activeParentSessionId: string): void {
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		if (entry.name === activeParentSessionId) continue;
-		fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });
+		const parent_dir = path.join(root, entry.name);
+		// Never delete a dir a live subagent is still writing into (the SDK's
+		// run-record openSync would then ENOENT and fail the whole run).
+		if (dir_contains_live_checkpoint(parent_dir)) continue;
+		fs.rmSync(parent_dir, { recursive: true, force: true });
 	}
 }

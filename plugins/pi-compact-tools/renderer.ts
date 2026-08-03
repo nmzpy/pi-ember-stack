@@ -87,13 +87,16 @@ export const TREE_BRANCH_PIPE = "│ ";
 /** Tee branch for non-terminal subagent rows (vertical continues + opens right). */
 export const TREE_BRANCH_TEE = "├ ";
 export const TREE_BRANCH_LAST = "└ ";
-/** Compact group child rows — flush with the branch glyph (no trailing space). */
-const GROUP_CHILD_TEE = "  ├";
-const GROUP_CHILD_LAST = "  └";
-/** Nested subagent tool rows — the └ sits on the agent-name column
- *  (`├ ` / `└ ` place the name at column 2; tool └ goes there too). */
-export const TREE_NESTED_PIPE = "│ └";
-export const TREE_NESTED_LAST = "  └";
+/** Compact group child rows — flush with the branch glyph (no trailing space).
+ *  Exported for nested compact trays (subagent live output) so the child
+ *  branch glyphs stay SSOT with the main agent's groups. */
+export const GROUP_CHILD_TEE = "  ├";
+export const GROUP_CHILD_LAST = "  └";
+/** Nested subagent tool rows under a grouped (Subagents/Delegating) agent —
+ *  flush with the branch glyph so the └ sits on the agent-name column
+ *  (`  ├` places the name at column 3; tool └ goes there too). */
+export const TREE_NESTED_PIPE = "  │└";
+export const TREE_NESTED_LAST = "   └";
 /** Single subagent tool row — └ sits at column 2 below the agent name's first letter. */
 export const TREE_SINGLE_TOOL = "  └";
 
@@ -1303,6 +1306,27 @@ function formatGroupChildRow(record: CompactCall, theme: ThemeLike): string {
 }
 
 /**
+ * Native compact single child row (verb + details + edit/write stats) — the
+ * SSOT shared by the main agent's compact group children and the subagent
+ * live tool tray. Plugins render nested subagent tool activity through this
+ * formatter (never re-derive the row shape), so nested rows stay identical to
+ * the main agent and merge/fold/diff-stats behavior flows through unchanged
+ * instead of drifting into a parallel implementation that can stack rows.
+ */
+export function formatCompactChildRow(
+	name: string,
+	args: ToolArgs,
+	completed: boolean,
+	result: Record<string, unknown> | undefined,
+	theme: ThemeLike,
+): string {
+	return formatGroupChildRow(
+		{ name, args, _completed: completed, result } as CompactCall,
+		theme,
+	);
+}
+
+/**
  * Merge identity for same-file diff calls: `edit`/`write` merge by normalized
  * target path; `apply_patch` by its first touched file. Consecutive (or any
  * same-file) calls render as ONE child row with accumulated +N -N instead of a
@@ -1327,7 +1351,8 @@ function group_child_merge_identity(record: CompactCall): string | undefined {
  * duplicate. Merging is render-time only — each call keeps its own record
  * for result tracking and Pi rebuilds.
  */
-function merge_group_child_rows(children: readonly CompactCall[]): CompactCall[][] {
+/** SSOT same-file child merge — exported for the subagent live output tray. */
+export function merge_group_child_rows(children: readonly CompactCall[]): CompactCall[][] {
 	const rows: CompactCall[][] = [];
 	const row_by_identity = new Map<string, number>();
 	for (const record of children) {
@@ -1371,8 +1396,9 @@ function merged_child_diff_stats(
 	return { additions, removals };
 }
 
-/** One visible child row; merged same-file records accumulate their +N -N. */
-function formatGroupChildRows(records: readonly CompactCall[], theme: ThemeLike): string {
+/** One visible child row; merged same-file records accumulate their +N -N.
+ *  Exported for the subagent live output tray (same shape as main groups). */
+export function formatGroupChildRows(records: readonly CompactCall[], theme: ThemeLike): string {
 	const last = records[records.length - 1];
 	if (!last) return "";
 	if (records.length === 1) return formatGroupChildRow(last, theme);
