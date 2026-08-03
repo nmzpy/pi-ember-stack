@@ -7,6 +7,10 @@ export const MUTED_COLOR = "#808080";
 export const PAGE_BG = "#18181e";
 export const TEXT_COLOR = "#d4d4d4";
 
+/** Tokens-per-second color thresholds used by the footer meter. */
+export const TPS_TEXT_THRESHOLD = 50;
+export const TPS_ACCENT_THRESHOLD = 100;
+
 /**
  * Shared muted background for user messages, subagent completed/failed rows,
  * and custom/compaction messages. White (#ffffff) at 5% opacity over PAGE_BG,
@@ -465,6 +469,18 @@ export function blendToHex(fgHex: string, bgHex: string, opacity: number): strin
 		Math.round(bg + (fg - bg) * opacity),
 		Math.round(bb + (fb - bb) * opacity),
 	]);
+}
+
+/** Live TPS foreground blended toward PAGE_BG by the supplied alpha. */
+export function tps_color_hex(tps: number, opacity = 1): string {
+	const base_color =
+		tps < TPS_TEXT_THRESHOLD
+			? MUTED_COLOR
+			: tps < TPS_ACCENT_THRESHOLD
+				? TEXT_COLOR
+				: buildThemeFgColors(getActiveModeColor()).accent;
+	const clamped_opacity = Math.max(0, Math.min(1, opacity));
+	return blendToHex(base_color, PAGE_BG, clamped_opacity);
 }
 
 export function desaturateHex(hex: string, amount: number): string {

@@ -27,7 +27,6 @@ import {
 	format_effort_display_label,
 } from "./model-variants.ts";
 import {
-	DIM_COLOR,
 	ORANGE,
 	PAGE_BG,
 	blendToHex,
@@ -465,23 +464,6 @@ export function open_model_picker_in_editor(
 
 function push_line(lines: string[], text: string, width: number): void {
 	lines.push(visibleWidth(text) > width ? truncateToWidth(text, width) : text);
-}
-
-function compose_row_with_right_suffix(prefix: string, suffix: string, width: number): string {
-	if (!suffix) {
-		return visibleWidth(prefix) > width ? truncateToWidth(prefix, width) : prefix;
-	}
-	const prefix_width = visibleWidth(prefix);
-	const suffix_width = visibleWidth(suffix);
-	if (prefix_width + 1 + suffix_width <= width) {
-		const gap = width - prefix_width - suffix_width;
-		return `${prefix}${" ".repeat(Math.max(1, gap))}${suffix}`;
-	}
-	const max_prefix = Math.max(0, width - suffix_width - 1);
-	const truncated_prefix = max_prefix > 0 ? truncateToWidth(prefix, max_prefix) : "";
-	const gap = Math.max(1, width - visibleWidth(truncated_prefix) - suffix_width);
-	const row = `${truncated_prefix}${" ".repeat(gap)}${suffix}`;
-	return visibleWidth(row) > width ? truncateToWidth(row, width) : row;
 }
 
 function format_effort_slider_inline(

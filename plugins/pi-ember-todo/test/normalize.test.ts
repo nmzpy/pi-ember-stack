@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { prepare_todo_arguments } from "../normalize.ts";
+import { coerce_id, prepare_todo_arguments } from "../normalize.ts";
 
 describe("prepare_todo_arguments", () => {
+	test("normalizes provider id strings including hash-prefixed display ids", () => {
+		expect(coerce_id("1")).toBe(1);
+		expect(coerce_id("#1")).toBe(1);
+		expect(coerce_id("1e2")).toBeUndefined();
+	});
+
 	test("passes through canonical update with status", () => {
 		const out = prepare_todo_arguments({ action: "update", id: 1, status: "in_progress" });
 		expect(out).toEqual({ action: "update", id: 1, status: "in_progress" });
@@ -32,6 +38,11 @@ describe("prepare_todo_arguments", () => {
 	test("maps taskId alias and infers update action", () => {
 		const out = prepare_todo_arguments({ taskId: 3, status: "completed" });
 		expect(out).toEqual({ id: 3, status: "completed", action: "update" });
+	});
+
+	test("infers subject-targeted updates without an extra list call", () => {
+		const out = prepare_todo_arguments({ task: "Module 1", status: "in_progress" });
+		expect(out).toEqual({ task: "Module 1", status: "in_progress", action: "update" });
 	});
 
 	test("unwraps nested data.status", () => {

@@ -26,6 +26,42 @@ describe("SubagentGroupRenderer", () => {
 		expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
 	});
 
+	test("streaming partial-args calls join the same batch (no Delegating spam)", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		// Call a streaming with the brace not closed: args have agent only.
+		renderer.register("a", { agent: "Coder" }, []);
+		renderer.register("b", {}, []);
+		renderer.register("c", { agent: "Scout" }, []);
+
+		expect(renderer.shouldUseGroupLayout("a")).toBe(true);
+		expect(renderer.isOwner("a")).toBe(true);
+		expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
+
+		// Args close for a: it stays in the batch once recognized as single-mode.
+		renderer.register("a", { agent: "Coder", task: "one" }, [makeResult("Coder", -1)]);
+		expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
+	});
+
+	test("streaming call that closes as native parallel ejects from the singles batch", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		renderer.register("a", { agent: "Coder", task: "one" }, [makeResult("Coder", -1)]);
+		// b starts streaming (unknown args), joins the group...
+		renderer.register("b", {}, []);
+		expect(renderer.shouldUseGroupLayout("a")).toBe(true);
+		// ...then closes with parallel tasks: it must be ejected, not absorbed.
+		renderer.register(
+			"b",
+			{ tasks: [{ agent: "Coder", task: "x" }, { agent: "Scout", task: "y" }] },
+			[makeResult("Coder", -1), makeResult("Scout", -1)],
+		);
+		expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
+		expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
+	});
+
 	test("non-subagent hard exit starts a fresh batch", () => {
 		const renderer = getSubagentGroupRenderer();
 		renderer.resetForSession();

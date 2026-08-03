@@ -24,15 +24,15 @@ import {
 	getAgentDir,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { type Component, Container, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS,
 	is_subagent_resume_tool,
 	model_provider_of,
 	SUBAGENT_RESUME_TOOL_NAME,
-	without_subagent_delegation_tools,
 	with_provider_patch_tool,
+	without_subagent_delegation_tools,
 } from "../../edit-tools.ts";
 
 type AbortSignalStatic = typeof AbortSignal & {
@@ -75,15 +75,19 @@ interface CustomUi {
 }
 
 import { getSharedRenderer } from "../../../pi-compact-tools/index.ts";
-import { subscribeGradientTick, unsubscribeGradientTick, requestTuiRender } from "../../../pi-ember-ui/index.ts";
-import { buildSelectListTheme } from "../../../pi-ember-ui/select-list-theme.ts";
+import {
+	requestTuiRender,
+	subscribeGradientTick,
+	syncThinkingGradientClock,
+	unsubscribeGradientTick,
+} from "../../../pi-ember-ui/index.ts";
 import {
 	isThinkingBlocksHidden,
 	setGroupReopenableActive,
 	setGroupThinkingChildActive,
 	setToolGroupActive,
 } from "../../../pi-ember-ui/mode-colors.ts";
-import { syncThinkingGradientClock } from "../../../pi-ember-ui/index.ts";
+import { buildSelectListTheme } from "../../../pi-ember-ui/select-list-theme.ts";
 import {
 	type AgentConfig,
 	type AgentScope,
@@ -95,10 +99,10 @@ import {
 import {
 	anySubagentRunning,
 	buildSubagentLayoutComponent,
-	shouldShowSubagentDelegating,
 	renderSubagentExpanded,
+	shouldShowSubagentDelegating,
 } from "./render.ts";
-import { getSubagentGroupRenderer, type SubagentArgs, type SubagentCallRecord, isSingleModeSubagentArgs, seed_subagent_renderer_from_branch } from "./subagent-group.ts";
+import { prune_foreign_checkpoints, resolve_resume_target } from "./resume-store.ts";
 import {
 	agent_tool_result_content,
 	DEFAULT_SUBAGENT_TIMEOUT_MS,
@@ -111,11 +115,17 @@ import {
 	runSubAgent,
 	type SubAgentResult,
 } from "./runner.ts";
-import { prune_foreign_checkpoints, resolve_resume_target } from "./resume-store.ts";
 import { runNamedAgent, SUBAGENT_REQUEST_EVENT, type SubagentRunRequest } from "./service.ts";
+import {
+	getSubagentGroupRenderer,
+	isSingleModeSubagentArgs,
+	type SubagentArgs,
+	type SubagentCallRecord,
+	seed_subagent_renderer_from_branch,
+} from "./subagent-group.ts";
+import { install_subagent_render_spacing_patch } from "./subagent-render-spacing.ts";
 import { ThreadViewer, type ThreadViewerCallbacks } from "./thread-viewer.ts";
 import { type SubagentThread, threadStore } from "./threads.ts";
-import { install_subagent_render_spacing_patch } from "./subagent-render-spacing.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -275,8 +285,8 @@ function sync_owner_gradient_tick(
 
 import {
 	arm_subagent_thinking_pass,
-	clearSubagentTiming,
 	clear_subagent_thinking_pass,
+	clearSubagentTiming,
 	getGroupElapsedMs,
 	getSubagentElapsedMs,
 	isSubagentToolTerminal,
@@ -333,10 +343,13 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 
 const SubagentResumeParams = Type.Object({
 	agent: Type.String({
-		description: 'Lettered display name of the prior subagent to continue (e.g. "Coder A", "Scout B")',
+		description:
+			'Lettered display name of the prior subagent to continue (e.g. "Coder A", "Scout B")',
 	}),
 	task: Type.String({ description: "Follow-up instruction for the continued subagent run" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory override (defaults to prior run cwd)" })),
+	cwd: Type.Optional(
+		Type.String({ description: "Working directory override (defaults to prior run cwd)" }),
+	),
 	timeout: Type.Optional(
 		Type.Number({
 			description: `Timeout in milliseconds. Default: ${DEFAULT_SUBAGENT_TIMEOUT_MS} (120s).`,
@@ -725,13 +738,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const failureMessage =
 			context.isError === true && results.length === 0
 				? result.content
-						.filter((item): item is { type: "text"; text: string } => item.type === "text" && typeof item.text === "string")
+						.filter(
+							(item): item is { type: "text"; text: string } =>
+								item.type === "text" && typeof item.text === "string",
+						)
 						.map((item) => item.text.trim())
 						.filter(Boolean)
 						.join(" ") || undefined
 				: undefined;
 		context.state.results = results;
-		group_renderer.register(context.toolCallId, context.args, results, context.invalidate, failureMessage);
+		group_renderer.register(
+			context.toolCallId,
+			context.args,
+			results,
+			context.invalidate,
+			failureMessage,
+		);
 
 		const batch = group_renderer.getBatch(context.toolCallId);
 		const owner = batch_owner(batch);
@@ -808,7 +830,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		promptGuidelines: [
 			"Use subagent to delegate work that would flood the main context with search results or file contents.",
 			"Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}).",
-			"Bundled agents: Scout (fast recon), Coder (implementation). Coder has `todo`: update/get/delete need numeric `id` from `todo list` or `create`.",
+			"Bundled agents: Scout (fast recon), Coder (implementation). Coder's `todo` list is child-session-local: use ids from its own `create`, or an exact `task` subject; call `list` only when needed.",
 			"Agent names are case-insensitive and surrounding whitespace is ignored.",
 			"Use /subagent to list all available agents or /subagent <name> for agent details.",
 		],
@@ -1092,9 +1114,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						if (prevCount > 0) {
 							const prevSummaries = results
 								.slice(0, prevCount)
-								.map((r) =>
-									format_agent_tool_result_text(r, (body) => body.slice(0, 500)),
-								)
+								.map((r) => format_agent_tool_result_text(r, (body) => body.slice(0, 500)))
 								.join("\n\n");
 							contentText = `Chain stopped at step ${i + 1}/${params.chain.length}. ${prevCount} previous step(s) succeeded:\n\n${prevSummaries}\n\nError at step ${i + 1}:\n\n${format_agent_tool_result_text(result)}`;
 						} else {
@@ -1687,7 +1707,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	): Promise<string | null> {
 		return ctx.ui.custom<string | null>(
 			(
-				tui: CustomFactoryTui,
+				_tui: CustomFactoryTui,
 				theme: CustomFactoryTheme,
 				_kb: unknown,
 				done: (value: string | null) => void,
@@ -1736,7 +1756,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 		// Overlay mode: viewer appears above editor, Esc dismisses
 		await ctx.ui.custom<void>(
-			(tui: CustomFactoryTui, theme: CustomFactoryTheme, _kb: unknown, done: () => void) => {
+			(_tui: CustomFactoryTui, theme: CustomFactoryTheme, _kb: unknown, done: () => void) => {
 				let unsubscribe: (() => void) | undefined;
 				let closed = false;
 

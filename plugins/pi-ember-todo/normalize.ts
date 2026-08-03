@@ -9,6 +9,7 @@ type TaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 export type TodoParamsLike = {
 	action?: string;
 	id?: number;
+	task?: string;
 	subject?: string;
 	description?: string;
 	activeForm?: string;
@@ -71,12 +72,14 @@ function first_array(input: Record<string, unknown>, names: readonly string[]): 
 	return undefined;
 }
 
-/** Coerce tool-call ids (models often send numeric strings). */
+/** Coerce tool-call ids (models often send numeric strings or `#1`). */
 export function coerce_id(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+	if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
 	if (typeof value === "string" && value.trim() !== "") {
-		const n = Number(value);
-		if (Number.isInteger(n) && n > 0 && String(n) === value.trim()) return n;
+		const normalized = value.trim().replace(/^#/, "");
+		if (!/^\d+$/.test(normalized)) return undefined;
+		const n = Number(normalized);
+		if (Number.isSafeInteger(n) && n > 0) return n;
 	}
 	return undefined;
 }
@@ -151,7 +154,7 @@ function infer_action(target: Record<string, unknown>): void {
 		target.action = batch.length > 1 ? "batch" : "update";
 		return;
 	}
-	if (target.id !== undefined) {
+	if (target.id !== undefined || target.task !== undefined) {
 		target.action = "update";
 		return;
 	}
@@ -248,6 +251,10 @@ export function prepare_todo_arguments(args: unknown): TodoParamsLike {
 	if (target.id === undefined && top_id !== undefined) {
 		const coerced = coerce_id(top_id);
 		if (coerced !== undefined) target.id = coerced;
+	}
+	const top_task = first_defined(target, ["task", "taskName", "task_name"]);
+	if (target.task === undefined && typeof top_task === "string") {
+		target.task = top_task;
 	}
 	const top_subject = first_defined(target, ["subject", "content", "title", "name", "text", "label"]);
 	if (target.subject === undefined && top_subject !== undefined) target.subject = top_subject;

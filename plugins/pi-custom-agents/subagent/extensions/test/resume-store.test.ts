@@ -8,20 +8,18 @@ import {
 	open_checkpoint_meta,
 	persist_checkpoint_meta,
 	resolve_resume_target,
+	set_subagent_sessions_root_override,
 } from "../resume-store.ts";
 
-const ORIGINAL_PI_HOME = process.env.PI_HOME;
-
 afterEach(() => {
-	if (ORIGINAL_PI_HOME === undefined) delete process.env.PI_HOME;
-	else process.env.PI_HOME = ORIGINAL_PI_HOME;
+	set_subagent_sessions_root_override(undefined);
 });
 
 function with_temp_agent_dir(run: (agent_dir: string) => void): void {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-resume-"));
-	process.env.PI_HOME = dir;
 	const agent_dir = path.join(dir, "agent");
 	fs.mkdirSync(agent_dir, { recursive: true });
+	set_subagent_sessions_root_override(path.join(agent_dir, "subagent-sessions"));
 	try {
 		run(agent_dir);
 	} finally {

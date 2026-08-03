@@ -417,7 +417,9 @@ export function find_family_for_model(
 ): ModelFamily | undefined {
 	if (!model?.provider || !model?.id) return undefined;
 	const families = build_model_families(catalog, options);
-	return families.find((family) => family_contains_model(family, model.provider!, model.id));
+	const provider = model.provider;
+	const id = model.id;
+	return families.find((family) => family_contains_model(family, provider, id));
 }
 
 /**

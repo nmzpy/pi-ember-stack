@@ -5,13 +5,14 @@
 import type { AgentMessage, StreamFn, ThinkingLevel as AgentThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	completeSimple,
+	type Api,
 	type AssistantMessage,
 	type Message,
 	type Model,
 	type ThinkingLevel,
 } from "@earendil-works/pi-ai/compat";
 import {
-	compact,
+	type compact,
 	type CompactionResult,
 	type FileOperations,
 	convertToLlm,
@@ -58,7 +59,7 @@ function format_file_operations(readFiles: string[], modifiedFiles: string[]): s
 }
 
 function create_summarization_options(
-	model: Model<any>,
+	model: Model<Api>,
 	maxTokens: number,
 	auth: StackCompactionAuth,
 	signal: AbortSignal | undefined,
@@ -92,7 +93,7 @@ function create_summarization_options(
 }
 
 async function complete_summarization(
-	model: Model<any>,
+	model: Model<Api>,
 	context: { systemPrompt: string; messages: Message[] },
 	options: ReturnType<typeof create_summarization_options>,
 	streamFn?: StreamFn,
@@ -140,7 +141,7 @@ function trim_llm_messages_for_summary(
 
 async function generate_history_summary(
 	messages: AgentMessage[],
-	model: Model<any>,
+	model: Model<Api>,
 	reserveTokens: number,
 	auth: StackCompactionAuth,
 	signal: AbortSignal | undefined,
@@ -181,7 +182,7 @@ async function generate_history_summary(
 
 async function generate_turn_prefix_summary(
 	messages: AgentMessage[],
-	model: Model<any>,
+	model: Model<Api>,
 	reserveTokens: number,
 	auth: StackCompactionAuth,
 	signal: AbortSignal | undefined,
@@ -221,7 +222,7 @@ async function generate_turn_prefix_summary(
 
 export async function run_stack_compaction(
 	preparation: CompactionPreparation,
-	model: Model<any>,
+	model: Model<Api>,
 	auth: StackCompactionAuth,
 	signal?: AbortSignal,
 	thinkingLevel?: AgentThinkingLevel,

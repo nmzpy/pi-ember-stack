@@ -21,6 +21,8 @@ export type PlanReviewAction =
 	| "copy"
 	| { action: "refine"; instruction: string };
 
+export type PlanImplementationMode = "code" | "orchestrate";
+
 /** Plan Review quiz screen — SSOT for options and labels. */
 export function build_plan_review_questions(): QuizQuestion[] {
 	return [
@@ -33,7 +35,7 @@ export function build_plan_review_questions(): QuizQuestion[] {
 				{
 					value: "implement-fresh",
 					label: "Implement with fresh context",
-					description: "Start a new session with the plan pasted in, then run in code mode.",
+					description: "Start a new session with the plan pasted in, then choose Code or Orchestrate.",
 				},
 				{ value: "copy", label: "Copy Plan" },
 			],
@@ -51,6 +53,37 @@ export function resolve_plan_review_answer(
 	if (answer.wasCustom && answer.value) {
 		return { action: "refine", instruction: answer.value };
 	}
+	return undefined;
+}
+
+/** SSOT for the mode picker shared by same-session and fresh-context implementation. */
+export function build_plan_implementation_questions(): QuizQuestion[] {
+	return [
+		{
+			id: "implement-via",
+			label: "Implement",
+			prompt: "Implement the plan via which mode?",
+			options: [
+				{
+					value: "code",
+					label: "Code",
+					description: "Execute the plan with full tool access.",
+				},
+				{
+					value: "orchestrate",
+					label: "Orchestrate",
+					description: "Delegate the plan to subagents.",
+				},
+			],
+		},
+	];
+}
+
+export function resolve_plan_implementation_mode(
+	answer: { value: string } | undefined,
+): PlanImplementationMode | undefined {
+	if (answer?.value === "code") return "code";
+	if (answer?.value === "orchestrate") return "orchestrate";
 	return undefined;
 }
 

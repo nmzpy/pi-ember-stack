@@ -137,7 +137,7 @@ function create_connect_frame_parser(
 	return (incoming: Buffer) => {
 		pending = Buffer.concat([pending, incoming]);
 		while (pending.length >= 5) {
-			const flags = pending[0]!;
+			const flags = pending[0];
 			const msg_len = pending.readUInt32BE(1);
 			if (pending.length < 5 + msg_len) break;
 			const message_bytes = pending.subarray(5, 5 + msg_len);
@@ -612,7 +612,9 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 	try {
 		while (!done || event_queue.length > 0) {
 			while (event_queue.length > 0) {
-				yield event_queue.shift()!;
+				const next = event_queue.shift();
+				if (next === undefined) break;
+				yield next;
 			}
 			if (done) break;
 			await Promise.race([

@@ -252,19 +252,28 @@ describe("subagent elapsed time", () => {
 		expect(formatSubagentElapsedSuffix(theme, 2500)).toBe("[dim: 2s]");
 	});
 
-	test("single mode shows dim elapsed next to the agent label", () => {
+	test("single mode shows dim elapsed only after the agent finishes", () => {
 		const theme = makeTheme() as any;
-		const out = renderSubagentLayout(
+		const running = renderSubagentLayout(
 			{ agent: "Coder", task: "do stuff" },
 			[makeRunning("Coder")],
 			theme,
 			12_500,
 		);
-		expect(stripAnsi(out)).toContain("Coder");
-		expect(out).toContain("[dim: 12s]");
+		expect(stripAnsi(running)).toContain("Coder");
+		expect(running).not.toContain("[dim: 12s]");
+
+		const completed = renderSubagentLayout(
+			{ agent: "Coder", task: "do stuff" },
+			[makeResult("Coder", 0)],
+			theme,
+			12_500,
+		);
+		expect(stripAnsi(completed)).toContain("Coder");
+		expect(completed).toContain("[dim: 12s]");
 	});
 
-	test("parallel mode shows elapsed only on the Subagents header", () => {
+	test("parallel mode shows elapsed only on the Subagents header when all done", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout(
 			{ tasks: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] },
@@ -273,18 +282,27 @@ describe("subagent elapsed time", () => {
 			65_000,
 		);
 		const lines = out.split("\n");
-		expect(lines[0]).toContain("[dim: 1m 5s]");
+		expect(lines[0]).not.toContain("[dim: 1m 5s]");
 		expect(stripAnsi(lines[1] ?? "")).toContain("Scout");
 		expect(lines[1]).not.toContain("1m 5s");
 		expect(stripAnsi(lines[3] ?? "")).toContain("Coder");
 		expect(lines[3]).not.toContain("1m 5s");
+
+		const done = renderSubagentLayout(
+			{ tasks: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] },
+			[makeResult("Scout", 0), makeResult("Coder", 0)],
+			theme,
+			65_000,
+		);
+		const doneLines = done.split("\n");
+		expect(doneLines[0]).toContain("[dim: 1m 5s]");
 	});
 
-	test("single delegating row shows elapsed when provided", () => {
+	test("single delegating row never shows an elapsed timer", () => {
 		const theme = makeTheme() as any;
-		const out = renderDelegatingRow(theme, 3000);
+		const out = renderDelegatingRow(theme);
 		expect(stripAnsi(out)).toContain("Delegating");
-		expect(out).toContain("[dim: 3s]");
+		expect(out).not.toContain("[dim: 3s]");
 	});
 
 	test("lingering subagent Thinking row shows time since thinking started", () => {
@@ -312,15 +330,68 @@ describe("subagent elapsed time", () => {
 			{ args: { agent: "Coder", task: "b" }, results: [makeRunning("Coder B")], displayName: "Coder B" },
 			{ args: { agent: "Coder", task: "c" }, results: [makeRunning("Coder C")], displayName: "Coder C" },
 		];
-		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, members[0].results, theme, 5000, members);
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, [], theme, 5000, members);
 		const lines = out.split("\n");
 		expect(stripAnsi(lines[0])).toContain("Subagents");
-		expect(lines[0]).toContain("[dim: 5s]");
+		expect(lines[0]).not.toContain("[dim: 5s]");
 		expect(lines.length).toBeGreaterThanOrEqual(4);
 		expect(memberRecordsToRows(members).length).toBe(3);
 		expect(stripAnsi(out)).toContain("Coder A");
 		expect(stripAnsi(out)).toContain("Coder B");
 		expect(stripAnsi(out)).toContain("Coder C");
+	});
+
+	test("grouped streaming members render one gradient Delegating header, agent types as they stream", () => {
+		const theme = makeTheme() as any;
+		// Brace still open: `agent` is written, `task` is not yet closed.
+		const members = [
+			{ args: { agent: "Coder", task: "a" }, results: [makeRunning("Coder A")], displayName: "Coder A" },
+			{ args: { agent: "Scout" }, results: [], toolCallId: "call-b" },
+		];
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "a" },
+			[makeRunning("Coder A")],
+			theme,
+			undefined,
+			members,
+		);
+		const output = stripAnsi(out);
+		// ONE Delegating label (the header), not one per streaming call.
+		expect(output.split("Delegating").length - 1).toBe(1);
+		expect(output).toContain("Coder A");
+		expect(output).toContain("Scout");
+		// Header carries the shared subagent gradient.
+		expect(out.split("\n")[0]).toContain("\u001b[38;2;");
+	});
+
+	test("first streaming member with no agent yet shows only the header, no bare subagent text", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{ args: {}, results: [], toolCallId: "call-a" },
+			{ args: { agent: "Scout" }, results: [], toolCallId: "call-b" },
+		];
+		const out = renderSubagentLayout({}, [], theme, undefined, members);
+		const output = stripAnsi(out);
+		expect(output.split("Delegating").length - 1).toBe(1);
+		expect(output).not.toContain("subagent");
+		expect(output).toContain("Scout");
+	});
+
+	test("settled grouped members keep the static Subagents header (no gradient)", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 0)], displayName: "Coder A" },
+			{ args: { agent: "Scout", task: "b" }, results: [makeResult("Scout B", 0)], displayName: "Scout B" },
+		];
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "a" },
+			[makeResult("Coder A", 0)],
+			theme,
+			undefined,
+			members,
+		);
+		expect(stripAnsi(out)).toContain("Subagents");
+		expect(out.split("\n")[0]).not.toContain("\u001b[38;2;");
 	});
 
 	test("grouped tool-level failures keep each diagnostic on its agent row", () => {

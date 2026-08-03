@@ -22,7 +22,6 @@ import {
 	RequestContextSchema,
 	UserMessageActionSchema,
 	UserMessageSchema,
-	type ConversationStateStructure,
 	type ConversationTurnStructure,
 	type McpToolDefinition,
 	type RequestContext,

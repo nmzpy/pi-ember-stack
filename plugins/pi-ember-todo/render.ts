@@ -1,8 +1,9 @@
 /**
  * Transcript rendering for the `todo` tool — neutral text/dim/muted tokens only.
- * Consecutive `todo` calls in one assistant burst fold into one header with tree
- * child rows: only the latest call renders at its transcript position; earlier
- * calls in the burst collapse to zero height. User messages start a fresh group.
+ * Consecutive `todo` calls in one assistant burst fold into one header with
+ * subject-only task rows. Descriptions, metadata, active forms, and dependency
+ * details stay out of the transcript; the model still receives the full task
+ * snapshot in tool details. User messages start a fresh group.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -21,57 +22,35 @@ export interface TranscriptTask {
 	subject: string;
 	status: TaskStatus;
 	activeForm?: string;
-	blockedBy?: number[];
 }
 
-const TREE_TEE = "  ├─";
-const TREE_LAST = "  └─";
-
-/** Subject line token: pending=dim, in_progress=text, completed/deleted=muted. */
-export function task_subject_token(status: TaskStatus): "dim" | "text" | "muted" {
+function task_subject_token(status: TaskStatus): "dim" | "text" | "muted" {
 	if (status === "in_progress") return "text";
 	if (status === "completed" || status === "deleted") return "muted";
 	return "dim";
 }
 
-function format_transcript_task_subject(
-	task: TranscriptTask,
-	theme: Theme,
-	show_id: boolean,
-): string {
-	const token = task_subject_token(task.status);
-	let subject = theme.fg(token, task.subject);
+function format_transcript_task_subject(task: TranscriptTask, theme: Theme): string {
+	let subject = theme.fg(task_subject_token(task.status), task.subject);
 	if (task.status === "completed" || task.status === "deleted") {
 		subject = theme.strikethrough(subject);
 	}
-	let line = "";
-	if (show_id) line += `${theme.fg("dim", `#${task.id}`)} `;
-	line += subject;
-	if (task.status === "in_progress" && task.activeForm) {
-		line += ` ${theme.fg("dim", `(${task.activeForm})`)}`;
-	}
-	if (task.blockedBy?.length) {
-		line += ` ${theme.fg("dim", `⛓ ${task.blockedBy.map((id) => `#${id}`).join(",")}`)}`;
-	}
-	return line;
+	return subject;
 }
 
-export function format_transcript_task_line(
-	task: TranscriptTask,
-	theme: Theme,
-	show_id: boolean,
-): string {
-	return format_transcript_task_subject(task, theme, show_id);
-}
+const TODO_TREE_INDENT = "  ";
 
+/**
+ * Tree prefix indented so the `├`/`└` pipe starts below the `T` of the
+ * `• Todo` header (bullet + space = 2 columns), not below the `d`.
+ */
 function format_transcript_task_tree_row(
 	task: TranscriptTask,
 	theme: Theme,
-	show_id: boolean,
 	is_last: boolean,
 ): string {
-	const prefix = is_last ? TREE_LAST : TREE_TEE;
-	return theme.fg("dim", prefix) + format_transcript_task_subject(task, theme, show_id);
+	const prefix = TODO_TREE_INDENT + (is_last ? "└─" : "├─");
+	return theme.fg("dim", prefix) + format_transcript_task_subject(task, theme);
 }
 
 function todo_header_bullet(tasks: TranscriptTask[], theme: Theme): string {
@@ -81,21 +60,14 @@ function todo_header_bullet(tasks: TranscriptTask[], theme: Theme): string {
 	return theme.fg("muted", BULLET);
 }
 
-/** Multi-line todo block (header + tree children) for CompactGroupText. */
+/** Compact todo header plus subject-only task rows for CompactGroupText. */
 export function format_todo_block(tasks: TranscriptTask[], theme: Theme, error?: string): string {
-	if (error) {
-		return theme.fg("error", error);
-	}
-
 	const visible = tasks.filter((t) => t.status !== "deleted");
-	const lines: string[] = [
-		todo_header_bullet(tasks, theme) + theme.fg("muted", theme.bold("Todo")),
-	];
-	if (visible.length === 0) return lines.join("\n");
-
-	const show_ids = visible.some((t) => t.blockedBy && t.blockedBy.length > 0);
+	const header = todo_header_bullet(visible, theme) + theme.fg("muted", theme.bold("Todo"));
+	if (error) return `${header}\n${theme.fg("error", error)}`;
+	const lines = [header];
 	for (let i = 0; i < visible.length; i++) {
-		lines.push(format_transcript_task_tree_row(visible[i], theme, show_ids, i === visible.length - 1));
+		lines.push(format_transcript_task_tree_row(visible[i], theme, i === visible.length - 1));
 	}
 	return lines.join("\n");
 }

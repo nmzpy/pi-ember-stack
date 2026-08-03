@@ -1,5 +1,5 @@
 import { parseStreamingJson } from "@earendil-works/pi-ai/compat";
-import { type Component, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, Text } from "@earendil-works/pi-tui";
 import * as Diff from "diff";
 import {
 	type ApplyPatchDetails,
@@ -13,6 +13,7 @@ import {
 import { get_gradient_phase, render_gradient } from "../pi-ember-ui/gradient.ts";
 import {
 	format_thinking_pass_elapsed_suffix,
+	is_thinking_pass_timer_armed,
 	MUTED_GROUP_GRADIENT_PRESET,
 	requestTuiRender,
 	reset_thinking_pass_timer,
@@ -588,21 +589,24 @@ function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string 
 		}
 		return format_apply_patch_block(record, theme);
 	}
-	// While a standalone edit/write is still running (args streaming or tool
-	// executing), use the gradient present-tense verb (Editing/Writing) — same
+	// While a standalone edit/write/bash is still running (args streaming or tool
+	// executing), use the gradient present-tense verb (Editing/Writing/Running) — same
 	// path as group child rows — so the row animates at the shared 20 FPS cadence
-	// instead of showing a static "Edit"/"Write" label. Completed rows keep the
+	// instead of showing a static "Edit"/"Write"/"Bash" label. Completed rows keep the
 	// muted past-tense label via formatCallBody.
-	if ((name === "edit" || name === "write") && !completed) {
+	if ((name === "edit" || name === "write" || name === "bash") && !completed) {
 		const verb = formatGroupChildGradientVerb(name, args);
 		const details = formatCallBodyDetails(name, args, theme, false, false);
-		const live = name === "edit" ? streamingEditStats(args) : streamingWriteStats(args);
-		const showRemovals = name === "edit";
-		const stats = live
-			? paint_compact_tool(theme, "  ", false) +
-				formatEditStatsFromCounts(live, theme, showRemovals)
-			: "";
-		return bulletColor(record, theme) + verb + details + stats;
+		if (name === "edit" || name === "write") {
+			const live = name === "edit" ? streamingEditStats(args) : streamingWriteStats(args);
+			const showRemovals = name === "edit";
+			const stats = live
+				? paint_compact_tool(theme, "  ", false) +
+					formatEditStatsFromCounts(live, theme, showRemovals)
+				: "";
+			return bulletColor(record, theme) + verb + details + stats;
+		}
+		return bulletColor(record, theme) + verb + details;
 	}
 	const prefix = bulletColor(record, theme) + formatCallBody(name, args, theme, false, completed);
 	if (!completed || result === undefined) return prefix;
@@ -664,6 +668,7 @@ function presentTenseVerb(name: string, args: ToolArgs): string {
 		case "ls":
 			return "Listing";
 		case "bash": {
+			if (bashGrepInfo(textValue(args?.command))) return "Searching";
 			return "Running";
 		}
 		case "edit":
@@ -888,7 +893,7 @@ function formatCallBodyDetails(
 				);
 			}
 			const stripped = strip_bash_command_preview(cmd, inGroup);
-			return paint_compact_tool(theme, ` $ ${stripped}`, completed);
+			return paint_compact_tool(theme, ` ${stripped}`, completed);
 		}
 		case "edit":
 			return paint_compact_tool(theme, ` ${pathName}`, completed);
@@ -934,10 +939,7 @@ function formatCallBodyVerb(
 	inGroup = false,
 	completed = true,
 ): string {
-	if (inGroup && name === "bash") {
-		const cmd = textValue(args?.command);
-		if (!bashGrepInfo(cmd)) return "";
-	}
+	if (inGroup && name === "bash" && bashGrepInfo(textValue(args?.command))) return "";
 	switch (name) {
 		case "read":
 			return paint_compact_tool_label(theme, "Read", completed);
@@ -948,7 +950,7 @@ function formatCallBodyVerb(
 		case "ls":
 			return paint_compact_tool_label(theme, "List", completed);
 		case "bash":
-			return paint_compact_tool_label(theme, "Bash", completed);
+			return paint_compact_tool_label(theme, completed ? "Ran" : "Running", completed);
 		case "edit":
 			return paint_compact_tool_label(theme, "Edit", completed);
 		case "write":
@@ -1027,12 +1029,7 @@ function groupHeaderLabel(group: DiscoveryGroup, theme: ThemeLike): string {
 		if (stats) suffixes.push(stats);
 	}
 	if (suffixes.length === 0) return base;
-	return base + " " + suffixes.join(" ");
-}
-
-function apply_patch_header_verb(record: CompactCall, group?: DiscoveryGroup): string {
-	const running = group ? group.records.some((r) => !r._completed) : !record._completed;
-	return running ? "Patching" : "Patched";
+	return `${base} ${suffixes.join(" ")}`;
 }
 
 function apply_patch_record_has_errors(record: CompactCall): boolean {
@@ -1096,7 +1093,7 @@ function apply_patch_total_stats(files: PatchFileRow[]): { additions: number; re
 }
 
 function apply_patch_header_text(
-	record: CompactCall,
+	_record: CompactCall,
 	files: PatchFileRow[],
 	completed: boolean,
 ): string {
@@ -1128,9 +1125,27 @@ function format_patch_group(group: DiscoveryGroup, theme: ThemeLike): string {
 			: headerVerb;
 	const visible_records = groupVisibleChildren(group);
 	const visible_file_rows: Array<{ file: PatchFileRow; completed: boolean }> = [];
+	const file_row_index = new Map<string, number>();
 	for (const record of visible_records) {
 		for (const file of patch_files_for_record(record)) {
-			visible_file_rows.push({ file, completed: record._completed === true });
+			const key = normalize_patch_display_path(file.path);
+			const existing = file_row_index.get(key);
+			if (existing !== undefined) {
+				const row = visible_file_rows[existing];
+				if (row) {
+					// Same file patched again: accumulate into the existing row
+					// instead of adding a duplicate per-file child.
+					row.file = {
+						path: row.file.path,
+						additions: row.file.additions + file.additions,
+						removals: row.file.removals + file.removals,
+					};
+					if (record._completed !== true) row.completed = false;
+					continue;
+				}
+			}
+			file_row_index.set(key, visible_file_rows.length);
+			visible_file_rows.push({ file: { ...file }, completed: record._completed === true });
 		}
 	}
 	const has_errors = patch_errors_for_records(visible_records).size > 0;
@@ -1215,10 +1230,11 @@ function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
 	const lines = [groupBulletColor(group, theme) + headerText];
 	const children = groupVisibleChildren(group);
 	const show_thinking = group.thinkingChild && isThinkingBlocksHidden();
-	for (const [index, record] of children.entries()) {
-		const is_last_child = index === children.length - 1 && !show_thinking;
+	const child_rows = merge_group_child_rows(children);
+	for (const [index, row_records] of child_rows.entries()) {
+		const is_last_child = index === child_rows.length - 1 && !show_thinking;
 		const prefix = is_last_child ? GROUP_CHILD_LAST : GROUP_CHILD_TEE;
-		lines.push(theme.fg("dim", prefix) + formatGroupChildRow(record, theme));
+		lines.push(theme.fg("dim", prefix) + formatGroupChildRows(row_records, theme));
 	}
 	if (show_thinking) {
 		lines.push(theme.fg("dim", GROUP_CHILD_LAST) + formatGroupThinkingChildRow(theme));
@@ -1286,6 +1302,92 @@ function formatGroupChildRow(record: CompactCall, theme: ThemeLike): string {
 	);
 }
 
+/**
+ * Merge identity for same-file diff calls: `edit`/`write` merge by normalized
+ * target path; `apply_patch` by its first touched file. Consecutive (or any
+ * same-file) calls render as ONE child row with accumulated +N -N instead of a
+ * duplicate row per call. Non-diff tools never merge.
+ */
+function group_child_merge_identity(record: CompactCall): string | undefined {
+	if (record.name === "edit" || record.name === "write") {
+		return `${record.name}:${targetPathForRecord(record)}`;
+	}
+	if (record.name === "apply_patch") {
+		const first = patch_files_for_record(record)[0];
+		if (!first) return undefined;
+		return `apply_patch:${normalize_patch_display_path(first.path)}`;
+	}
+	return undefined;
+}
+
+/**
+ * Collapse visible children into rows: same-file diff calls share one row
+ * (first occurrence keeps the slot; later same-file calls merge into it),
+ * so `edit a.ts; edit a.ts` shows one `Editing a.ts +N -N` row instead of a
+ * duplicate. Merging is render-time only — each call keeps its own record
+ * for result tracking and Pi rebuilds.
+ */
+function merge_group_child_rows(children: readonly CompactCall[]): CompactCall[][] {
+	const rows: CompactCall[][] = [];
+	const row_by_identity = new Map<string, number>();
+	for (const record of children) {
+		const identity = group_child_merge_identity(record);
+		if (identity !== undefined) {
+			const existing = row_by_identity.get(identity);
+			if (existing !== undefined) {
+				rows[existing]?.push(record);
+				continue;
+			}
+			row_by_identity.set(identity, rows.length);
+		}
+		rows.push([record]);
+	}
+	return rows;
+}
+
+/** Accumulated +N -N across merged same-file diff records. */
+function merged_child_diff_stats(
+	records: readonly CompactCall[],
+): { additions: number; removals: number } {
+	let additions = 0;
+	let removals = 0;
+	for (const record of records) {
+		if (record.name === "edit") {
+			const counts = edit_diff_counts(record.args, record.result, record._completed === true);
+			if (counts) {
+				additions += counts.additions;
+				removals += counts.removals;
+			}
+		} else if (record.name === "write") {
+			const stats = streamingWriteStats(record.args);
+			additions += stats?.additions ?? 0;
+		} else if (record.name === "apply_patch") {
+			for (const file of patch_files_for_record(record)) {
+				additions += file.additions;
+				removals += file.removals;
+			}
+		}
+	}
+	return { additions, removals };
+}
+
+/** One visible child row; merged same-file records accumulate their +N -N. */
+function formatGroupChildRows(records: readonly CompactCall[], theme: ThemeLike): string {
+	const last = records[records.length - 1];
+	if (!last) return "";
+	if (records.length === 1) return formatGroupChildRow(last, theme);
+	const completed = last._completed === true;
+	const verb = completed
+		? formatCallBodyVerb(last.name, last.args, theme, true, true)
+		: formatGroupChildGradientVerb(last.name, last.args);
+	const details = formatCallBodyDetails(last.name, last.args, theme, true, completed);
+	const counts = merged_child_diff_stats(records);
+	const show_removals =
+		last.name === "edit" ? true : last.name === "write" ? false : counts.removals > 0;
+	const stats = formatEditStatsFromCounts(counts, theme, show_removals, true);
+	return verb + details + (stats ? paint_compact_tool(theme, "  ", completed) + stats : "");
+}
+
 /** Fold completed tool rows into the group header — SSOT flush boundary. */
 export function fold_group_child_rows(group: DiscoveryGroup): void {
 	group.childAbsorbBefore = group.records.length;
@@ -1299,6 +1401,7 @@ export class CompactRenderer {
 	 *  so the next group starts at its own transcript position. */
 	private currentGroup: DiscoveryGroup | undefined;
 	private readonly pendingGroupInvalidations = new Set<DiscoveryGroup>();
+	private pendingGroupRenderRequestTimer: ReturnType<typeof queueMicrotask> | undefined;
 
 	/** Stable tick callback — updates component state before Pi's native render. */
 	private groupTickCb: (() => void) | undefined;
@@ -1461,7 +1564,7 @@ export class CompactRenderer {
 			// genuinely new tool wave (different tool name) or a hard boundary.
 			group.thinkingChild = true;
 			group.settled = true;
-			if (entering_thinking_lane) {
+			if (entering_thinking_lane && !is_thinking_pass_timer_armed()) {
 				reset_thinking_pass_timer();
 			}
 		}
@@ -1581,15 +1684,25 @@ export class CompactRenderer {
 		return groupVisibleChildren(group).length > 0;
 	}
 
-	/** Re-paint the group's shared callText when group state changes without a
-	 *  fresh tool renderCall (e.g. noteThinking on agent_end). */
+	/** Re-paint the group text synchronously, but debounce the render request
+	 *  so bursts of state changes (tool name switch, settle, fold) reach Pi as
+	 *  one frame rather than multiple flickering intermediate frames. */
 	private refreshGroupVisual(group: DiscoveryGroup | undefined): void {
 		if (!group || !this.lastTheme) return;
 		const callText = group.callText ?? group.renderOwner?.callText;
 		if (!callText) return;
 		group.callText = callText;
 		set_compact_call_text(group, callText, formatGroup(group, this.lastTheme));
-		requestTuiRender();
+		this.debouncedGroupRenderRequest();
+	}
+
+	/** Coalesce TUI render requests from rapid group state changes. */
+	private debouncedGroupRenderRequest(): void {
+		if (this.pendingGroupRenderRequestTimer) return;
+		this.pendingGroupRenderRequestTimer = queueMicrotask(() => {
+			this.pendingGroupRenderRequestTimer = undefined;
+			requestTuiRender();
+		});
 	}
 
 	/** Shrink/fold transitions: repaint in place without invalidating the anchor
@@ -1968,7 +2081,7 @@ export class CompactRenderer {
 		if (name === "apply_patch") {
 			this.syncApplyPatchTick(record);
 			this.scheduleRecordShrinkSnap(record);
-		} else if ((name === "edit" || name === "write") && !record._completed) {
+		} else if ((name === "edit" || name === "write" || name === "bash") && !record._completed) {
 			this.subscribeStandaloneTick(record);
 		}
 		return callText;
@@ -2076,8 +2189,8 @@ export class CompactRenderer {
 		if (name === "apply_patch") {
 			this.syncApplyPatchTick(record);
 			this.scheduleRecordShrinkSnap(record);
-		} else if (name === "edit" || name === "write") {
-			// Standalone edit/write completed — drop the gradient tick and snap
+		} else if (name === "edit" || name === "write" || name === "bash") {
+			// Standalone edit/write/bash completed — drop the gradient tick and snap
 			// to the muted past-tense label.
 			this.unsubscribeStandaloneTick();
 			this.scheduleRecordShrinkSnap(record);

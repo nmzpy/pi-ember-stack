@@ -105,16 +105,15 @@ describe("thinking pass timer", () => {
 		}
 	});
 
-	test("arm_pre_token_thinking_status still starts a fresh pass timer", () => {
-		const pinned = 1_000_000;
-		set_thinking_pass_started_at_for_tests(pinned);
+	test("arm_pre_token_thinking_status does not reset an already-armed pass timer", () => {
 		const original = performance.now;
 		const fresh = 2_000_000;
+		set_thinking_pass_started_at_for_tests(fresh - 2_500);
 		performance.now = () => fresh;
 		try {
 			arm_pre_token_thinking_status();
 			performance.now = () => fresh + 500;
-			expect(format_thinking_pass_elapsed_suffix(makeTheme())).toBe("");
+			expect(format_thinking_pass_elapsed_suffix(makeTheme())).toContain("3s");
 		} finally {
 			performance.now = original;
 			reset_thinking_pass_timer();
@@ -122,7 +121,7 @@ describe("thinking pass timer", () => {
 		}
 	});
 
-	test("noteThinking resets the pass timer when the in-group lane appears", () => {
+	test("noteThinking does not reset the pass timer when the in-group lane appears", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme();
@@ -157,15 +156,14 @@ describe("thinking pass timer", () => {
 			{ ...child_ctx, isError: false } as never,
 		);
 
-		const pinned = 1_000_000;
-		set_thinking_pass_started_at_for_tests(pinned);
 		const original = performance.now;
 		const fresh = 2_000_000;
+		set_thinking_pass_started_at_for_tests(fresh - 2_500);
 		performance.now = () => fresh;
 		try {
 			r.noteThinking();
 			performance.now = () => fresh + 500;
-			expect(format_thinking_pass_elapsed_suffix(theme)).toBe("");
+			expect(format_thinking_pass_elapsed_suffix(theme)).toContain("3s");
 		} finally {
 			performance.now = original;
 			reset_thinking_pass_timer();

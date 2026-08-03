@@ -97,10 +97,11 @@ export function wire_dcp(
 	const register_skills = options.registerSkills ?? true;
 	const persist_session = options.persistSession ?? true;
 	const nudges = options.nudges ?? true;
+	const skills_dir = options.skillsDir;
 
-	if (register_skills && options.skillsDir) {
+	if (register_skills && skills_dir) {
 		pi.on("resources_discover", async () => ({
-			skillPaths: [options.skillsDir!],
+			skillPaths: [skills_dir],
 		}));
 	}
 

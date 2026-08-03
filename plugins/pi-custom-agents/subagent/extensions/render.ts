@@ -7,43 +7,45 @@
  */
 
 import * as os from "node:os";
+import type { Message } from "@earendil-works/pi-ai";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { renderLiveGradient, formatElapsed, chatboxBorderColor } from "../../../pi-ember-ui/index.ts";
-import { format_in_group_thinking_row } from "../../../pi-ember-ui/thinking-status-render.ts";
-import { isThinkingBlocksHidden } from "../../../pi-ember-ui/mode-colors.ts";
+import {
+	type Component,
+	Container,
+	Markdown,
+	Spacer,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
 	BULLET,
 	formatCallBody,
-	formatGroupChildGradientVerb,
 	formatGroupChildEditWriteStats,
+	formatGroupChildGradientVerb,
 	formatGroupedCallDetails,
 	groupBulletColorFromFlags,
 	statusBulletColor,
 	TREE_BRANCH_LAST,
 	TREE_BRANCH_PIPE,
 	TREE_BRANCH_TEE,
-	TREE_NESTED_LAST,
-	TREE_NESTED_PIPE,
-	TREE_SINGLE_TOOL,
-	type CompactCall,
 } from "../../../pi-compact-tools/renderer.ts";
-import { Container, type Component, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { Message } from "@earendil-works/pi-ai";
 import {
-	type SubAgentResult,
-	type SubagentLiveToolRow,
-	SUBAGENT_LIVE_OUTPUT_MAX_ROWS,
+	chatboxBorderColor,
+	formatElapsed,
+	renderLiveGradient,
+} from "../../../pi-ember-ui/index.ts";
+import { format_in_group_thinking_row } from "../../../pi-ember-ui/thinking-status-render.ts";
+import {
 	getResultOutput,
 	isFailedResult,
 	resolve_failure_message,
+	SUBAGENT_LIVE_OUTPUT_MAX_ROWS,
+	type SubAgentResult,
+	type SubagentLiveToolRow,
 } from "./runner.ts";
-import {
-	format_subagent_thinking_elapsed_suffix,
-} from "./subagent-timing.ts";
-import {
-	type SubagentArgs,
-	isSingleModeSubagentArgs,
-} from "./subagent-group.ts";
+import { isSingleModeSubagentArgs, type SubagentArgs } from "./subagent-group.ts";
+import { format_subagent_thinking_elapsed_suffix } from "./subagent-timing.ts";
 
 export type { SubagentArgs };
 
@@ -118,7 +120,12 @@ export class SubagentLiveOutputText implements Component {
 	running = true;
 	theme: ThemeLike | undefined;
 
-	constructor(rows: SubagentLiveToolRow[] = [], treePrefix = "", running = true, theme?: ThemeLike) {
+	constructor(
+		rows: SubagentLiveToolRow[] = [],
+		treePrefix = "",
+		running = true,
+		theme?: ThemeLike,
+	) {
 		this.rows = rows;
 		this.treePrefix = treePrefix;
 		this.running = running;
@@ -159,14 +166,14 @@ export class SubagentLiveOutputText implements Component {
 
 			const completed = row.completed;
 			const verb = completed
-				? formatCallBody(row.name, row.args as any, theme, true, true)
+				? formatCallBody(row.name, row.args, theme, true, true)
 				: formatGroupChildGradientVerb(row.name, row.args);
-			const details = formatGroupedCallDetails(row.name, row.args as any, theme, completed);
+			const details = formatGroupedCallDetails(row.name, row.args, theme, completed);
 			const stats = formatGroupChildEditWriteStats(
 				row.name,
-				row.args as any,
+				row.args,
 				completed,
-				row.details as any,
+				row.details,
 				theme,
 			);
 			const body = verb + details + stats;
@@ -481,7 +488,7 @@ function renderAgentLabel(
 	theme: ThemeLike,
 	result?: SubAgentResult,
 	failureMessage?: string,
-	phaseOffsetMs: number = 0,
+	_phaseOffsetMs: number = 0,
 	isSingle = false,
 	elapsedMs?: number,
 ): string {
@@ -496,14 +503,18 @@ function renderAgentLabel(
 	}
 	let suffix = "";
 	if (status === "failed") {
-		const output = (failureMessage ?? (result ? resolve_failure_message(result) : undefined))?.trim();
+		const output = (
+			failureMessage ?? (result ? resolve_failure_message(result) : undefined)
+		)?.trim();
 		if (output) {
 			const singleLine = output.replace(/\s+/g, " ");
 			const clipped = singleLine.length > 60 ? `${singleLine.slice(0, 57)}...` : singleLine;
 			suffix = ` ${theme.fg("error", clipped)}`;
 		}
 	}
-	return prefix + theme.fg("dim", agentName) + suffix + agentStatusSuffix(status, theme) + elapsedSuffix;
+	return (
+		prefix + theme.fg("dim", agentName) + suffix + agentStatusSuffix(status, theme) + elapsedSuffix
+	);
 }
 
 /**
@@ -522,7 +533,19 @@ function renderAgentRow(
 	isSingle = false,
 	elapsedMs?: number,
 ): string {
-	return prefix + renderAgentLabel(status, agentName, theme, result, failureMessage, phaseOffsetMs, isSingle, elapsedMs);
+	return (
+		prefix +
+		renderAgentLabel(
+			status,
+			agentName,
+			theme,
+			result,
+			failureMessage,
+			phaseOffsetMs,
+			isSingle,
+			elapsedMs,
+		)
+	);
 }
 
 type FlatEntry =
@@ -547,7 +570,11 @@ function buildFlatEntries(rows: AgentRowDescriptor[], thinkingBlocksVisible: boo
 		if (!has_live_output) {
 			if (row.status === "running" && row.result?.latestToolCall) {
 				entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });
-			} else if (row.status === "running" && row.result?.isThinking && row.result.reasoning !== false) {
+			} else if (
+				row.status === "running" &&
+				row.result?.isThinking &&
+				row.result.reasoning !== false
+			) {
 				entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });
 			}
 		}
@@ -564,7 +591,11 @@ function agentTreePrefix(agentIndex: number, agentCount: number): string {
 }
 
 /** Outer tree prefix for items under an agent (spaces or group tree pipe). */
-export function outerPrefixForAgent(agentIndex: number, agentCount: number, hasHeader: boolean): string {
+export function outerPrefixForAgent(
+	agentIndex: number,
+	agentCount: number,
+	hasHeader: boolean,
+): string {
 	if (!hasHeader) return "  ";
 	return agentIndex < agentCount - 1 ? TREE_BRANCH_PIPE : "  ";
 }
@@ -626,9 +657,8 @@ function renderLatestToolRow(
 	// DRY with the compact group child row formatter: running agents get the
 	// gradient verb, completed/failed agents get the muted past-tense form.
 	const body = completed
-		? formatCallBody(name, args as any, theme, true, true)
-		: formatGroupChildGradientVerb(name, args) +
-		  formatGroupedCallDetails(name, args, theme, false);
+		? formatCallBody(name, args, theme, true, true)
+		: formatGroupChildGradientVerb(name, args) + formatGroupedCallDetails(name, args, theme, false);
 	return `${fg("dim", treePrefix)}${body}`;
 }
 
@@ -638,7 +668,10 @@ const DELEGATING_LABEL = "Delegating";
 const SUBAGENT_ELAPSED_MIN_MS = 1000;
 
 /** Dim elapsed suffix for subagent labels — SSOT with Thinking. */
-export function formatSubagentElapsedSuffix(theme: ThemeLike, elapsedMs: number | undefined): string {
+export function formatSubagentElapsedSuffix(
+	theme: ThemeLike,
+	elapsedMs: number | undefined,
+): string {
 	if (elapsedMs === undefined || elapsedMs < SUBAGENT_ELAPSED_MIN_MS) return "";
 	return theme.fg("dim", ` ${formatElapsed(elapsedMs)}`);
 }
@@ -658,10 +691,10 @@ export function shouldShowSubagentDelegating(
 }
 
 /** Compact single-row state while the parent invokes the subagent tool. */
-export function renderDelegatingRow(theme: ThemeLike, elapsedMs?: number): string {
+export function renderDelegatingRow(theme: ThemeLike): string {
 	const bullet = groupBulletColorFromFlags(false, false, theme);
 	const label = renderLiveGradient(DELEGATING_LABEL, "subagent");
-	return bullet + label + formatSubagentElapsedSuffix(theme, elapsedMs);
+	return bullet + label;
 }
 
 function renderGroupLabel(
@@ -697,6 +730,8 @@ interface AgentRowDescriptor {
 	failureMessage?: string;
 	isSingle: boolean;
 	toolCallId?: string;
+	/** Member is still delegating (args brace open / no results yet). */
+	delegating?: boolean;
 }
 
 export interface SubagentLayoutMember {
@@ -710,29 +745,36 @@ export interface SubagentLayoutMember {
 }
 
 function resolve_member_display_name(member: SubagentLayoutMember): string {
-	return (
-		member.results[0]?.agent ??
-		member.displayName ??
-		asString(member.args.agent, "subagent")
-	);
+	return member.results[0]?.agent ?? member.displayName ?? asString(member.args.agent, "subagent");
 }
 
-/** Rows for consecutive single-mode subagent tool calls grouped under Subagents. */
+/**
+ * Rows for consecutive single-mode subagent tool calls grouped under Subagents.
+ * Members with no results yet (args still streaming or awaiting execute) are
+ * in the "delegating" phase: they surface the unveiled agent type once it is
+ * written and render with the gradient label while current, closing the
+ * gradient when the next subagent invocation starts.
+ */
 export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDescriptor[] {
 	return members.map((member) => {
 		const displayName = resolve_member_display_name(member);
 		const terminal = member.terminal === true;
-		if (
-			!terminal &&
-			!member.failureMessage &&
-			isSingleModeSubagentArgs(member.args) &&
-			(member.results.length === 0 || isSubagentDelegating(member.results))
-		) {
+		// Not yet invoked: brace still open or worker not started. Surface the
+		// agent type as soon as it is written; unknown-agent members render as
+		// the gradient header only (spare row) so "Delegating" never repeats.
+		if (!terminal && !member.failureMessage && member.results.length === 0) {
+			const agentType =
+				(typeof member.displayName === "string" && member.displayName.trim() !== ""
+					? member.displayName.trim()
+					: undefined) ??
+				(typeof member.args.agent === "string" && member.args.agent.trim() !== ""
+					? member.args.agent.trim()
+					: undefined);
 			return {
 				status: "running" as const,
-				name: displayName,
-				result: member.results[0],
-				failureMessage: member.failureMessage,
+				name: agentType ?? DELEGATING_LABEL,
+				result: undefined,
+				delegating: true,
 				isSingle: false,
 				toolCallId: member.toolCallId,
 			};
@@ -748,6 +790,51 @@ export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDe
 	});
 }
 
+/**
+ * Group header line: while any member is still delegating (no results yet),
+ * the header itself is the single gradient `Delegating` row so repeated
+ * subagent tool calls never stack redundant labels; otherwise the settled
+ * `Subagents` label is used.
+ */
+function renderGroupHeaderLine(
+	headerLabel: string,
+	rows: AgentRowDescriptor[],
+	theme: ThemeLike,
+	elapsedMs?: number,
+): string {
+	if (rows.some((r) => r.delegating)) return renderDelegatingRow(theme);
+	const hasError = rows.some((r) => r.status === "failed");
+	const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
+	return renderGroupLabel(headerLabel, hasError, allDone, theme, allDone ? elapsedMs : undefined);
+}
+
+/**
+ * Last *visible* row still in the delegating phase — the one that owns the
+ * gradient. Unknown-agent placeholder rows (name `Delegating`) are skipped in
+ * the render loops, so they must not claim the gradient index.
+ */
+function lastDelegatingIndex(rows: AgentRowDescriptor[]): number {
+	for (let i = rows.length - 1; i >= 0; i--) {
+		if (rows[i].delegating && rows[i].name !== DELEGATING_LABEL) return i;
+	}
+	return -1;
+}
+
+/**
+ * A member still in the delegating phase: show the unveiled agent type with
+ * the gradient label while it is the current invocation, settling to static
+ * text once the next subagent is invoked (gradient closed on the prior).
+ */
+function renderDelegatingAgentLabel(
+	theme: ThemeLike,
+	name: string,
+	prefix: string,
+	gradient: boolean,
+): string {
+	const label = gradient ? renderLiveGradient(name, "subagent") : theme.fg("text", name);
+	return prefix + label;
+}
+
 function fillSubagentLayoutContainer(
 	container: Container,
 	headerLabel: string | undefined,
@@ -759,39 +846,59 @@ function fillSubagentLayoutContainer(
 	const fg = theme.fg.bind(theme);
 	const hasHeader = headerLabel !== undefined;
 	if (headerLabel) {
-		const hasError = rows.some((r) => r.status === "failed");
-		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
-		container.addChild(new Text(renderGroupLabel(headerLabel, hasError, allDone, theme, elapsedMs), 0, 0));
+		container.addChild(
+			new Text(renderGroupHeaderLine(headerLabel, rows, theme, elapsedMs), 0, 0),
+		);
 	}
 	const flatEntries = buildFlatEntries(rows, thinkingBlocksVisible);
+	const lastDelegatingIdx = lastDelegatingIndex(rows);
 	let agent_seen = 0;
 	for (const entry of flatEntries) {
 		const row = entry.descriptor;
 		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
 		if (entry.type === "agent") {
+			// A still-delegating member whose agent type is unknown: the
+			// gradient header already says "Delegating" — no redundant child.
+			if (row.delegating && row.name === DELEGATING_LABEL) {
+				agent_seen += 1;
+				continue;
+			}
 			// Dim separator between consecutive agents when more than one is
 			// shown and thinking blocks are visible (SSOT chatbox border color).
 			if (agent_seen > 0 && rows.length > 1 && thinkingBlocksVisible) {
 				container.addChild(new DimSeparator());
 			}
 			agent_seen += 1;
-			const rowText = renderAgentRow(
-				row.status,
-				row.name,
-				theme,
-				row.result,
-				hasHeader ? fg("dim", treePrefix) : "",
-				row.failureMessage,
-				entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
-				row.isSingle,
-				row.isSingle ? elapsedMs : undefined,
-			);
+			const rowText = row.delegating
+				? renderDelegatingAgentLabel(
+						theme,
+						row.name,
+						hasHeader ? fg("dim", treePrefix) : "",
+						entry.agentIndex === lastDelegatingIdx,
+					)
+				: renderAgentRow(
+						row.status,
+						row.name,
+						theme,
+						row.result,
+						hasHeader ? fg("dim", treePrefix) : "",
+						row.failureMessage,
+						entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
+						row.isSingle,
+						row.isSingle && row.status !== "running" ? elapsedMs : undefined,
+					);
 			container.addChild(new Text(rowText, 0, 0));
 		} else if (entry.type === "liveOutput") {
-			const liveRows = Array.isArray(row.result?.liveToolRows) ? row.result!.liveToolRows! : [];
+			const rawLiveRows = row.result?.liveToolRows;
+			const liveRows = Array.isArray(rawLiveRows) ? rawLiveRows : [];
 			const outerPrefix = outerPrefixForAgent(entry.parentAgentIndex, rows.length, hasHeader);
 			container.addChild(
-				new SubagentLiveOutputText(liveRows, fg("dim", outerPrefix), row.status === "running", theme),
+				new SubagentLiveOutputText(
+					liveRows,
+					fg("dim", outerPrefix),
+					row.status === "running",
+					theme,
+				),
 			);
 		} else {
 			const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
@@ -799,7 +906,7 @@ function fillSubagentLayoutContainer(
 		}
 	}
 	if (container.children.length === 0) {
-		container.addChild(new Text(renderDelegatingRow(theme, elapsedMs), 0, 0));
+		container.addChild(new Text(renderDelegatingRow(theme), 0, 0));
 	}
 }
 
@@ -892,26 +999,33 @@ export function renderSubagentLayout(
 		const lines: string[] = [];
 		const fg = theme.fg.bind(theme);
 		const hasHeader = true;
-		const hasError = rows.some((r) => r.status === "failed");
-		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
-		lines.push(renderGroupLabel("Subagents", hasError, allDone, theme, elapsedMs));
+		lines.push(renderGroupHeaderLine("Subagents", rows, theme, elapsedMs));
 		const flatEntries = buildFlatEntries(rows, false);
+		const lastDelegatingIdx = lastDelegatingIndex(rows);
 		for (const entry of flatEntries) {
 			const row = entry.descriptor;
 			const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
 			if (entry.type === "agent") {
+				if (row.delegating && row.name === DELEGATING_LABEL) continue;
 				lines.push(
-					renderAgentRow(
-						row.status,
-						row.name,
-						theme,
-						row.result,
-						fg("dim", treePrefix),
-						row.failureMessage,
-						entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
-						false,
-					),
-				);
+					row.delegating
+						? renderDelegatingAgentLabel(
+								theme,
+								row.name,
+								fg("dim", treePrefix),
+								entry.agentIndex === lastDelegatingIdx,
+							)
+						: renderAgentRow(
+								row.status,
+								row.name,
+								theme,
+								row.result,
+								fg("dim", treePrefix),
+								row.failureMessage,
+								entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
+								false,
+							),
+					);
 			} else {
 				const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
 				if (childRow) lines.push(childRow);
@@ -921,7 +1035,7 @@ export function renderSubagentLayout(
 	}
 	if (shouldShowSubagentDelegating(results, terminal)) {
 		if (isSingleModeSubagentArgs(args)) {
-			return renderDelegatingRow(theme, elapsedMs);
+			return renderDelegatingRow(theme);
 		}
 	}
 	const { headerLabel, rows } = deriveAgentRows(args, results, terminal, undefined, failureMessage);
@@ -931,7 +1045,9 @@ export function renderSubagentLayout(
 	if (headerLabel) {
 		const hasError = rows.some((r) => r.status === "failed");
 		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
-		lines.push(renderGroupLabel(headerLabel, hasError, allDone, theme, elapsedMs));
+		lines.push(
+			renderGroupLabel(headerLabel, hasError, allDone, theme, allDone ? elapsedMs : undefined),
+		);
 	}
 	const flatEntries = buildFlatEntries(rows, false);
 	for (const entry of flatEntries) {
@@ -948,7 +1064,7 @@ export function renderSubagentLayout(
 					row.failureMessage,
 					entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 					row.isSingle,
-					row.isSingle ? elapsedMs : undefined,
+					row.isSingle && row.status !== "running" ? elapsedMs : undefined,
 				),
 			);
 		} else {
@@ -958,7 +1074,7 @@ export function renderSubagentLayout(
 	}
 	if (lines.length === 0) {
 		if (terminal) return "";
-		return renderDelegatingRow(theme, elapsedMs);
+		return renderDelegatingRow(theme);
 	}
 	return lines.join("\n");
 }
@@ -987,33 +1103,63 @@ export function buildSubagentLayoutComponent(
 	const container = new Container();
 	if (groupedMembers && groupedMembers.length > 1) {
 		const rows = memberRecordsToRows(groupedMembers);
-		fillSubagentLayoutContainer(container, "Subagents", rows, theme, elapsedMs, thinkingBlocksVisible);
+		fillSubagentLayoutContainer(
+			container,
+			"Subagents",
+			rows,
+			theme,
+			elapsedMs,
+			thinkingBlocksVisible,
+		);
 		return container;
 	}
 	if (shouldShowSubagentDelegating(results, terminal) && isSingleModeSubagentArgs(args)) {
-		container.addChild(new Text(renderDelegatingRow(theme, elapsedMs), 0, 0));
+		container.addChild(new Text(renderDelegatingRow(theme), 0, 0));
 		return container;
 	}
-	const { headerLabel, rows } = deriveAgentRows(args, results, terminal, toolCallId, failureMessage);
-	fillSubagentLayoutContainer(container, headerLabel, rows, theme, elapsedMs, thinkingBlocksVisible);
+	const { headerLabel, rows } = deriveAgentRows(
+		args,
+		results,
+		terminal,
+		toolCallId,
+		failureMessage,
+	);
+	fillSubagentLayoutContainer(
+		container,
+		headerLabel,
+		rows,
+		theme,
+		elapsedMs,
+		thinkingBlocksVisible,
+	);
 	return container;
 }
 
 /**
  * Whether any agent in the layout is still running (flashing).
  */
-export function anySubagentRunning(args: SubagentArgs, results: SubAgentResult[], terminal = false): boolean {
+export function anySubagentRunning(
+	args: SubagentArgs,
+	results: SubAgentResult[],
+	terminal = false,
+): boolean {
 	if (terminal) return false;
 	if (isSingleModeSubagentArgs(args)) {
 		return agentStatus(results[0], false) === "running";
 	}
 	if (args.tasks && args.tasks.length > 0) {
-		return args.tasks.some((_t: { agent: string; task: string }, i: number) => agentStatus(results[i], false) === "running");
+		return args.tasks.some(
+			(_t: { agent: string; task: string }, i: number) =>
+				agentStatus(results[i], false) === "running",
+		);
 	}
 	if (args.chain && args.chain.length > 0) {
 		return args.chain
 			.slice(0, results.length)
-			.some((_s: { agent: string; task: string }, i: number) => agentStatus(results[i], false) === "running");
+			.some(
+				(_s: { agent: string; task: string }, i: number) =>
+					agentStatus(results[i], false) === "running",
+			);
 	}
 	return false;
 }

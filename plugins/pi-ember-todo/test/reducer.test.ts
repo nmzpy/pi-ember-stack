@@ -124,7 +124,41 @@ describe("pi-ember-todo reducer", () => {
 		expect(ok.isError).toBeUndefined();
 		const bad = await run(tools, ctx, { action: "update", id: "2.7", status: "completed" });
 		expect(bad.isError).toBe(true);
-		expect(bad.text).toContain("id must be a number");
+		expect(bad.text).toContain("id must be a positive whole number");
+	});
+
+	test("subject-targeted update avoids a redundant list call", async () => {
+		const { pi, tools } = make_api();
+		piEmberTodo(pi);
+		const ctx = make_ctx(`s-subject-${Date.now()}-${Math.random()}`);
+		await run(tools, ctx, { action: "create", subject: "Module 1" });
+		const updated = await run(tools, ctx, {
+			action: "update",
+			task: "module 1",
+			status: "in_progress",
+		});
+		expect(updated.isError).toBeUndefined();
+		expect(updated.details.tasks[0].status).toBe("in_progress");
+	});
+
+	test("starts fresh after compaction", async () => {
+		const { pi, tools, events } = make_api();
+		piEmberTodo(pi);
+		const branch: any[] = [];
+		const ctx = make_ctx(`s-compaction-fresh-${Date.now()}-${Math.random()}`, branch);
+		await run(tools, ctx, { action: "create", subject: "Module 1" });
+
+		branch.push({ type: "compaction", firstKeptEntryId: "compacted" });
+		await events.get("session_compact")![0]({}, ctx);
+
+		const stale = await run(tools, ctx, { action: "update", id: 1, status: "in_progress" });
+		expect(stale.isError).toBe(true);
+		expect(stale.text).toContain("not found");
+
+		const created = await run(tools, ctx, { action: "create", subject: "Fresh task" });
+		expect(created.isError).toBeUndefined();
+		expect(created.details.tasks[0].id).toBe(1);
+		expect(created.details.tasks[0].subject).toBe("Fresh task");
 	});
 
 	test("update without mutable field surfaces error", async () => {

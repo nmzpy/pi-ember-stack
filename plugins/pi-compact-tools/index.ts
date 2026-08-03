@@ -9,20 +9,17 @@ import {
 	createReadTool,
 	createWriteTool,
 	type ExtensionAPI,
+	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { type Component } from "@earendil-works/pi-tui";
 import { bashGrepInfo, rewriteGrepToRg } from "./bash-grep.ts";
 import { sync_compact_group_flags } from "./group-flags.ts";
 import {
-	CompactRenderer,
+	type CompactRenderer,
 	GROUPABLE_TOOLS,
 	WORK_GROUP_SOFT_BOUNDARY_TOOLS,
-	type ToolRenderContext,
-	type ToolRenderResultOptions,
 } from "./renderer.ts";
 import { getSharedRenderer } from "./shared-renderer.ts";
 import {
-	isThinkingBlocksHidden,
 	setGroupReopenableActive,
 	setToolGroupActive,
 	setGroupThinkingChildActive,
@@ -33,7 +30,15 @@ import { subscribe_theme_refresh } from "../pi-ember-ui/theme-refresh.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
-type ToolFactory = (cwd: string) => any;
+/** Structural mirror of renderer.ts internal ToolResult (not exported) so the
+ *  renderResult delegation can pass Pi's result through with an explicit cast. */
+type CompactToolResult = {
+	content?: Array<{ type: string; text?: string }>;
+	details?: { diff?: string; totalMatched?: number };
+	[key: string]: unknown;
+};
+
+type ToolFactory = (cwd: string) => ToolDefinition;
 
 const TOOL_FACTORIES: Record<string, ToolFactory> = {
 	bash: createBashTool,
@@ -51,7 +56,7 @@ function registerCompactTool(
 	factory: ToolFactory,
 	renderer: CompactRenderer,
 ): void {
-	const definition = factory(SOURCE_ROOT);
+	const definition: ToolDefinition = factory(SOURCE_ROOT);
 	pi.registerTool({
 		name,
 		label: name,
@@ -63,21 +68,23 @@ function registerCompactTool(
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
 
-		async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: any, ctx: any) {
-			return factory(ctx.cwd).execute(toolCallId, params, signal, onUpdate);
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return factory(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
 		},
 
-		renderCall(args: any, theme: any, context: ToolRenderContext): Component {
+		renderCall(args, theme, context) {
 			return renderer.renderCall(name, args, theme, context);
 		},
 
-		renderResult(
-			result: any,
-			options: ToolRenderResultOptions,
-			theme: any,
-			context: ToolRenderContext & { isError: boolean },
-		): Component {
-			return renderer.renderResult(name, context.args, result, options, theme, context);
+		renderResult(result, options, theme, context) {
+			return renderer.renderResult(
+				name,
+				context.args,
+				result as unknown as CompactToolResult,
+				options,
+				theme,
+				context,
+			);
 		},
 	});
 }
@@ -120,13 +127,13 @@ export default function piCompactToolsPlugin(
 		renderer.resyncGroupGradientTick();
 		sync_compact_group_flags(renderer);
 	});
-	pi.on("message_start", (event: any) => {
+	pi.on("message_start", (event) => {
 		if (event?.message?.role !== "user") return;
 		const display = (event.message as { display?: boolean }).display;
 		if (display !== false) renderer.noteUserMessage();
 		sync_compact_group_flags(renderer);
 	});
-	pi.on("tool_call", (event: any) => {
+	pi.on("tool_call", (event) => {
 		const is_groupable =
 			GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName];
 		if (is_groupable) {

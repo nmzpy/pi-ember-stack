@@ -50,7 +50,7 @@ export function decode_connect_unary_body(payload: Uint8Array): Uint8Array | nul
 
 	let offset = 0;
 	while (offset + 5 <= payload.length) {
-		const flags = payload[offset]!;
+		const flags = payload[offset];
 		const message_length = Buffer.from(payload).readUInt32BE(offset + 1);
 		const frame_end = offset + 5 + message_length;
 		if (frame_end > payload.length) return null;
@@ -186,7 +186,7 @@ function build_connect_display_message(
 	code: string,
 	message: string,
 	details: string[],
-	raw: string,
+	_raw: string,
 ): string {
 	const parts: string[] = [];
 	const embedded = parse_embedded_aiserver_error(message);
