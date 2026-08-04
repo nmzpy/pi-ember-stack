@@ -34,7 +34,7 @@ export default function piEmberImagesPlugin(pi: ExtensionAPI): void {
 				.map((placeholder) => store.get(placeholder))
 				.filter((attachment): attachment is ImageAttachment => attachment !== undefined);
 			if (attachments.length === 0) return undefined;
-			return new ImagePreviewMessage(attachments, (text) => theme.fg("dim", text));
+			return new ImagePreviewMessage(attachments, (text) => theme.fg("text", text));
 		},
 	);
 

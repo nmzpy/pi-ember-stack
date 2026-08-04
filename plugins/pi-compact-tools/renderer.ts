@@ -1737,6 +1737,24 @@ export class CompactRenderer {
 		return group?.thinkingChild === true && isThinkingBlocksHidden();
 	}
 
+	/** Whether ANY group (live or lingering) has an armed/painted in-group
+	 *  `└ Thinking` lane. Stronger than `hasGroupThinkingChild()` (live group
+	 *  only): a painted lane that outlives the `currentGroup` pointer (rebuild
+	 *  race, settle/arm ordering) must still suppress the external Thinking
+	 *  hosts — hidden blocks render the lane as the ONE Thinking surface.
+	 *  O(calls); called only from lifecycle flag syncs, never render paths. */
+	hasAnyGroupThinkingChild(): boolean {
+		if (!isThinkingBlocksHidden()) return false;
+		// The first record of a group has no `record.group` back-pointer until
+		// a second member joins (appendToGroup), so check currentGroup directly
+		// in addition to every record's group.
+		if (this.currentGroup?.thinkingChild === true) return true;
+		for (const record of this.calls.values()) {
+			if (record.group?.thinkingChild === true) return true;
+		}
+		return false;
+	}
+
 	/** Whether the live group still shows lingering tool child rows. */
 	hasVisibleGroupChildren(): boolean {
 		const group = this.resolveLiveGroup();

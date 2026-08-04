@@ -476,21 +476,9 @@ Output format — use markdown section headers and bullets:
 - **Cleanup:** <obsolete code to remove, or none>
 - **Validation:** bash t.gate.sh <files>
 
-## Persistence
-<keys, defaults, canonical read/write, forbidden stores; or n/a>
-
-## Interfaces
-<contracts to add/change; or n/a>
-
 ## Test Plan
 - <pure logic / persistence / mapping / architecture checks as relevant>
 - **Exclusions:** <intentional non-coverage>
-
-## Non-Goals
-- <explicitly out of scope>
-
-## Assumptions
-- <defaults taken when quiz was unnecessary>
 
 ## Working Tree
 - Preserve unrelated uncommitted work; scope the patch to this plan; do not revert or reformat unrelated files.
@@ -501,7 +489,10 @@ Output format — use markdown section headers and bullets:
 - <architecture / no duplicate ownership>
 - <backward compatibility>
 - <cleanup complete>
-- <named suites pass>`);
+- <named suites pass>
+
+## Quiz When Uncertain
+- If you are uncertain about a materially important requirement, tradeoff, or interpretation that would change what you do next, ask a clarifying question via the quiz tool before proceeding. Do not assume.`);
 
 const ORCHESTRATOR_PROMPT =
 	compose_mode_prompt(`Orchestrate mode is active. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.

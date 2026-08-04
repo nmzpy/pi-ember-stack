@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { getImageDimensions } from "@earendil-works/pi-tui";
+import { compressAttachment } from "./compress.ts";
 import type { AttachmentStore } from "./store.ts";
 import {
 	MAX_IMAGE_BYTES,
@@ -286,6 +287,7 @@ export function replaceImagePathsInText(
 		}
 		const attachment = options.store.add(extended.result.image);
 		accepted.push(attachment);
+		void compressAttachment(attachment);
 		output += text.slice(cursor, token.start) + attachment.placeholder;
 		cursor = extended.end;
 		replaced++;

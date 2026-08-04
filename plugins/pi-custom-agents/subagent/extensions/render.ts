@@ -50,7 +50,10 @@ import {
 	type SubagentLiveToolRow,
 } from "./runner.ts";
 import { isSingleModeSubagentArgs, type SubagentArgs } from "./subagent-group.ts";
-import { format_subagent_thinking_elapsed_suffix } from "./subagent-timing.ts";
+import {
+	format_subagent_thinking_elapsed_suffix,
+	getSubagentElapsedMs,
+} from "./subagent-timing.ts";
 
 export type { SubagentArgs };
 
@@ -153,19 +156,35 @@ type LiveSegment =
 	| { kind: "work"; rows: SubagentLiveToolRow[] };
 
 /**
+ * SSOT subagent mirror of the main assistant stream boundary
+ * (`resolve_assistant_stream_boundary_event` in pi-ember-ui): a live text item
+ * is a hard work-burst boundary only when it carries non-empty visible text.
+ * Bare `text_start` blocks and empty/whitespace-only deltas are NOT
+ * boundaries — they must never split the current work burst, matching how the
+ * main compact renderer ignores `text_start` and empty `text_delta`.
+ */
+export function is_live_text_boundary(text: string): boolean {
+	return text.trim().length > 0;
+}
+
+/**
  * Split the chronological live buffer into alternating text blocks and work
- * bursts. Visible assistant text is a hard transcript boundary — it closes the
- * current work burst (its children fold into the header summary) exactly like
- * the main agent's `noteVisibleText()` hard exit. Consecutive tool calls stay
- * in one burst.
+ * bursts. Non-empty visible assistant text is a hard transcript boundary — it
+ * closes the current work burst (its children fold into the header summary)
+ * exactly like the main agent's `noteVisibleText()` hard exit. Consecutive
+ * tool calls stay in one burst; empty/whitespace-only text blocks (bare
+ * `text_start`, empty `text_delta`) are skipped entirely so a tool → empty
+ * text_start → tool sequence stays ONE contiguous work group with no dead
+ * pipe-only spacer row between two half bursts.
  */
 function buildLiveSegments(items: SubagentLiveItem[]): LiveSegment[] {
 	const segments: LiveSegment[] = [];
 	let burst: SubagentLiveToolRow[] | null = null;
 	for (const item of items) {
 		if (item.kind === "text") {
+			if (!is_live_text_boundary(item.text)) continue;
 			burst = null;
-			if (item.text.length > 0) segments.push({ kind: "text", text: item.text });
+			segments.push({ kind: "text", text: item.text });
 		} else {
 			if (burst === null) {
 				burst = [];
@@ -747,14 +766,16 @@ function renderAgentLabel(
 	isSingle = false,
 	elapsedMs?: number,
 ): string {
-	const elapsedSuffix = isSingle ? formatSubagentElapsedSuffix(theme, elapsedMs) : "";
+	const elapsedSuffix = formatSubagentElapsedSuffix(theme, elapsedMs);
 	const prefix = isSingle
 		? status === "running"
 			? statusBulletColor(false, false, theme)
 			: theme.fg("muted", BULLET)
 		: "";
+	// Running rows never carry an elapsed suffix — call sites pass elapsedMs
+	// only for terminal rows, and this guard keeps it that way.
 	if (status === "running") {
-		return prefix + theme.fg("text", agentName) + elapsedSuffix;
+		return prefix + theme.fg("text", agentName);
 	}
 	let suffix = "";
 	if (status === "failed") {
@@ -1005,6 +1026,8 @@ interface AgentRowDescriptor {
 	failureMessage?: string;
 	isSingle: boolean;
 	toolCallId?: string;
+	/** Frozen final elapsed ms once the member's tool execution finished. */
+	elapsedMs?: number;
 	/** Member is still delegating (args brace open / no results yet). */
 	delegating?: boolean;
 }
@@ -1061,6 +1084,12 @@ export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDe
 			failureMessage: member.failureMessage,
 			isSingle: false,
 			toolCallId: member.toolCallId,
+			// Frozen final elapsed only once the member's run is terminal —
+			// running/delegating members never show a live timer.
+			elapsedMs:
+				terminal && member.toolCallId !== undefined
+					? getSubagentElapsedMs(member.toolCallId)
+					: undefined,
 		};
 	});
 }
@@ -1152,7 +1181,9 @@ function fillSubagentLayoutContainer(
 						row.failureMessage,
 						entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 						row.isSingle,
-						row.isSingle && row.status !== "running" ? elapsedMs : undefined,
+						row.status !== "running"
+							? (row.elapsedMs ?? (row.isSingle ? elapsedMs : undefined))
+							: undefined,
 					);
 			container.addChild(new Text(rowText, 0, 0));
 		} else if (entry.type === "liveOutput") {
@@ -1293,6 +1324,7 @@ export function renderSubagentLayout(
 								row.failureMessage,
 								entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 								false,
+								row.status !== "running" ? row.elapsedMs : undefined,
 							),
 					);
 			} else {

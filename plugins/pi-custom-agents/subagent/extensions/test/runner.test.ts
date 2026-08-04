@@ -6,13 +6,18 @@ import {
 	type SubAgentResult,
 	type SubagentRetrySession,
 	DEFAULT_SUBAGENT_TIMEOUT_MS,
+	annotate_parser_stream_error,
 	decide_pre_response_http500_retry,
+	extractFailureMessage,
 	format_agent_tool_result_batch,
 	format_agent_tool_result_text,
 	get_agent_result_body,
 	getResultOutput,
 	is_empty_body_http500_error,
 	isFailedResult,
+	is_parser_stream_error,
+	merge_failure_message,
+	PARSER_STREAM_ERROR_LIMITATION_SUFFIX,
 	resolve_failure_message,
 	resolve_subagent_timeout_ms,
 	retryable_pre_response_http500_failure,
@@ -251,6 +256,219 @@ describe("resolve_failure_message", () => {
 			],
 		});
 		expect(resolve_failure_message(result)).toBe("429 rate limit exceeded");
+	});
+});
+
+describe("is_parser_stream_error", () => {
+	test("matches every known pi-ai generic stream-parser failure", () => {
+		expect(is_parser_stream_error("Stream ended without finish_reason")).toBe(true);
+		expect(is_parser_stream_error("devin stream ended without a terminal event")).toBe(true);
+		expect(is_parser_stream_error("Anthropic stream ended before message_stop")).toBe(true);
+		expect(
+			is_parser_stream_error("OpenAI Responses stream ended before a terminal response event"),
+		).toBe(true);
+	});
+
+	test("matches case-insensitively and inside provider-prefixed text", () => {
+		expect(is_parser_stream_error("STREAM ENDED WITHOUT FINISH_REASON")).toBe(true);
+		expect(is_parser_stream_error("custom-model stream ended without a terminal event")).toBe(true);
+	});
+
+	test("rejects specific provider errors, aborts, and empty input", () => {
+		expect(is_parser_stream_error("401 Unauthorized: invalid api key")).toBe(false);
+		expect(is_parser_stream_error("500 status code (no body)")).toBe(false);
+		expect(is_parser_stream_error("socket hang up")).toBe(false);
+		expect(is_parser_stream_error("billing: insufficient credits")).toBe(false);
+		expect(is_parser_stream_error("Request was aborted")).toBe(false);
+		expect(is_parser_stream_error(undefined)).toBe(false);
+		expect(is_parser_stream_error("")).toBe(false);
+	});
+});
+
+describe("merge_failure_message", () => {
+	test("a specific incoming message overwrites a generic parser/abort current", () => {
+		expect(
+			merge_failure_message("Stream ended without finish_reason", "401 Unauthorized: invalid api key"),
+		).toBe("401 Unauthorized: invalid api key");
+		expect(merge_failure_message("Request was aborted", "ECONNRESET")).toBe("ECONNRESET");
+	});
+
+	test("a generic parser/abort incoming message never overwrites a specific current", () => {
+		expect(
+			merge_failure_message("401 Unauthorized: invalid api key", "Stream ended without finish_reason"),
+		).toBe("401 Unauthorized: invalid api key");
+		expect(merge_failure_message("ECONNRESET", "Request was aborted")).toBe("ECONNRESET");
+	});
+
+	test("between two generic messages the later one wins", () => {
+		expect(
+			merge_failure_message("Request was aborted", "Stream ended without finish_reason"),
+		).toBe("Stream ended without finish_reason");
+		expect(
+			merge_failure_message("Stream ended without finish_reason", "Request was aborted"),
+		).toBe("Request was aborted");
+	});
+
+	test("two specific messages keep the later one", () => {
+		expect(merge_failure_message("old 429 rate limit", "503 Service Unavailable")).toBe(
+			"503 Service Unavailable",
+		);
+	});
+
+	test("empty/undefined incoming keeps the current message", () => {
+		expect(merge_failure_message("401 Unauthorized", undefined)).toBe("401 Unauthorized");
+		expect(merge_failure_message("401 Unauthorized", "")).toBe("401 Unauthorized");
+		expect(merge_failure_message(undefined, undefined)).toBeUndefined();
+	});
+});
+
+describe("annotate_parser_stream_error", () => {
+	test("appends the explicit limitation note to a parser-stream failure", () => {
+		const annotated = annotate_parser_stream_error("Stream ended without finish_reason");
+		expect(annotated).toBe(
+			`Stream ended without finish_reason${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`,
+		);
+		expect(annotated).toContain("no underlying error was reported");
+	});
+
+	test("leaves specific messages untouched", () => {
+		expect(annotate_parser_stream_error("401 Unauthorized: invalid api key")).toBe(
+			"401 Unauthorized: invalid api key",
+		);
+	});
+
+	test("is idempotent on an already-annotated message", () => {
+		const once = annotate_parser_stream_error("Stream ended without finish_reason");
+		expect(annotate_parser_stream_error(once)).toBe(once);
+	});
+});
+
+describe("extractFailureMessage", () => {
+	test("returns a direct specific error message", () => {
+		expect(extractFailureMessage(new Error("401 Unauthorized: invalid api key"))).toBe(
+			"401 Unauthorized: invalid api key",
+		);
+	});
+
+	test("prefers a specific Error.cause over a generic outer message", () => {
+		const wrapper = new Error("Request was aborted", {
+			cause: new Error("ECONNRESET socket hang up"),
+		});
+		expect(extractFailureMessage(wrapper)).toBe("ECONNRESET socket hang up");
+	});
+
+	test("extracts the root cause buried under a parser-stream wrapper", () => {
+		const wrapped = new Error("Stream ended without finish_reason", {
+			cause: new Error("502 Bad Gateway from provider"),
+		});
+		expect(extractFailureMessage(wrapped)).toBe("502 Bad Gateway from provider");
+	});
+
+	test("walks a multi-level chain root-cause-first", () => {
+		const deepest = new Error("429 rate limit exceeded");
+		const parser = new Error("Stream ended without finish_reason", { cause: deepest });
+		const abort = new Error("Request was aborted", { cause: parser });
+		expect(extractFailureMessage(abort)).toBe("429 rate limit exceeded");
+	});
+
+	test("keeps the outermost error text when the whole chain is generic", () => {
+		const parser = new Error("Stream ended without finish_reason", {
+			cause: new Error("Request was aborted"),
+		});
+		expect(extractFailureMessage(parser)).toBe("Stream ended without finish_reason");
+	});
+
+	test("never degrades to a stringified non-Error cause", () => {
+		const outer = new Error("aborted", { cause: { status: 500 } });
+		expect(extractFailureMessage(outer)).toBe("aborted");
+	});
+
+	test("handles non-Error and null inputs", () => {
+		expect(extractFailureMessage(null)).toBe("Unknown error");
+		expect(extractFailureMessage(undefined)).toBe("Unknown error");
+		expect(extractFailureMessage("plain string")).toBe("plain string");
+	});
+});
+
+describe("parser-stream failure resolution", () => {
+	const PARSER = "Stream ended without finish_reason";
+
+	test("retains and annotates the exact parser failure when no underlying error exists", () => {
+		const result = makeResult({ exitCode: 1, stopReason: "error", errorMessage: PARSER });
+		const resolved = resolve_failure_message(result);
+		expect(resolved).toBe(`${PARSER}${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`);
+		// The finalization fallback never replaces the retained parser reason.
+		expect(resolved).not.toContain("Subagent failed");
+	});
+
+	test("specific agent_end message wins over a generic message_end parser message", () => {
+		// Lifecycle: message_end captured the generic parser text first, then a
+		// specific error surfaced on the assistant message (agent_end/turn_end).
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: PARSER,
+			messages: [assistantMessage({ errorMessage: "401 Unauthorized: invalid api key" })],
+		});
+		expect(resolve_failure_message(result)).toBe("401 Unauthorized: invalid api key");
+	});
+
+	test("specific message_end reason survives a later generic agent_end parser message", () => {
+		// Lifecycle: a specific reason was captured first; a generic parser
+		// message arriving later must not overwrite it.
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "503 Service Unavailable",
+			messages: [assistantMessage({ errorMessage: PARSER })],
+		});
+		expect(resolve_failure_message(result)).toBe("503 Service Unavailable");
+	});
+
+	test("parser message beats a generic abort from an earlier message_end", () => {
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "Request was aborted",
+			messages: [assistantMessage({ errorMessage: PARSER })],
+		});
+		expect(resolve_failure_message(result)).toBe(
+			`${PARSER}${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`,
+		);
+	});
+
+	test("resolution is idempotent after runSubAgent writes the annotated reason back", () => {
+		const annotated = `${PARSER}${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`;
+		const result = makeResult({ exitCode: 1, stopReason: "error", errorMessage: annotated });
+		expect(resolve_failure_message(result)).toBe(annotated);
+	});
+
+	test("getResultOutput shows the annotated parser reason, not a fallback", () => {
+		const result = makeResult({ exitCode: 1, stopReason: "error", errorMessage: PARSER });
+		expect(getResultOutput(result)).toBe(`${PARSER}${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`);
+		expect(getResultOutput(result)).not.toBe("(no output)");
+	});
+
+	test("model-visible tool result carries the annotated parser reason", () => {
+		const result = makeResult({
+			agent: "Scout A",
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: PARSER,
+		});
+		expect(format_agent_tool_result_text(result)).toBe(
+			`### [Scout A] failed (error)\n\n${PARSER}${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`,
+		);
+	});
+
+	test("specific reason is never replaced by the parser annotation or a fallback", () => {
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "429 rate limit exceeded",
+		});
+		expect(resolve_failure_message(result)).toBe("429 rate limit exceeded");
+		expect(getResultOutput(result)).toBe("429 rate limit exceeded");
 	});
 });
 

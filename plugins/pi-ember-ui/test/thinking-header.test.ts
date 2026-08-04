@@ -35,6 +35,7 @@ import {
 	stop_all_gradient_animation,
 } from "../gradient.ts";
 import { getSharedRenderer } from "../../pi-compact-tools/shared-renderer.ts";
+import { sync_compact_group_flags } from "../../pi-compact-tools/group-flags.ts";
 import {
 	isCurrentTurnAssistantTimestamp,
 	isInterRunGap,
@@ -1038,6 +1039,102 @@ describe("reconcile_thinking_wait_ui", () => {
 			expect(after).toContain("1 search");
 		} finally {
 			renderer.resetForSession();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("armed in-group lane suppresses external host even when the turn-tool flag is off (auto-continue window)", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		setUserTurnCommitted(true);
+		setAgentRunPending(true);
+		resetToolExecutionInFlight();
+		const renderer = getSharedRenderer();
+		renderer.resetForSession();
+		const theme = { fg: (t: string, s: string) => `[${t}:${s}]`, bold: (s: string) => s };
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("aw-owner", owner_state);
+		try {
+			renderer.renderCall("bash", { command: "git tag" }, theme, owner_ctx);
+			renderer.renderResult(
+				"bash",
+				{ command: "git tag" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...owner_ctx, isError: false },
+			);
+			renderer.settleAllGroups();
+			renderer.armInGroupThinking();
+			// The scan-based flag must reflect the armed lane even though the
+			// live-group check is what the old code used.
+			sync_compact_group_flags(renderer);
+			expect(renderer.hasAnyGroupThinkingChild()).toBe(true);
+			expect(isGroupThinkingChildActive()).toBe(true);
+			// agent_settled cleared the turn-tool flag: the lane alone must still
+			// win the Thinking slot — never a duplicate external header.
+			expect(compact_thinking_lane_owns_status()).toBe(true);
+			expect(thinking_status_should_show()).toBe(false);
+			expect(resolve_thinking_status_host()).toBe(null);
+		} finally {
+			renderer.resetForSession();
+			setGroupThinkingChildActive(false);
+			setGroupReopenableActive(false);
+			setToolGroupActive(false);
+			setAgentRunPending(false);
+			setTurnToolTranscriptActive(false);
+			setUserTurnCommitted(false);
+			resetToolExecutionInFlight();
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
+
+	test("scan-based lane flag suppresses external hosts after currentGroup divergence (stale painted lane)", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		setUserTurnCommitted(true);
+		setAgentRunPending(true);
+		resetToolExecutionInFlight();
+		const renderer = getSharedRenderer();
+		renderer.resetForSession();
+		const theme = { fg: (t: string, s: string) => `[${t}:${s}]`, bold: (s: string) => s };
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("div-owner", owner_state);
+		try {
+			renderer.renderCall("bash", { command: "git tag" }, theme, owner_ctx);
+			renderer.renderResult(
+				"bash",
+				{ command: "git tag" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...owner_ctx, isError: false },
+			);
+			renderer.settleAllGroups();
+			renderer.armInGroupThinking();
+			sync_compact_group_flags(renderer);
+			// Simulate the divergence: the lane's group is no longer the live
+			// currentGroup pointer (the old live-only check would miss it), but
+			// the scan-based flag still owns the slot for the external hosts.
+			expect(renderer.hasGroupThinkingChild()).toBe(true);
+			expect(renderer.hasAnyGroupThinkingChild()).toBe(true);
+			expect(isGroupThinkingChildActive()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe(null);
+			// Clearing the lane releases the slot again.
+			renderer.clearGroupThinkingChild();
+			sync_compact_group_flags(renderer);
+			expect(isGroupThinkingChildActive()).toBe(false);
+		} finally {
+			renderer.resetForSession();
+			setGroupThinkingChildActive(false);
+			setGroupReopenableActive(false);
+			setToolGroupActive(false);
+			setAgentRunPending(false);
+			setTurnToolTranscriptActive(false);
+			setUserTurnCommitted(false);
+			resetToolExecutionInFlight();
 			setThinkingBlocksHidden(prev_hidden);
 		}
 	});

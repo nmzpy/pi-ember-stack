@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+	format_image_fallback_label,
+	make_image_placeholder,
+} from "../types.ts";
+import {
 	detectImageMimeType,
 	isWindowsDrivePath,
 	isWindowsLikePath,
@@ -41,5 +45,13 @@ describe("pi-ember-images path handling", () => {
 			"Review and please",
 		);
 		expect(removeImagePlaceholders("[image 1]")).toBe("");
+	});
+
+	test("editor placeholder stays bare while fallback label carries dimensions", () => {
+		expect(make_image_placeholder(3)).toBe("[image 3]");
+		expect(format_image_fallback_label(3)).toBe("[image 3]");
+		expect(format_image_fallback_label(3, { widthPx: 345, heightPx: 175 })).toBe(
+			"[image 3: 345x175]",
+		);
 	});
 });

@@ -9,7 +9,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { Text, truncateToWidth, Spacer } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { BULLET, CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { statusBulletColor } from "../pi-compact-tools/renderer.ts";
 import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
@@ -241,9 +241,10 @@ export class TodoRenderer {
 				return new Text("", 0, 0);
 			}
 		}
-		// One blank line below the todo block so the next transcript row
-		// (e.g. gradient Thinking header) does not sit flush against it.
-		return new Spacer(1);
+		// The visual block is already hosted by renderCall; the result only
+		// refreshes the shared text. No extra spacer — native tool row spacing
+		// already gives the standard one-row padding.
+		return new Text("", 0, 0);
 	}
 }
 

@@ -1,6 +1,6 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SubAgentResult } from "./runner.ts";
-import { flatten_todo_timeline } from "../../../pi-ember-todo/timeline.ts";
+import { isThinkingBlocksHidden } from "../../../pi-ember-ui/mode-colors.ts";
 
 export interface SubagentArgs {
 	agent?: string;
@@ -167,6 +167,28 @@ export function getSubagentGroupRenderer(): SubagentGroupRenderer {
 
 const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_resume"]);
 
+/**
+ * Live subagent-batch boundary for assistant stream events (SSOT).
+ *
+ * A visible thinking block is a chronological transcript boundary: a later
+ * subagent tool call must not join a Subagents batch whose header renders
+ * above the reasoning trace. Hidden thinking renders no transcript block, so
+ * consecutive delegations keep collapsing exactly as before. Hidden assistant
+ * messages (display: false, e.g. auto-continue) stream no visible content, so
+ * their thinking never splits the batch either.
+ */
+export function apply_subagent_group_stream_boundary(
+	renderer: SubagentGroupRenderer,
+	ev: { type?: string } | undefined,
+	message?: { role?: string; display?: boolean } | null,
+): void {
+	if (!ev) return;
+	if (ev.type !== "thinking_start" && ev.type !== "thinking_delta") return;
+	if (isThinkingBlocksHidden()) return;
+	if (message?.role === "assistant" && message.display === false) return;
+	renderer.hardExit();
+}
+
 /** Restore grouped subagent layout state from branch history before Pi rebuilds. */
 export function seed_subagent_renderer_from_branch(
 	branch: SessionEntry[],
@@ -198,21 +220,57 @@ export function seed_subagent_renderer_from_branch(
 		}
 	}
 
-	const timeline = flatten_todo_timeline(branch);
-	for (const entry of timeline) {
-		if (entry.kind === "user") {
-			renderer.hardExit();
+	// Chronological replay mirrors the flattened todo timeline for user-message
+	// and tool boundaries while adding the subagent chronology rule: a visible
+	// non-empty thinking part renders as a transcript block, so the next
+	// subagent call starts a fresh batch instead of attaching above the
+	// reasoning trace. Hidden thinking renders no block and keeps batching.
+	let pending_visible_thinking = false;
+	for (const entry of branch) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+		if (!msg) continue;
+		if (msg.role === "user") {
+			const display = (msg as { display?: boolean }).display;
+			if (display !== false) {
+				renderer.hardExit();
+				pending_visible_thinking = false;
+			}
 			continue;
 		}
-		if (entry.kind !== "tool") continue;
-		if (!SUBAGENT_TOOL_NAMES.has(entry.name)) {
-			renderer.hardExit();
-			continue;
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		const hidden = (msg as { display?: boolean }).display === false;
+		for (const part of msg.content) {
+			if (!part || typeof part !== "object") continue;
+			const p = part as { type?: string; thinking?: unknown };
+			if (p.type === "thinking") {
+				if (
+					!hidden &&
+					!isThinkingBlocksHidden() &&
+					typeof p.thinking === "string" &&
+					p.thinking.trim().length > 0
+				) {
+					pending_visible_thinking = true;
+				}
+				continue;
+			}
+			if (p.type !== "toolCall") continue;
+			const tc = p as { id?: string; name?: string };
+			if (typeof tc.id !== "string" || typeof tc.name !== "string") continue;
+			if (!SUBAGENT_TOOL_NAMES.has(tc.name)) {
+				renderer.hardExit();
+				pending_visible_thinking = false;
+				continue;
+			}
+			if (pending_visible_thinking) {
+				renderer.hardExit();
+				pending_visible_thinking = false;
+			}
+			const args = args_by_id.get(tc.id) ?? {};
+			const results = results_by_id.get(tc.id) ?? [];
+			renderer.register(tc.id, args, results);
+			const displayName = results[0]?.agent;
+			if (displayName) renderer.setDisplayName(tc.id, displayName);
 		}
-		const args = args_by_id.get(entry.id) ?? {};
-		const results = results_by_id.get(entry.id) ?? [];
-		renderer.register(entry.id, args, results);
-		const displayName = results[0]?.agent;
-		if (displayName) renderer.setDisplayName(entry.id, displayName);
 	}
 }

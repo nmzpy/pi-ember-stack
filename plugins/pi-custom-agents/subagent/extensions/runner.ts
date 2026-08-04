@@ -511,21 +511,128 @@ export function isGenericAbortMessage(message: string | undefined): boolean {
 	);
 }
 
-function extractFailureMessage(error: unknown): string {
-	if (error === null || error === undefined) return "Unknown error";
-	const cause = (error as { cause?: unknown }).cause;
-	if (cause instanceof Error && cause.message && !isGenericAbortMessage(cause.message)) {
-		return cause.message;
+/**
+ * True when the message is one of pi-ai's generic stream-parser failures
+ * ("Stream ended without finish_reason", "<provider> stream ended without a
+ * terminal event", "Anthropic stream ended before message_stop", "OpenAI
+ * Responses stream ended before a terminal response event"). pi-ai emits
+ * these when the provider closes the SSE/event stream CLEANLY before a
+ * terminal event: the thrown Error carries no `cause`, status, body, or event
+ * data, so no underlying provider detail is recoverable from Ember-owned code
+ * (we never patch upstream pi-ai). They are generic like abort messages and
+ * must never shadow a specific provider/transport error captured earlier.
+ */
+export function is_parser_stream_error(message: string | undefined): boolean {
+	if (!message) return false;
+	return (
+		/stream ended without finish_reason/i.test(message) ||
+		/stream ended without a terminal event/i.test(message) ||
+		/stream ended before message_stop/i.test(message) ||
+		/stream ended before a terminal response event/i.test(message)
+	);
+}
+
+/**
+ * Deterministic suffix appended to a retained parser-stream failure so the
+ * row states explicitly that the provider closed the stream early and NO
+ * underlying error was reported. Honest by construction: we never invent a
+ * status/body that pi-ai did not surface — the exact parser failure text is
+ * retained and this note makes the irreducible limitation explicit.
+ */
+export const PARSER_STREAM_ERROR_LIMITATION_SUFFIX =
+	" (provider closed the stream before a terminal finish event; no underlying error was reported \u2014 check provider status, model, and network)";
+
+/** Append the limitation note once (idempotent). */
+export function annotate_parser_stream_error(message: string): string {
+	if (
+		is_parser_stream_error(message) &&
+		!message.includes(PARSER_STREAM_ERROR_LIMITATION_SUFFIX)
+	) {
+		return `${message}${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`;
 	}
-	if (error instanceof Error) return error.message;
-	return String(error);
+	return message;
+}
+
+type FailureMessageTier = "specific" | "parser" | "abort";
+
+/**
+ * Tier of a candidate failure message. `specific` is a real provider/transport
+ * reason; `parser` is a generic stream-parser failure (no underlying detail);
+ * `abort` is a generic abort/empty message. Specific always outranks generic.
+ */
+function failure_message_tier(message: string | undefined): FailureMessageTier {
+	if (!message || !message.trim()) return "abort";
+	if (is_parser_stream_error(message)) return "parser";
+	if (isGenericAbortMessage(message)) return "abort";
+	return "specific";
+}
+
+/**
+ * Pick the better of two candidate failure messages regardless of arrival
+ * order: a specific (non-generic) message always wins over a generic
+ * parser/abort message, and between two generic messages the later one wins.
+ * This is the SSOT ordering rule used by every write site (message_end,
+ * turn_end/agent_end, and the thrown-error catch block) so a real provider
+ * error captured earlier is never overwritten by a later generic parser or
+ * abort message, and vice versa.
+ */
+export function merge_failure_message(
+	current: string | undefined,
+	incoming: string | undefined,
+): string | undefined {
+	if (!incoming) return current;
+	if (failure_message_tier(incoming) === "specific") return incoming;
+	if (failure_message_tier(current) === "specific") return current;
+	return incoming;
+}
+
+const MAX_CAUSE_CHAIN_DEPTH = 8;
+
+/** Generic wrappers (aborts and parser-stream failures) add no provider detail. */
+function is_wrapper_generic(message: string | undefined): boolean {
+	return isGenericAbortMessage(message) || is_parser_stream_error(message);
+}
+
+/**
+ * Extract the most useful failure message from a thrown error. Walks the full
+ * Error.cause chain root-cause-first: a specific (non-generic, non-parser)
+ * message anywhere in the chain wins, so a real provider/transport error
+ * buried under pi-ai's generic parser wrapper surfaces instead of the
+ * wrapper. When the whole chain is generic, keeps the outermost Error text
+ * (never degrades to a stringified non-Error cause).
+ */
+export function extractFailureMessage(error: unknown): string {
+	if (error === null || error === undefined) return "Unknown error";
+	const chain: unknown[] = [];
+	let current: unknown = error;
+	for (
+		let depth = 0;
+		depth < MAX_CAUSE_CHAIN_DEPTH && current !== null && current !== undefined;
+		depth++
+	) {
+		chain.push(current);
+		current = (current as { cause?: unknown }).cause;
+	}
+	for (let i = chain.length - 1; i >= 0; i--) {
+		const node = chain[i];
+		if (node instanceof Error && node.message && !is_wrapper_generic(node.message)) {
+			return node.message;
+		}
+	}
+	for (const node of chain) {
+		if (node instanceof Error && node.message) return node.message;
+	}
+	if (!(error instanceof Error)) return String(error);
+	return "Unknown error";
 }
 
 /**
  * Pull the last assistant `errorMessage` from the message stream. Providers
  * fold real failure reasons (HTTP status + body, auth errors, etc.) into the
  * assistant message's `errorMessage` via `formatProviderError` before the
- * generic abort catch block can overwrite it.
+ * generic abort catch block can overwrite it. Parser-stream failures are
+ * intentionally kept so `resolve_failure_message` can retain and annotate
+ * them when nothing more specific exists.
  */
 function lastAssistantErrorMessage(messages: Message[]): string | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -541,18 +648,31 @@ function lastAssistantErrorMessage(messages: Message[]): string | undefined {
 
 /**
  * Resolve the best human-readable failure reason for a failed result, in
- * priority order: a non-generic `errorMessage`, the last assistant message's
- * non-generic `errorMessage`, non-empty `stderr`, or the last assistant text
- * output. Returns undefined when nothing useful is available so callers can
- * fall back to short status labels.
+ * priority order: the most specific `errorMessage` across the top-level
+ * result and the last assistant message (a specific provider/transport
+ * reason beats a generic parser/abort message regardless of which source
+ * carries it), non-empty `stderr`, or the last assistant text output.
+ * A retained parser-stream failure is annotated with an explicit
+ * limitation note (never replaced by a fallback, never silently dropped);
+ * a generic abort/empty candidate falls through to stderr/output. Returns
+ * undefined when nothing useful is available so callers can fall back to
+ * short status labels.
  */
 export function resolve_failure_message(result: SubAgentResult): string | undefined {
 	if (!isFailedResult(result)) return undefined;
-	if (result.errorMessage && !isGenericAbortMessage(result.errorMessage)) {
-		return result.errorMessage;
-	}
+	const top = result.errorMessage;
 	const fromMessages = lastAssistantErrorMessage(result.messages);
-	if (fromMessages) return fromMessages;
+	let best: string | undefined;
+	if (failure_message_tier(top) === "specific") {
+		best = top;
+	} else if (failure_message_tier(fromMessages) === "specific") {
+		best = fromMessages;
+	} else {
+		best = merge_failure_message(top, fromMessages);
+	}
+	if (best && failure_message_tier(best) !== "abort") {
+		return annotate_parser_stream_error(best);
+	}
 	if (result.stderr?.trim()) return result.stderr.trim();
 	const finalOutput = getFinalOutput(result.messages).trim();
 	if (finalOutput) return finalOutput;
@@ -1052,7 +1172,12 @@ export async function runSubAgent(options: {
 						result.model = `${msg.provider || "?"}/${msg.model}`;
 					}
 					if (msg.stopReason) result.stopReason = msg.stopReason;
-					if (msg.errorMessage) result.errorMessage = msg.errorMessage;
+					// Capture the assistant errorMessage with the specificity ordering
+					// rule: a later generic parser/abort message must never overwrite a
+					// specific provider/transport error captured earlier.
+					if (msg.errorMessage) {
+						result.errorMessage = merge_failure_message(result.errorMessage, msg.errorMessage);
+					}
 				}
 				if (msg) {
 					result.messages.push(msg);
@@ -1073,8 +1198,11 @@ export async function runSubAgent(options: {
 				for (const m of end_msgs) {
 					if (m && m.role === "assistant") {
 						if (m.stopReason) result.stopReason = m.stopReason;
+						// Aborts are skipped here (the dedicated abort finalization owns
+						// them); parser/stream and specific messages merge with the same
+						// specificity ordering as message_end.
 						if (m.errorMessage && !isGenericAbortMessage(m.errorMessage)) {
-							result.errorMessage = m.errorMessage;
+							result.errorMessage = merge_failure_message(result.errorMessage, m.errorMessage);
 						}
 					}
 				}
@@ -1201,11 +1329,13 @@ export async function runSubAgent(options: {
 			result.stopReason = result.stopReason || "error";
 		}
 		const caught = extractFailureMessage(error);
-		// Prefer a richer caught message over a generic/empty existing one so
+		// Prefer a richer caught message over an existing generic/empty one so
 		// real provider/network errors surfaced by the catch block are not
-		// dropped in favor of opaque abort strings.
-		if (caught && (!result.errorMessage || isGenericAbortMessage(result.errorMessage))) {
-			result.errorMessage = caught;
+		// dropped in favor of opaque abort or parser-stream strings. The
+		// specificity ordering is symmetric: a specific error already captured
+		// from the event stream is never replaced by a generic caught message.
+		if (caught) {
+			result.errorMessage = merge_failure_message(result.errorMessage, caught);
 		}
 	} finally {
 		if (timeoutId) clearTimeout(timeoutId);

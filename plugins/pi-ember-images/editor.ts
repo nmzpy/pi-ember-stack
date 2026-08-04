@@ -1,5 +1,6 @@
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
+import { compressAttachment } from "./compress.ts";
 import { readClipboardImage } from "./clipboard.ts";
 import { describeReject, replaceImagePathsInText } from "./image-utils.ts";
 import type { AttachmentStore } from "./store.ts";
@@ -54,6 +55,7 @@ export class EmberImagesEditor extends CustomEditor {
 			return;
 		}
 		const attachment = this.options.store.add(result.image);
+		void compressAttachment(attachment);
 		super.insertTextAtCursor(attachment.placeholder);
 		this.tui.requestRender();
 	}

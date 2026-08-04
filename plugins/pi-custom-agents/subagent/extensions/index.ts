@@ -117,6 +117,7 @@ import {
 } from "./runner.ts";
 import { runNamedAgent, SUBAGENT_REQUEST_EVENT, type SubagentRunRequest } from "./service.ts";
 import {
+	apply_subagent_group_stream_boundary,
 	getSubagentGroupRenderer,
 	isSingleModeSubagentArgs,
 	type SubagentArgs,
@@ -504,6 +505,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 	});
 
+	// A visible thinking block is a chronological transcript boundary: a later
+	// subagent tool call must not join an earlier Subagents batch whose header
+	// renders above the reasoning trace. Hidden thinking renders no block and
+	// keeps consecutive delegations collapsing into one batch.
+	pi.on("message_update", (event: {
+		assistantMessageEvent?: { type?: string };
+		message?: { role?: string; display?: boolean };
+	}) => {
+		apply_subagent_group_stream_boundary(
+			getSubagentGroupRenderer(),
+			event.assistantMessageEvent,
+			event.message,
+		);
+	});
+
 	// Proactively steer agents toward sub-agent delegation when users mention it
 	pi.on("before_agent_start", async (event) => {
 		const prompt = event.prompt.toLowerCase();
@@ -696,6 +712,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			: undefined;
 		if (batch_running) {
 			markSubagentRunning(owner_tool_call_id);
+			if (!isSubagentToolTerminal(context.toolCallId)) {
+				markSubagentRunning(context.toolCallId);
+			}
 		}
 		const elapsedMs = grouped_members
 			? getGroupElapsedMs(batch)

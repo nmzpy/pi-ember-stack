@@ -64,6 +64,16 @@ let footerStatsCache:
 
 let footerThinkingLevel = "off";
 
+/** Live model object + catalog snapshot for the footer render closure.
+ *  The footer factory stays live across session replacement, so its render
+ *  closure must never touch a (possibly stale) ctx — after /resume, /new,
+ *  /fork, or /reload every ctx getter throws (assertActive), crashing the
+ *  render frame. These are refreshed on session_start and model_select only. */
+// biome-ignore lint/suspicious/noExplicitAny: Pi's model objects are dynamic
+let footerModel: any;
+// biome-ignore lint/suspicious/noExplicitAny: Pi's model objects are dynamic
+let footerCatalog: readonly any[] = [];
+
 let footer_stats_timer: ReturnType<typeof setTimeout> | undefined;
 let footer_stats_dirty = false;
 
@@ -93,6 +103,16 @@ export function formatTokens(count: number): string {
 // biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 function is_live_session(ctx: any): boolean {
 	return footerCtx !== undefined && ctx?.sessionManager === footerCtx?.sessionManager;
+}
+
+/** Refresh the footer's model/catalog snapshot from a live (non-stale) ctx.
+ *  Call from `session_start` and `model_select` only — never from the render
+ *  path. */
+// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
+// biome-ignore lint/suspicious/noExplicitAny: Pi's model objects are dynamic
+export function set_footer_model_snapshot(model: any, catalog: readonly any[]): void {
+	footerModel = model;
+	footerCatalog = catalog ?? [];
 }
 
 /**
@@ -125,6 +145,8 @@ export function reset_footer_state(): void {
 	cancel_footer_stats_schedule();
 	footerStatsCache = undefined;
 	footerThinkingLevel = "off";
+	footerModel = undefined;
+	footerCatalog = [];
 	footerCtx = undefined;
 }
 
@@ -182,14 +204,22 @@ function resolve_mode_label(modeId: string): string {
 }
 
 /**
- * Install the Ember bottom footer. Captures the session ctx for the render
- * closure and stats recomputation. Call from `session_start` after the ctx
- * is bound.
+ * Install the Ember bottom footer. Captures the session ctx for the stats
+ * recomputation and snapshots the session-scoped objects/values the render
+ * closure needs. Call from `session_start` after the ctx is bound.
  */
 // biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 export function installEmberFooter(ctx: any): void {
 	if (ctx.mode !== "tui") return;
 	footerCtx = ctx;
+	// Snapshot the session-scoped objects ONCE at install, while the ctx is
+	// fresh. The footer factory stays live across session replacement; after
+	// /resume, /new, /fork, or /reload the old ctx wrapper throws on every
+	// getter (assertActive). The SessionManager/ModelRegistry objects stay
+	// valid — only the runner ctx wrapper is invalidated.
+	const sessionManager = ctx.sessionManager;
+	const modelRegistry = ctx.modelRegistry;
+	set_footer_model_snapshot(ctx.model, modelRegistry?.getAvailable?.() ?? []);
 	// biome-ignore lint/suspicious/noExplicitAny: Pi's setFooter callback signature is dynamic
 	ctx.ui.setFooter((_tui: any, theme: any, _footerData: any) => {
 		return {
@@ -202,10 +232,14 @@ export function installEmberFooter(ctx: any): void {
 				const contextWindow = stats?.contextWindow ?? 0;
 				const usedTokens = stats?.contextTokens;
 
-				const model = ctx.model;
+				// Read only the lifecycle-snapshotted model/catalog (refreshed on
+				// session_start and model_select) and the captured objects. Never
+				// touch ctx here — the footer factory stays live across session
+				// replacement, and a stale ctx wrapper throws on every getter.
+				const model = footerModel;
 				const usedLabel =
 					usedTokens === null || usedTokens === undefined ? "?" : formatTokens(usedTokens);
-				const cwd = ctx.sessionManager.getCwd();
+				const cwd = sessionManager.getCwd();
 				const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
 
 				// --- Left side: folder • context/cache/cost tps ---
@@ -214,7 +248,7 @@ export function installEmberFooter(ctx: any): void {
 				if (latestCacheHitRate !== undefined) {
 					statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
 				}
-				if (totalCost || (model && ctx.modelRegistry.isUsingOAuth(model))) {
+				if (totalCost || (model && modelRegistry?.isUsingOAuth?.(model))) {
 					statsParts.push(`$${totalCost.toFixed(3)}`);
 				}
 				const tps = getLiveTps();
@@ -242,7 +276,7 @@ export function installEmberFooter(ctx: any): void {
 				const modeLabel = resolve_mode_label(getActiveModeId());
 				const modelName = model?.name ?? model?.id ?? "no model";
 				const provider = model?.provider ?? "unknown";
-				const catalog = footerCtx?.modelRegistry?.getAvailable?.() ?? [];
+				const catalog = footerCatalog;
 				const level = resolve_model_effort_level(model, footerThinkingLevel, catalog);
 				let displayName = modelName;
 				let variant = "";

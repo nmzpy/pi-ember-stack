@@ -337,6 +337,13 @@
   active, when a visible thinking block is actively streaming (`thinkingActive`
   with `!isThinkingBlocksHidden()` — the transcript owns reasoning), or when
   in-group `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). The
+  `groupThinkingChildActive` flag is **scan-based**: `sync_compact_group_flags`
+  sets it from `CompactRenderer.hasAnyGroupThinkingChild()` (any armed/painted
+  lane across all renderer groups, including a painted lane that outlives the
+  `currentGroup` pointer), and `thinking_status_should_show()` /
+  `resolve_thinking_status_host()` gate on it BEFORE the pre-tool early return
+  — so with blocks hidden a painted in-group lane unconditionally suppresses
+  the external widget AND in-message host, never a duplicate Thinking row. The
   `Thinking` placeholder still appears in the pre-token wait and in-message
   pre-output wait while blocks are visible, until the model begins emitting
   visible text or a thinking stream. Nested
@@ -858,6 +865,19 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Submitted images render through Pi TUI's public `Image` component in a compact
   custom message renderer (`maxWidthCells`/`maxHeightCells`); this plugin never
   writes terminal frames or maintains a parallel renderer.
+- The placeholder line and terminal fallback text are rendered with the
+  `text` token, not `dim`, so the label is readable in terminals that cannot
+  display inline images (e.g. Windows Terminal).
+- The `compressAttachment` function in `pi-ember-images/compress.ts` is the
+  SSOT for image compression: PNG/JPEG attachments are re-encoded to lossy
+  WebP (quality `ATTACHMENT_WEBP_QUALITY` = 80) and capped at
+  `ATTACHMENT_MAX_DIMENSION_PX` = 2000 px on any edge; GIF and already-WebP
+  inputs are skipped; the smaller of the original or WebP bytes is kept;
+  any encode failure silently preserves the original bytes.
+- `sharp` is the canonical image-processing dependency for encoding and
+  resizing. JPEG XL and AVIF are intentionally not used because major vision
+  model providers and the terminal do not accept them, and Pi's own image
+  normalizer would silently drop such formats.
 - The extension loads before `pi-custom-agents` so the existing editor wrapper
   composes around the image-aware editor instead of being replaced.
 - Attachment state is session-local and held by one `AttachmentStore`; it is
@@ -1063,6 +1083,17 @@ field. Keep that mechanism aligned with the actual plugin folders.
   renders a compact, Exploring-style grouped layout. Running agent names use
   `theme.fg("text", …)`; completed and failed agent names use `theme.fg("dim", …)`.
   Completed agents use green bullets and failed agents use red bullets.
+  **Per-agent elapsed time:** each done agent (single mode, and grouped
+  members under a `Subagents` header) appends a dim frozen elapsed suffix
+  (` 12s`, ` 2m 26s`) after its ✓/✗ so the user can see how long each
+  subagent took. The value is the member's own tool-call duration frozen at
+  `markSubagentTerminal` (SSOT in `subagent-timing.ts`, same
+  `formatElapsed`/1s threshold as Thinking); running and delegating members
+  never show a live timer. Grouped headers additionally show the batch max
+  once every member is done. Per-row placement is gated at the call sites
+  (`memberRecordsToRows` sets `elapsedMs` only for terminal members;
+  `renderAgentLabel` never renders it for running rows) — never render a
+  live ticking elapsed on subagent rows.
   Parallel/chain mode shows a
   `Subagents` header + `└ agent` children with the same status treatment. No
   `⏳`, `[scope]`, or `parallel (N tasks)` labels. Chain mode only shows
@@ -1087,9 +1118,19 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `pi-compact-tools/renderer.ts` — never duplicate it. Failed rows append
   the real failure reason inline next to the agent name in `theme.fg("error", …)`
   (single ANSI-aware, width-truncated row); the reason is resolved once by
-  `resolve_failure_message` in `runner.ts` (SSOT) from the non-generic
-  `errorMessage`, the last assistant message's non-generic `errorMessage`,
-  `stderr`, or the last assistant text output. The runner's post-run
+  `resolve_failure_message` in `runner.ts` (SSOT) from the most specific
+  `errorMessage` across the top-level result and the last assistant message
+  (a specific provider/transport reason always beats a generic
+  parser/abort message regardless of arrival order via `merge_failure_message`
+  — never overwrite a specific error with a later generic one), then
+  `stderr`, or the last assistant text output. pi-ai's generic
+  stream-parser failures (`Stream ended without finish_reason`, `<provider>
+  stream ended without a terminal event`, …) carry no underlying
+  cause/status/body and are retained verbatim with the explicit
+  `PARSER_STREAM_ERROR_LIMITATION_SUFFIX` note (never replaced by a
+  fallback, never silently dropped); `extractFailureMessage` walks the
+  Error.cause chain root-first so a specific error buried under a parser
+  wrapper still surfaces. The runner's post-run
   finalization only rewrites the message on actual failures
   (`isFailedResult`); a successful stop with no `errorMessage` is never
   force-marked failed. Provider errors that arrive on `agent_end`/`turn_end`

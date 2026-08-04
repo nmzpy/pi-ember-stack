@@ -10,8 +10,9 @@ import {
 	memberRecordsToRows,
 	SubagentToolText,
 	SubagentLiveOutputText,
-		renderSubagentExpanded,
+	renderSubagentExpanded,
 	renderSubagentThinkingRow,
+	is_live_text_boundary,
 } from "../render.ts";
 import {
 	BULLET,
@@ -27,6 +28,9 @@ import { strip_subagent_leading_render_gap } from "../subagent-render-spacing.ts
 import {
 	arm_subagent_thinking_pass,
 	clear_subagent_thinking_pass,
+	clearSubagentTiming,
+	markSubagentRunning,
+	markSubagentTerminal,
 } from "../subagent-timing.ts";
 
 function forcedColorizer(rgb: Rgb, text: string): string {
@@ -324,6 +328,91 @@ describe("SubagentLiveOutputText", () => {
 	});
 });
 
+describe("subagent live work-burst boundary (empty text SSOT)", () => {
+	test("is_live_text_boundary mirrors the main stream boundary rule", () => {
+		// Canonical rule (resolve_assistant_stream_boundary_event): bare
+		// text_start and empty/whitespace-only deltas are NOT boundaries;
+		// only non-empty visible text is.
+		expect(is_live_text_boundary("")).toBe(false);
+		expect(is_live_text_boundary("   ")).toBe(false);
+		expect(is_live_text_boundary("\n \t\n")).toBe(false);
+		expect(is_live_text_boundary("ok")).toBe(true);
+		expect(is_live_text_boundary("\nok")).toBe(true);
+	});
+
+	test("tool -> empty text_start -> tool stays ONE unified work group, no dead rows", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			textItem(""), // bare text_start records an empty live text block
+			toolItem(
+				"edit",
+				{ file_path: "b.ts", oldText: "x", newText: "y" },
+				{ completed: true, toolCallId: "c2", details: { diff: "+1\n" } },
+			),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// One unified work group: a single past-tense summary header plus the
+		// current-wave child. NO duplicate header, NO dead pipe-only spacer
+		// row, NO blank line — the exact row shape of the main message
+		// surface (header + children contiguous).
+		expect(stripped).toEqual([
+			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*] [success:+1]",
+			"   [dim:\u2514][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
+		]);
+		expect(stripped.some((line) => line === "" || line.trim() === "[dim:\u2502]")).toBe(false);
+	});
+
+	test("whitespace-only text blocks never split a work burst", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			textItem("  \n \t"),
+			toolItem(
+				"edit",
+				{ file_path: "b.ts", oldText: "x", newText: "y" },
+				{ completed: true, toolCallId: "c2", details: { diff: "+1\n" } },
+			),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		expect(stripped).toEqual([
+			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*] [success:+1]",
+			"   [dim:\u2514][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
+		]);
+	});
+
+	test("real non-empty text remains a hard boundary between work bursts", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			textItem("Let me check the popover."),
+			toolItem(
+				"edit",
+				{ file_path: "b.ts", oldText: "x", newText: "y" },
+				{ completed: true, toolCallId: "c2", details: { diff: "+1\n" } },
+			),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// Two work bursts split by the streamed text, each with its own
+		// summary header, separated by the one-row pipe-continuous spacer —
+		// real visible text still folds the prior wave and hard-splits.
+		expect(stripped).toEqual([
+			"  [dim:\u2502][muted:*Explored 1 file*]",
+			"  [dim:\u2502]",
+			"  [dim:\u2502][text:Let me check the popover.]",
+			"  [dim:\u2502]",
+			"  [dim:\u2514][muted:*Edited 1 file*]",
+			"   [dim:\u2514][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
+		]);
+	});
+});
+
 describe("nested tray tree composition (regression)", () => {
 	test("no nested work-group bullet; 3-column tightening flush against the outer └", () => {
 		const theme = makeTheme() as any;
@@ -525,6 +614,19 @@ describe("subagent render spacing", () => {
 		expect(strip_subagent_leading_render_gap([""])).toEqual([]);
 		expect(strip_subagent_leading_render_gap([])).toEqual([]);
 	});
+
+	test("complete work-group surface keeps exactly one native leading row and adds no trailing rows", () => {
+		// Pi's ToolExecutionComponent self-shell render prepends ONE leading
+		// blank separator row, then the group's header + children. The wrapper
+		// must preserve that single row above and never inject padding below —
+		// the group block is header + children contiguous, matching the main
+		// message surface (no dead pipe/blank rows inside or after).
+		const surface = ["", "  └ Edited 1 file, Explored 1 file +1", "    └ Edit b.ts +1"];
+		expect(strip_subagent_leading_render_gap(surface)).toEqual(surface);
+		expect(surface[0]).toBe("");
+		expect(surface.filter((line) => line === "").length).toBe(1);
+		expect(surface[surface.length - 1]).toContain("Edit b.ts");
+	});
 });
 
 describe("subagent delegating state", () => {
@@ -652,6 +754,145 @@ describe("subagent elapsed time", () => {
 		const out = renderDelegatingRow(theme);
 		expect(stripAnsi(out)).toContain("Delegating");
 		expect(out).not.toContain("[dim: 3s]");
+	});
+
+	test("grouped members show frozen per-agent elapsed next to done agents only", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{
+				args: { agent: "Coder", task: "a" },
+				results: [makeResult("Coder A", 0)],
+				displayName: "Coder A",
+				terminal: true,
+				toolCallId: "grouped-elapsed-done-a",
+			},
+			{
+				args: { agent: "Coder", task: "b" },
+				results: [makeRunning("Coder B")],
+				displayName: "Coder B",
+				toolCallId: "grouped-elapsed-running-b",
+			},
+		];
+		const original_now = performance.now;
+		let now = 1_000_000;
+		performance.now = () => now;
+		try {
+			markSubagentRunning("grouped-elapsed-done-a");
+			markSubagentRunning("grouped-elapsed-running-b");
+			now += 25_000;
+			markSubagentTerminal("grouped-elapsed-done-a");
+			const out = renderSubagentLayout(
+				{ agent: "Coder", task: "a" },
+				[],
+				theme,
+				25_000,
+				members,
+			);
+			const lines = out.split("\n");
+			// Done member shows its own frozen elapsed next to the ✓; the
+			// running member never shows a timer.
+			const doneLine = lines.find((l) => stripAnsi(l).includes("Coder A"));
+			expect(doneLine).toContain("[dim: 25s]");
+			const runningLine = lines.find((l) => stripAnsi(l).includes("Coder B"));
+			expect(runningLine).not.toMatch(/\[dim: \d/);
+			// Header shows no elapsed while any member is still running.
+			expect(stripAnsi(lines[0])).toContain("Subagents");
+			expect(lines[0]).not.toContain("[dim: 25s]");
+		} finally {
+			performance.now = original_now;
+			markSubagentTerminal("grouped-elapsed-running-b");
+		}
+	});
+
+	test("grouped component rows show per-agent elapsed for done members", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{
+				args: { agent: "Coder", task: "a" },
+				results: [makeResult("Coder A", 0)],
+				displayName: "Coder A",
+				terminal: true,
+				toolCallId: "grouped-comp-elapsed-done",
+			},
+			{
+				args: { agent: "Coder", task: "b" },
+				results: [makeRunning("Coder B")],
+				displayName: "Coder B",
+				toolCallId: "grouped-comp-elapsed-running",
+			},
+		];
+		const original_now = performance.now;
+		let now = 2_000_000;
+		performance.now = () => now;
+		try {
+			markSubagentRunning("grouped-comp-elapsed-done");
+			markSubagentRunning("grouped-comp-elapsed-running");
+			now += 12_500;
+			markSubagentTerminal("grouped-comp-elapsed-done");
+			const comp = buildSubagentLayoutComponent(
+				{ agent: "Coder", task: "a" },
+				[],
+				theme,
+				12_500,
+				members,
+			);
+			const lines = renderComponent(comp).split("\n");
+			expect(lines.find((l) => l.includes("Coder A"))).toContain("[dim: 12s]");
+			expect(lines.find((l) => l.includes("Coder B"))).not.toMatch(/\[dim: \d/);
+		} finally {
+			performance.now = original_now;
+			markSubagentTerminal("grouped-comp-elapsed-running");
+			clearSubagentTiming();
+		}
+	});
+
+	test("non-owner batch members freeze their own elapsed from their execution start", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{
+				args: { agent: "Coder", task: "a" },
+				results: [makeResult("Coder A", 0)],
+				displayName: "Coder A",
+				terminal: true,
+				toolCallId: "member-elapsed-a",
+			},
+			{
+				args: { agent: "Coder", task: "b" },
+				results: [makeResult("Coder B", 0)],
+				displayName: "Coder B",
+				terminal: true,
+				toolCallId: "member-elapsed-b",
+			},
+		];
+		const original_now = performance.now;
+		let now = 3_000_000;
+		performance.now = () => now;
+		try {
+			// Only member A is marked by the render path (batch owner); B's
+			// mark comes from its own tool_execution_start, the production
+			// wiring this test simulates.
+			markSubagentRunning("member-elapsed-a");
+			now += 40_000;
+			markSubagentRunning("member-elapsed-b");
+			now += 20_000;
+			markSubagentTerminal("member-elapsed-a");
+			markSubagentTerminal("member-elapsed-b");
+			const out = renderSubagentLayout(
+				{ agent: "Coder", task: "a" },
+				[],
+				theme,
+				60_000,
+				members,
+			);
+			const lines = out.split("\n");
+			const lineA = lines.find((l) => stripAnsi(l).includes("Coder A"));
+			expect(lineA).toContain("[dim: 1m 0s]");
+			const lineB = lines.find((l) => stripAnsi(l).includes("Coder B"));
+			expect(lineB).toContain("[dim: 20s]");
+		} finally {
+			performance.now = original_now;
+			clearSubagentTiming();
+		}
 	});
 
 	test("lingering subagent Thinking row shows time since thinking started", () => {
@@ -957,6 +1198,35 @@ describe("renderSubagentLayout (string)", () => {
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [result], theme);
 		expect(stripAnsi(out)).toContain("401 Unauthorized: invalid api key");
 		expect(stripAnsi(out)).not.toContain("This operation was aborted");
+	});
+
+	test("compact row retains the parser-stream failure, clipped to the existing 60-char rule", () => {
+		const theme = makeTheme() as any;
+		const result = makeResult("Scout A", 1, true);
+		result.errorMessage = "Stream ended without finish_reason";
+		const out = renderSubagentLayout({ agent: "Scout", task: "do stuff" }, [result], theme);
+		const stripped = stripAnsi(out);
+		// The exact parser failure is retained (never replaced by a generic
+		// fallback), clipped with the ellipsis per the compact-row convention.
+		expect(stripped).toContain("Stream ended without finish_reason");
+		expect(stripped).toContain("...");
+		expect(stripped).not.toContain("Subagent failed");
+	});
+
+	test("expanded view shows the full annotated parser-stream reason", () => {
+		const theme = makeTheme() as any;
+		const result = makeResult("Scout A", 1, true);
+		result.errorMessage = "Stream ended without finish_reason";
+		result.messages = [
+			{ role: "assistant", content: [{ type: "text", text: "..." }] },
+		];
+		const component = renderSubagentExpanded({ mode: "single", results: [result] }, theme);
+		const stripped = stripAnsi(renderComponent(component!));
+		// The expanded view keeps the FULL reason including the explicit
+		// limitation note so the failure is diagnosable.
+		expect(stripped).toContain("Stream ended without finish_reason");
+		expect(stripped).toContain("no underlying error was reported");
+		expect(stripped).toContain("check provider status");
 	});
 
 	test("tool-level failure is shown when no per-agent result was persisted", () => {

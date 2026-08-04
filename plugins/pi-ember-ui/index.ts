@@ -187,6 +187,7 @@ import {
 	refresh_footer,
 	reset_footer_state,
 	schedule_footer_stats,
+	set_footer_model_snapshot,
 	set_footer_thinking_level,
 } from "./footer.ts";
 import {
@@ -434,20 +435,27 @@ export function lingering_tool_children_visible_for_tests(): boolean {
 	return lingering_tool_children_block_thinking_header();
 }
 
-/** In-group `└ Thinking` owns the status slot only when the live compact
- *  group is actually painting that row (renderer SSOT — not the synced flag). */
+/** In-group `└ Thinking` owns the status slot when the live compact
+ *  group is actually painting that row (renderer SSOT — not the synced flag).
+ *  With blocks hidden, ANY armed/painted lane (synced flag scans all renderer
+ *  groups) wins the slot unconditionally — a painted lane that outlives the
+ *  currentGroup pointer must still suppress the external hosts. */
 export function compact_thinking_lane_owns_status(): boolean {
-	if (!isThinkingBlocksHidden() || !isTurnToolTranscriptActive()) return false;
+	if (!isThinkingBlocksHidden()) return false;
+	if (isGroupThinkingChildActive()) return true;
+	if (!isTurnToolTranscriptActive()) return false;
 	if (getSharedRenderer().hasGroupThinkingChild()) return true;
-	// A live group (settled or running) owns the transcript Thinking slot;
-	// external hosts must not duplicate it even while a tool wave is still
-	// in flight and the group has not yet settled.
 	return getSharedRenderer().hasReopenableGroup();
 }
 
 /** SSOT: mutually exclusive surface for the gradient Thinking row. */
 export function resolve_thinking_status_host(): "in_message" | "widget" | null {
 	if (!thinking_status_should_show()) return null;
+	// Hidden blocks + any armed/painted in-group `└ Thinking` lane: the compact
+	// group owns the slot. Defense in depth — the synced flag is scan-based so
+	// even a painted lane that outlives the currentGroup pointer suppresses the
+	// external hosts (widget AND in-message) instead of duplicating Thinking.
+	if (isGroupThinkingChildActive()) return null;
 	// A live compact group (running tool wave, lingering children, or settled
 	// Thinking lane) owns the slot. External hosts paint only when the
 	// transcript is empty of any live group or in-flight tool call.
@@ -467,6 +475,11 @@ export function is_pre_tool_thinking_gap(): boolean {
 /** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
+	// Hidden blocks + any armed/painted in-group `└ Thinking` lane: the compact
+	// group owns the slot. This gate runs BEFORE the pre-tool early return so
+	// the external hosts never paint while the lane is on screen — the synced
+	// flag scans all renderer groups, not just the live currentGroup.
+	if (isGroupThinkingChildActive()) return false;
 	// A streamed/announced tool call is deterministic work intent. Hide Thinking
 	// from the first toolcall_start, before Pi emits tool_execution_start.
 	if (isToolCallPending()) return false;
@@ -2377,22 +2390,46 @@ function renderLogoWithGradient(): string[] {
 
 let tuiRef: LiveTuiLike | undefined;
 
+/** Session-scoped header display values, snapshotted from a fresh session ctx
+ *  on `session_start` and refreshed on `model_select`. The ember header is
+ *  sticky across session replacement, so its factory render closure stays live
+ *  while Pi replaces the runner: after `/resume`, `/new`, `/fork`, or
+ *  `/reload` every getter on the old ctx wrapper throws (`assertActive`). The
+ *  render closure therefore reads ONLY this snapshot — never ctx. The snapshot
+ *  survives `session_shutdown` so the header renders byte-identical rows across
+ *  the switch window (sticky goal); the next `session_start` refreshes it. */
+let headerSnapshot: { dir: string; modelName: string } | undefined;
+
+/** Re-derive the header display snapshot from a live (non-stale) session ctx.
+ *  Safe to call only from lifecycle/event handlers (`session_start`,
+ *  `model_select`) that receive the current runner's ctx. */
+function update_header_snapshot(ctx: ExtensionContext): void {
+	const cwd = ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd();
+	headerSnapshot = {
+		dir: folderNameFromCwd(cwd),
+		modelName: ctx.model?.name ?? ctx.model?.id ?? "no model",
+	};
+}
+
 function installStartupHeader(ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui") return;
+
+	// Snapshot the session-scoped display values now, from the fresh session
+	// ctx. The factory render closure runs on every TUI frame and stays live
+	// across session replacement; it must never touch a (possibly stale) ctx.
+	update_header_snapshot(ctx);
 
 	const factory: EmberHeaderFactory = (tui, theme) => {
 		bind_live_tui_render(tui as LiveTuiLike | undefined);
 		const live_theme = theme as { fg: (color: string, text: string) => string };
 		const render_header = (width: number): string[] => {
-			// Re-read every render so model/dir/mode changes are reflected.
-			// Use the live sessionCtx (rebound on session_start) instead of the
-			// closed-over ctx: the ember header is sticky across session
-			// replacement, so the closed-over ctx may be stale after /resume,
-			// /new, /fork, or /reload and accessing its sessionManager throws.
-			const liveCtx = sessionCtx ?? ctx;
-			const dir = folderNameFromCwd(liveCtx.sessionManager?.getCwd?.() ?? liveCtx.cwd ?? process.cwd());
-			const model = liveCtx.model;
-			const modelName = model?.name ?? model?.id ?? "no model";
+			// Read only the lifecycle-snapshotted values (refreshed on
+			// session_start and model_select). Never touch ctx here: the ember
+			// header is sticky across session replacement, and after /resume,
+			// /new, /fork, or /reload the old ctx wrapper throws on every
+			// getter (assertActive), crashing the render frame.
+			const dir = headerSnapshot?.dir ?? folderNameFromCwd(process.cwd());
+			const modelName = headerSnapshot?.modelName ?? "no model";
 
 			// The animated startup logo and header bullet pulse through a
 			// dim→muted→text gradient. After the user sends their first message
@@ -2591,7 +2628,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// Re-render header/footer when the model changes.
 	pi.on("model_select", (_event, ctx) => {
 		if (ctx.mode === "tui") {
+			update_header_snapshot(ctx);
 			init_footer_thinking_level(pi, ctx);
+			set_footer_model_snapshot(ctx.model, ctx.modelRegistry?.getAvailable?.() ?? []);
 			refresh_footer(ctx);
 			requestRender?.();
 		}
