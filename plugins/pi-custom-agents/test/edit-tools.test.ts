@@ -57,8 +57,56 @@ describe("edit-tools provider resolution", () => {
 		]);
 	});
 
+	test("with_provider_patch_tool swaps edit to apply_patch for codex", () => {
+		const from_md = ["read", "bash", "edit", "write", "grep"];
+		expect(with_provider_patch_tool(from_md, OPENAI_CODEX_PROVIDER)).toEqual([
+			"read",
+			"bash",
+			"write",
+			"apply_patch",
+			"grep",
+		]);
+		// coder.md lists edit; a non-codex model keeps edit, never apply_patch.
+		expect(with_provider_patch_tool(from_md, "opencode-go")).toEqual([
+			"read",
+			"bash",
+			"write",
+			"edit",
+			"grep",
+		]);
+	});
+
+	test("with_provider_patch_tool dedupes when both patch names are listed", () => {
+		const both = ["read", "edit", "apply_patch", "write", "grep"];
+		expect(with_provider_patch_tool(both, "devin")).toEqual([
+			"read",
+			"write",
+			"edit",
+			"grep",
+		]);
+		expect(with_provider_patch_tool(both, OPENAI_CODEX_PROVIDER)).toEqual([
+			"read",
+			"write",
+			"apply_patch",
+			"grep",
+		]);
+	});
+
 	test("default subagent tools prefer edit until provider resolves codex", () => {
 		expect(DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS).toContain("edit");
 		expect(DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS).not.toContain("apply_patch");
+		// Defaults (edit) are normalized to apply_patch when the resolved model is codex.
+		expect(
+			with_provider_patch_tool(
+				[...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS],
+				OPENAI_CODEX_PROVIDER,
+			),
+		).toContain("apply_patch");
+		expect(
+			with_provider_patch_tool(
+				[...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS],
+				OPENAI_CODEX_PROVIDER,
+			),
+		).not.toContain("edit");
 	});
 });

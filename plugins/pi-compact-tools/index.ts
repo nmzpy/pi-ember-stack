@@ -134,6 +134,12 @@ export default function piCompactToolsPlugin(
 		sync_compact_group_flags(renderer);
 	});
 	pi.on("tool_call", (event) => {
+		// The model announced/started a tool call: drop the in-group
+		// `└ Thinking` lane synchronously before the call joins or replaces the
+		// work group. registerCall/appendToGroup also clears it, but announcing
+		// first repaints the shared row text in this same update instead of
+		// waiting on the scheduled microtask invalidation.
+		renderer.announceToolCall();
 		const is_groupable =
 			GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName];
 		if (is_groupable) {

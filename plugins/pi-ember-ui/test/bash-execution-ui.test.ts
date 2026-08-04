@@ -25,9 +25,9 @@ describe("user bash integrated UI helpers", () => {
 	});
 
 	test("shell_aware_editor_inner_pad adds one column while bash runs", () => {
-		expect(shell_aware_editor_inner_pad()).toBe(1);
+		expect(shell_aware_editor_inner_pad()).toBe(0);
 		setUserBashRunning(true);
-		expect(shell_aware_editor_inner_pad()).toBe(2);
+		expect(shell_aware_editor_inner_pad()).toBe(1);
 	});
 
 	test("shell_aware_editor_border_hex blends toward page bg while bash runs", () => {

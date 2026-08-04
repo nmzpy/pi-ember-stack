@@ -942,7 +942,13 @@ function formatCallBodyVerb(
 	inGroup = false,
 	completed = true,
 ): string {
-	if (inGroup && name === "bash" && bashGrepInfo(textValue(args?.command))) return "";
+	// Bash grep calls are searches (counted in the `N searches` header and
+	// routed to the discovery group) — label them `Search` exactly like the
+	// grep tool row, never the empty verb or a misleading `Ran <pattern>`.
+	// (The running path already animates these as `Searching`.)
+	if (name === "bash" && bashGrepInfo(textValue(args?.command))) {
+		return paint_compact_tool_label(theme, "Search", completed);
+	}
 	switch (name) {
 		case "read":
 			return paint_compact_tool_label(theme, "Read", completed);
@@ -1590,7 +1596,9 @@ export class CompactRenderer {
 			// genuinely new tool wave (different tool name) or a hard boundary.
 			group.thinkingChild = true;
 			group.settled = true;
-			if (entering_thinking_lane && !is_thinking_pass_timer_armed()) {
+			// Reset the pass timer whenever the in-group lane first appears so the
+			// elapsed reflects the current thinking pass, not the whole turn.
+			if (entering_thinking_lane) {
 				reset_thinking_pass_timer();
 			}
 		}
@@ -1635,6 +1643,32 @@ export class CompactRenderer {
 		const group = this.currentGroup;
 		if (!group?.thinkingChild) return;
 		this.freezeGroup(group);
+		this.syncGroupTick(group);
+	}
+
+	/** The model announced the next tool call (message_update toolcall_start or
+	 *  the tool_call lifecycle event). Remove the in-group `└ Thinking` lane
+	 *  immediately in this same component update — never wait for the 20 FPS
+	 *  gradient tick or for tool_call to fire after args finish streaming. The
+	 *  group stays settled and reopenable: the arriving same-key call reopens
+	 *  the header via appendToGroup, preserving hidden-thinking soft grouping
+	 *  and lingering children. Hard boundaries (visible text / visible thinking
+	 *  / user message / non-groupable tool) still route through their own
+	 *  note* methods — this never folds or hard-exits. */
+	announceToolCall(): void {
+		let group = this.resolveLiveGroup();
+		if (!group && this.reopenGroupKey) {
+			group = this.findReopenableGroup(this.reopenGroupKey);
+			if (group) this.currentGroup = group;
+		}
+		if (!group || group.records.length < 1) return;
+		if (!group.thinkingChild) return;
+		group.thinkingChild = false;
+		// Repaint the shared CompactGroupText synchronously so the row loses the
+		// `└ Thinking` lane in the frame Pi paints for this update, then re-arm
+		// the gradient tick only if a visible child still needs it (a running
+		// member left over from an inter-run gap).
+		this.refreshGroupVisual(group);
 		this.syncGroupTick(group);
 	}
 
@@ -2168,15 +2202,32 @@ export class CompactRenderer {
 			// reflects this member's completion (bullet color, match count,
 			// final label) without invalidating the owner. Pi's next requestRender
 			// renders the owner's selfRenderContainer with the updated component.
-			const group_text = formatGroup(record.group, theme);
-			if (record.group.callText) {
-				set_compact_call_text(record.group, record.group.callText, group_text);
-				if (this.should_schedule_group_shrink_invalidation(record.group)) {
-					this.scheduleGroupInvalidation(record.group);
-				}
+			//
+			// Bind the shared visual handle when it is unset: the owner may have
+			// rendered as a standalone row (records.length === 1) before a second
+			// member joined and never re-rendered through the group path, so its
+			// live component never became group.callText. Fall back the same way
+			// repaintAllGroupVisuals does: current component -> group handle ->
+			// the anchor owner's standalone handle.
+			const group = record.group;
+			const callText =
+				context.state.callText instanceof CompactGroupText
+					? context.state.callText
+					: group.callText instanceof CompactGroupText
+						? group.callText
+						: group.renderOwner?.callText instanceof CompactGroupText
+							? group.renderOwner.callText
+							: new CompactGroupText();
+			if (this.group_transcript_anchor(group) === record) {
+				context.state.callText = callText;
 			}
-			this.syncGroupTick(record.group);
-			if (this.group_transcript_anchor(record.group) !== record) return new Text("", 0, 0);
+			group.callText = callText;
+			set_compact_call_text(group, callText, formatGroup(group, theme));
+			if (this.should_schedule_group_shrink_invalidation(group)) {
+				this.scheduleGroupInvalidation(group);
+			}
+			this.syncGroupTick(group);
+			if (this.group_transcript_anchor(group) !== record) return new Text("", 0, 0);
 			// When the group is collapsed (settled + thinking hidden), hide the
 			// per-member error row too — the header bullet already turns red to
 			// signal the failure. Reuses the same collapse gate as formatGroup.

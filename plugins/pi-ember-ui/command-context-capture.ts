@@ -4,16 +4,14 @@
  * session_start refresh re-binds switchSession from the live ExtensionRunner.
  */
 import {
-	ExtensionRunner,
+	type ExtensionCommandContext,
 	type ExtensionCommandContextActions,
+	ExtensionRunner,
 } from "@earendil-works/pi-coding-agent";
 
 export type NewSessionFn = NonNullable<ExtensionCommandContextActions["newSession"]>;
 
-export type SwitchSessionFn = (
-	sessionPath: string,
-	options?: { withSession?: (ctx: unknown) => Promise<void> },
-) => Promise<{ cancelled: boolean }>;
+export type SwitchSessionFn = NonNullable<ExtensionCommandContext["switchSession"]>;
 
 const GLOBAL_KEY = Symbol.for("pi-ember-ui:command-context-capture");
 const WRAPPER_KEY = Symbol.for("pi-ember-ui:command-context-capture-wrapper");

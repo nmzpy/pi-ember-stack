@@ -29,6 +29,7 @@ plugins under `plugins/`. Enable them globally in `PI_HOME/pi-ember-stack.json`:
     "pi-compact-tools",
     "devin-auth",
     "pi-cursor-auth",
+    "pi-ember-images",
     "pi-custom-agents",
     "pi-ember-fff",
     "pi-ember-ui",
@@ -46,6 +47,7 @@ the TUI. Restart pi after changing the list. The available plugins are:
 - `devin-auth`: Devin provider, OAuth, catalog refresh, and streaming.
 - `pi-cursor-auth`: Cursor subscription auth, model refresh, and native Pi streaming.
 - `pi-ember-fff`: FFF-powered grep/find with compact rendering.
+- `pi-ember-images`: Windows/macOS clipboard image attachments with compact chat previews.
 - `pi-ember-ui`: Ember accent theme and TUI chrome.
 - `pi-ember-tps`: tokens-per-second meter.
 - `pi-ember-webtools`: web search, URL fetching, and related extraction tools.

@@ -62,7 +62,6 @@ import {
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
 import {
-	ensure_chatbox_leading_spacer,
 	request_live_tui_render,
 	reset_slash_command_tracking,
 } from "./layout.ts";
@@ -139,6 +138,11 @@ import {
 	sync_thinking_status_tick,
 	unbind_thinking_status_hosts,
 } from "./thinking-status-tick.ts";
+import {
+	type EmberHeaderFactory,
+	install_header_persistence_patch,
+	set_active_ember_header_factory,
+} from "./header-persistence.ts";
 
 export {
 	cancel_footer_stats_schedule as cancelFooterStatsSchedule,
@@ -446,7 +450,7 @@ export function resolve_thinking_status_host(): "in_message" | "widget" | null {
 	if (!thinking_status_should_show()) return null;
 	// A live compact group (running tool wave, lingering children, or settled
 	// Thinking lane) owns the slot. External hosts paint only when the
-	// transcript is empty of any live group.
+	// transcript is empty of any live group or in-flight tool call.
 	if (compact_thinking_lane_owns_status()) return null;
 	if (getSharedRenderer().hasReopenableGroup()) return null;
 	// Pre-tool: above-editor widget until the first tool row lands in the transcript.
@@ -463,8 +467,8 @@ export function is_pre_tool_thinking_gap(): boolean {
 /** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
-	// A streamed tool call is deterministic work intent. Hide Thinking from
-	// its first toolcall_start, before Pi emits tool_execution_start.
+	// A streamed/announced tool call is deterministic work intent. Hide Thinking
+	// from the first toolcall_start, before Pi emits tool_execution_start.
 	if (isToolCallPending()) return false;
 
 	const pre_tool = is_pre_tool_thinking_gap();
@@ -505,12 +509,25 @@ export function should_suppress_thinking_header_for_stream_event(ev: {
 	type: string;
 	delta?: unknown;
 }): boolean {
-	if (ev.type === "thinking_start" || ev.type === "thinking_delta") return false;
 	if (is_pre_tool_thinking_gap() || isInterRunGap()) return false;
 	if (ev.type === "text_start") return false;
+	// `thinking_start` is just the stream boundary; keep the placeholder until
+	// actual reasoning text arrives.
+	if (ev.type === "thinking_start") return false;
+	if (ev.type === "thinking_delta") {
+		const delta = typeof ev.delta === "string" ? ev.delta : "";
+		if (delta.trim().length === 0) return false;
+		// In visible thinking mode the reasoning block becomes the transcript
+		// slot; suppress the placeholder after the first reasoning text output.
+		return !isThinkingBlocksHidden();
+	}
 	if (ev.type === "text_delta") {
 		const delta = typeof ev.delta === "string" ? ev.delta : "";
-		return delta.trim().length > 0;
+		if (delta.trim().length === 0) return false;
+		// Hidden thinking: the placeholder is a stand-in for reasoning, so the
+		// first visible answer text replaces it. Visible thinking: the reasoning
+		// block owns the slot; answer text does not suppress the placeholder.
+		return isThinkingBlocksHidden();
 	}
 	return false;
 }
@@ -521,13 +538,10 @@ export function thinking_status_terminal_layout(host: "widget" | "in_message" | 
 	padBelow: number;
 } {
 	if (host === "compact") return { padAbove: 0, padBelow: 0 };
-	// In-message: one blank row above the gradient Thinking label so it sits
-	// below the assistant bubble like a distinct status line, not appended text.
-	if (host === "in_message") return { padAbove: 1, padBelow: 0 };
-	// Pi's above-editor widget container already owns the single leading
-	// spacer. Do not add another row here; the widget may render [] while
-	// hidden, but its container still keeps Pi's baseline chatbox spacer.
-	return { padAbove: 0, padBelow: 0 };
+	// External Thinking (above-editor widget and in-message bubble) share
+	// one blank row above the gradient label so the header has the same visual
+	// weight and does not jump when the host switches.
+	return { padAbove: 1, padBelow: 0 };
 }
 
 /** Shared Thinking status row — reads the pre-baked gradient text from the
@@ -582,9 +596,12 @@ export function suppress_thinking_header_for_work(): void {
 	refresh_thinking_status(true);
 }
 
-/** Re-show the gradient Thinking header when a thinking stream resumes. */
+/** Re-show the gradient Thinking header when a hidden thinking stream resumes.
+ *  Visible thinking blocks render their own reasoning transcript, so the
+ *  placeholder header must stay suppressed and the pass timer must continue
+ *  from the original arming point. */
 export function resume_thinking_header_for_think_stream(): void {
-	if (thinkingHeaderSuppressed) {
+	if (thinkingHeaderSuppressed && isThinkingBlocksHidden()) {
 		thinkingHeaderSuppressed = false;
 		refresh_thinking_status();
 	}
@@ -897,6 +914,8 @@ export function arm_pre_token_thinking_status(): void {
 	if (isQuizActive() || isSubagentDelegationActive()) return;
 	const renderer = getSharedRenderer();
 	sync_compact_group_flags(renderer);
+	// Pre-tool wait and post-tool gaps continue the same turn timer; only set
+	// a fresh start if no timer is currently running.
 	if (!is_thinking_pass_timer_armed()) reset_thinking_pass_timer();
 	setAgentRunPending(true);
 	thinkingHeaderSuppressed = false;
@@ -926,6 +945,8 @@ export function arm_pre_token_thinking_status(): void {
 function startThinkingAnimation(): void {
 	thinkingActive = true;
 	// Stream start is not a new header — keep elapsed time from arm_pre_token.
+	// Never reset an already-armed pass timer; the user-sent turn timer is the
+	// single source of truth for the visible Thinking header.
 	if (!is_thinking_pass_timer_armed()) reset_thinking_pass_timer();
 	activate_gradient("thinking");
 	refresh_thinking_status();
@@ -942,22 +963,13 @@ function installThinkingWidget(ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget("ember-thinking", (tui, _theme) => {
 		bind_live_tui_render(tui);
-		ensure_chatbox_leading_spacer(tui);
 		const host = {
 			render(width: number): string[] {
 				if (resolve_thinking_status_host() !== "widget") return [];
-				const lines = render_thinking_status_lines(width);
-				// SSOT: the above-editor widget container owns the single leading
-				// spacer. Ensure it is in place on every visible frame so the
-				// gradient Thinking row sits 1 row above the chatbox border from
-				// the first paint, instead of jumping after the first tick.
-				ensure_chatbox_leading_spacer(tui);
-				if (lines.length === 0) return [];
-				return lines;
+				return render_thinking_status_lines(width);
 			},
 			invalidate(): void {
 				if (!thinking_status_should_show()) return;
-				ensure_chatbox_leading_spacer(tui);
 				request_live_tui_render(tui);
 			},
 		};
@@ -1259,7 +1271,7 @@ export function renderGradientLabel(text: string, _accent?: string, _phaseOffset
 
 /** Extra horizontal inset on each side while user bash output is streaming. */
 const USER_BASH_EXTRA_INSET = 1;
-const EDITOR_BASE_INNER_PAD = 1;
+const EDITOR_BASE_INNER_PAD = 0;
 const EDITOR_GUTTER_COLS = 2;
 
 /** Chatbox inner padding — +1 col/side while user bash is running. */
@@ -1339,7 +1351,7 @@ function render_shell_aware_editor(
 	const border = (text: string): string => colorize(text, borderHex);
 	const INSET = 0;
 	const innerPad = shell_aware_editor_inner_pad();
-	const SLASH_MIDDLE_INSET = 1;
+	const SLASH_MIDDLE_INSET = 0;
 	const innerWidth = Math.max(1, width - INSET * 2 - 2 - innerPad * 2);
 	const originalBorderColor = instance.borderColor;
 	instance.borderColor = border;
@@ -1376,7 +1388,7 @@ function render_shell_aware_editor(
 	const gutter = "  ";
 	const fit = (s: string): string => fit_terminal_content_line(s, width);
 	const padRule = (s: string): string => pad_terminal_rule_line(s, width);
-	const bottomRule = ` ${chatboxBorderColor("\u2500".repeat(Math.max(1, width - 2)))} `;
+	const bottomRule = chatboxBorderColor("\u2500".repeat(Math.max(1, width)));
 	const topRule = bottomRule;
 	const slashMiddleSep =
 		" ".repeat(SLASH_MIDDLE_INSET) +
@@ -1384,7 +1396,7 @@ function render_shell_aware_editor(
 	const middleSep = padRule(
 		isSlashMode || modelPickerActive
 			? slashMiddleSep
-			: `${pad}${innerPadStr}${gutter}${border("\u2500".repeat(innerWidth))}`,
+			: chatboxBorderColor("\u2500".repeat(Math.max(1, width))),
 	);
 
 	let firstBody = true;
@@ -1982,18 +1994,18 @@ function installBashExecutionPatch(): void {
 	};
 }
 
-/** Chatbox-style horizontal-rule color using the dim token. */
+/** Chatbox-style horizontal-rule color: DIM_COLOR at 40% opacity over PAGE_BG (60% less opaque than dim). */
 export function chatboxBorderColor(text: string): string {
-	return colorize(text, DIM_COLOR);
+	return colorize(text, blendToHex(DIM_COLOR, PAGE_BG, 0.4));
 }
 
 /**
  * Wrap a content component in chatbox-style horizontal lines: top and bottom
- * `──` rules at 50% opacity, with 1-column left/right inner padding and no
+ * `──` rules at 50% opacity, with no default left/right inner padding and no
  * background fill. Replaces the old `userMessageBg` block style for user
  * messages and quiz rows.
  */
-export function chatboxBorderContainer(content: any, paddingX = 1): any {
+export function chatboxBorderContainer(content: any, paddingX = 0): any {
 	const wrapper = new Container();
 	wrapper.addChild(new DynamicBorder(chatboxBorderColor));
 	const inner = new Box(paddingX, 0, undefined);
@@ -2361,12 +2373,18 @@ let tuiRef: LiveTuiLike | undefined;
 function installStartupHeader(ctx: ExtensionContext): void {
 	if (ctx.mode !== "tui") return;
 
-	ctx.ui.setHeader((tui, theme) => {
-		bind_live_tui_render(tui);
+	const factory: EmberHeaderFactory = (tui, theme) => {
+		bind_live_tui_render(tui as LiveTuiLike | undefined);
+		const live_theme = theme as { fg: (color: string, text: string) => string };
 		const render_header = (width: number): string[] => {
 			// Re-read every render so model/dir/mode changes are reflected.
-			const dir = folderNameFromCwd(ctx.sessionManager?.getCwd?.() ?? ctx.cwd ?? process.cwd());
-			const model = ctx.model;
+			// Use the live sessionCtx (rebound on session_start) instead of the
+			// closed-over ctx: the ember header is sticky across session
+			// replacement, so the closed-over ctx may be stale after /resume,
+			// /new, /fork, or /reload and accessing its sessionManager throws.
+			const liveCtx = sessionCtx ?? ctx;
+			const dir = folderNameFromCwd(liveCtx.sessionManager?.getCwd?.() ?? liveCtx.cwd ?? process.cwd());
+			const model = liveCtx.model;
 			const modelName = model?.name ?? model?.id ?? "no model";
 
 			// The animated startup logo and header bullet pulse through a
@@ -2380,10 +2398,10 @@ function installStartupHeader(ctx: ExtensionContext): void {
 			// Once the logo turns static/gray (after the first user message
 			// or at shutdown), the header bullet goes dim to match the model/dir.
 			const headerBullet = logoStatic
-				? theme.fg("dim", "\u2022")
+				? live_theme.fg("dim", "\u2022")
 				: colorize("\u2022", neutral_pulse_hex(get_logo_phase()));
 
-			const infoLine = `${theme.fg("text", modelName)} ${headerBullet} ${theme.fg("dim", dir)}`;
+			const infoLine = `${live_theme.fg("text", modelName)} ${headerBullet} ${live_theme.fg("dim", dir)}`;
 			const infoPad = Math.max(0, Math.floor((width - visibleWidth(infoLine)) / 2));
 			const infoPadStr = " ".repeat(infoPad);
 
@@ -2398,7 +2416,13 @@ function installStartupHeader(ctx: ExtensionContext): void {
 			},
 			invalidate() {},
 		};
-	});
+	};
+	// SSOT: this factory owns the ember startup header slot. Registering it
+	// here lets the header-persistence patch keep the ember header across
+	// session replacement instead of swapping to Pi's built-in header at the
+	// top of the buffer (which would force a scrollback-clearing full redraw).
+	set_active_ember_header_factory(factory);
+	ctx.ui.setHeader(factory as never);
 }
 
 function getAgentDir(): string {
@@ -2517,6 +2541,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	installCompactionSummaryPatch();
 	installCompactionTranscriptPatch();
 	installCompactionStatusPatch();
+	install_header_persistence_patch();
 	installUpdateNotificationPatch();
 	applyDynamicTheme();
 
@@ -2594,8 +2619,14 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 					: undefined,
 			);
 			setTurnToolTranscriptActive(true);
+			// The model announced the next tool call: hide the external Thinking
+			// header deterministically and drop the in-group `└ Thinking` lane
+			// synchronously so they never coexist for a single tool wave.
+			thinkingHeaderSuppressed = true;
+			getSharedRenderer().announceToolCall();
+			sync_compact_group_flags(getSharedRenderer());
 			suppress_thinking_header_for_work();
-			refresh_thinking_status();
+			refresh_thinking_status(true);
 		}
 
 		const isHiddenAssistantMessage =

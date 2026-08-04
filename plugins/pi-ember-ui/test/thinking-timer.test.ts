@@ -33,7 +33,7 @@ function makeTheme() {
 
 describe("thinking pass timer", () => {
 	test("thinking_status_terminal_layout keeps one row for each host", () => {
-		expect(thinking_status_terminal_layout("widget")).toEqual({ padAbove: 0, padBelow: 0 });
+		expect(thinking_status_terminal_layout("widget")).toEqual({ padAbove: 1, padBelow: 0 });
 		expect(thinking_status_terminal_layout("in_message")).toEqual({ padAbove: 1, padBelow: 0 });
 	});
 
@@ -162,6 +162,9 @@ describe("thinking pass timer", () => {
 		performance.now = () => fresh;
 		try {
 			r.noteThinking();
+			// The in-group lane resets the pass timer so the visible elapsed
+			// starts from the moment the lane arms.
+			set_thinking_pass_started_at_for_tests(fresh - 2_500);
 			performance.now = () => fresh + 500;
 			expect(format_thinking_pass_elapsed_suffix(theme)).toContain("3s");
 		} finally {

@@ -38,6 +38,7 @@ import {
 	type AgentServerMessage,
 	type ConversationStateStructure,
 	type ExecServerMessage,
+	type InteractionUpdate,
 	type KvServerMessage,
 	type McpToolDefinition,
 } from "./proto/agent_pb.js";
@@ -107,7 +108,24 @@ interface StreamState {
 
 const REJECT_REASON =
 	"Tool not available in this environment. Use the MCP tools provided instead.";
-const MCP_IDLE_CLOSE_MS = 5000;
+const MCP_IDLE_CLOSE_MS = 1000;
+export const MCP_DEFERRED_RESULT_TEXT =
+	"Pi is executing this tool; the real result will be provided on the next turn.";
+
+/**
+ * InteractionUpdate cases that announce native Cursor tool calls. Pi owns the
+ * tool loop: these are never executed here (canonical tools arrive through the
+ * pi_ember_* MCP exec channel as mcpArgs and route through
+ * resolve_pi_tool_name/normalize_tool_arguments in stream.ts). They must still
+ * be observed so the stream finalizes instead of hanging on a native tool
+ * result the client will never send.
+ */
+const NATIVE_TOOL_CALL_UPDATE_CASES = new Set([
+	"partialToolCall",
+	"toolCallDelta",
+	"toolCallStarted",
+	"toolCallCompleted",
+]);
 
 function build_stream_failure_message(options: {
 	trailer?: ConnectTrailerError | null;
@@ -249,7 +267,7 @@ function handle_exec_message(
 						create(McpToolResultContentItemSchema, {
 							content: {
 								case: "text",
-								value: create(McpTextContentSchema, { text: "ok" }),
+								value: create(McpTextContentSchema, { text: MCP_DEFERRED_RESULT_TEXT }),
 							},
 						}),
 					],
@@ -401,10 +419,11 @@ function handle_exec_message(
 }
 
 function handle_interaction_update(
-	update: { message?: { case?: string; value?: { text?: string; tokens?: number } } },
+	update: InteractionUpdate,
 	state: StreamState,
 	on_text: (text: string, is_thinking?: boolean) => void,
 	on_turn_ended?: () => void,
+	on_native_tool_call?: () => void,
 ): void {
 	const update_case = update.message?.case;
 	if (update_case === "turnEnded") {
@@ -412,17 +431,25 @@ function handle_interaction_update(
 		return;
 	}
 	if (update_case === "textDelta") {
-		const delta = update.message?.value?.text || "";
+		const delta = update.message.value.text || "";
 		if (delta) on_text(delta, false);
 		return;
 	}
 	if (update_case === "thinkingDelta") {
-		const delta = update.message?.value?.text || "";
+		const delta = update.message.value.text || "";
 		if (delta) on_text(delta, true);
 		return;
 	}
 	if (update_case === "tokenDelta") {
-		state.output_tokens += update.message?.value?.tokens ?? 0;
+		state.output_tokens += update.message.value.tokens ?? 0;
+		return;
+	}
+	// Native Cursor tool calls stream through interaction updates. Silently
+	// ignoring them leaves the server waiting for a native tool result the
+	// client will never send, so a native-only turn can hang. Mark the stream
+	// so the batch finalizes and the idle-close guard can terminate the turn.
+	if (update_case !== undefined && NATIVE_TOOL_CALL_UPDATE_CASES.has(update_case)) {
+		on_native_tool_call?.();
 	}
 }
 
@@ -438,10 +465,17 @@ function process_server_message(
 	on_usage?: (total_tokens: number) => void,
 	workspace_path?: string,
 	on_turn_ended?: () => void,
+	on_native_tool_call?: () => void,
 ): void {
 	const msg_case = msg.message.case;
 	if (msg_case === "interactionUpdate") {
-		handle_interaction_update(msg.message.value as never, state, on_text, on_turn_ended);
+		handle_interaction_update(
+			msg.message.value as never,
+			state,
+			on_text,
+			on_turn_ended,
+			on_native_tool_call,
+		);
 		return;
 	}
 	if (msg_case === "kvServerMessage") {
@@ -503,6 +537,7 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 	let bridge_stderr = "";
 	let bridge_exit_code = 0;
 	let saw_tool_call = false;
+	let saw_native_tool_call = false;
 	const state: StreamState = { output_tokens: 0, total_tokens: 0 };
 	let pending_checkpoint: Uint8Array | undefined;
 	let stream_succeeded = false;
@@ -553,6 +588,16 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 		// Keep the Run stream open so Cursor can emit additional MCP tools in one batch.
 	};
 
+	// A native Cursor tool call was announced through an interaction update
+	// (toolCallStarted/Delta/Completed/partialToolCall). It is never routed to
+	// Pi or executed; recording it keeps the idle-close guard active so a
+	// native-only turn cannot hang waiting for a result the client never sends.
+	const on_native_tool_call = (): void => {
+		if (done) return;
+		saw_native_tool_call = true;
+		last_event_time = Date.now();
+	};
+
 	const mark_stream_done = (): void => {
 		finalize_tool_batch();
 		done = true;
@@ -595,6 +640,7 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 						},
 						req.workspace_path,
 						on_turn_ended,
+						on_native_tool_call,
 					);
 				} catch (error) {
 					stream_error =
@@ -624,8 +670,21 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 			if (req.signal?.aborted) {
 				throw new CursorChatError("Cursor request aborted");
 			}
-			if (saw_tool_call && !done && Date.now() - last_event_time > MCP_IDLE_CLOSE_MS) {
+			if (
+				__chat_test_only_should_idle_close_stream({
+					saw_tool_call,
+					saw_native_tool_call,
+					done,
+					last_event_time,
+					now: Date.now(),
+				})
+			) {
 				mark_stream_done();
+				// The server may be waiting on a native tool result it will never
+				// get (or a turnEnded that never arrives). Close the bridge so
+				// close_promise resolves and the generator terminates instead of
+				// hanging after the finalize.
+				bridge.end();
 			}
 		}
 
@@ -694,6 +753,34 @@ export function __chat_test_only_finalize_tool_batch(
 	if (!saw_tool_call || already_finished) return already_finished;
 	push_event({ kind: "finish", reason: "tool_calls" });
 	return true;
+}
+
+/**
+ * Pure idle-close guard. Returns true when a stream that observed a tool call
+ * (MCP or native) has gone silent long enough that waiting further would hang
+ * the turn — e.g. a native-only turn whose server never sends turnEnded.
+ */
+export function __chat_test_only_should_idle_close_stream(options: {
+	saw_tool_call: boolean;
+	saw_native_tool_call: boolean;
+	done: boolean;
+	last_event_time: number;
+	now: number;
+}): boolean {
+	if (options.done) return false;
+	if (!options.saw_tool_call && !options.saw_native_tool_call) return false;
+	return options.now - options.last_event_time > MCP_IDLE_CLOSE_MS;
+}
+
+/** Wraps handle_interaction_update so tests can feed decoded InteractionUpdates. */
+export function __chat_test_only_handle_interaction_update(
+	update: InteractionUpdate,
+	state: StreamState,
+	on_text: (text: string, is_thinking?: boolean) => void,
+	on_turn_ended?: () => void,
+	on_native_tool_call?: () => void,
+): void {
+	handle_interaction_update(update, state, on_text, on_turn_ended, on_native_tool_call);
 }
 
 export type { PendingMcpExec };

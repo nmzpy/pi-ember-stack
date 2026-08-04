@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 import {
+	type SelectItem,
+	type SelectListTheme,
+	SelectList,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
+import {
 	find_exact_model_reference,
 	find_session_reference,
 	fallback_to_native_resume_for_tests,
@@ -11,6 +17,8 @@ import {
 	extract_model_command_search,
 	should_route_model_slash_to_picker,
 	resume_truncate_text,
+	create_resume_select_list_for_tests,
+	resume_list_primary_column_width_before_render_for_tests,
 } from "../model-picker.ts";
 
 const MODELS = [
@@ -31,6 +39,94 @@ function session(partial: Partial<SessionInfo> & Pick<SessionInfo, "path" | "id"
 		...partial,
 	};
 }
+
+const plain_theme = (): SelectListTheme & {
+	selectedDescription: (text: string) => string;
+	unselectedText: (text: string) => string;
+} => {
+	const identity = (text: string) => text;
+	return {
+		selectedPrefix: identity,
+		selectedText: identity,
+		description: identity,
+		selectedDescription: identity,
+		scrollInfo: identity,
+		noMatch: identity,
+		unselectedText: identity,
+	};
+};
+
+const RESUME_ITEMS: SelectItem[] = [
+	{
+		value: "/sessions/a.jsonl",
+		label: "Short title",
+		description: "2h \u00b7 5 msgs",
+	},
+	{
+		value: "/sessions/b.jsonl",
+		label:
+			"A much longer session title that would normally widen the data-driven column far past the midpoint of the resume menu",
+		description: "1d \u00b7 42 msgs",
+	},
+	{ value: "/sessions/c.jsonl", label: "Medium title", description: "3w \u00b7 7 msgs" },
+];
+
+const strip_ansi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
+
+describe("resume list midpoint primary column", () => {
+	test("description column starts at the midpoint of the live content width", () => {
+		const list = create_resume_select_list_for_tests(RESUME_ITEMS, plain_theme());
+		const lines = list.render(120);
+		expect(lines.length).toBe(RESUME_ITEMS.length);
+		for (const line of lines) {
+			const plain = strip_ansi(line);
+			// prefix (2) + primary column floor(120/2)=60 -> description starts at 62.
+			// The " \u00b7 " separator pattern includes its leading space, so the
+			// description start is indexOf(" \u00b7 ") - 2.
+			expect(plain.indexOf(" \u00b7 ") - 2).toBe(62);
+		}
+	});
+
+	test("primary column tracks the live render width (floor(width/2))", () => {
+		const list = create_resume_select_list_for_tests(RESUME_ITEMS, plain_theme());
+		const wide = list.render(120);
+		const narrow = list.render(80);
+		// floor(120/2)=60 -> description starts at 62; floor(80/2)=40 -> at 42.
+		// "2h \u00b7 5 msgs" puts the " \u00b7 " separator at description offset 2.
+		expect(strip_ansi(wide[0]!).indexOf(" \u00b7 ") - 2).toBe(62);
+		expect(strip_ansi(narrow[0]!).indexOf(" \u00b7 ") - 2).toBe(42);
+	});
+
+	test("long titles stay single-line and never push the description off-screen", () => {
+		const list = create_resume_select_list_for_tests(RESUME_ITEMS, plain_theme());
+		const lines = list.render(120);
+		expect(lines.length).toBe(RESUME_ITEMS.length);
+		for (const line of lines) {
+			const plain = strip_ansi(line);
+			expect(visibleWidth(plain)).toBeLessThanOrEqual(120);
+			expect(plain).toContain("msgs");
+		}
+	});
+
+	test("resume list is a SelectList subclass (native owner, no wrapper rows)", () => {
+		const list = create_resume_select_list_for_tests(RESUME_ITEMS, plain_theme());
+		expect(list).toBeInstanceOf(SelectList);
+	});
+
+	test("falls back to the data-driven column before the first live render", () => {
+		const wide_title =
+			"A very long conversation title that is wider than any other title in the list";
+		const width = resume_list_primary_column_width_before_render_for_tests(
+			[
+				{ value: "/a", label: wide_title, description: "d" },
+				{ value: "/b", label: "x", description: "d" },
+			],
+			plain_theme(),
+		);
+		// widest label + pi-tui's PRIMARY_COLUMN_GAP (2), clamped by the layout bounds.
+		expect(width).toBe(visibleWidth(wide_title) + 2);
+	});
+});
 
 describe("resume_truncate_text", () => {
 	const long_title =

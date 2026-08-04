@@ -32,7 +32,14 @@ The body after frontmatter becomes the agent's **entire system prompt**. No pi d
 
 ## Available Tools
 
-Built-in pi tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `apply_patch`
+Built-in pi tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
+
+The code-edit tool is provider-aware: sub-agents receive `edit` unless the
+resolved model's provider is `openai-codex`, in which case they receive
+`apply_patch` instead. `apply_patch` and `edit` are both valid in frontmatter,
+but the runner normalizes the list to the provider-appropriate tool via
+`with_provider_patch_tool` (`pi-custom-agents/edit-tools.ts` SSOT) — never
+hardcode the patch tool elsewhere.
 
 The `subagent` tool is never available to sub-agents (prevents accidental recursion). Sub-agents run at one level of delegation only; they cannot spawn further sub-agents.
 

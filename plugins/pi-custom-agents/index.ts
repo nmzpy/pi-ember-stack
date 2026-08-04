@@ -28,24 +28,14 @@ import {
 	type ExtensionCommandContext,
 	type ExtensionContext,
 	type KeybindingsManager,
-	type SessionManager,
+	SessionManager,
 	type SessionShutdownEvent,
 	type SessionStartEvent,
 	type ToolCallEvent,
 	type TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
-import { install_bash_rules } from "./bash-rules.ts";
-import { install_bash_timeout } from "./bash-timeout.ts";
-import { validate_plan_mode_subagent } from "./subagent-policy.ts";
-import {
-	isAgentRunPending,
-	setActiveMode,
-	setPlanAutoContinuing,
-	setShellMode,
-} from "../pi-ember-ui/mode-colors.ts";
-import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
-import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
+import { resolve_switch_session_fn } from "../pi-ember-ui/command-context-capture.ts";
 import {
 	cancelPendingModelPick,
 	consumePendingShellSubmitEnter,
@@ -56,22 +46,31 @@ import {
 	processShellInput,
 	refresh_footer,
 	requestShellModeVisualRefresh,
-	syncShellModeFromEditorText,
 	requestTuiRender,
 	resetSlashCommandTracking,
 	scheduleFooterStats,
-	setModeLabelResolver,
 	setFooterThinkingLevel,
+	setModeLabelResolver,
+	syncShellModeFromEditorText,
 	wrapEditorRenderForShell,
 	wrapModelPickerEditor,
 } from "../pi-ember-ui/index.ts";
+import {
+	isAgentRunPending,
+	setActiveMode,
+	setPlanAutoContinuing,
+	setShellMode,
+} from "../pi-ember-ui/mode-colors.ts";
+import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
+import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
 import { with_suppressed_shell_history_sync as withSuppressedShellHistorySync } from "../pi-ember-ui/shell-mode.ts";
-import { askQuiz, type QuizQuestion, registerQuizTool } from "./quiz-tool.ts";
 import {
 	build_auto_continue_content,
 	is_benign_compact_error,
 	should_skip_compact,
 } from "./auto-continue.ts";
+import { install_bash_rules } from "./bash-rules.ts";
+import { install_bash_timeout } from "./bash-timeout.ts";
 import install_compaction_wiring from "./compaction-wiring.ts";
 import {
 	build_full_tools,
@@ -95,25 +94,26 @@ import {
 	PI_AGENTS_BIND_MODE_MODEL_EVENT,
 	type ModelIdentity,
 } from "./mode-models.ts";
-import { build_plan_implement_message_content } from "./plan-implement.ts";
+import { should_defer_mode_switch } from "./mode-switch.ts";
 import {
 	get_fresh_context_mode,
-	get_new_session_fn,
 	install_new_session_capture,
 	seed_fresh_context_mode,
 } from "./plan-fresh-session.ts";
+import { build_plan_implement_message_content } from "./plan-implement.ts";
 import {
 	arm_plan_turn,
 	build_plan_implementation_questions,
 	build_plan_review_questions,
+	type PlanImplementationMode,
 	resolve_plan_implementation_mode,
 	resolve_plan_review_answer,
 	should_show_plan_review,
-	type PlanImplementationMode,
 } from "./plan-review.ts";
+import { askQuiz, type QuizQuestion, registerQuizTool } from "./quiz-tool.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
-import { should_defer_mode_switch } from "./mode-switch.ts";
+import { validate_plan_mode_subagent } from "./subagent-policy.ts";
 
 /**
  * Promisify ctx.compact() into a result discriminated union.
@@ -642,6 +642,22 @@ const MODE_IDS = Object.keys(MODES);
 const DEFAULT_MODE = "code";
 const CYCLE_ORDER = ["code", "plan", "orchestrate"];
 type SessionManagerReference = Pick<SessionManager, "getEntries">;
+
+function persist_seeded_session(session_manager: SessionManager): string {
+	const session_file = session_manager.getSessionFile();
+	const header = session_manager.getHeader();
+	if (!session_file || !header) {
+		throw new Error("Fresh-context session did not have a persisted session header");
+	}
+
+	const entries = [header, ...session_manager.getEntries()];
+	fs.writeFileSync(
+		session_file,
+		`${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+		"utf8",
+	);
+	return session_file;
+}
 
 function getLastModeFromSession(ctx: { sessionManager: SessionManagerReference }): string | null {
 	const entries = ctx.sessionManager.getEntries();
@@ -1215,47 +1231,74 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			ctx.ui.notify("No plan text is available.", "error");
 			return;
 		}
-		const newSession = get_new_session_fn();
-		if (!ctx.hasUI || !newSession) {
+		const switchSession = resolve_switch_session_fn();
+		if (!ctx.hasUI || !switchSession) {
 			ctx.ui.notify("Fresh-context implement is unavailable in this mode.", "error");
 			return;
 		}
 		const implementation_mode = await showPlanImplementationMode(ctx);
 		if (!implementation_mode) return;
 
+		let seeded_session_file: string;
+		try {
+			const bound_model =
+				get_mode_model(mode_models, implementation_mode) ??
+				model_identity_of(ctx.model as Model<Api> | undefined, get_pi_thinking_level(pi));
+			if (!bound_model) {
+				ctx.ui.notify("No selected model is available for fresh-context implement.", "error");
+				return;
+			}
+			const target_model = ctx.modelRegistry.find(bound_model.provider, bound_model.modelId);
+			if (!target_model || !ctx.modelRegistry.hasConfiguredAuth(target_model)) {
+				ctx.ui.notify(
+					`Selected model is unavailable: ${bound_model.provider}/${bound_model.modelId}`,
+					"error",
+				);
+				return;
+			}
+
+			const thinking_level =
+				normalize_thinking_level(bound_model.thinkingLevel) ??
+				normalize_thinking_level(get_pi_thinking_level(pi)) ??
+				"medium";
+			const parentSession = ctx.sessionManager.getSessionFile();
+			const seeded_session = SessionManager.create(
+				ctx.cwd,
+				ctx.sessionManager.getSessionDir(),
+				parentSession ? { parentSession } : undefined,
+			);
+			seeded_session.appendModelChange(bound_model.provider, bound_model.modelId);
+			seeded_session.appendThinkingLevelChange(thinking_level);
+			seed_fresh_context_mode(seeded_session, implementation_mode);
+			seeded_session.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: plan }],
+				timestamp: Date.now(),
+			});
+			seeded_session_file = persist_seeded_session(seeded_session);
+		} catch (err) {
+			ctx.ui.notify(
+				`Fresh-context session preparation failed: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+				"error",
+			);
+			return;
+		}
+
 		waitingForPlan = false;
 		latest_plan_text = "";
-		const parentSession = ctx.sessionManager?.getSessionFile?.();
-		//
-		// Session replacement invalidates the module-level `pi` (the ExtensionAPI
-		// bound to the plan session's runtime). The new session re-invokes this
-		// plugin factory with a fresh `pi`; seed an explicit mode marker so its
-		// `session_start` → `restoreMode` cannot inherit the persisted plan mode.
-		// Calling `apply_mode` here would touch the stale `pi` and throw, which the
-		// interactive-mode wrapper turns into `handleFatalRuntimeError` →
-		// `process.exit(1)` (the "Ctrl+C" quit).
-		//
-		// So: never touch the stale module-level `pi` after `newSession()`. Seed
-		// the target mode and plan as the first session entries via `setup`, then
-		// send the mode-specific hidden directive + follow-up via the fresh
-		// `ReplacedSessionContext` (`newCtx`). Any error is notified, never thrown
-		// out of `withSession` —
-		// the wrapper exits the process on an uncaught `withSession` throw.
-		//
+		writePersistedState({ mode: implementation_mode, modeModels: mode_models });
+
+		// `newSession({ setup })` runs setup after createRuntime() has selected the
+		// model, so an empty replacement falls back to settings/defaults. Switch to
+		// a pre-seeded session instead: Pi restores model, effort, and user context
+		// before constructing the replacement runtime. All post-switch work uses
+		// the fresh context supplied by the native switchSession seam.
 		try {
-			const result = await newSession({
-				parentSession,
-				setup: async (sm: SessionManager) => {
-					seed_fresh_context_mode(sm, implementation_mode);
-					sm.appendMessage({
-						role: "user",
-						content: [{ type: "text", text: plan }],
-						timestamp: Date.now(),
-					});
-				},
+			const result = await switchSession(seeded_session_file, {
 				withSession: async (newCtx) => {
 					try {
-						writePersistedState({ mode: implementation_mode, modeModels: mode_models });
 						await newCtx.sendMessage({
 							customType: `pi-agents-enter-${implementation_mode}`,
 							content: `Entered ${MODES[implementation_mode].label} mode.`,
@@ -1277,13 +1320,9 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 							implementation_mode === "orchestrate"
 								? "Delegate the plan to subagents."
 								: "Execute the plan following the modules.",
-							{
-								deliverAs: "followUp",
-							},
+							{ deliverAs: "followUp" },
 						);
 					} catch (err) {
-						// Never let a withSession throw escape: the interactive-mode
-						// command-context wrapper turns it into a fatal process exit.
 						newCtx.ui.notify(
 							`Fresh-context implement failed to start: ${
 								err instanceof Error ? err.message : String(err)
@@ -1294,7 +1333,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 				},
 			});
 			if (result?.cancelled) {
-				ctx.ui.notify("New session cancelled.", "warning");
+				ctx.ui.notify("Fresh-context switch cancelled.", "warning");
 			}
 		} catch (err) {
 			ctx.ui.notify(

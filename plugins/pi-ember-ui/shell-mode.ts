@@ -222,8 +222,12 @@ export function process_shell_input(
 		// Suppress the setTextInternal shell-history sync while we write the
 		// submit text, otherwise the re-entry would strip the leading `!` that
 		// Pi's onSubmit needs to identify a bash command.
-		with_suppressed_shell_history_sync(() => editor.setText?.(`!${text}`));
+		// Reset shell mode and the editor body before submitting so the `!`
+		// prefix is written as the only content. We then explicitly clear the
+		// chatbox after submit so the command is never left visible while the
+		// bash handler runs.
 		setShellMode(false);
+		with_suppressed_shell_history_sync(() => editor.setText?.(`!${text}`));
 		// TUI listeners run before the editor handleInput chain. Submit and clear
 		// here so the chatbox never keeps the command visible while bash runs.
 		if (submit_shell_command_from_editor(editor)) {

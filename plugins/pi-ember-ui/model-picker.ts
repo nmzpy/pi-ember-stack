@@ -15,6 +15,8 @@ import {
 	fuzzyFilter,
 	getKeybindings,
 	SelectList,
+	type SelectItem,
+	type SelectListTheme,
 	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import {
@@ -61,16 +63,39 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
 	maxPrimaryColumnWidth: 32,
 };
 
-/** Width of the live /resume autocomplete list, captured on each render so
- *  `RESUME_SELECT_LIST_LAYOUT.truncatePrimary` can cap titles at half the
- *  terminal content width. `SelectList.render(width)` receives the real
- *  content width, whereas `truncatePrimary`'s `columnWidth` is the
- *  data-driven primary-column width — capped at the widest label, so halving
- *  THAT shrank every title to a narrow quarter of the screen. Only the live
- *  resume list renders/reads this value, so a stale frame is never observed
- *  by a different list.
+/** Width of the live /resume autocomplete list, captured on each render.
+ *  `SelectList.render(width)` receives the real editor content width, which is
+ *  the single authority for both the primary-column midpoint (Feature: resume
+ *  titles occupy the middle of the available content width) and the
+ *  `RESUME_SELECT_LIST_LAYOUT.truncatePrimary` title cap. Only the live resume
+ *  list renders/reads this value, so a stale frame is never observed by a
+ *  different list.
  */
 let resume_render_width = 0;
+
+/** SSOT: the resume title/header column occupies exactly the middle of the
+ *  available content width (mirrors the subagent `TOOL_ROW_WIDTH_FRACTION`
+ *  = 0.5 compact-row threshold). Descriptions start right after this
+ *  midpoint. Never duplicate this fraction in other files.
+ */
+const RESUME_PRIMARY_COLUMN_FRACTION = 0.5;
+
+/** Structural view of pi-tui's SelectList primary-column hook. The installed
+ *  pi-tui typings declare `getPrimaryColumnWidth` private, so the override is
+ *  applied at runtime on the subclass prototype — the same private-member seam
+ *  the select-list theme patches use for `renderItem`. This keeps pi-tui's
+ *  `render()` / `renderItem` layout math (spacing, description column,
+ *  truncation) authoritative without vendoring dependency changes.
+ */
+type ResumeListPrimaryColumnSeam = {
+	getPrimaryColumnWidth: () => number;
+};
+
+/** pi-tui's data-driven column fallback when the live width is unknown. */
+const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
+
+const select_list_proto = SelectList.prototype as unknown as Partial<ResumeListPrimaryColumnSeam>;
+const base_get_primary_column_width = select_list_proto.getPrimaryColumnWidth;
 
 /** Cap a resume title at half the terminal content width (mirrors the subagent
  *  `TOOL_ROW_WIDTH_FRACTION` = 0.5 compact-row threshold). `contentWidth` is the
@@ -90,9 +115,10 @@ export function resume_truncate_text(
 	);
 }
 
-/** Thin SelectList subclass that only records the content width; rendering is
- *  delegated entirely to pi-tui's SelectList so Pi keeps layout/cursor/diff
- *  ownership.
+/** Thin SelectList subclass that records the live content width and delegates
+ *  rendering entirely to pi-tui's SelectList so Pi keeps layout/cursor/diff
+ *  ownership. The primary-column midpoint override is installed on the subclass
+ *  prototype below.
  */
 class ResumeSelectList extends SelectList {
 	override render(width: number): string[] {
@@ -101,9 +127,26 @@ class ResumeSelectList extends SelectList {
 	}
 }
 
-/** Resume layout: allow conversation titles to use up to half the terminal
- *  width so long titles wrap after the middle of the screen, not a narrow
- *  quarter. The description still gets the right-hand side.
+/** Runtime-only override of pi-tui's private `getPrimaryColumnWidth`: the
+ *  resume primary column is the live content width midpoint, not the widest
+ *  label. This moves the last-used date/message description column to the
+ *  right of the screen middle and keeps every title on one line (pi-tui's
+ *  `renderItem` truncates to the column width minus the gap).
+ */
+(ResumeSelectList.prototype as unknown as ResumeListPrimaryColumnSeam).getPrimaryColumnWidth =
+	function getPrimaryColumnWidth(this: ResumeSelectList): number {
+		if (resume_render_width > 0) {
+			return Math.max(1, Math.floor(resume_render_width * RESUME_PRIMARY_COLUMN_FRACTION));
+		}
+		// Before the first live render (or outside a render cycle) fall back to
+		// pi-tui's data-driven computation so behavior is never undefined.
+		return base_get_primary_column_width?.call(this) ?? DEFAULT_PRIMARY_COLUMN_WIDTH;
+	};
+
+/** Resume layout: the primary column is pinned to the live width midpoint by
+ *  the `getPrimaryColumnWidth` override above, so min/max bounds only guard the
+ *  pre-first-render fallback. `truncatePrimary` keeps every title on one line
+ *  and never wider than the primary column (already floor(width/2) − gap).
  */
 const RESUME_SELECT_LIST_LAYOUT = {
 	minPrimaryColumnWidth: 12,
@@ -592,6 +635,30 @@ export function set_native_editor_submit_value_for_tests(
 	fn: ((this: Editor) => void) | undefined,
 ): void {
 	native_editor_submit_value = fn;
+}
+
+/** Test seam: build a live resume autocomplete list with a fixed theme so
+ *  tests can exercise the midpoint primary-column layout against pi-tui's own
+ *  SelectList renderer (no live theme resolver required).
+ */
+export function create_resume_select_list_for_tests(
+	items: SelectItem[],
+	theme: SelectListTheme,
+	maxVisible: number = AUTOCOMPLETE_MAX_VISIBLE,
+): SelectList {
+	return new ResumeSelectList(items, maxVisible, theme, RESUME_SELECT_LIST_LAYOUT);
+}
+
+/** Test seam: the primary-column width a fresh resume list computes before any
+ *  live render — the data-driven fallback used when the live width is unknown.
+ */
+export function resume_list_primary_column_width_before_render_for_tests(
+	items: SelectItem[],
+	theme: SelectListTheme,
+): number {
+	resume_render_width = 0;
+	const list = new ResumeSelectList(items, AUTOCOMPLETE_MAX_VISIBLE, theme, RESUME_SELECT_LIST_LAYOUT);
+	return (list as unknown as ResumeListPrimaryColumnSeam).getPrimaryColumnWidth();
 }
 
 /** Test seam: bind live editor for /resume fallback tests. */

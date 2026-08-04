@@ -382,26 +382,41 @@ export function resetSubagentDelegation(): void {
 	setLatestSubagentRunning(false);
 }
 
-let thinkingBlocksHidden = false;
+/** Thinking-blocks-hidden flag stored on `globalThis` via a `Symbol.for` key so
+ *  it survives jiti module duplication (same pattern as SHELL_MODE_KEY /
+ *  AGENT_RUN_PENDING_KEY). `pi-ember-ui/index.ts`, the compact renderer
+ *  (`pi-compact-tools/renderer.ts`), and `assistant-stream-boundary.ts` import
+ *  this module through different importer chains; a module-level `let` would let
+ *  one instance hide blocks while another keeps painting the in-group
+ *  `└ Thinking` lane or the external header for the whole gradient tick cadence.
+ */
+const THINKING_BLOCKS_HIDDEN_KEY = Symbol.for("pi-ember-ui:thinking-blocks-hidden");
+const THINKING_BLOCKS_VISIBILITY_LISTENER_KEY = Symbol.for(
+	"pi-ember-ui:thinking-blocks-visibility-listener",
+);
 
 type ThinkingBlocksVisibilityListener = (hidden: boolean) => void;
-let thinkingBlocksVisibilityListener: ThinkingBlocksVisibilityListener | undefined;
 
 /** Register a listener fired when thinking-block visibility toggles (Ctrl+T). */
 export function set_thinking_blocks_visibility_listener(
 	listener: ThinkingBlocksVisibilityListener | undefined,
 ): void {
-	thinkingBlocksVisibilityListener = listener;
+	(globalThis as GlobalThis)[THINKING_BLOCKS_VISIBILITY_LISTENER_KEY] = listener;
 }
 
 export function isThinkingBlocksHidden(): boolean {
-	return thinkingBlocksHidden;
+	return (globalThis as GlobalThis)[THINKING_BLOCKS_HIDDEN_KEY] === true;
 }
 
 export function setThinkingBlocksHidden(hidden: boolean): void {
-	const prev = thinkingBlocksHidden;
-	thinkingBlocksHidden = hidden;
-	if (prev !== hidden) thinkingBlocksVisibilityListener?.(hidden);
+	const g = globalThis as GlobalThis;
+	const prev = g[THINKING_BLOCKS_HIDDEN_KEY] === true;
+	if (prev === hidden) return;
+	g[THINKING_BLOCKS_HIDDEN_KEY] = hidden;
+	const listener = g[THINKING_BLOCKS_VISIBILITY_LISTENER_KEY] as
+		| ThinkingBlocksVisibilityListener
+		| undefined;
+	listener?.(hidden);
 }
 
 let work_group_boundary_suppression_depth = 0;

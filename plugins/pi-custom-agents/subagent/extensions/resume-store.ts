@@ -18,6 +18,25 @@ const SUBAGENT_SESSIONS_DIR = "subagent-sessions";
 const META_FILE = "meta.json";
 const INDEX_FILE = "index.json";
 
+/**
+ * Durable cross-process live marker file name written inside each checkpoint
+ * dir by `mark_checkpoint_dir_live()`. A foreign Pi process or duplicated
+ * module instance observes this file and never prunes a parent containing a
+ * fresh marker. Only this exact file name is ever treated as a marker —
+ * arbitrary files are never interpreted as live.
+ */
+export const LIVE_MARKER_FILE = ".live";
+
+/**
+ * TTL for a durable live marker. A crashed run's marker must not protect its
+ * checkpoint dir forever: once a marker is older than this, it is treated as
+ * stale, reaped by `prune_foreign_checkpoints()`, and the parent becomes
+ * disposable. The runner refreshes the marker before every `session.prompt()`,
+ * so a live run whose individual prompts stay well under this window never
+ * goes stale mid-run. Canonical stale-recovery TTL — single source of truth.
+ */
+export const LIVE_MARKER_TTL_MS = 6 * 60 * 60 * 1000;
+
 const RESUMABLE_TOOL_NAMES = new Set<string>(SUBAGENT_DELEGATION_TOOLS);
 
 export interface ResumeCheckpointMeta {
@@ -62,6 +81,11 @@ export type ResolveResumeResult = { ok: true; target: ResumeTarget } | { ok: fal
  * ENOENT (the root cause of `ENOENT ... subagent-sessions/...` failing whole
  * runs with any provider). The runner marks a dir live at bootstrap and clears
  * it in finally, so the directory deterministically exists for every SDK open.
+ *
+ * The Set is the same-process fast path. Liveness is ALSO durable on disk via
+ * the `.live` marker written by `mark_checkpoint_dir_live()`, so a foreign Pi
+ * process or a duplicated module instance observes the mark and never prunes
+ * a live dir even when this process's Set is empty.
  */
 const live_checkpoint_dirs = new Set<string>();
 
@@ -69,14 +93,134 @@ function normalize_checkpoint_dir(dir: string): string {
 	return path.normalize(dir);
 }
 
-/** Mark a checkpoint dir as being written by an in-flight subagent run. */
-export function mark_checkpoint_dir_live(dir: string): void {
-	live_checkpoint_dirs.add(normalize_checkpoint_dir(dir));
+/**
+ * Content of the durable `.live` marker. Freshness is derived exclusively from
+ * `updatedAt` against `LIVE_MARKER_TTL_MS`; pid/start are metadata only and are
+ * never used to decide liveness (pid liveness is racy and not cross-platform).
+ */
+export interface LiveMarkerData {
+	version: 1;
+	/** PID of the process holding the run (metadata only). */
+	pid: number;
+	/** Epoch ms when the run first marked the dir. */
+	startedAt: number;
+	/** Epoch ms of the latest marker write — the freshness source. */
+	updatedAt: number;
 }
 
-/** Drop the live mark once a subagent run finishes (success, error, or abort). */
+function read_live_marker(marker_path: string): LiveMarkerData | undefined {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(marker_path, "utf8")) as Partial<LiveMarkerData>;
+		if (
+			parsed &&
+			typeof parsed === "object" &&
+			typeof parsed.updatedAt === "number" &&
+			Number.isFinite(parsed.updatedAt)
+		) {
+			return {
+				version: 1,
+				pid: typeof parsed.pid === "number" ? parsed.pid : 0,
+				startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : parsed.updatedAt,
+				updatedAt: parsed.updatedAt,
+			};
+		}
+		return undefined;
+	} catch {
+		// Missing or not parseable as our format. The caller decides conservatively:
+		// `live_marker_state` treats an unparseable-but-mtime-fresh marker as live.
+		return undefined;
+	}
+}
+
+/**
+ * True when a marker is fresh enough to protect its checkpoint dir from a
+ * foreign prune. Canonical staleness check against `LIVE_MARKER_TTL_MS`;
+ * `now_ms` is injectable so tests exercise the boundary deterministically.
+ */
+export function is_live_marker_fresh(marker: LiveMarkerData, now_ms: number = Date.now()): boolean {
+	return now_ms - marker.updatedAt < LIVE_MARKER_TTL_MS;
+}
+
+/**
+ * Synchronously write the durable `.live` marker, preserving the original
+ * `startedAt` across refreshes.
+ *
+ * Direct write, deliberately NO write-then-rename: on Windows/Bun a rename
+ * over a destination a foreign prune is concurrently reading can fail with a
+ * transient EPERM sharing violation (MoveFileExW REPLACE_EXISTING requires
+ * the destination's openers to share delete access), which would spuriously
+ * fail the run. A direct small write never hits that, and readers treat
+ * unparseable/empty content as LIVE (see `live_marker_state`), so the
+ * truncate-then-write window can never let a live dir be pruned.
+ */
+function write_live_marker(dir: string, now_ms: number): void {
+	const marker_path = path.join(dir, LIVE_MARKER_FILE);
+	const existing = read_live_marker(marker_path);
+	const data: LiveMarkerData = {
+		version: 1,
+		pid: process.pid,
+		startedAt: existing?.startedAt ?? now_ms,
+		updatedAt: now_ms,
+	};
+	fs.writeFileSync(marker_path, `${JSON.stringify(data)}\n`, "utf8");
+}
+
+/**
+ * Classify a marker file for pruning: "live" (protect), "stale" (reap), or
+ * "none" (not a marker / vanished). Parseable markers use `updatedAt`. An
+ * unparseable/empty marker (a writer's truncate window or a crashed write) is
+ * conservatively treated as LIVE while its mtime is fresh — a live dir is
+ * never pruned — and reaped once the mtime goes stale, so crashed markers do
+ * not leak forever.
+ */
+function live_marker_state(marker_path: string, now_ms: number): "live" | "stale" | "none" {
+	const marker = read_live_marker(marker_path);
+	if (marker) return is_live_marker_fresh(marker, now_ms) ? "live" : "stale";
+	let mtime: number;
+	try {
+		mtime = fs.statSync(marker_path).mtimeMs;
+	} catch {
+		// Marker vanished between the parent scan and this stat.
+		return "none";
+	}
+	return now_ms - mtime < LIVE_MARKER_TTL_MS ? "live" : "stale";
+}
+
+/**
+ * Mark a checkpoint dir as being written by an in-flight subagent run.
+ *
+ * Synchronously (no async boundary) ensures the dir exists and writes the
+ * durable `.live` marker, so a foreign process's prune observes the run before
+ * the runner's first await. Re-calling refreshes `updatedAt` — the runner
+ * refreshes before every prompt so long runs never let the cross-process guard
+ * go stale.
+ */
+export function mark_checkpoint_dir_live(dir: string): void {
+	const normalized = normalize_checkpoint_dir(dir);
+	// fs work first: if mkdir or the marker write throws, no in-memory Set entry
+	// is left behind. The durable marker is the cross-process guard; the Set is
+	// only the same-process fast path and is populated once the disk state is
+	// consistent.
+	fs.mkdirSync(normalized, { recursive: true });
+	write_live_marker(normalized, Date.now());
+	live_checkpoint_dirs.add(normalized);
+}
+
+/**
+ * Drop the live mark once a subagent run finishes (success, error, or abort):
+ * clears the same-process Set entry AND removes the durable marker so the dir
+ * is disposable again. Call only AFTER checkpoint persistence has completed
+ * (the runner's `finally` persists meta.json/index.json before unmarking) so a
+ * foreign prune can never observe an unprotected incomplete checkpoint.
+ */
 export function unmark_checkpoint_dir_live(dir: string): void {
-	live_checkpoint_dirs.delete(normalize_checkpoint_dir(dir));
+	const normalized = normalize_checkpoint_dir(dir);
+	live_checkpoint_dirs.delete(normalized);
+	try {
+		fs.rmSync(path.join(normalized, LIVE_MARKER_FILE), { force: true });
+	} catch {
+		// A concurrent prune may already have removed the whole dir.
+	}
 }
 
 function dir_contains_live_checkpoint(parent_dir: string): boolean {
@@ -85,6 +229,43 @@ function dir_contains_live_checkpoint(parent_dir: string): boolean {
 		if (live === normalize_checkpoint_dir(parent_dir) || live.startsWith(prefix)) return true;
 	}
 	return false;
+}
+
+/**
+ * True when any checkpoint dir under `parent_dir` is live: either a
+ * same-process Set entry (fast path) or a FRESH durable `.live` marker written
+ * by ANY Pi process/instance. Stale markers are reaped so a crashed run's
+ * marker cannot protect its parent forever. Only `.live` markers (parseable,
+ * or unparseable-but-mtime-fresh via `live_marker_state`) are ever held or
+ * reaped — arbitrary files are never treated as live.
+ */
+function parent_has_live_checkpoint(parent_dir: string, now_ms: number): boolean {
+	if (dir_contains_live_checkpoint(parent_dir)) return true;
+	let children: fs.Dirent[];
+	try {
+		children = fs.readdirSync(parent_dir, { withFileTypes: true });
+	} catch {
+		// Parent vanished between the root scan and this readdir — nothing left
+		// to protect.
+		return false;
+	}
+	let has_fresh_marker = false;
+	for (const child of children) {
+		if (!child.isDirectory()) continue;
+		const marker_path = path.join(parent_dir, child.name, LIVE_MARKER_FILE);
+		const state = live_marker_state(marker_path, now_ms);
+		if (state === "live") {
+			has_fresh_marker = true;
+		} else if (state === "stale") {
+			// Stale crashed-run marker: reap it so it cannot protect forever.
+			try {
+				fs.rmSync(marker_path, { force: true });
+			} catch {
+				/* best-effort reap; pruning removes it with the parent anyway */
+			}
+		}
+	}
+	return has_fresh_marker;
 }
 
 let subagent_sessions_root_override: string | undefined;
@@ -385,13 +566,18 @@ export function prune_foreign_checkpoints(activeParentSessionId: string): void {
 		// Root removed between existsSync and readdir (TOCTOU) — nothing to prune.
 		return;
 	}
+	const now_ms = Date.now();
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 		if (entry.name === activeParentSessionId) continue;
 		const parent_dir = path.join(root, entry.name);
-		// Never delete a dir a live subagent is still writing into (the SDK's
-		// run-record openSync would then ENOENT and fail the whole run).
-		if (dir_contains_live_checkpoint(parent_dir)) continue;
+		// Never delete a parent a live subagent is still writing into (the SDK's
+		// run-record openSync would then ENOENT and fail the whole run). The
+		// guard is durable: a FRESH `.live` marker protects across processes even
+		// when this process's in-memory Set is empty. Stale markers are reaped by
+		// `parent_has_live_checkpoint`, so crashed runs never protect their dirs
+		// forever.
+		if (parent_has_live_checkpoint(parent_dir, now_ms)) continue;
 		fs.rmSync(parent_dir, { recursive: true, force: true });
 	}
 }

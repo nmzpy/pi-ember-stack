@@ -169,23 +169,21 @@
   structurally (by character content), not by fragile index arithmetic.
   Slash-command dimming gates on `getText()` content, not on external flags.
   The editor border is a **straight-rule chatbox**: 0-column outer inset, with
-  dim, inset-by-1 horizontal rules (`──`) on top and bottom (`DIM_COLOR`),
-  no side pipes, no rounded corners. The editor content has 1-col inner
-  padding (`INNER_PAD = 1`) on each side plus a 2-col gutter on the left.
+  full-width horizontal rules (`──`) on top and bottom at 50% opacity of
+  `DIM_COLOR` over `PAGE_BG`, no side pipes, no rounded corners. The editor
+  content has no base inner padding (`INNER_PAD = 0`; user-bash streaming adds
+  one temporary column per side) plus a 2-col gutter on the left.
   The gutter shows a `> ` prompt glyph on the first editor body row and a
   `  ` (two-space) gutter on subsequent rows; in shell mode the prompt
   glyph is `! ` instead of `> `. The `innerWidth` passed to Pi's original
   render subtracts `INSET * 2 + 2 + INNER_PAD * 2` from the terminal width
   (the `+ 2` is the gutter, not pipe columns). While the agent is running
   (`agentRunPending`, from `agent_start` to `agent_settled`) or in shell mode,
-  the prompt glyph and the non-slash middle separator use `MUTED_COLOR` instead
-  of `TEXT_COLOR`, giving the chatbox a dimmed appearance while the agent is
-  running. The border color logic for those elements is
-  `(isShellMode() || agentRunPending) ? MUTED_COLOR : TEXT_COLOR`. In slash-command
-  middle separator is rendered as a dim inset horizontal rule (`──` at
-  `DIM_COLOR`, inset **1 column on each side**, `SLASH_MIDDLE_INSET = 1`)
-  with no junction glyph. The previous slash-mode bottom border dimming
-  is removed. Pi's native TUI render path is
+  the prompt glyph uses `MUTED_COLOR` instead of `TEXT_COLOR`, giving the
+  chatbox a dimmed appearance while the agent is running. The middle separator
+  and slash separator use the same 50%-opacity `DIM_COLOR` rule as the
+  edge-to-edge top and bottom lines; `SLASH_MIDDLE_INSET = 0`, with no
+  junction glyph. Pi's native TUI render path is
   left unpatched — content flows top-down and scrolls when it exceeds the
   terminal height. The `recompute_latest_subagent_running()` helper
   scans `sessionCtx.sessionManager` entries and writes the result to the
@@ -262,7 +260,18 @@
   `requestRender` is queued. Trackpad scroll uses terminal scrollback; Ember
   must not intercept scroll input or repaint the live viewport while the user
   reads history. Do not re-anchor on slash/autocomplete exit or idle lifecycle
-  events. Structural changes (show/hide Thinking, group settle/collapse,
+  events. **Sticky startup header across session replacement:** the ember
+  startup logo header (`installStartupHeader`) is kept live across
+  `/resume`/`/new`/`/fork`/`/reload` via `install_header_persistence_patch`
+  (`pi-ember-ui/header-persistence.ts`, SSOT). Pi's `resetExtensionUI` restore
+  of the built-in header at the top of the buffer would force a
+  scrollback-clearing full redraw (`\x1b[2J` + `\x1b[3J` — jump-to-top +
+  scroll lock); the patch skips that restore while the ember header is active
+  and the `session_start` re-install renders byte-identical rows, so the
+  top-of-buffer header never changes during a session switch. Never re-install
+  a tall header at the top of the buffer on session lifecycle events — only the
+  inherent transcript rebuild may redraw. Structural changes (show/hide
+  Thinking, group settle/collapse,
   mode switch) update the component tree and use the same normal native
   request. Off-screen startup visuals are static. The
   sweep cycle is `GRADIENT_DURATION_MS` = 1600 ms (20%
@@ -576,6 +585,8 @@ Pi
     │   └── compact native tool rendering
     ├── plugins/pi-ember-applypatch/
     │   └── Codex-style apply_patch tool (openai-codex provider only)
+    ├── plugins/pi-ember-images/
+    │   └── Cross-platform clipboard/path image attachments and compact previews
     ├── plugins/pi-custom-agents/
     │   ├── primary modes, plans, quiz
     │   └── subagent implementation and bundled agent definitions
@@ -671,8 +682,11 @@ field. Keep that mechanism aligned with the actual plugin folders.
   this unified public work bundle so patches contribute to `Edited`/`Explored`
   summaries.
   Grouped child rows show path/details only plus muted diff stats; grouped read
-  children include offset/line limit. Final counts use distinct tool-call
-  target paths for files; searches and bash commands count call entries. Every
+  children include offset/line limit. Bash `grep` child rows always carry the
+  same `Search` label as `grep` tool rows (`formatCallBodyVerb` SSOT) — never an
+  empty verb leaving a bare `pattern in path` row with no tool name. Final
+  counts use distinct tool-call target paths for files; searches and bash
+  commands count call entries. Every
   group header and child is one ANSI-aware, width-truncated terminal row. The
   grouping contract is:
   - **First-member ownership:** The first call that creates a group
@@ -816,6 +830,23 @@ field. Keep that mechanism aligned with the actual plugin folders.
   flag in `pi-ember-ui/mode-colors.ts` is driven from this plugin's
   lifecycle handlers via `hasActiveGroups()`.
 
+### `pi-ember-images`
+
+- Owns clipboard and pasted-path image attachments for the parent TUI.
+- Windows clipboard capture uses the STA PowerShell `System.Windows.Forms`/
+  `System.Drawing` backend; macOS uses `osascript`. Windows file paths from
+  bracketed terminal paste are recognized before they reach the normal editor.
+- Image placeholders use the single `[image N]` format in the editor. On submit,
+  the input handler removes placeholders from prompt text and attaches native
+  Pi `ImageContent` parts.
+- Submitted images render through Pi TUI's public `Image` component in a compact
+  custom message renderer (`maxWidthCells`/`maxHeightCells`); this plugin never
+  writes terminal frames or maintains a parallel renderer.
+- The extension loads before `pi-custom-agents` so the existing editor wrapper
+  composes around the image-aware editor instead of being replaced.
+- Attachment state is session-local and held by one `AttachmentStore`; it is
+  cleared on `session_start` and `session_shutdown`.
+
 ### `pi-custom-agents`
 
 - **Quiz for material uncertainty:** All parent modes (`plan`, `code`,
@@ -872,10 +903,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `build_plan_implement_message_content` in `plan-implement.ts` so compaction
   cannot reduce the approved plan to the short summary),
   `Implement with fresh context` first opens the same `Implement via` picker;
-  then `ctx.newSession()` pastes the plan as the first user message and starts
-  in the selected Code or Orchestrate mode. A one-shot session marker overrides
-  the persisted Plan mode during replacement startup, is superseded after the
-  new session binds, and the selected mode is persisted for later resume.
+  then creates a pre-seeded session file containing the target mode's bound
+  model, thinking level, one-shot mode marker, and plan user message before
+  calling the captured native `switchSession()` seam. This ensures Pi restores
+  the selected model and all configured package extensions before the
+  replacement runtime is created. The one-shot marker overrides the persisted
+  Plan mode during replacement startup, is superseded after the new session
+  binds, and the selected mode is persisted for later resume.
   `Copy Plan`, plus the automatic custom `None` option for typed refinements.
   The `Implement via` picker is built once in `plan-review.ts` and uses the
   quiz renderer (not `ctx.ui.select`) so its dim chatbox borders stay out of
@@ -955,7 +989,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `/resume` (and `app.session.resume`) stays chat-pill autocomplete with a
   sticky `switchSession` capture from `ExtensionRunner.bindCommandContext`
   (`pi-ember-ui/command-context-capture.ts` SSOT — also captures `newSession`
-  for plan-fresh-session; unbind does not clear prior handlers). Each
+  and is reused by plan-fresh-session; unbind does not clear prior handlers).
+  Each
   `session_start` re-binds from the live runner's `createCommandContext()`.
   When capture is temporarily missing, `/resume` falls back to the editor's
   native `submitValue` (per-instance, not the slash intercept). Session
@@ -1077,11 +1112,25 @@ field. Keep that mechanism aligned with the actual plugin folders.
   whole subagent run with any provider. The runner bootstraps the dir
   synchronously via `subagent_sessions_dir_for()` AND holds a live mark
   (`mark_checkpoint_dir_live`/`unmark_checkpoint_dir_live` in `resume-store.ts`)
-  for the entire run, cleared in `finally`; `prune_foreign_checkpoints()`
-  never removes a dir containing a live-marked checkpoint, so the directory
-  deterministically exists for every SDK open/write. Never remove the live-mark
-  logic or weaken the prune guard — it is the deterministic fix for the
-  historical `ENOENT ... subagent-sessions/...` failure.
+  for the entire run. The live mark is DURABLE on disk:
+  `mark_checkpoint_dir_live()` writes a `.live` marker (pid/start metadata +
+  `updatedAt`) into each checkpoint dir synchronously after the dir exists and
+  before the first async boundary (direct synchronous write, no rename — on
+  Windows/Bun a rename over a concurrently-read marker can fail with a
+  transient EPERM sharing violation), so `prune_foreign_checkpoints()` skips
+  any parent whose child contains a FRESH `.live` marker even when the pruning
+  process has no in-memory mark (foreign Pi process or duplicated module
+  instance). The runner refreshes the marker before every `session.prompt()`
+  and persists `meta.json`/`index.json` in `finally` BEFORE dropping the
+  marker, so a foreign prune can never observe an unprotected incomplete
+  checkpoint. Stale crashed-run markers do not leak forever:
+  `is_live_marker_fresh()` treats a marker older than `LIVE_MARKER_TTL_MS`
+  (6 h) as stale, the prune reaps it, and the parent becomes disposable.
+  Unparseable/empty markers (a crashed mid-write) fall back to file mtime and
+  are treated as live while fresh — never prune a dir whose marker cannot be
+  read — then reaped once stale. Never remove the live-mark logic or weaken
+  the prune guard — it is the deterministic fix for the historical
+  `ENOENT ... subagent-sessions/...` failure.
   The subagent runs **in-process** on the main thread — not in a
   `worker_thread`. The runner accepts the parent's extension-facing
   `ModelRegistry` and crosses to its canonical `ModelRuntime` exactly once in
@@ -1145,13 +1194,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
   (narration between tools or the streaming answer) render as plain
   `theme.fg("text", …)` lines, ANSI-aware truncated via `truncateToWidth`,
   capped at `LIVE_TEXT_MAX_LINES` (6) per block and
-  `SUBAGENT_LIVE_TEXT_MAX_CHARS` (400) per block. One blank spacer row
+  `SUBAGENT_LIVE_TEXT_MAX_CHARS` (400) per block. One spacer row
   separates consecutive tray segments (tool bursts and text blocks), matching
-  the main transcript's block spacing; spacer rows carry no branch glyph and
-  count toward the 15-line budget. No top horizontal rule; a
-  bottom `──` rule (via `chatboxBorderColor`) appears only when the agent
-  settles. When more than one subagent is shown, a dim full-width `──`
-  separator (`DimSeparator`, same `chatboxBorderColor` SSOT) is inserted
+  the main transcript's block spacing; spacer rows keep the vertical branch
+  pipe continuous (dim `TREE_BRANCH_PIPE` under the outer agent prefix)
+  through the one-row padding gap and count toward the 15-line budget. No top
+  horizontal rule; a bottom `──` rule (via `chatboxBorderColor`) appears only
+  when the agent settles. When more than one subagent is shown, the agent tree
+  stays continuous (`│` / `├` / `└`) and no extra horizontal rule is inserted
   between consecutive agent blocks. The live buffer
   (`SubAgentResult.liveItems`, `SubagentLiveItem[]` — one `tool` item per
   child call keyed by its `toolCallId` so running rows complete in place
@@ -1333,7 +1383,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
   ExecServerMessage, the client MUST respond with an `mcpResult`
   ExecClientMessage. After receiving `mcpArgs` and pushing tool-call events
   to Pi's queue, `handle_exec_message` in `chat.ts` sends a placeholder
-  `McpResult` (`McpSuccess` with text `"ok"`, `isError: false`) back to
+  `McpResult` (`McpSuccess` with an explicit deferred-execution message,
+  `isError: false`) back to
   Cursor via `send_exec_result` to unblock the exec channel. Pi owns the
   tool loop — the real result is sent in the next turn's history blobs
   (`build_tool_call_step_bytes` in `history.ts`). Every other exec case
@@ -1348,6 +1399,16 @@ field. Keep that mechanism aligned with the actual plugin folders.
   closed proactively. This covers cases where `turnEnded` does not arrive.
   The `on_mcp_exec` callback has a `done` guard to ignore late tool calls
   that arrive after the stream has been finalized.
+  **Native tool-call interaction updates:** Cursor also announces native tool
+  calls through `InteractionUpdate` `toolCallStarted`/`toolCallDelta`/
+  `toolCallCompleted`/`partialToolCall`. Pi owns the tool loop — these are
+  never routed to Pi or executed (canonical tools arrive via `mcpArgs` and
+  route through `resolve_pi_tool_name`/`normalize_tool_arguments` in
+  `stream.ts`). `handle_interaction_update` marks them via
+  `on_native_tool_call` so `saw_native_tool_call` keeps the idle-close guard
+  active; the idle close now also calls `bridge.end()` so `close_promise`
+  resolves and a native-only turn (e.g. native `UpdateTodos`/`ReadTodos`)
+  cannot hang waiting for a result the client never sends.
 - **Outbound tool schema SSOT:** `PI_TO_CURSOR_TOOL_NAME` and
   `PI_TO_CURSOR_ARG_NAMES` in `src/context.ts` (`cursor_serialize_tool`;
   covers core tools plus `todo`, `apply_patch`, `subagent`, `quiz`, `task`,

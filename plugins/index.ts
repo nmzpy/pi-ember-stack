@@ -9,6 +9,7 @@ import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 import piEmberApplypatchPlugin from "./pi-ember-applypatch/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
+import piEmberImagesPlugin from "./pi-ember-images/index.ts";
 import piEmberTodoPlugin from "./pi-ember-todo/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
@@ -24,6 +25,7 @@ type PluginId =
 	| "pi-crof-auth"
 	| "pi-cursor-auth"
 	| "pi-ember-fff"
+	| "pi-ember-images"
 	| "pi-ember-todo"
 	| "pi-ember-ui"
 	| "pi-ember-tps"
@@ -41,6 +43,7 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"devin-auth",
 	"pi-crof-auth",
 	"pi-cursor-auth",
+	"pi-ember-images",
 	"pi-custom-agents",
 	"pi-ember-fff",
 	"pi-ember-todo",
@@ -74,6 +77,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-cursor-auth",
 		description: "Cursor subscription auth, model catalog, and native Pi streaming",
 		extension: piCursorAuthPlugin,
+	},
+	{
+		id: "pi-ember-images",
+		description: "Windows/macOS clipboard images with compact chat previews",
+		extension: piEmberImagesPlugin,
 	},
 	{
 		id: "pi-custom-agents",

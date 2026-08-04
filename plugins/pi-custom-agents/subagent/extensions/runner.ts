@@ -16,10 +16,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Api, Message, Model } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AgentSessionEvent,
 	createAgentSession,
 	discoverAndLoadExtensions,
+	estimateTokens,
 	getAgentDir,
 	type LoadExtensionsResult,
 	loadProjectContextFiles,
@@ -84,6 +86,12 @@ const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
 	/token limit exceeded/i,
 ];
 
+/** Headroom above the model context window before we pre-emptively compact. */
+const CONTEXT_SAFETY_FACTOR = 1.1;
+
+/** Buffer reserved for the next turn's output and overhead. */
+const CONTEXT_PROMPT_RESERVE = 8192;
+
 /** In-memory settings for subagent child sessions — auto-compaction off (handled by runner), retry off. */
 export function build_subagent_settings(): {
 	compaction: { enabled: boolean };
@@ -121,6 +129,32 @@ async function compact_subagent_session(
 	}
 }
 
+/** Estimate the tokens the next prompt will send, using the child's live messages. */
+function estimate_subagent_prompt_tokens(
+	session: NonNullable<Awaited<ReturnType<typeof createAgentSession>>["session"]>,
+	pendingPrompt: string,
+): number {
+	const { messages } = session.sessionManager.buildSessionContext();
+	const messageTokens = messages.reduce((sum, msg) => sum + estimateTokens(msg), 0);
+	const promptTokens = estimateTokens({
+		role: "user",
+		content: pendingPrompt,
+		timestamp: Date.now(),
+	});
+	return messageTokens + promptTokens;
+}
+
+/** True when the next prompt would exceed the model's context window plus safety headroom. */
+function should_compact_before_prompt(
+	session: NonNullable<Awaited<ReturnType<typeof createAgentSession>>["session"]>,
+	pendingPrompt: string,
+): boolean {
+	const model = session.model;
+	if (!model || model.contextWindow <= 0) return false;
+	const budget = Math.floor(model.contextWindow / CONTEXT_SAFETY_FACTOR) - CONTEXT_PROMPT_RESERVE;
+	return estimate_subagent_prompt_tokens(session, pendingPrompt) > Math.max(1, budget);
+}
+
 const MAX_SUBAGENT_LENGTH_CONTINUES = 5;
 const MAX_SUBAGENT_WEBSOCKET_RETRIES = 3;
 const SUBAGENT_WEBSOCKET_PATTERNS: readonly RegExp[] = [
@@ -137,8 +171,189 @@ function is_websocket_error(message: string | undefined): boolean {
 	return SUBAGENT_WEBSOCKET_PATTERNS.some((pattern) => pattern.test(message));
 }
 
+/** Short abortable backoff before the single pre-response HTTP 500 retry. */
+export const SUBAGENT_HTTP500_RETRY_BACKOFF_MS = 300;
+
+/**
+ * Exact empty-body pre-response HTTP 500 error patterns. Narrow by design:
+ * only a pure 500 with no useful body is transient-safe to retry — never
+ * arbitrary "500 ..." text, and never auth/permission/quota/billing/
+ * invalid-model errors or 400/401/403/404/408/409/429/503 statuses.
+ */
+const EMPTY_BODY_HTTP500_PATTERNS: readonly RegExp[] = [
+	/^500 status code \(no body\)$/,
+	/^GetChatMessage HTTP 500:\s*$/,
+];
+
+/** True when the message is exactly an empty-body pre-response HTTP 500. */
+export function is_empty_body_http500_error(message: string | undefined): boolean {
+	if (!message) return false;
+	const trimmed = message.trim();
+	return EMPTY_BODY_HTTP500_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+/** The last assistant message in the stream, if any. */
+function lastAssistantMessage(messages: Message[]): Message | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role === "assistant") return msg;
+	}
+	return undefined;
+}
+
+/**
+ * True when the failed result is a pure pre-response empty-body HTTP 500 with
+ * no partial visible text or tool calls — the only case the single retry may
+ * safely re-run without duplicating emitted work.
+ */
+export function retryable_pre_response_http500_failure(result: SubAgentResult): boolean {
+	if (result.stopReason !== "error") return false;
+	const matches =
+		is_empty_body_http500_error(result.errorMessage) ||
+		is_empty_body_http500_error(lastAssistantErrorMessage(result.messages));
+	if (!matches) return false;
+	if (result.latestToolCall) return false;
+	for (const item of result.liveItems ?? []) {
+		if (item.kind === "tool") return false;
+	}
+	const lastAssistant = lastAssistantMessage(result.messages);
+	if (!lastAssistant) return true;
+	for (const part of lastAssistant.content) {
+		if (typeof part === "string") continue; // legacy plain-text content part
+		if (part.type === "text" && part.text.trim()) return false;
+		if (part.type === "toolCall") return false;
+	}
+	return true;
+}
+
+/**
+ * Rollback snapshot captured immediately before a `session.prompt()` call so a
+ * failed pre-response attempt can be removed from the live session and result
+ * accounting before the single retry re-sends the same task exactly once.
+ */
+export interface Http500RetryRollback {
+	/** Session leaf entry id before the prompt; null when the session had no entries. */
+	retryAnchor: string | null;
+	/** `result.messages` length before the prompt (message-cache truncation point). */
+	messagesBefore: number;
+	/** `result.liveItems` length before the prompt (live-buffer truncation point). */
+	liveItemsBefore: number;
+	/** Usage/turn accounting before the prompt; restored so a successful retry counts once. */
+	usageBefore: UsageStats;
+}
+
+/**
+ * Minimal session surface the retry rollback needs: the persisted session
+ * manager plus the live agent transcript. The SDK's `AgentSession` satisfies
+ * this structurally (`sessionManager` + `agent.state.messages`).
+ */
+export interface SubagentRetrySession {
+	sessionManager: SessionManager;
+	agent: { state: { messages: AgentMessage[] } };
+}
+
+/**
+ * Roll back a failed prompt attempt so a retry re-sends the task exactly once
+ * from the pre-attempt state: no duplicate user message on the active branch
+ * and no stale failed assistant in the live context or result accounting.
+ *
+ * Session side: branches the SessionManager back to the pre-attempt leaf (or
+ * resets a fresh session), which removes the failed user + assistant messages
+ * from the active branch, then resyncs the live agent transcript from the
+ * persisted branch — the same pattern AgentSession itself uses after compaction
+ * (`agent.state.messages = sessionManager.buildSessionContext().messages`), so
+ * the retry's context snapshot contains neither the duplicate user nor the
+ * failed assistant.
+ *
+ * Result side: truncates the streamed message cache and live buffer back to the
+ * pre-attempt length and restores the usage/turn accounting so a successful
+ * retry is counted exactly once.
+ */
+export function rollback_failed_prompt_attempt(
+	result: SubAgentResult,
+	session: SubagentRetrySession,
+	rollback: Http500RetryRollback,
+): void {
+	if (result.messages.length > rollback.messagesBefore) {
+		result.messages.length = rollback.messagesBefore;
+	}
+	const liveItems = result.liveItems;
+	if (liveItems && liveItems.length > rollback.liveItemsBefore) {
+		liveItems.length = rollback.liveItemsBefore;
+	}
+	result.usage = { ...rollback.usageBefore };
+	result.latestToolCall = undefined;
+	result.isThinking = false;
+	const { sessionManager } = session;
+	if (rollback.retryAnchor) {
+		sessionManager.branch(rollback.retryAnchor);
+	} else {
+		sessionManager.resetLeaf();
+	}
+	const sessionContext = sessionManager.buildSessionContext();
+	session.agent.state.messages = sessionContext.messages;
+}
+
+/** Abortable short sleep used by the pre-response HTTP 500 retry backoff.
+ *  Resolves immediately when `signal` aborts so the caller can stop without
+ *  waiting out the delay; never resolves later than the requested delay. */
+async function abortable_delay(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return;
+	if (!signal) {
+		await new Promise<void>((resolve) => setTimeout(resolve, ms));
+		return;
+	}
+	await new Promise<void>((resolve) => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const onAbort = (): void => {
+			if (timer) clearTimeout(timer);
+			resolve();
+		};
+		timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+export type PreResponseHttp500RetryDecision = "retry" | "aborted" | "skip";
+
+/**
+ * Decide and arm the single pre-response HTTP 500 retry. Returns:
+ *  - "retry": the failed attempt was rolled back (session branch, live agent
+ *    transcript, message cache, and usage accounting) and the caller should
+ *    re-prompt the same task.
+ *  - "aborted": an abort fired during the backoff; the caller must stop.
+ *  - "skip": the failure is not retry-eligible (or the retry budget is
+ *    exhausted); the normal failure text is preserved unchanged.
+ */
+export async function decide_pre_response_http500_retry(options: {
+	result: SubAgentResult;
+	aborted: boolean;
+	http500_retried: boolean;
+	signal?: AbortSignal;
+	session: SubagentRetrySession;
+	rollback: Http500RetryRollback;
+	backoffMs?: number;
+}): Promise<PreResponseHttp500RetryDecision> {
+	const { result, aborted, http500_retried, signal, session, rollback } = options;
+	if (aborted || http500_retried) return "skip";
+	if (!retryable_pre_response_http500_failure(result)) return "skip";
+	await abortable_delay(options.backoffMs ?? SUBAGENT_HTTP500_RETRY_BACKOFF_MS, signal);
+	if (signal?.aborted) return "aborted";
+	rollback_failed_prompt_attempt(result, session, rollback);
+	result.stopReason = undefined;
+	result.errorMessage = undefined;
+	return "retry";
+}
+
 /** Resume checkpoints may end with a partial/failed assistant turn. Move the leaf
- * to the last non-assistant entry so the next prompt starts from a valid turn. */
+ * to the last non-assistant entry so the next prompt starts from a valid turn.
+ * This is resume-checkpoint cleanup only — in-run retries use
+ * `rollback_failed_prompt_attempt` with a pre-prompt anchor instead, because
+ * branching to the last non-assistant entry alone leaves the failed attempt's
+ * user message on the active branch and duplicates it on re-prompt. */
 function trim_trailing_assistant_messages(sessionManager: SessionManager): void {
 	const branch = sessionManager.getBranch();
 	for (let i = branch.length - 1; i >= 0; i--) {
@@ -701,41 +916,6 @@ export async function runSubAgent(options: {
 				? subagent_sessions_dir_for(resume.parentSessionId, resume.originToolCallId)
 				: undefined;
 
-	// Hold a live mark on the checkpoint dir for the entire run so a concurrent
-	// `prune_foreign_checkpoints()` (foreign session shutdown) can never delete
-	// it between the bootstrap above and the SDK's lazy first run-record write.
-	// Deterministically guarantees the directory exists for every SDK open/write.
-	if (checkpoint_dir) mark_checkpoint_dir_live(checkpoint_dir);
-
-	let sessionManager: SessionManager;
-	if (resume && checkpoint_dir) {
-		const meta = read_resume_meta(resume.parentSessionId, resume.originToolCallId);
-		if (!meta?.sessionFile || !fs.existsSync(meta.sessionFile)) {
-			return failedResult(
-				agentName,
-				task,
-				"error",
-				`No saved session for ${resume.displayName}. Spawn with subagent first.`,
-			);
-		}
-		try {
-			sessionManager = SessionManager.open(meta.sessionFile, checkpoint_dir, cwd);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return failedResult(
-				agentName,
-				task,
-				"error",
-				`Resume session for ${resume.displayName} is missing or corrupted. ${message}`,
-			);
-		}
-		trim_trailing_assistant_messages(sessionManager);
-	} else if (checkpoint && checkpoint_dir) {
-		sessionManager = SessionManager.create(cwd, checkpoint_dir);
-	} else {
-		sessionManager = SessionManager.inMemory(cwd);
-	}
-
 	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 	let unsubscribe: (() => void) | undefined;
 
@@ -749,18 +929,71 @@ export async function runSubAgent(options: {
 			session.abort().catch(() => {});
 		}
 	};
-	if (combinedSignal) {
-		if (combinedSignal.aborted) {
-			if (timeoutId) clearTimeout(timeoutId);
-			const isTimeout = timeoutController?.signal.aborted && !parentSignal?.aborted;
-			return failedResult(
-				agentName,
-				task,
-				isTimeout ? "timeout" : "aborted",
-				isTimeout ? `Timeout after ${timeoutMs}ms` : "Sub-agent aborted before start",
-			);
+
+	let sessionManager: SessionManager;
+	try {
+		// Hold a live mark on the checkpoint dir for the entire run so a
+		// concurrent `prune_foreign_checkpoints()` (foreign session shutdown)
+		// can never delete it between the bootstrap above and the SDK's lazy
+		// first run-record write. Deterministically guarantees the directory
+		// exists for every SDK open/write.
+		if (checkpoint_dir) mark_checkpoint_dir_live(checkpoint_dir);
+
+		if (resume && checkpoint_dir) {
+			const meta = read_resume_meta(resume.parentSessionId, resume.originToolCallId);
+			if (!meta?.sessionFile || !fs.existsSync(meta.sessionFile)) {
+				// The run never started — release the live mark (durable marker +
+				// in-memory Set) so this dir is not protected by a dead run.
+				if (checkpoint_dir) unmark_checkpoint_dir_live(checkpoint_dir);
+				return failedResult(
+					agentName,
+					task,
+					"error",
+					`No saved session for ${resume.displayName}. Spawn with subagent first.`,
+				);
+			}
+			try {
+				sessionManager = SessionManager.open(meta.sessionFile, checkpoint_dir, cwd);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				// The run never started — release the live mark (durable marker +
+				// in-memory Set) so this dir is not protected by a dead run.
+				if (checkpoint_dir) unmark_checkpoint_dir_live(checkpoint_dir);
+				return failedResult(
+					agentName,
+					task,
+					"error",
+					`Resume session for ${resume.displayName} is missing or corrupted. ${message}`,
+				);
+			}
+			trim_trailing_assistant_messages(sessionManager);
+		} else if (checkpoint && checkpoint_dir) {
+			sessionManager = SessionManager.create(cwd, checkpoint_dir);
+		} else {
+			sessionManager = SessionManager.inMemory(cwd);
 		}
-		combinedSignal.addEventListener("abort", onAbort, { once: true });
+
+		if (combinedSignal) {
+			if (combinedSignal.aborted) {
+				if (timeoutId) clearTimeout(timeoutId);
+				const isTimeout = timeoutController?.signal.aborted && !parentSignal?.aborted;
+				// The run never started — release the live mark (durable marker +
+				// in-memory Set) so this dir is not protected by a dead run.
+				if (checkpoint_dir) unmark_checkpoint_dir_live(checkpoint_dir);
+				return failedResult(
+					agentName,
+					task,
+					isTimeout ? "timeout" : "aborted",
+					isTimeout ? `Timeout after ${timeoutMs}ms` : "Sub-agent aborted before start",
+				);
+			}
+			combinedSignal.addEventListener("abort", onAbort, { once: true });
+		}
+	} catch (error) {
+		// Any unexpected failure between mark and the run must release the live
+		// mark (durable marker + in-memory Set) so a dead dir is never protected.
+		if (checkpoint_dir) unmark_checkpoint_dir_live(checkpoint_dir);
+		throw error;
 	}
 
 	try {
@@ -855,11 +1088,38 @@ export async function runSubAgent(options: {
 		let length_continues = 0;
 		let pending_task = task;
 		let websocket_retries = 0;
+		let http500_retried = false;
 		while (true) {
-			// Re-ensure the checkpoint dir before each prompt so a concurrent prune
-			// (session_shutdown of a foreign parent session) cannot leave the SDK's
-			// next run-record write without a parent directory. Cheap and idempotent.
-			if (checkpoint_dir) fs.mkdirSync(checkpoint_dir, { recursive: true });
+			// Re-ensure the checkpoint dir AND refresh the durable live marker
+			// before each prompt so a concurrent prune (session_shutdown of a
+			// foreign parent session) cannot leave the SDK's next run-record write
+			// without a parent directory and cannot observe a stale marker on a
+			// long multi-prompt run. Cheap and idempotent.
+			if (checkpoint_dir) mark_checkpoint_dir_live(checkpoint_dir);
+
+			// Pre-emptive overflow guard: if the next prompt would exceed the model's
+			// context window plus a 10% tokenizer-safety headroom, compact the child
+			// session before sending. This deterministically avoids the arbitrary
+			// "prompt is too long" / "exceeds the context window" errors instead of
+			// catching them after they happen.
+			if (session && should_compact_before_prompt(session, pending_task)) {
+				await compact_subagent_session(session);
+				// If compaction did not shrink enough, the next iteration's check will
+				// catch it; do not infinite-loop.
+			}
+
+			// Snapshot the pre-prompt session/result state so a failed pre-response
+			// attempt can be rolled back before the single retry: the retry must
+			// re-send the same task exactly once, with no duplicate user message on
+			// the active session branch and no stale failed assistant in the live
+			// agent context or result accounting.
+			const retry_rollback: Http500RetryRollback = {
+				retryAnchor: session.sessionManager.getLeafId(),
+				messagesBefore: result.messages.length,
+				liveItemsBefore: result.liveItems?.length ?? 0,
+				usageBefore: { ...result.usage },
+			};
+
 			try {
 				await session.prompt(pending_task);
 			} catch (prompt_error) {
@@ -876,12 +1136,34 @@ export async function runSubAgent(options: {
 					websocket_retries < MAX_SUBAGENT_WEBSOCKET_RETRIES
 				) {
 					websocket_retries++;
+					rollback_failed_prompt_attempt(result, session, retry_rollback);
 					result.stopReason = undefined;
 					result.errorMessage = undefined;
-					trim_trailing_assistant_messages(session.sessionManager);
 					continue;
 				}
 				throw prompt_error;
+			}
+			// Pre-response transient HTTP 500 retry (at most once). The child
+			// runner intentionally disables core retry, and providers surface a
+			// pre-response empty-body 500 as a *resolved* failed assistant message
+			// rather than a thrown error, so the catch-based websocket retry above
+			// never fires. Detect the resolved failure after prompt() settles and
+			// re-run the same task once after a short abortable backoff when no
+			// visible text or tool call was emitted.
+			const http500_retry = await decide_pre_response_http500_retry({
+				result,
+				aborted,
+				http500_retried,
+				signal: combinedSignal,
+				session,
+				rollback: retry_rollback,
+			});
+			if (http500_retry === "retry") {
+				http500_retried = true;
+				continue;
+			}
+			if (http500_retry === "aborted") {
+				break;
 			}
 			websocket_retries = 0;
 			if (result.stopReason !== "length" || length_continues >= MAX_SUBAGENT_LENGTH_CONTINUES) {
@@ -926,7 +1208,6 @@ export async function runSubAgent(options: {
 			result.errorMessage = caught;
 		}
 	} finally {
-		if (checkpoint_dir) unmark_checkpoint_dir_live(checkpoint_dir);
 		if (timeoutId) clearTimeout(timeoutId);
 		if (combinedSignal) combinedSignal.removeEventListener("abort", onAbort);
 		unsubscribe?.();
@@ -946,12 +1227,22 @@ export async function runSubAgent(options: {
 							sessionFile: session_file,
 							updatedAt: new Date().toISOString(),
 						};
+						// Persist checkpoint metadata (meta.json + index.json) WHILE the
+						// durable live marker is still held, so a foreign prune can never
+						// observe an unprotected incomplete checkpoint. The live mark is
+						// dropped only after this write, below.
 						persist_checkpoint_meta(meta);
 					}
 				}
 			}
 			session?.dispose();
-		} catch {}
+		} catch {
+			/* best-effort finalize; never mask the run result */
+		}
+		// Drop the live mark LAST — after checkpoint persistence and session
+		// disposal — so the dir stays protected for the entire finalization path
+		// and only becomes disposable once the checkpoint is complete.
+		if (checkpoint_dir) unmark_checkpoint_dir_live(checkpoint_dir);
 	}
 
 	// Surface the actual failure reason instead of the provider's generic

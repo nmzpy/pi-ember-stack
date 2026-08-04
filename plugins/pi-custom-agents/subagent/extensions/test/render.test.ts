@@ -10,15 +10,13 @@ import {
 	memberRecordsToRows,
 	SubagentToolText,
 	SubagentLiveOutputText,
-	DimSeparator,
-	renderSubagentExpanded,
+		renderSubagentExpanded,
 	renderSubagentThinkingRow,
 } from "../render.ts";
 import {
 	BULLET,
 	formatCompactChildRow,
 	formatGroupChildRows,
-	TREE_BRANCH_LAST,
 	TREE_BRANCH_TEE,
 	TREE_NESTED_LAST,
 	TREE_NESTED_PIPE,
@@ -189,7 +187,7 @@ describe("SubagentLiveOutputText", () => {
 		);
 	});
 
-	test("inserts a blank spacer row between text blocks and tool bursts", () => {
+	test("inserts a one-row spacer with a continuous branch pipe between segments", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true }),
@@ -202,12 +200,32 @@ describe("SubagentLiveOutputText", () => {
 		];
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
-		// header, blank, text, blank, header (+ child)
+		// header, spacer, text, spacer, header (+ child)
 		expect(stripAnsi(out[0])).toContain("Explored 1 file");
-		expect(stripAnsi(out[1])).toBe("");
+		// Spacer rows keep the vertical branch continuous through the one-row
+		// padding gap (outer prefix + flush dim pipe, no inner content).
+		expect(stripAnsi(out[1])).toBe("  [dim:\u2502]");
 		expect(stripAnsi(out[2])).toContain("Checking the popover.");
-		expect(stripAnsi(out[3])).toBe("");
+		expect(stripAnsi(out[3])).toBe("  [dim:\u2502]");
 		expect(stripAnsi(out[4])).toContain("Edited 1 file");
+		// The outer branch terminates at the latest tool-call block header
+		// (the second work burst), not at the trailing child row below it.
+		expect(stripAnsi(out[4])).toContain("[dim:\u2514]");
+		expect(stripAnsi(out[4])).not.toContain("[dim:\u2502]");
+	});
+
+	test("spacer rows stay width-safe at narrow widths", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true }),
+			textItem("Checking the popover."),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(7);
+		// The spacer truncates to the available width like every other row —
+		// it never overflows the terminal width. (The fake theme's literal
+		// `[dim:...]` markup counts as content, so narrow widths cut into it.)
+		expect(stripAnsi(out[1]).length).toBeLessThanOrEqual(7);
 	});
 
 	test("no spacer when the tray is a single work burst", () => {
@@ -222,7 +240,7 @@ describe("SubagentLiveOutputText", () => {
 		expect(text.split("\n").every((line) => line.length > 0)).toBe(true);
 	});
 
-	test("only the header carries a bullet; child rows are bullet-free", () => {
+	test("no nested work-group bullet: the tray header carries no `•` (subagent-only suppression)", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("bash", { command: "python script.py" }),
@@ -232,7 +250,9 @@ describe("SubagentLiveOutputText", () => {
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
 		const text = stripAnsi(out.join("\n"));
-		expect(text.split("\u2022").length - 1).toBe(1);
+		// The nested tray header must not double-mark the work group with a
+		// `•` — the outer `└` branch is the row marker (see renderLiveWorkHeader).
+		expect(text.split("\u2022").length - 1).toBe(0);
 		expect(text).toContain("Working");
 		expect(text).toContain("Running");
 		expect(text).toContain("python script.py");
@@ -242,13 +262,21 @@ describe("SubagentLiveOutputText", () => {
 		expect(text).toContain("test");
 	});
 
-	test("renders an in-group Thinking lane after a tool wave", () => {
+	test("renders an in-group Thinking lane after a tool wave with continuous tree branching", () => {
 		const theme = makeTheme() as any;
 		const items = [toolItem("read", { path: "a.ts" }, { completed: true })];
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1");
 		const out = comp.render(60);
 		const text = stripAnsi(out.join("\n"));
 		expect(text).toContain("Thinking");
+		// Exact branch prefixes: the outer `└` terminates at the latest
+		// tool-call block header, the preceding work-group child branches `├`
+		// into the Thinking lane (continuous tree), and Thinking carries the
+		// terminal inner `└` without extending the outer pipe. (The fake
+		// theme keeps `[tag:…]` markup; stripAnsi only removes real ANSI.)
+		expect(stripAnsi(out[0])).toBe("  [dim:\u2514][muted:*Explored 1 file*]");
+		expect(stripAnsi(out[1])).toBe("   [dim:\u251c][muted:*Read*][muted: a.ts]");
+		expect(stripAnsi(out[2])).toBe("   [dim:\u2514]Thinking");
 	});
 
 	test("adds a bottom rule when settled", () => {
@@ -296,19 +324,130 @@ describe("SubagentLiveOutputText", () => {
 	});
 });
 
-describe("DimSeparator connected tee", () => {
-	test("renders a connected tee at the edge followed by dashes", () => {
-		const comp = new DimSeparator();
-		const out = comp.render(10);
-		expect(stripAnsi(out[0])).toBe("\u251c" + "\u2500".repeat(9));
-		expect(stripAnsi(out[0])).not.toBe("\u2500".repeat(10));
-		expect(stripAnsi(out[0]).length).toBe(10);
+describe("nested tray tree composition (regression)", () => {
+	test("no nested work-group bullet; 3-column tightening flush against the outer └", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+		];
+		// Single-mode outer prefix "  " (the agent tool-row column).
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// No `•` anywhere in the nested tray, and every line sits 3 columns
+		// tighter than the old `  │ • Explored` / `  │   └ Read` layout:
+		// header text at column 4 (flush against the outer └ at column 3),
+		// inner tree glyphs at column 4 (flush with the header text).
+		expect(stripped.join("\n")).not.toContain("\u2022");
+		expect(stripped).toEqual([
+			"  [dim:\u2514][muted:*Explored 1 file*]",
+			"   [dim:\u2514][muted:*Read*][muted: a.ts]",
+		]);
 	});
 
-	test("stays width-safe at narrow widths", () => {
-		const comp = new DimSeparator();
-		const out = comp.render(1);
-		expect(stripAnsi(out[0])).toBe("\u251c");
+	test("in-group Thinking: child branches ├ and Thinking carries the terminal └", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			toolItem("read", { path: "b.ts" }, { completed: true, toolCallId: "c2" }),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1");
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// Both work-group children branch `├` (the tree continues into
+		// Thinking); the Thinking lane closes the group with `└` and does
+		// NOT extend the outer pipe (no outer glyph at column 3 on it).
+		expect(stripped).toEqual([
+			"  [dim:\u2514][muted:*Explored 2 files*]",
+			"   [dim:\u251c][muted:*Read*][muted: a.ts]",
+			"   [dim:\u251c][muted:*Read*][muted: b.ts]",
+			"   [dim:\u2514]Thinking",
+		]);
+	});
+
+	test("outer branch terminates at the latest tool-call block, not the trailing Thinking", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			textItem("Checking the popover."),
+			toolItem(
+				"edit",
+				{ file_path: "b.ts", oldText: "x", newText: "y" },
+				{ completed: true, toolCallId: "c2", details: { diff: "+1\n" } },
+			),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1");
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// First burst + spacer + text + spacer continue the outer pipe; the
+		// second (latest) burst header terminates it with `└`; the trailing
+		// child and Thinking rows hang inside the group without an outer pipe.
+		expect(stripped).toEqual([
+			"  [dim:\u2502][muted:*Explored 1 file*]",
+			"  [dim:\u2502]",
+			"  [dim:\u2502][text:Checking the popover.]",
+			"  [dim:\u2502]",
+			"  [dim:\u2514][muted:*Edited 1 file*]",
+			"   [dim:\u251c][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
+			"   [dim:\u2514]Thinking",
+		]);
+	});
+
+	test("grouped tray keeps the 3-column tightening flush with the agent branch", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("grep", { pattern: "auth", path: "src" }, { completed: true, toolCallId: "c1" }),
+		];
+		// Grouped outer prefix "  │" — the tray's own └/│ glyph sits one column
+		// right of the tree pipe, directly below the agent name's first letter
+		// (`C` of Coder / `S` of Scout at column 3), matching childTreePrefix.
+		const comp = new SubagentLiveOutputText(items, "  │", true, theme, true, "call-1");
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// Header text and inner tree align at column 5 (flush with the agent
+		// branch, not one column right under the agent name's second letter).
+		expect(stripped).toEqual([
+			"  │[dim:\u2514][muted:*1 search*]",
+			"  │ [dim:\u251c][muted:*Search*][muted: auth][muted: in src]",
+			"  │ [dim:\u2514]Thinking",
+		]);
+	});
+
+	test("trailing agent message snaps the outer └ to the message", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			textItem("Let me check the launch window."),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// The work-burst header keeps the continuous pipe; the agent message
+		// is the latest output, so the outer branch terminates `└` on it
+		// rather than staying on the older work header.
+		expect(stripped).toEqual([
+			"  [dim:\u2502][muted:*Explored 1 file*]",
+			"  [dim:\u2502]",
+			"  [dim:\u2514][text:Let me check the launch window.]",
+		]);
+	});
+
+	test("running tray without Thinking closes the inner tree on the last child", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { toolCallId: "c1" }),
+			toolItem("read", { path: "b.ts" }, { toolCallId: "c2" }),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// No thinking lane: the last work-group child closes with `└` (the
+		// outer branch still terminates at the burst header).
+		expect(stripped).toEqual([
+			"  [dim:\u2514][muted:*Exploring*]",
+			"   [dim:\u251c]Reading[text: a.ts]",
+			"   [dim:\u2514]Reading[text: b.ts]",
+		]);
 	});
 });
 
@@ -1019,7 +1158,8 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		// Tree-prefix column alignment: the completed row's prefix must start at
 		// the same column as the running row's prefix. Both rows carry the
 		// bullet-width indent so the `├` / `└` pipe sits below the header's
-		// first letter (column 2), flush with the agent name.
+		// first letter (column 2), flush with the agent name. Tree branch prefixes always use the `dim` token, matching the
+		// live output tray rows.
 		expect(stripAnsi(lines[1]).startsWith("[dim:  \u251c]")).toBe(true);
 		expect(stripAnsi(scoutLine!).startsWith("[dim:  \u2514]")).toBe(true);
 	});
@@ -1292,7 +1432,7 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		expect(stripAnsi(out)).not.toContain("leftover.ts");
 	});
 
-	test("live tray renders one bulleted work header plus bullet-free child rows", () => {
+	test("live tray renders a bullet-free work header plus bullet-free child rows", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("bash", { command: "python script.py" }),
@@ -1302,8 +1442,8 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
 		const text = stripAnsi(out.join("\n"));
-		// The unified work header carries the only bullet.
-		expect(text.split("\u2022").length - 1).toBe(1);
+		// The nested work-group header carries no bullet (subagent seam only).
+		expect(text.split("\u2022").length - 1).toBe(0);
 		expect(text).toContain("Working");
 		expect(text).toContain("Running");
 		expect(text).toContain("python script.py");

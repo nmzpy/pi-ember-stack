@@ -97,23 +97,56 @@ export class SubagentToolText implements Component {
 }
 
 /**
- * Full-width dim horizontal separator between consecutive subagent blocks.
- * Reuses the SSOT `chatboxBorderColor` (DIM_COLOR token) — same rule as the
- * Ember bash/chatbox borders. The edge is a connected tee `├` so the rule
+ * Dim horizontal separator between consecutive subagent blocks. When an
+ * inset prefix is provided, the rule starts with a connected tee `├` so it
  * visually hooks into the agent tree on the left, then continues as `──` to
- * the right edge. Renders a single row at the supplied width (tee + dashes).
+ * the right edge. Renders a single row at the supplied width. Colors flow
+ * through the theme token when a theme is supplied, otherwise falls back to
+ * the SSOT `chatboxBorderColor` (DIM_COLOR token).
  */
 export class DimSeparator implements Component {
+	private theme?: ThemeLike;
+	private color: string;
+	private left: string;
+
+	constructor(theme?: ThemeLike, color = "dim", left = "\u251c") {
+		this.theme = theme;
+		this.color = color;
+		this.left = left;
+	}
+
 	invalidate(): void {}
+
 	render(width: number): string[] {
-		const rule_width = Math.max(1, width);
-		const dashes = Math.max(0, rule_width - 1);
-		return [chatboxBorderColor("\u251c" + "\u2500".repeat(dashes))];
+		const leftWidth = visibleWidth(this.left);
+		const ruleWidth = Math.max(0, width - leftWidth);
+		const text = this.left + "\u2500".repeat(ruleWidth);
+		if (this.theme) return [this.theme.fg(this.color, text)];
+		return [chatboxBorderColor(text)];
 	}
 }
 
 /** Cap on visible text lines per live agent text block (before truncation). */
 const LIVE_TEXT_MAX_LINES = 6;
+
+/** Single source for subagent tree branch color — must always be `dim`. */
+const SUBAGENT_TREE_COLOR = "dim";
+
+/**
+ * Subagent live-tray tree prefixes — flush 1-column variants (no leading or
+ * trailing whitespace) so the nested work-group tray sits 3 terminal columns
+ * tighter than the shared GROUP_CHILD_* / TREE_BRANCH_* constants and aligns
+ * flush with the outer agent `└` branch. Subagent-only composition: the
+ * shared compact renderer constants stay untouched for the main agent's
+ * groups. The outer branch runs `│` through the tray and terminates `└` on
+ * the latest tool-call block header; trailing Thinking/status rows keep the
+ * `SUBAGENT_TRAY_GAP` slot so they stay visible without extending the pipe.
+ */
+const SUBAGENT_TRAY_PIPE = "\u2502"; // │ — outer branch continuation
+const SUBAGENT_TRAY_LAST = "\u2514"; // └ — outer branch terminator (latest tool-call block)
+const SUBAGENT_TRAY_GAP = " "; // outer-branch slot for trailing Thinking/status rows
+const SUBAGENT_TRAY_INNER_TEE = "\u251c"; // ├ — work-group child, more rows follow
+const SUBAGENT_TRAY_INNER_LAST = "\u2514"; // └ — work-group child / Thinking, terminal
 
 type LiveSegment =
 	| { kind: "text"; text: string }
@@ -174,11 +207,16 @@ function liveRowToCall(row: SubagentLiveToolRow, index: number): CompactCall {
 }
 
 /**
- * Unified work-bundle header for a burst — the exact `• Edited N files, …
- * +N -N` line the main agent renders (`formatUnifiedWorkHeader` SSOT), with
- * the shared group bullet. Completed work summarizes into the past-tense
- * segments; while everything is still running the present-tense label
- * (Exploring/Editing/…) is used, matching the main compact group header.
+ * Unified work-bundle header text for a burst — the exact
+ * `Edited N files, … +N -N` line the main agent renders
+ * (`formatUnifiedWorkHeader` SSOT). Nested inside the subagent tray the
+ * header deliberately carries NO `•` bullet: the tray's own outer `└` branch
+ * already marks the row, and a second bullet would double-mark the nested
+ * group. The main agent's compact groups keep their bullet via `formatGroup`
+ * (`groupBulletColor` + header) — suppression is explicit at this subagent
+ * seam only. Completed work summarizes into the past-tense segments; while
+ * everything is still running the present-tense label (Exploring/Editing/…)
+ * is used, matching the main compact group header.
  */
 function renderLiveWorkHeader(rows: SubagentLiveToolRow[], theme: ThemeLike): string {
 	const calls = rows.map(liveRowToCall);
@@ -188,24 +226,30 @@ function renderLiveWorkHeader(rows: SubagentLiveToolRow[], theme: ThemeLike): st
 		type: "work",
 		childAbsorbBefore: 0,
 	} as DiscoveryGroup;
-	const hasError = rows.some((r) => r.error);
-	const allCompleted = rows.length > 0 && rows.every((r) => r.completed);
-	const bullet = groupBulletColorFromFlags(hasError, allCompleted, theme);
-	return bullet + formatUnifiedWorkHeader(group, theme);
+	return formatUnifiedWorkHeader(group, theme);
 }
 
 /**
  * Current-wave child rows (merged same-file calls, accumulated +N -N) with
- * the compact group branch prefixes — the same row shape as main-agent
- * groups. Running members animate with the shared gradient verbs.
+ * the flush subagent tray branch prefixes — the same row shape as main-agent
+ * groups. Running members animate with the shared gradient verbs. When the
+ * in-group `└ Thinking` lane follows the burst, the last child branches `├`
+ * (continuous tree) instead of closing the branch too early; the Thinking
+ * lane itself carries the terminal `└`.
  */
-function renderLiveWorkChildren(rows: SubagentLiveToolRow[], theme: ThemeLike): string[] {
+function renderLiveWorkChildren(
+	rows: SubagentLiveToolRow[],
+	theme: ThemeLike,
+	thinkingFollows = false,
+): string[] {
 	const calls = currentWaveRows(rows).map(liveRowToCall);
 	const merged = merge_group_child_rows(calls);
 	const bodies = merged.map((records) => formatGroupChildRows(records, theme));
 	return bodies.map((body, index) => {
-		const branch = index === bodies.length - 1 ? GROUP_CHILD_LAST : GROUP_CHILD_TEE;
-		return theme.fg("dim", branch) + body;
+		const isLast = index === bodies.length - 1;
+		const branch =
+			!isLast || thinkingFollows ? SUBAGENT_TRAY_INNER_TEE : SUBAGENT_TRAY_INNER_LAST;
+		return theme.fg(SUBAGENT_TREE_COLOR, branch) + body;
 	});
 }
 
@@ -213,13 +257,17 @@ function renderLiveWorkChildren(rows: SubagentLiveToolRow[], theme: ThemeLike): 
  * Multi-line live output tray for a running subagent (thinking blocks
  * visible). Renders the child session's chronological `liveItems` as a
  * compact work-bundle mirroring the main agent's `pi-compact-tools` groups:
- * one `•` header per burst (past-tense summary while any member completed,
- * present-tense while everything is running), current-wave children as
- * bullet-less compact rows with gradient verbs, streamed assistant text
- * blocks as plain lines, and an in-group `└ Thinking` lane while the child
- * reasons after a tool wave. Prior waves fold into the header summary on a
- * genuinely new tool family or visible text — stale Reading/Searching rows
- * never stay open. Reuses the SSOT formatters; no duplicate tool-row logic.
+ * one bullet-free header per burst (past-tense summary while any member
+ * completed, present-tense while everything is running), current-wave
+ * children as compact rows with gradient verbs and flush `├`/`└` inner tree
+ * branches, streamed assistant text blocks as plain lines, and an in-group
+ * `└ Thinking` lane while the child reasons after a tool wave. The outer
+ * agent branch runs `│` through the tray and terminates `└` at the latest
+ * tool-call block header; trailing Thinking/status rows stay visible below
+ * without extending the outer pipe. Prior waves fold into the header summary
+ * on a genuinely new tool family or visible text — stale Reading/Searching
+ * rows never stay open. Reuses the SSOT formatters; no duplicate tool-row
+ * logic.
  */
 export class SubagentLiveOutputText implements Component {
 	items: SubagentLiveItem[] = [];
@@ -274,7 +322,7 @@ export class SubagentLiveOutputText implements Component {
 		const segments = buildLiveSegments(this.items);
 		if (segments.length === 0) return [];
 
-		const segmentLines: string[][] = segments.map((seg) => {
+		const segmentLines: string[][] = segments.map((seg, segIndex) => {
 			if (seg.kind === "text") {
 				const lines: string[] = [];
 				const textLines = seg.text.split("\n");
@@ -287,24 +335,24 @@ export class SubagentLiveOutputText implements Component {
 				}
 				return lines;
 			}
+			const isLastSegment = segIndex === segments.length - 1;
 			const lines = [renderLiveWorkHeader(seg.rows, theme)];
-			if (seg === segments[segments.length - 1]) {
-				lines.push(...renderLiveWorkChildren(seg.rows, theme));
+			if (isLastSegment) {
+				// In-group `└ Thinking` lane while the child reasons after its
+				// latest tool wave — the same slot the main agent's compact
+				// groups paint. It is part of the last work burst, so the
+				// burst's child rows branch `├` into it (continuous tree)
+				// instead of closing with `└` too early.
+				lines.push(...renderLiveWorkChildren(seg.rows, theme, this.isThinking));
+				if (this.isThinking && seg.rows.length > 0) {
+					const elapsed = format_subagent_thinking_elapsed_suffix(theme, this.toolCallId);
+					lines.push(
+						fg(SUBAGENT_TREE_COLOR, SUBAGENT_TRAY_INNER_LAST) + format_in_group_thinking_row(elapsed),
+					);
+				}
 			}
 			return lines;
 		});
-
-		// In-group `└ Thinking` lane while the child reasons after its latest
-		// tool wave — the same slot the main agent's compact groups paint.
-		if (this.isThinking) {
-			const last = segments[segments.length - 1];
-			if (last.kind === "work" && last.rows.length > 0) {
-				const elapsed = format_subagent_thinking_elapsed_suffix(theme, this.toolCallId);
-				segmentLines[segmentLines.length - 1].push(
-					fg("dim", GROUP_CHILD_LAST) + format_in_group_thinking_row(elapsed),
-				);
-			}
-		}
 
 		// One blank spacer row between segments (tool bursts and agent text
 		// blocks), matching the main transcript's block spacing.
@@ -318,29 +366,70 @@ export class SubagentLiveOutputText implements Component {
 			total -= segmentLines[start].length + 1;
 			start++;
 		}
+
+		// Flatten with spacers, tracking which line is a work-burst header so
+		// the outer agent branch can terminate at the latest tool-call block.
 		const lines: string[] = [];
+		const isHeader: boolean[] = [];
 		for (let i = start; i < segmentLines.length; i++) {
-			if (i > start) lines.push("");
-			lines.push(...segmentLines[i]);
+			if (i > start) {
+				lines.push("");
+				isHeader.push(false);
+			}
+			const segLines = segmentLines[i];
+			const segIsWork = segments[i].kind === "work";
+			for (let j = 0; j < segLines.length; j++) {
+				lines.push(segLines[j]);
+				isHeader.push(segIsWork && j === 0);
+			}
 		}
 		if (lines.length > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
 			const header = lines[0];
+			const headerFlag = isHeader[0] ?? false;
 			const tail = lines.slice(lines.length - (SUBAGENT_LIVE_OUTPUT_MAX_ROWS - 1));
+			const tailFlags = isHeader.slice(lines.length - (SUBAGENT_LIVE_OUTPUT_MAX_ROWS - 1));
 			lines.length = 0;
 			lines.push(header, ...tail);
+			isHeader.length = 0;
+			isHeader.push(headerFlag, ...tailFlags);
 		}
+
+		// The outer agent branch runs `│` through every line up to the latest
+		// output message and terminates `└` on it: the work-burst header when
+		// the newest segment is a tool call (inner work-group calls render
+		// below with their own tree), or the message's last line when the
+		// newest output is agent text — the branch snaps to the message too,
+		// not only to the last tool call. Trailing in-group Thinking / status
+		// rows keep their inner tree but do not extend the outer pipe (flush
+		// 1-column prefixes, see SUBAGENT_TRAY_*).
+		let lastHeaderIndex = -1;
+		for (let i = 0; i < isHeader.length; i++) {
+			if (isHeader[i]) lastHeaderIndex = i;
+		}
+		if (segments[segments.length - 1]?.kind === "text") {
+			lastHeaderIndex = lines.length - 1;
+		}
+		if (lastHeaderIndex < 0) lastHeaderIndex = lines.length - 1;
 
 		const out: string[] = [];
 		for (let i = 0; i < lines.length; i++) {
 			const body = lines[i];
-			// Spacer rows are fully blank — no branch glyph, like the blank
-			// lines Pi paints between transcript blocks.
+			const outer =
+				i < lastHeaderIndex
+					? SUBAGENT_TRAY_PIPE
+					: i === lastHeaderIndex
+						? SUBAGENT_TRAY_LAST
+						: SUBAGENT_TRAY_GAP;
+			const outerStyled = outer === SUBAGENT_TRAY_GAP ? outer : fg(SUBAGENT_TREE_COLOR, outer);
+			// Spacer rows keep the vertical branch continuous: render the
+			// outer branch glyph under the outer agent prefix instead of a
+			// fully blank line, preserving the one-row padding gap between
+			// segments. Width-safe so the prefix can never overflow the row.
 			if (body.length === 0) {
-				out.push("");
+				out.push(truncateToWidth(this.treePrefix + outerStyled, Math.max(1, width)));
 				continue;
 			}
-			const outerBranch = i === lines.length - 1 ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE;
-			const prefix = this.treePrefix + fg("dim", outerBranch);
+			const prefix = this.treePrefix + outerStyled;
 			const prefixWidth = visibleWidth(prefix);
 			const contentWidth = Math.max(1, width - prefixWidth);
 			out.push(prefix + truncateToWidth(body, contentWidth));
@@ -769,15 +858,17 @@ function agentTreePrefix(agentIndex: number, agentCount: number): string {
 }
 
 /** Outer tree prefix for the live output tray under an agent (spaces or the
- *  group tree pipe). Keeps a trailing space so the tray's own `│ `/`└ `
- *  branch reads with a gap under the tree (e.g. `│ │`). */
+ *  group tree pipe). Flush with the agent-name column: the tray's own
+ *  `│`/`└` glyph sits one column right of the group tree pipe, directly
+ *  below the agent name's first letter (grouped: `  │└`/`   └`; single:
+ *  `  └`), matching `childTreePrefix`. */
 export function outerPrefixForAgent(
 	agentIndex: number,
 	agentCount: number,
 	hasHeader: boolean,
 ): string {
 	if (!hasHeader) return "  ";
-	return SUBAGENT_TREE_INDENT + (agentIndex < agentCount - 1 ? TREE_BRANCH_PIPE : "  ");
+	return SUBAGENT_TREE_INDENT + (agentIndex < agentCount - 1 ? "│" : " ");
 }
 
 /** Full tree prefix for a child item (tool, thinking, liveOutput) under an
@@ -813,7 +904,7 @@ export function renderSubagentThinkingRow(
 ): string {
 	const fg = theme.fg.bind(theme);
 	const elapsed = format_subagent_thinking_elapsed_suffix(theme, toolCallId);
-	return fg("dim", treePrefix) + format_in_group_thinking_row(elapsed);
+	return fg(SUBAGENT_TREE_COLOR, treePrefix) + format_in_group_thinking_row(elapsed);
 }
 
 function renderSubagentChildRow(
@@ -843,7 +934,7 @@ function renderLatestToolRow(
 	// DRY with the compact group child row formatter: running agents get the
 	// gradient verb, completed/failed agents get the muted past-tense form.
 	const body = formatCompactChildRow(name, args, completed, undefined, theme);
-	return `${fg("dim", treePrefix)}${body}`;
+	return `${fg(SUBAGENT_TREE_COLOR, treePrefix)}${body}`;
 }
 
 const DELEGATING_LABEL = "Delegating";
@@ -1036,7 +1127,6 @@ function fillSubagentLayoutContainer(
 	}
 	const flatEntries = buildFlatEntries(rows, thinkingBlocksVisible);
 	const lastDelegatingIdx = lastDelegatingIndex(rows);
-	let agent_seen = 0;
 	for (const entry of flatEntries) {
 		const row = entry.descriptor;
 		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
@@ -1044,20 +1134,13 @@ function fillSubagentLayoutContainer(
 			// A still-delegating member whose agent type is unknown: the
 			// gradient header already says "Delegating" — no redundant child.
 			if (row.delegating && row.name === DELEGATING_LABEL) {
-				agent_seen += 1;
 				continue;
 			}
-			// Dim separator between consecutive agents when more than one is
-			// shown and thinking blocks are visible (SSOT chatbox border color).
-			if (agent_seen > 0 && rows.length > 1 && thinkingBlocksVisible) {
-				container.addChild(new DimSeparator());
-			}
-			agent_seen += 1;
 			const rowText = row.delegating
 				? renderDelegatingAgentLabel(
 						theme,
 						row.name,
-						hasHeader ? fg("dim", treePrefix) : "",
+						hasHeader ? fg(SUBAGENT_TREE_COLOR, treePrefix) : "",
 						entry.agentIndex === lastDelegatingIdx,
 					)
 				: renderAgentRow(
@@ -1065,7 +1148,7 @@ function fillSubagentLayoutContainer(
 						row.name,
 						theme,
 						row.result,
-						hasHeader ? fg("dim", treePrefix) : "",
+						hasHeader ? fg(SUBAGENT_TREE_COLOR, treePrefix) : "",
 						row.failureMessage,
 						entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
 						row.isSingle,
@@ -1079,7 +1162,7 @@ function fillSubagentLayoutContainer(
 			container.addChild(
 				new SubagentLiveOutputText(
 					liveItems,
-					fg("dim", outerPrefix),
+					fg(SUBAGENT_TREE_COLOR, outerPrefix),
 					row.status === "running",
 					theme,
 					row.result?.isThinking === true,

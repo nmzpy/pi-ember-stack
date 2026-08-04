@@ -1,19 +1,21 @@
 /**
- * Capture Pi's newSession from bindCommandContext.
+ * Capture Pi's session-replacement actions from bindCommandContext.
  *
  * Event handlers (e.g. agent_settled) receive ExtensionContext without
  * session-control methods. Command handlers get ExtensionCommandContext.
  * Plan Review's "Implement with fresh context" runs from agent_settled, so
- * we bind newSession the same way pi-ember-ui captures switchSession.
+ * it reuses pi-ember-ui's sticky command-context capture.
  */
 import {
 	get_new_session_fn as get_shared_new_session_fn,
+	get_switch_session_fn as get_shared_switch_session_fn,
 	install_command_context_capture,
-	reset_command_context_capture_for_tests,
 	type NewSessionFn,
+	reset_command_context_capture_for_tests,
+	type SwitchSessionFn,
 } from "../pi-ember-ui/command-context-capture.ts";
 
-export type { NewSessionFn };
+export type { NewSessionFn, SwitchSessionFn };
 
 /** Session-only marker used to select the implementation mode after replacement. */
 export const FRESH_CONTEXT_MODE_ENTRY = "pi-agents-fresh-context-mode";
@@ -26,10 +28,7 @@ type SessionEntryWriter = {
 	appendCustomEntry: (customType: string, data?: unknown) => unknown;
 };
 
-export function seed_fresh_context_mode(
-	session_manager: SessionEntryWriter,
-	mode: string,
-): void {
+export function seed_fresh_context_mode(session_manager: SessionEntryWriter, mode: string): void {
 	session_manager.appendCustomEntry(FRESH_CONTEXT_MODE_ENTRY, { mode });
 }
 
@@ -83,6 +82,10 @@ export function get_fresh_context_mode(
 
 export function get_new_session_fn(): NewSessionFn | undefined {
 	return get_shared_new_session_fn();
+}
+
+export function get_switch_session_fn(): SwitchSessionFn | undefined {
+	return get_shared_switch_session_fn();
 }
 
 /** Test-only reset — not used in production. */

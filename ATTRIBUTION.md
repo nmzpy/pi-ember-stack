@@ -21,3 +21,8 @@ BSD-3-Clause licensed; its license is retained in
 `plugins/pi-cursor-auth/LICENSE`. Upstream project:
 <https://github.com/Nomadcxx/opencode-cursor>.
 
+
+`plugins/pi-ember-images/` adapts the clipboard/path attachment flow from
+`pi-paster` version `0.2.3` by beowulf11. The upstream project is MIT licensed;
+its license text is retained in `plugins/pi-ember-images/LICENSE`. Upstream
+project: <https://github.com/beowulf11/pi-paster>.

@@ -11,6 +11,7 @@ import {
 	shutdown_gradient_clock,
 } from "../../pi-ember-ui/gradient.ts";
 import {
+	isThinkingBlocksHidden,
 	resetToolExecutionInFlight,
 	setAgentRunPending,
 	setThinkingBlocksHidden,
@@ -1779,6 +1780,133 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(row.toLowerCase()).toContain("explored");
 		expect(baby_state.callText).toBeUndefined();
 	});
+
+	test("announceToolCall drops the in-group Thinking lane synchronously and keeps the group reopenable", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("ann-lane1", owner_state) as any;
+		const child_ctx = makeContext("ann-lane2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		r.noteThinking();
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
+		expect(r.hasGroupThinkingChild()).toBe(true);
+
+		// The model announces the next tool call (message_update toolcall_start)
+		// before its args finish streaming. The lane must vanish in this same
+		// component update — no gradient tick, no tool_call, no microtask.
+		r.announceToolCall();
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).not.toContain("Thinking");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+		// Soft/reopenable grouping is preserved: not a hard exit.
+		expect(r.hasReopenableGroup()).toBe(true);
+		expect(r.hasVisibleGroupChildren()).toBe(true);
+
+		// The arriving same-key call reopens the SAME header — one bullet row,
+		// no duplicated Explored/… header, no stale Thinking lane.
+		const wave_ctx = makeContext("ann-lane3", {}) as any;
+		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, wave_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Searching");
+		expect(row).toContain("c.ts");
+		expect(row).not.toContain("Thinking");
+		expect((row.match(/•/g) ?? [])).toHaveLength(1);
+	});
+
+	test("hidden-thinking consecutive groupable calls with no visible text batch into one work group", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("batch-hidden1", owner_state) as any;
+
+		// Tool wave 1: read completes, hidden thinking lane arms between waves.
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.settleAllGroups();
+		r.noteThinking();
+		expect(stripAnsi((owner_state.callText as any).text)).toContain("Thinking");
+
+		// Tool wave 2: announce (toolcall_start) then execute — same work group.
+		r.announceToolCall();
+		const wave_ctx = makeContext("batch-hidden2", {}) as any;
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, wave_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Searching");
+		expect(row).toContain("b.ts");
+		expect(row).not.toContain("Thinking");
+		// ONE unified work header for the whole burst.
+		expect((row.match(/•/g) ?? [])).toHaveLength(1);
+	});
+
+	test("thinkingBlocksHidden state and listener are shared across module instances", async () => {
+		// Simulate jiti module duplication: a query-string dynamic import yields
+		// a second module instance of mode-colors.ts. The flag must agree across
+		// instances because it lives on globalThis via Symbol.for, exactly like
+		// SHELL_MODE_KEY — a per-instance `let` would desync pi-ember-ui's
+		// setter from pi-compact-tools' reader and leave a stale Thinking lane.
+		const specifier =
+			"../../pi-ember-ui/mode-colors.ts?instance=thinking-blocks-hidden-desync";
+		const second = (await import(specifier)) as {
+			isThinkingBlocksHidden: () => boolean;
+			setThinkingBlocksHidden: (hidden: boolean) => void;
+			set_thinking_blocks_visibility_listener: (
+				listener: ((hidden: boolean) => void) | undefined,
+			) => void;
+		};
+		setThinkingBlocksHidden(false);
+		expect(second.isThinkingBlocksHidden()).toBe(false);
+		setThinkingBlocksHidden(true);
+		expect(second.isThinkingBlocksHidden()).toBe(true);
+
+		// The visibility listener is shared too: register on the second
+		// instance, toggle from the first, and the callback fires.
+		const seen: boolean[] = [];
+		second.set_thinking_blocks_visibility_listener((hidden: boolean) => {
+			seen.push(hidden);
+		});
+		setThinkingBlocksHidden(false);
+		expect(seen).toEqual([false]);
+		second.setThinkingBlocksHidden(true);
+		expect(seen).toEqual([false, true]);
+		expect(isThinkingBlocksHidden()).toBe(true);
+
+		// Cleanup: drop the listener and reset the shared flag.
+		second.set_thinking_blocks_visibility_listener(undefined);
+		setThinkingBlocksHidden(false);
+	});
 });
 
 describe("CompactRenderer apply_patch failures", () => {
@@ -3010,6 +3138,26 @@ describe("formatCompactChildRow (native SSOT)", () => {
 		expect(body).toContain("Edit");
 		expect(body).toContain("foo.ts");
 		expect(body).toContain("+2");
+	});
+
+	test("completed bash grep child renders as Search, never a nameless row", () => {
+		const theme = makeTheme() as any;
+		// A bash `grep` command is a search: it must carry the `Search` label
+		// like the grep tool row (and the running `Searching` verb), not an
+		// empty verb leaving a bare `pattern in path` row with no tool name.
+		const body = stripAnsi(
+			formatCompactChildRow(
+				"bash",
+				{ command: "cd /c/Work/pi-ember-stack && grep -rn 'foo|bar' ." },
+				true,
+				undefined,
+				theme,
+			),
+		);
+		expect(body).toContain("Search");
+		expect(body).toContain("foo|bar");
+		expect(body).toContain("in /c/Work/pi-ember-stack");
+		expect(body).not.toContain("Ran");
 	});
 
 	test("matches the shared formatter the group child rows use", () => {
