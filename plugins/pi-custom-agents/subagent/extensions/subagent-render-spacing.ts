@@ -1,12 +1,14 @@
 /**
- * Remove Pi's self-shell separator for compact subagent rows.
+ * Keep Pi's self-shell separator for compact subagent rows.
  *
  * Pi owns the ToolExecutionComponent render cycle. The native self-shell
- * renderer prepends one separator row to every tool component, which is
- * useful for large tool output but leaves parallel/successive subagent rows
- * needlessly far apart. This wrapper delegates the complete native render
- * and removes only that known leading separator for Ember's two compact
- * subagent tools.
+ * renderer prepends one separator row to every tool component — the same
+ * 1-row padding every other tool row has, so the `Subagents`/`Delegating`/
+ * single-agent header never sits flush against the previous transcript
+ * block. This wrapper delegates the complete native render and drops the
+ * separator only for pure-spacer (empty) components, i.e. grouped non-owner
+ * members, so parallel/successive subagent rows stay tight with no stray
+ * blanks below the block.
  */
 
 const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_resume"]);
@@ -26,9 +28,16 @@ interface ToolExecutionModule {
 	};
 }
 
-/** Remove the one native self-shell separator when it is present. */
+/** Keep the native leading separator for content rows; drop it only for
+ *  pure-spacer (empty) components so grouped non-owner members contribute
+ *  zero vertical space instead of stacking stray blanks. */
 export function strip_subagent_leading_render_gap(lines: string[]): string[] {
-	return lines[0] === "" ? lines.slice(1) : lines;
+	if (lines.length === 0) return lines;
+	// A lone blank (the native separator with no content) is an empty
+	// non-owner member — render nothing. Content rows keep the separator
+	// so the header gets its 1-row padding above.
+	if (lines.every((line) => line === "")) return [];
+	return lines;
 }
 
 /** Install the narrow component wrapper once across jiti module instances. */

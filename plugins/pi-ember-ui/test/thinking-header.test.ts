@@ -369,6 +369,34 @@ describe("thinking header visibility", () => {
 			setThinkingBlocksHidden(prev_hidden);
 		}
 	});
+	test("widget host renders the label at the in-message row (blank below, no pad above)", () => {
+		const prev_hidden = isThinkingBlocksHidden();
+		setThinkingBlocksHidden(true);
+		setTurnToolTranscriptActive(false);
+		setUserTurnCommitted(true);
+		set_gradient_colorizer(forcedColorizer);
+		try {
+			setToolGroupActive(false);
+			setGroupThinkingChildActive(false);
+			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe("widget");
+			const lines = render_thinking_status_lines_for_tests(80);
+			// Pi's widget container supplies the leading blank; the widget adds
+			// the trailing blank (padBelow) so the label occupies the exact row
+			// the in-message host will use — no 1-row jump on assistant mount.
+			expect(lines.length).toBe(2);
+			const stripped = (lines[0] ?? "").replace(/\[[0-9;]*m/g, "");
+			expect(stripped).toContain("Thinking");
+			expect(lines[1]).toBe("");
+		} finally {
+			reset_gradient_colorizer();
+			setAgentRunPending(false);
+			setTurnToolTranscriptActive(false);
+			setUserTurnCommitted(false);
+			setThinkingBlocksHidden(prev_hidden);
+		}
+	});
 
 	test("gradient tick schedules render through thinking host invalidate", () => {
 		const render_calls: number[] = [];

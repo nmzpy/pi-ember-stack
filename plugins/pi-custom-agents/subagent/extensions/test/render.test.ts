@@ -508,8 +508,9 @@ describe("subagent native compact row SSOT", () => {
 });
 
 describe("subagent render spacing", () => {
-	test("removes only the native leading self-shell separator", () => {
+	test("keeps the native leading separator so the header gets padding above", () => {
 		expect(strip_subagent_leading_render_gap(["", "Subagents", "  └Coder A"])).toEqual([
+			"",
 			"Subagents",
 			"  └Coder A",
 		]);
@@ -518,6 +519,11 @@ describe("subagent render spacing", () => {
 	test("does not remove a real first content row", () => {
 		const lines = ["Subagents", "  └Coder A"];
 		expect(strip_subagent_leading_render_gap(lines)).toBe(lines);
+	});
+
+	test("drops the lone separator for empty non-owner members", () => {
+		expect(strip_subagent_leading_render_gap([""])).toEqual([]);
+		expect(strip_subagent_leading_render_gap([])).toEqual([]);
 	});
 });
 

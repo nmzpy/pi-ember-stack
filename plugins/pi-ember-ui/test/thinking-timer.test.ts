@@ -32,8 +32,12 @@ function makeTheme() {
 }
 
 describe("thinking pass timer", () => {
-	test("thinking_status_terminal_layout keeps one row for each host", () => {
-		expect(thinking_status_terminal_layout("widget")).toEqual({ padAbove: 1, padBelow: 0 });
+	test("thinking_status_terminal_layout renders identical row structures per host", () => {
+		// Widget lives below Pi's widget-container leading spacer, so it must not
+		// add a second blank above (that extra row is the visible 1-row jump on
+		// send); it adds the blank below to mirror the empty container spacer in
+		// the in-message case. Both hosts end up [blank][Thinking][blank].
+		expect(thinking_status_terminal_layout("widget")).toEqual({ padAbove: 0, padBelow: 1 });
 		expect(thinking_status_terminal_layout("in_message")).toEqual({ padAbove: 1, padBelow: 0 });
 	});
 

@@ -869,7 +869,11 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		pi.setActiveTools(build_full_tools(model_provider_of(ctx.model)));
 	}
 
-	async function apply_mode(modeId: string, ctx: ExtensionContext): Promise<void> {
+	async function apply_mode(
+		modeId: string,
+		ctx: ExtensionContext,
+		force = false,
+	): Promise<void> {
 		const mode = MODES[modeId];
 		if (!mode) return;
 
@@ -884,7 +888,14 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		// review on currentMode === "plan"). Flip the live accent/label now and
 		// defer the logical switch; agent_settled's flush applies it after the
 		// Plan Review decision, so the new mode takes effect with the next run.
-		if (prevMode && should_defer_mode_switch(prevModeId, modeId, isAgentRunPending())) {
+		// Post-settle decisions (the Plan Review "Implement Plan" switch and the
+		// flush itself) pass force=true: the run is logically over even though
+		// the shared agentRunPending flag is still set by a later listener, and
+		// deferring would start the implement follow-up turn in the stale mode.
+		if (
+			prevMode &&
+			should_defer_mode_switch(prevModeId, modeId, isAgentRunPending(), force)
+		) {
 			setActiveMode(modeId);
 			pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
 			render_mode_status(modeId, ctx);
@@ -953,10 +964,14 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			return;
 		}
 		deferred_mode_id = undefined;
-		await apply_mode(modeId, ctx);
+		await apply_mode(modeId, ctx, true);
 	}
 
-	async function switchMode(modeId: string, ctx: ExtensionContext): Promise<void> {
+	async function switchMode(
+		modeId: string,
+		ctx: ExtensionContext,
+		force = false,
+	): Promise<void> {
 		if (!MODES[modeId]) return;
 		if (!is_live_session(ctx)) {
 			// Queue only for the session that is currently binding. Never retain a
@@ -964,7 +979,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			if (ctx.sessionManager === active_session_manager) pending_mode_id = modeId;
 			return;
 		}
-		await apply_mode(modeId, ctx);
+		await apply_mode(modeId, ctx, force);
 	}
 
 	for (const modeId of MODE_IDS) {
@@ -1350,7 +1365,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			return;
 		}
 		if (!ctx.hasUI) {
-			switchMode(DEFAULT_MODE, ctx);
+			switchMode(DEFAULT_MODE, ctx, true);
 			pi.sendMessage({
 				customType: "pi-agents-plan-implement",
 				content: build_plan_implement_message_content(
@@ -1366,7 +1381,11 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		}
 		const implementation_mode = await showPlanImplementationMode(ctx);
 		if (!implementation_mode) return;
-		await switchMode(implementation_mode, ctx);
+		// Post-settle decision: force the switch so the implement follow-up turn
+		// starts in the selected mode with its full tool set. The deferred path
+		// would leave currentMode in the stale plan mode until another
+		// agent_settled, so the model would be blocked from Coder delegation.
+		await switchMode(implementation_mode, ctx, true);
 		const msg =
 			implementation_mode === "orchestrate"
 				? "Delegate the plan to subagents."

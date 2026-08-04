@@ -313,7 +313,15 @@
   external hosts are inset by `THINKING_STATUS_INSET_COLUMNS` = 1 column on
   each side (`build_thinking_status_row_text` SSOT); the in-group `└ Thinking`
   lane is owned by the compact renderer (tree-branch prefix) and does not use
-  this inset. There is
+  this inset. `thinking_status_terminal_layout` (SSOT) keeps both external
+  hosts rendering `[blank][Thinking][blank]` in the same terminal rows so the
+  widget → in-message switch never moves the label: the in-message host pads
+  one blank above inside the transcript (the empty widget container's own
+  spacer supplies the blank below), while the widget host relies on Pi's
+  widget-container leading `Spacer(1)` for the blank above and pads one blank
+  below instead — it never adds a second blank above, which would render the
+  pre-tool header one row lower and visibly jump up when the assistant bubble
+  mounts. There is
   no `Working` label. `installAssistantMessagePatch` creates a
   `ThinkingStatusComponent` per assistant message and binds it to the message's
   timestamp. A module-level `latestAssistantMessageTimestamp` is updated from
@@ -538,7 +546,15 @@
   review still opens and resolves before the deferred switch applies).
   `should_defer_mode_switch` in `mode-switch.ts` is the SSOT predicate
   (defer only on a real mode change while `isAgentRunPending()`); same-mode
-  re-applies and settled switches stay immediate. Tab cycling resolves from
+  re-applies and settled switches stay immediate. Post-settle decisions
+  bypass the predicate with `force=true`: the Plan Review `Implement Plan`
+  switch (`handlePlanImplement`) and the `agent_settled` flush itself apply
+  immediately even though the shared `agentRunPending` flag is still set
+  (pi-ember-ui's own `agent_settled` listener clears it only after
+  pi-custom-agents' handler has run), so the implement follow-up turn starts
+  in the selected mode with its full tool set instead of the stale plan
+  mode — never defer the review-chosen switch or re-defer inside the flush.
+  Tab cycling resolves from
   `pending_mode_id ?? deferred_mode_id ?? currentMode` so the visible mode is
   the cycle anchor. `session_shutdown` clears the deferred switch and persists
   it (`deferred_mode_id ?? currentMode`) so the next session resumes in the
@@ -1220,9 +1236,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
   or the border logic in
   other plugins.
   The subagent extension delegates Pi's native `ToolExecutionComponent.render`
-  and removes only its self-shell leading separator for `subagent` and
-  `subagent_resume`, keeping successive compact agent rows tight without
-  touching Pi's render scheduler or differential state.
+  and keeps its native leading separator for `subagent` and `subagent_resume`
+  so the `Subagents`/`Delegating`/single-agent header gets the same 1-row
+  padding above as every other tool row and never sits flush against the
+  previous transcript block; it drops the separator only for pure-spacer
+  (empty) non-owner members so grouped batches stay tight with no stray blanks
+  below the block, without touching Pi's render scheduler or differential
+  state.
 - Keep read-only modes read-only through their active-tool allowlists.
   Plan and orchestrate include `SUBAGENT_DELEGATION_TOOLS`; code mode does
   not. Plan mode is Scout-only for exploration (`subagent-policy.ts` SSOT:

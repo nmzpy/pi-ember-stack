@@ -538,9 +538,16 @@ export function thinking_status_terminal_layout(host: "widget" | "in_message" | 
 	padBelow: number;
 } {
 	if (host === "compact") return { padAbove: 0, padBelow: 0 };
-	// External Thinking (above-editor widget and in-message bubble) share
-	// one blank row above the gradient label so the header has the same visual
-	// weight and does not jump when the host switches.
+	// External Thinking must render the SAME row structure on both hosts so
+	// the widget -> in-message switch never moves the gradient label:
+	// - in-message: one blank row above the label inside the transcript; the
+	//   empty widget container's own spacer supplies the blank row below.
+	// - widget: Pi's widget container ALWAYS prepends its own leading
+	//   Spacer(1) before the widget, so the widget must NOT add a second
+	//   blank above — that extra row is the visible 1-row jump on send. It
+	//   adds the blank below instead, mirroring the empty container spacer.
+	// Both hosts end up rendering [blank][Thinking][blank] in the same rows.
+	if (host === "widget") return { padAbove: 0, padBelow: 1 };
 	return { padAbove: 1, padBelow: 0 };
 }
 
