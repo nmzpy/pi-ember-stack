@@ -41,7 +41,7 @@ export {
 } from "./model-variants.ts";
 
 /** Footer inset (columns) on each side. SSOT for the bottom footer inset. */
-const FOOTER_INSET = 1;
+const FOOTER_INSET = 0;
 
 const FOOTER_STATUS_KEY = "pi-ember-ui-footer";
 
@@ -226,7 +226,6 @@ export function installEmberFooter(ctx: any): void {
 				const PAD = " ".repeat(FOOTER_INSET);
 				const innerWidth = Math.max(0, width - FOOTER_INSET * 2);
 				const stats = footerStatsCache;
-				const totalCost = stats?.totalCost ?? 0;
 				const latestCacheHitRate = stats?.latestCacheHitRate;
 				const contextWindow = stats?.contextWindow ?? 0;
 				const usedTokens = stats?.contextTokens;
@@ -241,14 +240,11 @@ export function installEmberFooter(ctx: any): void {
 				const cwd = sessionManager.getCwd();
 				const folderName = cwd.split(/[/\\]/).filter(Boolean).pop() ?? cwd;
 
-				// --- Left side: folder • context/cache/cost tps ---
+				// --- Left side: folder • context/cache tps ---
 				const statsParts: string[] = [];
 				statsParts.push(`${usedLabel}/${formatTokens(contextWindow)}`);
 				if (latestCacheHitRate !== undefined) {
 					statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-				}
-				if (totalCost || (model && modelRegistry?.isUsingOAuth?.(model))) {
-					statsParts.push(`$${totalCost.toFixed(3)}`);
 				}
 				const tps = getLiveTps();
 				const tps_opacity = getLiveTpsOpacity();

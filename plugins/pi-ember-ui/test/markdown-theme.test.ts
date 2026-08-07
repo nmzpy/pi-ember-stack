@@ -102,12 +102,11 @@ describe("live Markdown headings", () => {
 		const code_theme = make_theme("code");
 		const plan_theme = make_theme("plan");
 		const orchestrate_theme = make_theme("orchestrate");
-		// mdHeading / mdListBullet are mode-independent MUTED_COLOR — same ANSI
-		// in every mode. The live-theme patch must still resolve headings through
-		// the live Theme (not a construction-time closure).
+		// mdHeading uses the green diff/success color; mdListBullet stays muted.
+		// The live-theme patch must still resolve headings through the live Theme.
 		expect(code_theme.getFgAnsi("mdHeading")).toBe(plan_theme.getFgAnsi("mdHeading"));
 		expect(code_theme.getFgAnsi("mdListBullet")).toBe(plan_theme.getFgAnsi("mdListBullet"));
-		expect(code_theme.getFgAnsi("mdHeading")).toBe(code_theme.getFgAnsi("muted"));
+		expect(code_theme.getFgAnsi("mdHeading")).toBe(code_theme.getFgAnsi("success"));
 		expect(code_theme.getFgAnsi("mdListBullet")).toBe(code_theme.getFgAnsi("muted"));
 
 		const markdown = new Markdown("# Live heading", 0, 0, make_markdown_theme(code_theme));

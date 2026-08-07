@@ -12,15 +12,14 @@ import {
 } from "../pi-ember-applypatch/display.ts";
 import { get_gradient_phase, render_gradient } from "../pi-ember-ui/gradient.ts";
 import {
-	format_thinking_pass_elapsed_suffix,
+	formatElapsed,
 	MUTED_GROUP_GRADIENT_PRESET,
 	requestTuiRender,
-	reset_thinking_pass_timer,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
 import { isThinkingBlocksHidden } from "../pi-ember-ui/mode-colors.ts";
-import { format_in_group_thinking_row } from "../pi-ember-ui/thinking-status-render.ts";
+import { format_in_group_thinking_row, THINKING_ELAPSED_MIN_MS } from "../pi-ember-ui/thinking-status-render.ts";
 import { bashGrepInfo } from "./bash-grep.ts";
 import { BULLET, CompactGroupText } from "./compact-text.ts";
 /** Kept for test imports but no longer used — different tool names fold immediately. */
@@ -186,6 +185,8 @@ export type DiscoveryGroup = {
 	 * Thinking label in the single child row slot (replacing tool rows).
 	 */
 	thinkingChild?: boolean;
+	/** Fresh monotonic start of the in-group Thinking lane. */
+	thinkingPassStartedAt?: number;
 	/**
 	 * Cached header + child-row text (NO thinking lane) for the 20 FPS tick.
 	 * Valid only while `staticTextValid` is true. The tick rebuilds just the
@@ -696,9 +697,18 @@ function renderRunningGradient(text: string): string {
 	return render_gradient(text, MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase());
 }
 
-/** Gradient Thinking child row under a settled group header — SSOT with the status label. */
-function formatGroupThinkingChildRow(theme: ThemeLike): string {
-	return format_in_group_thinking_row(format_thinking_pass_elapsed_suffix(theme));
+/** In-group child lane � `Thinking` with a fresh elapsed timer
+ *  local to each in-group lane appearance. */
+function formatGroupThinkingChildRow(group: DiscoveryGroup, theme: ThemeLike): string {
+	return format_in_group_thinking_row(group_thinking_elapsed_suffix(group, theme));
+}
+
+function group_thinking_elapsed_suffix(group: DiscoveryGroup, theme: ThemeLike): string {
+	const start = group.thinkingPassStartedAt ?? 0;
+	if (start <= 0) return "";
+	const elapsed = performance.now() - start;
+	if (elapsed < THINKING_ELAPSED_MIN_MS) return "";
+	return theme.fg("dim", ` ${formatElapsed(elapsed)}`);
 }
 
 /** Present-tense child verb for absorb+linger rows (SSOT for compact + cursor). */
@@ -1242,7 +1252,7 @@ function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
 	group.staticText = staticText;
 	group.staticTextValid = true;
 	if (group.thinkingChild && isThinkingBlocksHidden()) {
-		return `${staticText}\n${formatGroupThinkingLane(theme)}`;
+		return `${staticText}\n${formatGroupThinkingLane(group, theme)}`;
 	}
 	return staticText;
 }
@@ -1273,8 +1283,8 @@ function buildGroupStaticText(group: DiscoveryGroup, theme: ThemeLike): string {
 }
 
 /** The single in-group `└ Thinking` lane row — the only per-tick dynamic part. */
-function formatGroupThinkingLane(theme: ThemeLike): string {
-	return theme.fg("dim", GROUP_CHILD_LAST) + formatGroupThinkingChildRow(theme);
+function formatGroupThinkingLane(group: DiscoveryGroup, theme: ThemeLike): string {
+	return theme.fg("dim", GROUP_CHILD_LAST) + formatGroupThinkingChildRow(group, theme);
 }
 
 /** Edit/write +N -N suffix for grouped child rows — SSOT for compact + cursor. */
@@ -1637,17 +1647,13 @@ export class CompactRenderer {
 		if (group.migrateAnchorOnNextWave) return;
 		this.currentGroup = group;
 		if (isThinkingBlocksHidden()) {
-			const entering_thinking_lane = !group.thinkingChild;
 			// Thinking never folds prior tool children — the `└ Thinking` lane
 			// appends after lingering tool rows. Children fold only on a
 			// genuinely new tool wave (different tool name) or a hard boundary.
 			this.setThinkingChild(group, true);
 			group.settled = true;
-			// Reset the pass timer whenever the in-group lane first appears so the
-			// elapsed reflects the current thinking pass, not the whole turn.
-			if (entering_thinking_lane) {
-				reset_thinking_pass_timer();
-			}
+			// Start a fresh in-group thinking timer every time the lane appears.
+			group.thinkingPassStartedAt = performance.now();
 		}
 		this.reopenGroupKey = group.key;
 		this.refreshGroupInPlace(group);
@@ -1887,7 +1893,7 @@ export class CompactRenderer {
 			// Static prefix cache hit: only the `└ Thinking` lane (gradient label
 			// + elapsed suffix) is dynamic, so rebuild just that row instead of
 			// re-baking the header and every child row every 50 ms.
-			next = lane_active ? `${group.staticText}\n${formatGroupThinkingLane(theme)}` : group.staticText;
+			next = lane_active ? `${group.staticText}\n${formatGroupThinkingLane(group, theme)}` : group.staticText;
 		} else {
 			next = formatGroup(group, theme);
 		}

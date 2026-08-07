@@ -59,6 +59,7 @@ import {
 	set_gradient_render_request,
 	shutdown_gradient_clock,
 	stop_all_gradient_animation,
+	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
 import {
@@ -102,6 +103,7 @@ import {
 	setPlanAutoContinuing,
 	setShellMode,
 	setThinkingBlocksHidden,
+	set_thinking_stream_active,
 	setToolGroupActive,
 	setTurnToolTranscriptActive,
 	setUserBashRunning,
@@ -634,10 +636,10 @@ export function should_suppress_thinking_header_for_stream_event(ev: {
 	if (ev.type === "text_delta") {
 		const delta = typeof ev.delta === "string" ? ev.delta : "";
 		if (delta.trim().length === 0) return false;
-		// Hidden thinking: the placeholder is a stand-in for reasoning, so the
-		// first visible answer text replaces it. Visible thinking: the reasoning
-		// block owns the slot; answer text does not suppress the placeholder.
-		return isThinkingBlocksHidden();
+		// Any non-empty visible model output (answer, commentary, plan text)
+		// kills the gradient Thinking header; reasoning owns the slot only when
+		// a real thinking stream is active.
+		return true;
 	}
 	return false;
 }
@@ -993,6 +995,7 @@ function installShellModeInputListener(ctx: ExtensionContext): void {
 
 function stopThinkingAnimation(): void {
 	thinkingActive = false;
+	set_thinking_stream_active(false);
 	refresh_thinking_status();
 }
 
@@ -1009,6 +1012,7 @@ export function reset_thinking_header_session_state(): void {
 	setAgentRunPending(false);
 	setUserTurnCommitted(false);
 	resetToolExecutionInFlight();
+	set_thinking_stream_active(false);
 }
 
 /** Test seam: clear leaked thinking-header module state between unit tests. */
@@ -1061,6 +1065,7 @@ export function arm_pre_token_thinking_status(): void {
 
 function startThinkingAnimation(): void {
 	thinkingActive = true;
+	set_thinking_stream_active(true);
 	// Stream start is not a new header — keep elapsed time from arm_pre_token.
 	// Never reset an already-armed pass timer; the user-sent turn timer is the
 	// single source of truth for the visible Thinking header.
@@ -1500,8 +1505,8 @@ function render_shell_aware_editor(
 
 	const pad = " ".repeat(INSET);
 	const innerPadStr = " ".repeat(innerPad);
-	const promptGlyph = isShellMode() || isUserBashRunning() ? "!" : ">";
-	const promptStr = border(`${promptGlyph} `);
+	const promptGlyph = isShellMode() || isUserBashRunning() ? "!" : "\u276d";
+	const promptStr = border(promptGlyph);
 	const gutter = "  ";
 	const fit = (s: string): string => fit_terminal_content_line(s, width);
 	const padRule = (s: string): string => pad_terminal_rule_line(s, width);
@@ -2419,9 +2424,11 @@ function drop_logo_tick(): void {
 
 function startLogoAnimation(): void {
 	logo_settled_by_user_message = false;
-	logoAnimating = false;
-	logoStatic = true;
+	logoAnimating = true;
+	logoStatic = false;
 	drop_logo_tick();
+	logo_tick_cb = () => requestRender?.();
+	subscribe_gradient_tick(logo_tick_cb);
 }
 
 function stopLogoAnimation(): void {

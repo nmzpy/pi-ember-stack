@@ -110,6 +110,7 @@ export function setTurnToolTranscriptActive(active: boolean): void {
 /** Agent-run pending flag — globalThis so jiti module duplication cannot desync wait state. */
 const AGENT_RUN_PENDING_KEY = Symbol.for("pi-ember-ui:agent-run-pending");
 const USER_TURN_COMMITTED_KEY = Symbol.for("pi-ember-ui:user-turn-committed");
+const THINKING_STREAM_ACTIVE_KEY = Symbol.for("pi-ember-ui:thinking-stream-active");
 const USER_TURN_ANCHOR_TIMESTAMP_KEY = Symbol.for("pi-ember-ui:user-turn-anchor-timestamp");
 const TOOL_EXECUTION_IN_FLIGHT_KEY = Symbol.for("pi-ember-ui:tool-execution-in-flight");
 const PENDING_TOOL_CALL_IDS_KEY = Symbol.for("pi-ember-ui:pending-tool-call-ids");
@@ -147,6 +148,15 @@ export function setUserTurnAnchorTimestamp(timestamp: number | undefined): void 
 	} else {
 		(globalThis as GlobalThis)[USER_TURN_ANCHOR_TIMESTAMP_KEY] = timestamp;
 	}
+}
+
+/** Whether a real assistant `thinking_*` stream is currently active. */
+export function is_thinking_stream_active(): boolean {
+	return (globalThis as GlobalThis)[THINKING_STREAM_ACTIVE_KEY] === true;
+}
+
+export function set_thinking_stream_active(active: boolean): void {
+	(globalThis as GlobalThis)[THINKING_STREAM_ACTIVE_KEY] = active;
 }
 
 export function isUserTurnCommitted(): boolean {
@@ -543,8 +553,8 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 	const accent75 = blendToHex(accentHex, PAGE_BG, 0.75);
 	const accentDesat = blendToHex(accentHex, TEXT_COLOR, 0.8);
 
-	// Markdown chrome tokens stay non-mode-colored:
-	// - mdHeading / mdListBullet ("1." / "-") use MUTED_COLOR
+	// Markdown chrome tokens: mdHeading uses the new green diff color; list
+	// bullets stay muted so ordered/unordered markers do not compete with text.
 	// mdLink follows the live mode accent via accent90.
 
 	return {
@@ -554,7 +564,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		borderAccent: accent90,
 		customMessageLabel: accent90,
 		toolTitle: accentDesat,
-		mdHeading: MUTED_COLOR,
+		mdHeading: "#2af0a8",
 		mdListBullet: MUTED_COLOR,
 		mdLink: accent90,
 
@@ -575,7 +585,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		thinkingMax: accent90,
 
 		// Non-accent tokens (same as ember.json)
-		success: "#b5bd68",
+		success: "#2af0a8",
 		error: "#cc6666",
 		warning: "#ffff00",
 		muted: MUTED_COLOR,
@@ -586,12 +596,12 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		customMessageText: TEXT_COLOR,
 		toolOutput: MUTED_COLOR,
 		mdLinkUrl: "#666666",
-		mdCodeBlock: "#b5bd68",
+		mdCodeBlock: "#2af0a8",
 		mdCodeBlockBorder: MUTED_COLOR,
 		mdQuote: MUTED_COLOR,
 		mdQuoteBorder: MUTED_COLOR,
 		mdHr: MUTED_COLOR,
-		toolDiffAdded: "#b5bd68",
+		toolDiffAdded: "#2af0a8",
 		toolDiffRemoved: "#cc6666",
 		toolDiffContext: MUTED_COLOR,
 		syntaxComment: "#6A9955",
@@ -603,7 +613,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		syntaxType: "#4EC9B0",
 		syntaxOperator: TEXT_COLOR,
 		syntaxPunctuation: TEXT_COLOR,
-		bashMode: "#b5bd68",
+		bashMode: "#2af0a8",
 	};
 }
 
