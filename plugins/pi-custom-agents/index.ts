@@ -1110,7 +1110,11 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					queueMicrotask(() => requestTuiRender());
 				}
 			};
-			wrapModelPickerEditor(editor, pi, ctx);
+			wrapModelPickerEditor(
+				editor as unknown as Parameters<typeof wrapModelPickerEditor>[0],
+				pi,
+				ctx,
+			);
 			return editor;
 		});
 		thinking_editor_installed = true;

@@ -315,6 +315,93 @@ type BlankRowProbeNode = {
 	contentContainer?: { children?: BlankRowProbeNode[] };
 };
 
+/** Structural cast of a Pi class prototype for monkey-patching — the ONE
+ *  sanctioned escape hatch (AGENTS.md allows `any` only where Pi's dynamic
+ *  extension API makes it unavoidable; this keeps every patch site typed). */
+type PatchableProto<T> = T & Record<PropertyKey, unknown>;
+
+function patchableProto<T>(ctor: { prototype: T }): PatchableProto<T> {
+	return ctor.prototype as unknown as PatchableProto<T>;
+}
+
+/** Runtime member shape of a patched AssistantMessageComponent. */
+type AssistantMessagePatchHost = {
+	_emberThinkingStatus?: { messageTimestamp?: number; invalidate?: () => void };
+	_emberContentMessage?: unknown;
+	_emberContentKey?: string;
+	_emberRenderBodyCache?: string[];
+	_emberRenderBodyCacheKey?: string;
+	_emberMarkdownThemeBase?: MarkdownTheme;
+	_emberMarkdownTheme?: MarkdownTheme;
+	message?: { timestamp?: number };
+	lastMessage?: { timestamp?: number };
+	hideThinkingBlock: boolean;
+	outputPad: number;
+	markdownTheme: MarkdownTheme;
+	contentContainer: { clear(): void; addChild(child: unknown): void };
+	hasToolCalls: boolean;
+};
+
+/** Runtime member shape of a patched Text (ExpandableText) prototype. */
+type TextPatchHost = {
+	text?: string;
+	getCollapsedText?: () => string;
+	getExpandedText?: () => string;
+};
+
+/** Runtime member shape of a patched InteractiveMode prototype. */
+type InteractiveModePatchHost = {
+	chatContainer: { children: unknown[]; addChild(child: unknown): void };
+	lastStatusText?: { setText(text: string): void };
+	lastStatusSpacer?: unknown;
+	lastStatus?: unknown;
+	activeStatusIndicator?: CompactionStatusIndicatorLike;
+	ui?: { requestRender(): void };
+};
+
+/** Structural prototype surface for InteractiveMode patches. The members are
+ *  private or untyped on Pi's class; the `Record` index covers reads/writes
+ *  and the patch markers. Originals are cast to local function types at the
+ *  read sites (never `any`). */
+type InteractiveModePatchProto = Record<PropertyKey, unknown>;
+
+/** Runtime member shape of a patched BashExecutionComponent prototype. */
+type BashExecutionPatchHost = {
+	status?: string;
+	command?: string;
+	contentContainer?: { children?: unknown[] };
+};
+
+/** Structural prototype surface for the Bash execution patch. */
+type BashExecutionPatchProto = Record<PropertyKey, unknown>;
+
+/** Runtime member shape of a patched UserMessageComponent prototype. */
+type UserMessagePatchHost = {
+	outputPad: number;
+	text?: string;
+	markdownTheme: MarkdownTheme;
+	addChild(child: unknown): void;
+	clear(): void;
+};
+
+/** Structural prototype surface for the UserMessage patch. */
+type UserMessagePatchProto = Record<PropertyKey, unknown>;
+
+/** Runtime member shape of a patched CompactionSummaryMessageComponent. */
+type CompactionSummaryPatchHost = {
+	message?: { isError?: boolean; tokensBefore?: number; summary?: string };
+	expanded: boolean;
+	markdownTheme: MarkdownTheme;
+	paddingX: number;
+	paddingY: number;
+	setBgFn(fn: unknown): void;
+	addChild(child: unknown): void;
+	clear(): void;
+};
+
+/** Structural prototype surface for the CompactionSummary patch. */
+type CompactionSummaryPatchProto = Record<PropertyKey, unknown>;
+
 /** Runtime shape of Pi's compaction status indicator read by the patch. */
 type CompactionStatusIndicatorLike = {
 	kind?: string;
@@ -402,7 +489,10 @@ export function build_thinking_status_row_text(host: "widget" | "in_message"): s
 /** Keep the thinking gradient clock aligned with visible Thinking UI. */
 export function sync_thinking_gradient_clock(): void {
 	const external_should_run = thinking_status_should_show();
-	const group_should_run = isGroupThinkingChildActive();
+	// The live renderer O(1) counter is authoritative; the synced flag is a
+	// secondary (same value when instances agree).
+	const group_should_run =
+		getSharedRenderer().hasAnyGroupThinkingChild() || isGroupThinkingChildActive();
 	if (external_should_run || group_should_run) {
 		activate_gradient("thinking");
 	} else {
@@ -437,11 +527,14 @@ export function lingering_tool_children_visible_for_tests(): boolean {
 
 /** In-group `└ Thinking` owns the status slot when the live compact
  *  group is actually painting that row (renderer SSOT — not the synced flag).
- *  With blocks hidden, ANY armed/painted lane (synced flag scans all renderer
- *  groups) wins the slot unconditionally — a painted lane that outlives the
- *  currentGroup pointer must still suppress the external hosts. */
+ *  With blocks hidden, ANY armed/painted lane (the renderer's O(1) counter)
+ *  wins the slot unconditionally — a painted lane that outlives the
+ *  currentGroup pointer must still suppress the external hosts. The live
+ *  renderer check runs FIRST so a stale synced flag (jiti module duplication)
+ *  can never open the external header beside the lane. */
 export function compact_thinking_lane_owns_status(): boolean {
 	if (!isThinkingBlocksHidden()) return false;
+	if (getSharedRenderer().hasAnyGroupThinkingChild()) return true;
 	if (isGroupThinkingChildActive()) return true;
 	if (!isTurnToolTranscriptActive()) return false;
 	if (getSharedRenderer().hasGroupThinkingChild()) return true;
@@ -451,10 +544,12 @@ export function compact_thinking_lane_owns_status(): boolean {
 /** SSOT: mutually exclusive surface for the gradient Thinking row. */
 export function resolve_thinking_status_host(): "in_message" | "widget" | null {
 	if (!thinking_status_should_show()) return null;
-	// Hidden blocks + any armed/painted in-group `└ Thinking` lane: the compact
-	// group owns the slot. Defense in depth — the synced flag is scan-based so
-	// even a painted lane that outlives the currentGroup pointer suppresses the
-	// external hosts (widget AND in-message) instead of duplicating Thinking.
+	// Hidden blocks + ANY armed/painted in-group `└ Thinking` lane: the compact
+	// group owns the slot. Defense in depth — the live renderer O(1) counter is
+	// authoritative (the renderer that paints the lane IS the renderer we
+	// query), so even a stale synced flag or jiti module duplication can never
+	// open the external hosts (widget AND in-message) beside the lane.
+	if (getSharedRenderer().hasAnyGroupThinkingChild()) return null;
 	if (isGroupThinkingChildActive()) return null;
 	// A live compact group (running tool wave, lingering children, or settled
 	// Thinking lane) owns the slot. External hosts paint only when the
@@ -475,10 +570,12 @@ export function is_pre_tool_thinking_gap(): boolean {
 /** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
-	// Hidden blocks + any armed/painted in-group `└ Thinking` lane: the compact
+	// Hidden blocks + ANY armed/painted in-group `└ Thinking` lane: the compact
 	// group owns the slot. This gate runs BEFORE the pre-tool early return so
-	// the external hosts never paint while the lane is on screen — the synced
-	// flag scans all renderer groups, not just the live currentGroup.
+	// the external hosts never paint while the lane is on screen. The live
+	// renderer O(1) counter is authoritative — immune to stale synced flags and
+	// jiti module duplication across importer chains.
+	if (getSharedRenderer().hasAnyGroupThinkingChild()) return false;
 	if (isGroupThinkingChildActive()) return false;
 	// A streamed/announced tool call is deterministic work intent. Hide Thinking
 	// from the first toolcall_start, before Pi emits tool_execution_start.
@@ -820,7 +917,7 @@ export function requestTuiRenderFromEditor(editor: { tui?: { requestRender?: () 
  */
 export function requestShellModeVisualRefresh(
 	editor: { tui?: { requestRender?: () => void } },
-	ctx?: any,
+	ctx?: ExtensionContext,
 ): void {
 	requestTuiRenderFromEditor(editor);
 	if (ctx?.mode === "tui") {
@@ -1468,14 +1565,17 @@ function render_shell_aware_editor(
 }
 
 function installAssistantMessagePatch(): void {
-	const proto = (AssistantMessageComponent as any).prototype;
+	const proto = patchableProto(AssistantMessageComponent);
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 
-	const assistantPrototype = (AssistantMessageComponent as any).prototype;
+	const assistantPrototype = patchableProto(AssistantMessageComponent);
 	const originalSetHideThinkingBlock = assistantPrototype.setHideThinkingBlock;
 	if (typeof originalSetHideThinkingBlock === "function") {
-		assistantPrototype.setHideThinkingBlock = function (this: any, hide: boolean): void {
+		assistantPrototype.setHideThinkingBlock = function (
+			this: AssistantMessagePatchHost,
+			hide: boolean,
+		): void {
 			const next_hidden = hide === true;
 			const prev_hidden = isThinkingBlocksHidden();
 			if (prev_hidden === next_hidden) {
@@ -1500,7 +1600,10 @@ function installAssistantMessagePatch(): void {
 		};
 	}
 
-	assistantPrototype.updateContent = function (this: any, message: AssistantMessage): void {
+	assistantPrototype.updateContent = function (
+		this: AssistantMessagePatchHost,
+		message: AssistantMessage,
+	): void {
 		const msgTimestamp = typeof message?.timestamp === "number" ? message.timestamp : undefined;
 		if (
 			msgTimestamp !== undefined &&
@@ -1666,7 +1769,10 @@ function installAssistantMessagePatch(): void {
 
 	const originalRender = assistantPrototype.render;
 	if (typeof originalRender === "function") {
-		assistantPrototype.render = function (this: any, width: number): string[] {
+		assistantPrototype.render = function (
+			this: AssistantMessagePatchHost,
+			width: number,
+		): string[] {
 			const cacheKey = `${this._emberContentKey ?? ""}|${width}`;
 			if (!this._emberRenderBodyCache || this._emberRenderBodyCacheKey !== cacheKey) {
 				this._emberRenderBodyCache = originalRender.call(this, width) as string[];
@@ -1708,11 +1814,11 @@ function installAssistantMessagePatch(): void {
  *  ANSI-stripped visible text against the stripped collapsed/expanded
  *  getter outputs. */
 function installExpandableTextPatch(): void {
-	const proto = (Text as any).prototype;
+	const proto = patchableProto(Text);
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 	const originalInvalidate = proto.invalidate;
-	proto.invalidate = function (this: any): void {
+	proto.invalidate = function (this: TextPatchHost): void {
 		originalInvalidate?.call(this);
 		if (typeof this.getCollapsedText !== "function" || typeof this.getExpandedText !== "function") {
 			return;
@@ -1731,7 +1837,7 @@ function installExpandableTextPatch(): void {
  * should only show the normal context/skills/extensions/themes summary.
  */
 function installUpdateNotificationPatch(): void {
-	const proto = (InteractiveMode as any).prototype;
+	const proto = InteractiveMode.prototype as unknown as InteractiveModePatchProto;
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 
@@ -1758,11 +1864,16 @@ function installUpdateNotificationPatch(): void {
 		return false;
 	}
 
-	const originalShowStatus = proto.showStatus;
-	proto.showStatus = function emberShowStatus(this: any, message: string): void {
+	const originalShowStatus = proto.showStatus as
+		| ((this: InteractiveModePatchHost, message: string) => void)
+		| undefined;
+	proto.showStatus = function emberShowStatus(
+		this: InteractiveModePatchHost,
+		message: string,
+	): void {
 		const theme = resolve_live_theme();
 		if (!theme || !this.chatContainer) {
-			originalShowStatus.call(this, message);
+			originalShowStatus?.call(this, message);
 			return;
 		}
 
@@ -1782,8 +1893,8 @@ function installUpdateNotificationPatch(): void {
 				sessionEndStatusPending,
 			)
 		) {
-			this.lastStatusText.setText(theme.fg("dim", message));
-			this.ui.requestRender();
+			this.lastStatusText?.setText(theme.fg("dim", message));
+			this.ui?.requestRender();
 			return;
 		}
 
@@ -1791,7 +1902,7 @@ function installUpdateNotificationPatch(): void {
 		// one explicit row above it even when the preceding transcript component
 		// already ends in a blank row; ordinary status messages retain the native
 		// compact spacing behavior.
-		if (status_requires_leading_spacer(component_ends_with_blank_row(last))) {
+		if (status_requires_leading_spacer(component_ends_with_blank_row(last as BlankRowProbeNode | undefined))) {
 			const spacer = new Spacer(1);
 			this.chatContainer.addChild(spacer);
 			this.lastStatusSpacer = spacer;
@@ -1802,7 +1913,7 @@ function installUpdateNotificationPatch(): void {
 		const text = new Text(theme.fg("dim", message), 1, 0);
 		this.chatContainer.addChild(text);
 		this.lastStatusText = text;
-		this.ui.requestRender();
+		this.ui?.requestRender();
 	};
 
 	// Suppress version and package update notices entirely. The startup screen
@@ -1841,11 +1952,13 @@ const COMPACTION_TRANSCRIPT_PATCH_MARKER = Symbol.for("pi-ember-ui:compaction-tr
 
 /** Chronological compaction transcript + skip Pi's redundant compaction_end append. */
 function installCompactionTranscriptPatch(): void {
-	const proto = (InteractiveMode as any).prototype;
+	const proto = InteractiveMode.prototype as unknown as InteractiveModePatchProto;
 	if (proto[COMPACTION_TRANSCRIPT_PATCH_MARKER]) return;
 	proto[COMPACTION_TRANSCRIPT_PATCH_MARKER] = true;
 
-	const original_handle_event = proto.handleEvent;
+	const original_handle_event = proto.handleEvent as
+		| ((...args: unknown[]) => unknown)
+		| undefined;
 
 	proto.rebuildChatFromMessages = function emberRebuildChatFromMessages(this: {
 		chatContainer: { clear(): void };
@@ -1889,7 +2002,7 @@ function installCompactionTranscriptPatch(): void {
 			flushCompactionQueue(options: { willRetry?: boolean }): Promise<void>;
 		},
 		event: { type?: string; result?: unknown; willRetry?: boolean },
-	): Promise<void> {
+	): Promise<unknown> {
 		if (!this.isInitialized) {
 			await this.init();
 		}
@@ -1912,17 +2025,21 @@ function installCompactionTranscriptPatch(): void {
 			requestTuiRender();
 			return;
 		}
-		return original_handle_event.call(this, event);
+		return original_handle_event?.call(this, event);
 	};
 }
 
 function installCompactionStatusPatch(): void {
-	const proto = (InteractiveMode as any).prototype;
+	const proto = InteractiveMode.prototype as unknown as InteractiveModePatchProto;
 	if (proto[STATUS_PATCH_MARKER]) return;
 	proto[STATUS_PATCH_MARKER] = true;
 
-	const originalShowStatusIndicator = proto.showStatusIndicator;
-	const originalClearStatusIndicator = proto.clearStatusIndicator;
+	const originalShowStatusIndicator = proto.showStatusIndicator as
+		| ((indicator: CompactionStatusIndicatorLike) => unknown)
+		| undefined;
+	const originalClearStatusIndicator = proto.clearStatusIndicator as
+		| ((kind?: string) => unknown)
+		| undefined;
 
 	function patch_compaction_status_indicator(indicator: CompactionStatusIndicatorLike): void {
 		if (indicator?.kind !== "compaction") return;
@@ -1945,35 +2062,47 @@ function installCompactionStatusPatch(): void {
 	}
 
 	proto.showStatusIndicator = function emberShowStatusIndicator(
-		this: any,
+		this: InteractiveModePatchHost,
 		indicator: CompactionStatusIndicatorLike,
 	) {
 		if (indicator?.kind === "compaction") {
 			patch_compaction_status_indicator(indicator);
 		}
-		return originalShowStatusIndicator.call(this, indicator);
+		return originalShowStatusIndicator?.call(this, indicator);
 	};
 
-	proto.clearStatusIndicator = function emberClearStatusIndicator(this: any, kind?: string) {
+	proto.clearStatusIndicator = function emberClearStatusIndicator(
+		this: InteractiveModePatchHost,
+		kind?: string,
+	) {
 		const active = this.activeStatusIndicator;
 		const wasCompaction =
 			active?.kind === "compaction" &&
 			(kind === undefined || kind === "compaction" || kind === active.kind);
 		if (wasCompaction) clear_compaction_status_indicator(active);
-		return originalClearStatusIndicator.call(this, kind);
+		return originalClearStatusIndicator?.call(this, kind);
 	};
 }
 
 function installBashExecutionPatch(): void {
-	const proto = (BashExecutionComponent as any).prototype;
+	const proto = BashExecutionComponent.prototype as unknown as BashExecutionPatchProto;
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 
-	const originalRender = proto.render;
-	const originalUpdateDisplay = proto.updateDisplay;
-	const originalSetComplete = proto.setComplete;
+	const originalRender = proto.render as
+		| ((this: BashExecutionPatchHost, width: number) => string[])
+		| undefined;
+	const originalUpdateDisplay = proto.updateDisplay as
+		| ((this: BashExecutionPatchHost) => void)
+		| undefined;
+	const originalSetComplete = proto.setComplete as
+		| ((...args: unknown[]) => void)
+		| undefined;
 
-	proto.setComplete = function emberBashSetComplete(this: any, ...args: unknown[]): void {
+	proto.setComplete = function emberBashSetComplete(
+		this: BashExecutionPatchHost,
+		...args: unknown[]
+	): void {
 		if (typeof originalSetComplete === "function") {
 			originalSetComplete.apply(this, args);
 		}
@@ -1981,13 +2110,13 @@ function installBashExecutionPatch(): void {
 		requestRender?.();
 	};
 
-	proto.updateDisplay = function emberBashUpdateDisplay(this: any): void {
+	proto.updateDisplay = function emberBashUpdateDisplay(this: BashExecutionPatchHost): void {
 		const running = this.status === "running";
 		if (isUserBashRunning() !== running) {
 			setUserBashRunning(running);
 			requestRender?.();
 		}
-		originalUpdateDisplay.call(this);
+		originalUpdateDisplay?.call(this);
 		const theme = resolve_live_theme();
 		if (!theme) return;
 		const status = this.status;
@@ -1999,17 +2128,17 @@ function installBashExecutionPatch(): void {
 					: "text";
 		const header = this.contentContainer?.children?.[0];
 		if (header instanceof Text) {
-			header.setText(`${theme.fg(dollarColor, theme.bold("$"))} ${theme.fg("text", this.command)}`);
+			header.setText(`${theme.fg(dollarColor, theme.bold("$"))} ${theme.fg("text", this.command ?? "")}`);
 		}
 	};
 
-	proto.render = function renderEmberBash(this: any, width: number): string[] {
+	proto.render = function renderEmberBash(this: BashExecutionPatchHost, width: number): string[] {
 		const running = this.status === "running";
 		const theme = resolve_live_theme();
-		if (!theme) return originalRender.call(this, width);
+		if (!theme) return originalRender?.call(this, width) ?? [];
 
 		const innerWidth = Math.max(1, width - 2);
-		const rawLines = originalRender.call(this, innerWidth) as string[];
+		const rawLines = (originalRender?.call(this, innerWidth) ?? []) as string[];
 		return format_ember_bash_transcript_lines(rawLines, width, running);
 	};
 }
@@ -2025,7 +2154,7 @@ export function chatboxBorderColor(text: string): string {
  * background fill. Replaces the old `userMessageBg` block style for user
  * messages and quiz rows.
  */
-export function chatboxBorderContainer(content: any, paddingX = 0): any {
+export function chatboxBorderContainer(content: Component, paddingX = 0): Container {
 	const wrapper = new Container();
 	wrapper.addChild(new DynamicBorder(chatboxBorderColor));
 	const inner = new Box(paddingX, 0, undefined);
@@ -2036,16 +2165,16 @@ export function chatboxBorderContainer(content: any, paddingX = 0): any {
 }
 
 function installUserMessagePatch(): void {
-	const proto = (UserMessageComponent as any).prototype;
+	const proto = UserMessageComponent.prototype as unknown as UserMessagePatchProto;
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 
-	proto.rebuild = function emberUserMessageRebuild(this: any): void {
+	proto.rebuild = function emberUserMessageRebuild(this: UserMessagePatchHost): void {
 		this.outputPad = 1;
 		this.clear();
 		const theme = resolve_live_theme();
 		const markdown = new Markdown(
-			this.text,
+			this.text ?? "",
 			0,
 			0,
 			this.markdownTheme,
@@ -2059,22 +2188,25 @@ function installUserMessagePatch(): void {
 }
 
 function installCompactionSummaryPatch(): void {
-	const proto = (CompactionSummaryMessageComponent as any).prototype;
+	const proto = CompactionSummaryMessageComponent.prototype as unknown as CompactionSummaryPatchProto;
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 
-	proto.updateDisplay = function emberCompactionUpdateDisplay(this: any): void {
+	proto.updateDisplay = function emberCompactionUpdateDisplay(
+		this: CompactionSummaryPatchHost,
+	): void {
 		this.setBgFn(undefined);
 		this.paddingX = 0;
 		this.paddingY = 0;
 		this.clear();
 
 		const theme = resolve_live_theme();
-		const is_error = this.message?.isError === true;
+		const message = this.message;
+		const is_error = message?.isError === true;
 		const row = format_compacted_row(
 			theme,
-			this.message.tokensBefore ?? 0,
-			this.message.summary?.length ?? 0,
+			message?.tokensBefore ?? 0,
+			message?.summary?.length ?? 0,
 			is_error,
 		);
 		const expandKey = globalThis.process?.env?.PI_EXPAND_KEY || "ctrl+o";
@@ -2082,10 +2214,10 @@ function installCompactionSummaryPatch(): void {
 		callText.setText(this.expanded ? row : row + theme.fg("dim", ` (${expandKey} to expand)`));
 		this.addChild(callText);
 
-		if (this.expanded && this.message.summary) {
+		if (this.expanded && message?.summary) {
 			this.addChild(new Spacer(1));
 			this.addChild(
-				new Markdown(this.message.summary, 0, 0, this.markdownTheme, {
+				new Markdown(message.summary, 0, 0, this.markdownTheme, {
 					color: (text: string) => theme.fg("customMessageText", text),
 				}),
 			);

@@ -337,13 +337,21 @@
   active, when a visible thinking block is actively streaming (`thinkingActive`
   with `!isThinkingBlocksHidden()` — the transcript owns reasoning), or when
   in-group `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). The
-  `groupThinkingChildActive` flag is **scan-based**: `sync_compact_group_flags`
-  sets it from `CompactRenderer.hasAnyGroupThinkingChild()` (any armed/painted
-  lane across all renderer groups, including a painted lane that outlives the
-  `currentGroup` pointer), and `thinking_status_should_show()` /
-  `resolve_thinking_status_host()` gate on it BEFORE the pre-tool early return
-  — so with blocks hidden a painted in-group lane unconditionally suppresses
-  the external widget AND in-message host, never a duplicate Thinking row. The
+  `groupThinkingChildActive` flag is **O(1) counter-backed and globalThis-stored**
+  (`Symbol.for("pi-ember-ui:group-thinking-child-active")`, same pattern as
+  `isThinkingBlocksHidden`/`agentRunPending` — jiti module duplication across
+  importer chains must never split the writer from the reader or the external
+  header paints beside the in-group lane): `sync_compact_group_flags` sets it
+  from `CompactRenderer.hasAnyGroupThinkingChild()`, which reads an O(1)
+  `thinkingLaneCount` maintained by `setThinkingChild()` at every arm/clear
+  site (any armed/painted lane across all renderer groups, including a painted
+  lane that outlives the `currentGroup` pointer). The render path
+  (`thinking_status_should_show()` / `resolve_thinking_status_host()` /
+  `compact_thinking_lane_owns_status()`) ALSO queries the live renderer
+  `hasAnyGroupThinkingChild()` directly BEFORE the synced flag — O(1), immune
+  to stale flag syncs — so with blocks hidden a painted in-group lane
+  unconditionally suppresses the external widget AND in-message host, never a
+  duplicate Thinking row. The
   `Thinking` placeholder still appears in the pre-token wait and in-message
   pre-output wait while blocks are visible, until the model begins emitting
   visible text or a thinking stream. Nested
@@ -797,7 +805,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
     are removed on settle and session reset. The subscription uses a stable
     callback identity with a mutable invalidate target so Pi rebuilds (which
     provide fresh invalidate closures) rebind the target without churning the
-    subscriber Set.
+    subscriber Set. **The tick rebuilds only the dynamic lane:** the group's
+    header + child rows are cached as `group.staticText` (refreshed by every
+    full `formatGroup` call and invalidated by `fold_group_child_rows`/
+    `appendToGroup`), so `refreshActiveGroupText` re-bakes just the
+    `└ Thinking` lane (gradient label + elapsed suffix) per 50 ms tick —
+    never the whole block. `hasAnyGroupThinkingChild()` is O(1) (a
+    `thinkingLaneCount` counter maintained by `setThinkingChild()`), so the
+    20 FPS render path can query it live without an O(calls) scan.
   - **Owner-only invalidation:** Joining a group invalidates only the
     group owner (one invalidation), not all members. This eliminates
     duplicate-header flicker and extra blank lines. This invalidation

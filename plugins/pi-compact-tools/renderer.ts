@@ -13,7 +13,6 @@ import {
 import { get_gradient_phase, render_gradient } from "../pi-ember-ui/gradient.ts";
 import {
 	format_thinking_pass_elapsed_suffix,
-	is_thinking_pass_timer_armed,
 	MUTED_GROUP_GRADIENT_PRESET,
 	requestTuiRender,
 	reset_thinking_pass_timer,
@@ -187,6 +186,14 @@ export type DiscoveryGroup = {
 	 * Thinking label in the single child row slot (replacing tool rows).
 	 */
 	thinkingChild?: boolean;
+	/**
+	 * Cached header + child-row text (NO thinking lane) for the 20 FPS tick.
+	 * Valid only while `staticTextValid` is true. The tick rebuilds just the
+	 * `└ Thinking` lane instead of re-baking every child row every 50 ms.
+	 */
+	staticText?: string;
+	/** Whether `staticText` is fresh (recomputed by the last full formatGroup). */
+	staticTextValid?: boolean;
 	/**
 	 * Shared visual handle for the group block. The owner re-binds this
 	 * to its live `Text` on every `renderCall`; members write into it
@@ -939,7 +946,7 @@ function formatCallBodyVerb(
 	name: string,
 	args: ToolArgs,
 	theme: ThemeLike,
-	inGroup = false,
+	_inGroup = false,
 	completed = true,
 ): string {
 	// Bash grep calls are searches (counted in the `N searches` header and
@@ -1229,6 +1236,23 @@ function group_status_records(group: DiscoveryGroup): CompactCall[] {
 }
 
 function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
+	const staticText = buildGroupStaticText(group, theme);
+	// Refresh the tick cache: every non-tick path calls formatGroup AFTER
+	// mutating group state, so the cached prefix is always the current one.
+	group.staticText = staticText;
+	group.staticTextValid = true;
+	if (group.thinkingChild && isThinkingBlocksHidden()) {
+		return `${staticText}\n${formatGroupThinkingLane(theme)}`;
+	}
+	return staticText;
+}
+
+/** Header + child rows (NO thinking lane) — cached on the group so the
+ *  20 FPS tick rebuilds only the `└ Thinking` lane instead of re-baking
+ *  every child row every 50 ms. The last-child `├`/`└` prefix depends on
+ *  `thinkingChild`, so arming/clearing the lane (which routes through
+ *  formatGroup) refreshes the cache with the new prefix. */
+function buildGroupStaticText(group: DiscoveryGroup, theme: ThemeLike): string {
 	if (
 		is_multi_patch_group(group) ||
 		(!is_work_group(group) && group.type === "patching" && group.records.length >= 2)
@@ -1245,10 +1269,12 @@ function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
 		const prefix = is_last_child ? GROUP_CHILD_LAST : GROUP_CHILD_TEE;
 		lines.push(theme.fg("dim", prefix) + formatGroupChildRows(row_records, theme));
 	}
-	if (show_thinking) {
-		lines.push(theme.fg("dim", GROUP_CHILD_LAST) + formatGroupThinkingChildRow(theme));
-	}
 	return lines.join("\n");
+}
+
+/** The single in-group `└ Thinking` lane row — the only per-tick dynamic part. */
+function formatGroupThinkingLane(theme: ThemeLike): string {
+	return theme.fg("dim", GROUP_CHILD_LAST) + formatGroupThinkingChildRow(theme);
 }
 
 /** Edit/write +N -N suffix for grouped child rows — SSOT for compact + cursor. */
@@ -1423,6 +1449,9 @@ export function formatGroupChildRows(records: readonly CompactCall[], theme: The
 /** Fold completed tool rows into the group header — SSOT flush boundary. */
 export function fold_group_child_rows(group: DiscoveryGroup): void {
 	group.childAbsorbBefore = group.records.length;
+	// The visible children changed; drop the tick's static-prefix cache so the
+	// next frame re-bakes the header + remaining rows before the lane repaints.
+	group.staticTextValid = false;
 }
 
 export class CompactRenderer {
@@ -1438,6 +1467,14 @@ export class CompactRenderer {
 	/** Stable tick callback — updates component state before Pi's native render. */
 	private groupTickCb: (() => void) | undefined;
 	private groupTickGroup: DiscoveryGroup | undefined;
+	/**
+	 * O(1) count of groups currently painting the in-group `└ Thinking` lane
+	 * (thinkingChild === true). Maintained by {@link setThinkingChild} so
+	 * `hasAnyGroupThinkingChild()` is a cheap counter read — the render path
+	 * (20 FPS widget/in-message host) can query it live without an O(calls)
+	 * scan, immune to stale synced flags or jiti module duplication.
+	 */
+	private thinkingLaneCount = 0;
 	/** Stable tick callback for a standalone running edit/write (single-member
 	 *  work group) so its gradient Editing/Writing verb animates at 20 FPS. */
 	private standaloneTickCb: (() => void) | undefined;
@@ -1479,7 +1516,7 @@ export class CompactRenderer {
 	/** Collapse a group to its past-tense header row only. */
 	private freezeGroup(group: DiscoveryGroup | undefined): void {
 		if (!group || group.records.length === 0) return;
-		group.thinkingChild = false;
+		this.setThinkingChild(group, false);
 		if (!group.settled) group.settled = true;
 		this.refreshGroupVisual(group);
 		this.scheduleGroupInvalidation(group);
@@ -1529,6 +1566,16 @@ export class CompactRenderer {
 		this.hardExitGroup();
 	}
 
+	/** Mutate `group.thinkingChild` keeping the O(1) lane counter in sync.
+	 *  Every arm/clear site must go through here so `hasAnyGroupThinkingChild()`
+	 *  (the render-path gate) can never diverge from the painted lane. */
+	private setThinkingChild(group: DiscoveryGroup, value: boolean): void {
+		const current = group.thinkingChild === true;
+		if (current === value) return;
+		group.thinkingChild = value;
+		this.thinkingLaneCount += value ? 1 : -1;
+	}
+
 	/** Soft boundary: transcript tools that must not spawn a fresh work header
 	 *  after they complete (SSOT: `WORK_GROUP_SOFT_BOUNDARY_TOOLS`). Settles
 	 *  to header-only and keeps `reopenGroupKey` so the next groupable call
@@ -1541,7 +1588,7 @@ export class CompactRenderer {
 		}
 		if (!group || group.records.length < 1) return;
 		this.settleGroups();
-		group.thinkingChild = false;
+		this.setThinkingChild(group, false);
 		if (group.key) this.reopenGroupKey = group.key;
 		group.migrateAnchorOnNextWave = true;
 		this.currentGroup = group;
@@ -1594,7 +1641,7 @@ export class CompactRenderer {
 			// Thinking never folds prior tool children — the `└ Thinking` lane
 			// appends after lingering tool rows. Children fold only on a
 			// genuinely new tool wave (different tool name) or a hard boundary.
-			group.thinkingChild = true;
+			this.setThinkingChild(group, true);
 			group.settled = true;
 			// Reset the pass timer whenever the in-group lane first appears so the
 			// elapsed reflects the current thinking pass, not the whole turn.
@@ -1663,7 +1710,7 @@ export class CompactRenderer {
 		}
 		if (!group || group.records.length < 1) return;
 		if (!group.thinkingChild) return;
-		group.thinkingChild = false;
+		this.setThinkingChild(group, false);
 		// Repaint the shared CompactGroupText synchronously so the row loses the
 		// `└ Thinking` lane in the frame Pi paints for this update, then re-arm
 		// the gradient tick only if a visible child still needs it (a running
@@ -1690,6 +1737,7 @@ export class CompactRenderer {
 		this.currentGroup = undefined;
 		this.reopenGroupKey = undefined;
 		this.pendingGroupInvalidations.clear();
+		this.thinkingLaneCount = 0;
 		this.lastTheme = undefined;
 	}
 
@@ -1742,17 +1790,12 @@ export class CompactRenderer {
 	 *  only): a painted lane that outlives the `currentGroup` pointer (rebuild
 	 *  race, settle/arm ordering) must still suppress the external Thinking
 	 *  hosts — hidden blocks render the lane as the ONE Thinking surface.
-	 *  O(calls); called only from lifecycle flag syncs, never render paths. */
+	 *  O(1): backed by `thinkingLaneCount`, which `setThinkingChild` keeps in
+	 *  sync at every arm/clear site — so the 20 FPS render path can query it
+	 *  LIVE (immune to stale synced flags or jiti module duplication) without
+	 *  an O(calls) scan. */
 	hasAnyGroupThinkingChild(): boolean {
-		if (!isThinkingBlocksHidden()) return false;
-		// The first record of a group has no `record.group` back-pointer until
-		// a second member joins (appendToGroup), so check currentGroup directly
-		// in addition to every record's group.
-		if (this.currentGroup?.thinkingChild === true) return true;
-		for (const record of this.calls.values()) {
-			if (record.group?.thinkingChild === true) return true;
-		}
-		return false;
+		return isThinkingBlocksHidden() && this.thinkingLaneCount > 0;
 	}
 
 	/** Whether the live group still shows lingering tool child rows. */
@@ -1836,7 +1879,18 @@ export class CompactRenderer {
 		const group = this.groupTickGroup;
 		const theme = this.lastTheme;
 		if (!group?.callText || !theme) return false;
-		const next = formatGroup(group, theme);
+		let next: string;
+		const lane_active = group.thinkingChild && isThinkingBlocksHidden();
+		const all_visible_completed =
+			!lane_active || groupVisibleChildren(group).every((record) => record._completed === true);
+		if (group.staticTextValid && group.staticText !== undefined && all_visible_completed) {
+			// Static prefix cache hit: only the `└ Thinking` lane (gradient label
+			// + elapsed suffix) is dynamic, so rebuild just that row instead of
+			// re-baking the header and every child row every 50 ms.
+			next = lane_active ? `${group.staticText}\n${formatGroupThinkingLane(theme)}` : group.staticText;
+		} else {
+			next = formatGroup(group, theme);
+		}
 		if (group.callText.text === next) return false;
 		set_compact_call_text(group, group.callText, next);
 		return true;
@@ -1896,7 +1950,7 @@ export class CompactRenderer {
 			if (!group || seen.has(group)) continue;
 			seen.add(group);
 			if (!blocks_hidden && group.thinkingChild) {
-				group.thinkingChild = false;
+				this.setThinkingChild(group, false);
 				if (!group.settled) group.settled = true;
 			}
 		}
@@ -1919,7 +1973,7 @@ export class CompactRenderer {
 		if (group.records.length < 1 || group.records.some((record) => !record._completed)) return;
 		if (group.thinkingChild) return;
 		if (!group.settled && groupVisibleChildren(group).length === 0) return;
-		group.thinkingChild = true;
+		this.setThinkingChild(group, true);
 		group.settled = true;
 		this.currentGroup = group;
 		this.reopenGroupKey = group.key;
@@ -1995,10 +2049,13 @@ export class CompactRenderer {
 		if (has_visible_children && !repeats_visible_child) {
 			fold_group_child_rows(group);
 		}
-		group.thinkingChild = false;
+		this.setThinkingChild(group, false);
 		group.settled = false;
 		group.records.push(record);
 		record.group = group;
+		// A new child joined — the cached header/child prefix is stale until the
+		// owner re-renders through formatGroup.
+		group.staticTextValid = false;
 		// The group is now multi-member: the group tick owns the gradient
 		// animation, so drop any standalone tick the first member started.
 		if (group.records.length > 1) this.unsubscribeStandaloneTick();

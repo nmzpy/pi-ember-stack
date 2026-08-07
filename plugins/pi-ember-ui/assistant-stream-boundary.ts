@@ -1,5 +1,5 @@
 import type { CompactRenderer } from "../pi-compact-tools/renderer.ts";
-import { isAgentRunPending, isThinkingBlocksHidden, is_work_group_boundary_suppressed } from "./mode-colors.ts";
+import { isThinkingBlocksHidden, is_work_group_boundary_suppressed } from "./mode-colors.ts";
 
 /** Classify assistant stream events that affect compact group boundaries. */
 export function resolve_assistant_stream_boundary_event(ev: {

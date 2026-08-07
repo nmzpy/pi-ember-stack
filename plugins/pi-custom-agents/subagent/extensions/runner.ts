@@ -561,7 +561,7 @@ type FailureMessageTier = "specific" | "parser" | "abort";
  * `abort` is a generic abort/empty message. Specific always outranks generic.
  */
 function failure_message_tier(message: string | undefined): FailureMessageTier {
-	if (!message || !message.trim()) return "abort";
+	if (!message?.trim()) return "abort";
 	if (is_parser_stream_error(message)) return "parser";
 	if (isGenericAbortMessage(message)) return "abort";
 	return "specific";

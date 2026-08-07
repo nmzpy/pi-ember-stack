@@ -15229,7 +15229,7 @@ export const ControlService: GenService<{
  *
  * @generated from service agent.v1.ExecService
  */
-export const ExecService: GenService<{}> = /*@__PURE__*/ serviceDesc(file_agent, 2);
+export const ExecService: GenService<Record<string, never>> = /*@__PURE__*/ serviceDesc(file_agent, 2);
 
 /**
  * @generated from service agent.v1.PrivateWorkerBridgeExternalService

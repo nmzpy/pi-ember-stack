@@ -903,7 +903,7 @@ export function childTreePrefix(
 	isLastChild = true,
 ): string {
 	if (!hasHeader) {
-		return "  " + (isLastChild ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE);
+		return `  ${isLastChild ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE}`;
 	}
 	const outer = SUBAGENT_TREE_INDENT + (agentIndex < agentCount - 1 ? "│" : " ");
 	const inner = isLastChild ? "└" : "│";

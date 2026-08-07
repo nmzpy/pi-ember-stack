@@ -203,6 +203,15 @@ type ModelPickerEditor = {
 	autocompleteProvider?: unknown;
 };
 
+/** Editor surface the picker wrap patches: required members bound
+ *  unconditionally plus the dynamic per-instance symbol key. */
+type WrappedPickerEditor = ModelPickerEditor &
+	Record<symbol, unknown> & {
+		handleInput: (data: string) => void;
+		requestAutocomplete: (options?: { force?: boolean; explicitTab?: boolean }) => void;
+		submitValue: () => void;
+	};
+
 let model_picker_ctx: ExtensionContext | undefined;
 let model_picker_pi: ExtensionAPI | undefined;
 let live_editor: ModelPickerEditor | undefined;
@@ -273,7 +282,7 @@ function open_slash_autocomplete(
 }
 
 /** Open /resume session argument autocomplete (chat-pill). */
-export function open_resume_autocomplete(editor: any, initialSearch = ""): void {
+export function open_resume_autocomplete(editor: ModelPickerEditor, initialSearch = ""): void {
 	void refresh_session_cache({ force: true });
 	open_slash_autocomplete(editor, RESUME_PREFIX, initialSearch);
 }
@@ -717,7 +726,7 @@ export function should_auto_submit_resume_text(text: string): boolean {
 
 /** Outermost editor wrap — call from pi-custom-agents editor factory after other wraps. */
 export function wrap_model_picker_editor(
-	editor: any,
+	editor: WrappedPickerEditor,
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 ): void {
@@ -1071,7 +1080,7 @@ function install_model_picker_prototype_patches(): void {
 			return;
 		}
 		if (kb.matches(data, "app.session.resume")) {
-			open_resume_autocomplete(this);
+			open_resume_autocomplete(this as unknown as ModelPickerEditor);
 			return;
 		}
 		originalCustomHandleInput.call(this, data);

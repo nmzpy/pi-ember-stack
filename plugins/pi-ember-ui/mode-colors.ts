@@ -297,41 +297,54 @@ export function setLatestSubagentRunning(active: boolean): void {
 	(globalThis as GlobalThis)[LATEST_SUBAGENT_RUNNING_KEY] = active;
 }
 
-let toolGroupActive = false;
+const TOOL_GROUP_ACTIVE_KEY = Symbol.for("pi-ember-ui:tool-group-active");
 
 /**
  * Whether any compact tool group (Exploring, Editing, Writing, or Bashing) currently has at
  * least one running member. Set by pi-compact-tools lifecycle handlers for
  * shared group state and gradient rendering.
+ *
+ * Stored on `globalThis` via `Symbol.for` (same pattern as
+ * `isThinkingBlocksHidden` / `agentRunPending`): the flag is written by
+ * `pi-compact-tools/group-flags.ts` and read by `pi-ember-ui/index.ts`
+ * through different importer chains; a module-level `let` would let one
+ * instance set the flag while another instance (the one the Thinking
+ * predicates read) stays stale.
  */
 export function isToolGroupActive(): boolean {
-	return toolGroupActive;
+	return (globalThis as GlobalThis)[TOOL_GROUP_ACTIVE_KEY] === true;
 }
 
 export function setToolGroupActive(active: boolean): void {
-	toolGroupActive = active;
+	(globalThis as GlobalThis)[TOOL_GROUP_ACTIVE_KEY] = active;
 }
 
-let groupThinkingChildActive = false;
+const GROUP_THINKING_CHILD_ACTIVE_KEY = Symbol.for(
+	"pi-ember-ui:group-thinking-child-active",
+);
 
-/** Whether a settled compact group is painting an in-group Thinking child row. */
+/** Whether a settled compact group is painting an in-group Thinking child row.
+ *  GlobalThis-backed: written by pi-compact-tools lifecycle flag syncs, read
+ *  by the pi-ember-ui Thinking predicates — jiti module duplication must not
+ *  split the writer from the reader or the external Thinking header paints
+ *  beside the in-group `└ Thinking` lane. */
 export function isGroupThinkingChildActive(): boolean {
-	return groupThinkingChildActive;
+	return (globalThis as GlobalThis)[GROUP_THINKING_CHILD_ACTIVE_KEY] === true;
 }
 
 export function setGroupThinkingChildActive(active: boolean): void {
-	groupThinkingChildActive = active;
+	(globalThis as GlobalThis)[GROUP_THINKING_CHILD_ACTIVE_KEY] = active;
 }
 
-let groupReopenableActive = false;
+const GROUP_REOPENABLE_ACTIVE_KEY = Symbol.for("pi-ember-ui:group-reopenable-active");
 
 /** Settled compact group can host in-group Thinking instead of the external widget. */
 export function isGroupReopenableActive(): boolean {
-	return groupReopenableActive;
+	return (globalThis as GlobalThis)[GROUP_REOPENABLE_ACTIVE_KEY] === true;
 }
 
 export function setGroupReopenableActive(active: boolean): void {
-	groupReopenableActive = active;
+	(globalThis as GlobalThis)[GROUP_REOPENABLE_ACTIVE_KEY] = active;
 }
 
 /**

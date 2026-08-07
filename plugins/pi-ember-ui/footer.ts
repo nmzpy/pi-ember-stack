@@ -108,7 +108,6 @@ function is_live_session(ctx: any): boolean {
 /** Refresh the footer's model/catalog snapshot from a live (non-stale) ctx.
  *  Call from `session_start` and `model_select` only — never from the render
  *  path. */
-// biome-ignore lint/suspicious/noExplicitAny: Pi's extension ctx is dynamic
 // biome-ignore lint/suspicious/noExplicitAny: Pi's model objects are dynamic
 export function set_footer_model_snapshot(model: any, catalog: readonly any[]): void {
 	footerModel = model;
