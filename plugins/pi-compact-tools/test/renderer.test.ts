@@ -729,6 +729,137 @@ describe("CompactRenderer group child visibility", () => {
 		expect(r.hasGroupThinkingChild()).toBe(false);
 	});
 
+	test("holdToolLane keeps the latest child gradient -ing with no Thinking lane", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("hold-1", owner_state) as any;
+		const child_ctx = makeContext("hold-2", {}) as any;
+
+		r.renderCall("grep", { pattern: "x", path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
+		r.renderCall("grep", { pattern: "x", path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		// Wait with no thinking stream: the group HOLDS the tool lane.
+		r.holdToolLane();
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row.toLowerCase()).toContain("explored");
+		expect(row).not.toContain("Thinking");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+		// The latest completed child keeps its gradient `-ing` verb; the prior
+		// grep wave folded into the header summary when `read` joined.
+		expect(row).toContain("Reading");
+		expect(row).toContain("b.ts");
+		expect(row).toContain("1 search");
+		expect(row).not.toContain("Search");
+		expect(r.hasActiveGroups()).toBe(false);
+	});
+
+	test("holdToolLane renders edit/write children past tense (Edited/Wrote)", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("hold-edit-1", owner_state) as any;
+		const child_ctx = makeContext("hold-edit-2", {}) as any;
+
+		r.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "a\nb" }, theme, owner_ctx);
+		r.renderCall("write", { file_path: "b.ts", content: "x" }, theme, child_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "a", newText: "a\nb" }, theme, owner_ctx);
+		r.renderResult(
+			"edit",
+			{ file_path: "a.ts", oldText: "a", newText: "a\nb" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "@@" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"write",
+			{ file_path: "b.ts", content: "x" },
+			{ content: [{ type: "text", text: "ok" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		r.holdToolLane();
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Edited 1 file");
+		expect(row).toContain("Wrote 1 file");
+		// Completed mutations snap to past tense — never a lingering -ing.
+		expect(row).toContain("Edited");
+		expect(row).toContain("Wrote");
+		expect(row).not.toContain("Editing");
+		expect(row).not.toContain("Writing");
+		expect(row).not.toContain("Thinking");
+	});
+
+	test("real thinking stream arms the lane from the hold; new wave clears the hold", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("hold-flow-1", owner_state) as any;
+		const child_ctx = makeContext("hold-flow-2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 1 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		r.holdToolLane();
+		expect(r.hasGroupThinkingChild()).toBe(false);
+
+		// A real thinking stream (hidden blocks) arms the lane from the hold.
+		r.noteThinking();
+		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
+		expect(r.hasGroupThinkingChild()).toBe(true);
+
+		// The next tool wave reopens the tool lane and clears the hold/lane.
+		const baby_ctx = makeContext("hold-flow-3", {}) as any;
+		r.renderCall("find", { query: "z", path: "c.ts" }, theme, baby_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(r.hasGroupThinkingChild()).toBe(false);
+		expect(row).not.toContain("Thinking");
+		expect(row).toContain("Finding");
+		expect(row).toContain("c.ts");
+	});
+
 	test("visible text hard-exits and clears child rows", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -2101,6 +2232,7 @@ describe("CompactRenderer native render invalidation", () => {
 			requestTuiRender: () => {
 				render_calls.push(1);
 			},
+			requestGradientRender: gradient.request_gradient_render,
 			subscribeGradientTick: gradient.subscribe_gradient_tick,
 			unsubscribeGradientTick: gradient.unsubscribe_gradient_tick,
 			MUTED_GROUP_GRADIENT_PRESET: "actionGroup",

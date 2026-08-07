@@ -27,8 +27,8 @@ import {
 	format_effort_display_label,
 } from "./model-variants.ts";
 import {
-	ORANGE,
 	PAGE_BG,
+	SUCCESS_GREEN,
 	blendToHex,
 	colorize,
 	setQuizActive,
@@ -141,7 +141,7 @@ function effort_point_opacity(point: EffortSliderPoint, efforts: EffortSliderPoi
 	return EFFORT_OPACITY_FOUR[point];
 }
 
-/** Orange accent at the Effort point opacity (SSOT for the slider). */
+/** SSOT green success accent at the Effort point opacity (SSOT for the slider). */
 export function effort_point_color(
 	point: EffortSliderPoint,
 	efforts?: EffortSliderPoint[],
@@ -152,7 +152,7 @@ export function effort_point_color(
 			: point === "default"
 			  ? 0.5
 			  : EFFORT_OPACITY_FOUR[point];
-	return blendToHex(ORANGE, PAGE_BG, opacity);
+	return blendToHex(SUCCESS_GREEN, PAGE_BG, opacity);
 }
 
 function paint_effort_point(

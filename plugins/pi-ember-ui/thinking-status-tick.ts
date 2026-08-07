@@ -1,4 +1,5 @@
 import {
+	request_gradient_render,
 	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
@@ -84,6 +85,10 @@ function invalidate_external_host(host: "widget" | "in_message"): void {
 	if (next !== undefined) last_staged_text = next;
 	if (host === "widget") widget_host?.invalidate?.();
 	else in_message_host?.invalidate?.();
+	// The host invalidate only drops the component cache; the gradient clock
+	// owns the single per-tick render. Mark the clock dirty so the dispatch
+	// issues exactly one native render after every subscriber has run.
+	request_gradient_render();
 }
 
 function dispatch_thinking_status_tick(): void {

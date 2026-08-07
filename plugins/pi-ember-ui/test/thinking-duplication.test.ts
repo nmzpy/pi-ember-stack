@@ -233,20 +233,23 @@ describe("full event sequence: duplicate Thinking hunt", () => {
 			sim.tool_execution_end(id);
 		}
 
-		// agent_end (inter-run gap): lane should arm on the settled group
+		// agent_end (inter-run gap): no thinking stream yet — the settled group
+		// HOLDS the tool lane (gradient `-ing` verb) instead of painting a
+		// premature `└ Thinking` lane.
 		sim.agent_end();
 		let row = stripAnsi((owner_state.callText as any).text);
-		const lanePainted = row.includes("Thinking");
-		expect(lanePainted).toBe(true);
-		expect(renderer.hasAnyGroupThinkingChild()).toBe(true);
-		expect(isGroupThinkingChildActive()).toBe(true);
+		expect(row.includes("Thinking")).toBe(false);
+		expect(renderer.hasAnyGroupThinkingChild()).toBe(false);
+		expect(isGroupThinkingChildActive()).toBe(false);
 		expect(thinking_status_should_show()).toBe(false);
 		expect(resolve_thinking_status_host()).toBe(null);
 
-		// A hidden thinking stream keeps the lane as the ONE surface
+		// A hidden thinking stream arms the lane as the ONE surface
 		sim.message_update("thinking_delta");
 		expect(renderer.hasAnyGroupThinkingChild()).toBe(true);
 		expect(resolve_thinking_status_host()).toBe(null);
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Thinking");
 
 		// Gradient ticks never open the external host
 		for (let i = 0; i < 20; i++) dispatch_gradient_tick();
@@ -284,6 +287,12 @@ describe("full event sequence: duplicate Thinking hunt", () => {
 		sim.agent_settled();
 		// Auto-continue re-arms before the next agent_start
 		sim.before_agent_start();
+		// No thinking stream yet: the group HOLDS the tool lane; the external
+		// host must still stay hidden (hasReopenableGroup owns the slot).
+		expect(renderer.hasAnyGroupThinkingChild()).toBe(false);
+		expect(resolve_thinking_status_host()).toBe(null);
+		// A real thinking stream arms the lane — still the ONE surface.
+		sim.message_update("thinking_delta");
 		expect(renderer.hasAnyGroupThinkingChild()).toBe(true);
 		expect(resolve_thinking_status_host()).toBe(null);
 	});
@@ -316,7 +325,7 @@ describe("full event sequence: duplicate Thinking hunt", () => {
 			{ ...child_ctx, isError: false },
 		);
 		renderer.settleAllGroups();
-		arm_pre_token_thinking_status();
+		renderer.armInGroupThinking();
 		sync_compact_group_flags(renderer);
 		expect(renderer.hasAnyGroupThinkingChild()).toBe(true);
 		expect(resolve_thinking_status_host()).toBe(null);

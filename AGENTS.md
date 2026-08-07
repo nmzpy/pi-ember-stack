@@ -371,13 +371,17 @@
   above-editor host via `arm_pre_token_thinking_status()`.
   `clear_blockers` runs on visible user `message_start`, `session_compact`,
   and `compaction_end` transcript rebuild (`reconcile_thinking_after_transcript_rebuild()`).
-  In-group `└ Thinking` is painted immediately by
-  `arm_pre_token_thinking_status()` when a settled work group owns the slot;
-  it appends after lingering tool rows without folding them. A real thinking
-  stream (`message_update` → `apply_assistant_stream_boundary` in
-  `assistant-stream-boundary.ts`, SSOT) reuses that lane. Inter-run planning
-  `text_delta` arms Thinking via `reconcile_thinking_wait_ui()` without
-  folding children.
+  In-group `└ Thinking` is painted ONLY by a real thinking stream
+  (`message_update` → `apply_assistant_stream_boundary` in
+  `assistant-stream-boundary.ts`, SSOT → `noteHiddenThinking()`); the wait arm
+  never paints it prematurely. During a post-tool wait with NO thinking stream,
+  `arm_pre_token_thinking_status()` calls `renderer.holdToolLane()` instead:
+  the group keeps its tool lane with the latest completed child in the gradient
+  `-ing` verb (Reading/Searching/Finding/Listing/Running) while completed
+  mutations snap to past tense (Edited/Wrote/Patched) — the lane appends after
+  lingering tool rows without folding them, and only appears once the model is
+  actually emitting reasoning. Inter-run planning
+  `text_delta` holds the lane the same way (no fake Thinking).
   When the last subagent finishes (`tool_execution_end` for `subagent` with no
   remaining delegated subagent call), `reconcile_thinking_wait_ui()` runs so the
   parent-agent inter-run gap shows gradient `Thinking` before the model streams
@@ -411,12 +415,16 @@
   safety floor) clear it. While it is true the label shows `Thinking` and the
   editor border stays muted, so the header state is never lost during
   compaction/retry/follow-up gaps. **Post-tool / inter-run Thinking:** while
-  tools are idle and the SSOT wait predicate holds, a settled work group shows
-  gradient `└ Thinking` inside the group with lingering child rows; without a
+  tools are idle and the SSOT wait predicate holds with NO thinking stream, a
+  settled work group HOLDS the tool lane — the latest completed child keeps its
+  gradient `-ing` verb (Reading/Searching/…) and edit/write snap to
+  Edited/Wrote; the in-group `└ Thinking` lane is NOT painted (a premature lane
+  would claim the slot while the model is not emitting reasoning). When a real
+  thinking or inter-run planning stream arrives (blocks hidden),
+  `noteThinking()`/`noteHiddenThinking()` paints the lane from the hold and
+  suppresses the external widget. Without a
   work group, the in-message component or above-editor widget shows gradient
-  `Thinking`. When a thinking or inter-run planning stream arrives (blocks
-  hidden), `noteThinking()` reuses the in-group lane and suppresses the
-  external widget.
+  `Thinking` during the wait.
   `resolve_thinking_status_host()` prefers in-message whenever
   `assistantThinkingHostReady`, not only during the pre-tool gap. Child rows
   are folded only via `fold_group_child_rows()` on a genuinely new tool wave
@@ -437,9 +445,11 @@
   prior tool children — the in-group `└ Thinking` lane appends after
   lingering tool rows. Same-key batches reopen the latest
   settled group (`findReopenableGroup`) instead of spawning another
-  `Explored`/`Edited`/… header. Each Thinking pass resets
-  `thinkingPassStartedAt` and shows a dim live elapsed suffix after 1s (widget +
-  in-group `└ Thinking`); total turn time still notifies once on `agent_settled`.
+  `Explored`/`Edited`/… header. The elapsed suffix is ONE shared turn pass
+  timer (`thinkingPassStartedAt`, started on the user `message_start`, cleared
+  on `agent_settled`) read by the widget, the in-message host, AND the in-group
+  `└ Thinking` lane — SSOT, never reset per pass or when the thinking stream
+  arrives; total turn time still notifies once on `agent_settled`.
   When Pi is compacting context (manual
   `/compact`, threshold, or overflow recovery), `installCompactionStatusPatch`
   replaces Pi's `CompactionStatusIndicator` with a compact tool row: muted
@@ -507,6 +517,12 @@
   rebuilds the chat and can change the transcript line count — see the Running
   / lingering children bullet in the `pi-compact-tools` grouping contract for
   how group child rows absorb and linger independently of that toggle.
+  SSOT note (2026-08-07): Thinking now shows ONLY on user send (pre-tool wait)
+  or a real thinking stream — `agent_start`/`agent_end`/`tool_execution_end`
+  never re-arm (post-tool feedback stays with compact tool `-ing` verbs via
+  `holdToolLane`), non-empty non-thinking text always suppresses (no pre-tool /
+  inter-run exemption), and the pass timer starts on show (every arm/stream
+  start resets `thinkingPassStartedAt`).
 - **Message/Row Background Token:** The `MUTED_MESSAGE_BG` constant in
   `mode-colors.ts` (`desaturateHex(blendToHex("#ffffff", PAGE_BG, 0.05), 1)` —
   white at 5% opacity over `PAGE_BG`, desaturated to a pure neutral grey =
@@ -590,6 +606,18 @@
   content. Everything else (footer mode label, thinking/summarizing
   gradient, borders, tool titles, `customMessageLabel`) continues to follow the
   live mode accent.
+- **Select-list / extension-selector theme patch:** `select-list-theme.ts` patches
+  Pi's `ctx.ui.select` (ExtensionSelector) and SelectList rows so selected → `text`
+  (bright) and unselected → `dim` (never accent/white inversion). Its
+  `resolve_coding_agent_dist_dir()` resolution order is: (1) the running pi entry
+  script `process.argv[1]` (dist/cli.js or dist/rpc-entry.js → dirname → verify
+  `modes/interactive/components/extension-selector.js` — targets the actual runtime
+  regardless of layout), (2) bare specifier
+  `req.resolve('@earendil-works/pi-coding-agent')`, (3) the `dist/index.js` and
+  `dist/cli.js` subpath attempts, (4) the pi-tui sibling path. Never reorder the
+  strategies or drop the `verify()` guard — the exports map exposes only `.` and
+  `./rpc-entry`, so subpath resolves throw and only the argv[1] entry reliably
+  lands on the running runtime's dist dir.
 - **Fail Fast, No Fallbacks:** If a plugin cannot register its tools, apply its
   theme, or resolve its bundled agents, surface the error — do not silently
   degrade to a partial experience.

@@ -716,8 +716,8 @@ export default function piEmberTodo(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: TOOL_LABEL,
-		description: "Manage a task list for tracking multi-step progress.",
-		promptSnippet: "Manage a task list to track multi-step progress",
+		description: "Manage a task list for tracking multi-step progress. Use only when 3 or more tasks are to be done.",
+		promptSnippet: "Manage a task list to track multi-step progress. Use only when 3+ tasks are to be done",
 		promptGuidelines: [
 			"Use `todo` for complex work with 3+ steps.",
 			"Use the numeric id returned by `create` directly; call `list` only when the id is unknown. Updates can also target an exact subject with `task`.",

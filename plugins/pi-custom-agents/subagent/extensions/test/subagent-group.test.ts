@@ -229,7 +229,7 @@ describe("SubagentGroupRenderer", () => {
 			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
 		});
 
-		test("non-thinking events never split", () => {
+		test("bare text_start / empty text_delta never split", () => {
 			const renderer = getSubagentGroupRenderer();
 			renderer.resetForSession();
 			setThinkingBlocksHidden(false);
@@ -239,7 +239,76 @@ describe("SubagentGroupRenderer", () => {
 
 			apply_subagent_group_stream_boundary(
 				renderer,
-				{ type: "text_delta", delta: "hello" },
+				{ type: "text_start" },
+				{ role: "assistant" },
+			);
+			renderer.register("c", { agent: "Coder", task: "three" }, []);
+
+			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
+
+			// Whitespace-only deltas carry no visible content either.
+			const renderer2 = getSubagentGroupRenderer();
+			renderer2.resetForSession();
+			renderer2.register("a", { agent: "Coder", task: "one" }, []);
+			renderer2.register("b", { agent: "Coder", task: "two" }, []);
+			apply_subagent_group_stream_boundary(
+				renderer2,
+				{ type: "text_delta", delta: "   \n" },
+				{ role: "assistant" },
+			);
+			renderer2.register("c", { agent: "Coder", task: "three" }, []);
+			expect(renderer2.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
+		});
+
+		test("visible non-empty text_delta hard-exits so the next call starts a fresh batch", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+			setThinkingBlocksHidden(false);
+
+			renderer.register("a", { agent: "Coder", task: "one" }, []);
+			renderer.register("b", { agent: "Coder", task: "two" }, []);
+			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
+
+			apply_subagent_group_stream_boundary(
+				renderer,
+				{ type: "text_delta", delta: "Wrapper PTS fix landed. Next: renderer instant-start." },
+				{ role: "assistant" },
+			);
+			renderer.register("c", { agent: "Coder", task: "three" }, []);
+
+			expect(renderer.shouldUseGroupLayout("c")).toBe(false);
+			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["c"]);
+			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
+		});
+
+		test("hidden assistant message text never splits", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+			setThinkingBlocksHidden(false);
+
+			renderer.register("a", { agent: "Coder", task: "one" }, []);
+			renderer.register("b", { agent: "Coder", task: "two" }, []);
+
+			apply_subagent_group_stream_boundary(renderer, { type: "text_delta", delta: "resume..." }, {
+				role: "assistant",
+				display: false,
+			});
+			renderer.register("c", { agent: "Coder", task: "three" }, []);
+
+			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
+		});
+
+		test("other non-text, non-thinking events never split", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+			setThinkingBlocksHidden(false);
+
+			renderer.register("a", { agent: "Coder", task: "one" }, []);
+			renderer.register("b", { agent: "Coder", task: "two" }, []);
+
+			apply_subagent_group_stream_boundary(
+				renderer,
+				{ type: "toolcall_start" },
 				{ role: "assistant" },
 			);
 			renderer.register("c", { agent: "Coder", task: "three" }, []);
@@ -326,6 +395,90 @@ describe("SubagentGroupRenderer", () => {
 					{ type: "thinking", thinking: "" },
 					subagentToolCall("b", "Scout"),
 				]),
+				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
+			];
+			seed_subagent_renderer_from_branch(branch, renderer);
+
+			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
+			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
+		});
+
+		test("visible non-empty text between two subagent calls splits their batches", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+			setThinkingBlocksHidden(false);
+
+			const branch = [
+				assistantEntry([subagentToolCall("a", "Coder")]),
+				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
+				assistantEntry([
+					{ type: "text", text: "Wrapper PTS fix landed. Next: renderer instant-start." },
+					subagentToolCall("b", "Scout"),
+				]),
+				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
+			];
+			seed_subagent_renderer_from_branch(branch, renderer);
+
+			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
+			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
+			expect(renderer.shouldUseGroupLayout("b")).toBe(false);
+		});
+
+		test("visible text inside the same message splits a following tool call", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+			setThinkingBlocksHidden(false);
+
+			const branch = [
+				assistantEntry([
+					subagentToolCall("a", "Coder"),
+					{ type: "text", text: "continuing between waves" },
+					subagentToolCall("b", "Scout"),
+				]),
+				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
+				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
+			];
+			seed_subagent_renderer_from_branch(branch, renderer);
+
+			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
+			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
+		});
+
+		test("empty text parts do not split historical batches", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+			setThinkingBlocksHidden(false);
+
+			const branch = [
+				assistantEntry([subagentToolCall("a", "Coder")]),
+				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
+				assistantEntry([
+					{ type: "text", text: "   " },
+					subagentToolCall("b", "Scout"),
+				]),
+				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
+			];
+			seed_subagent_renderer_from_branch(branch, renderer);
+
+			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
+			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
+		});
+
+		test("hidden assistant message text keeps historical subagent calls batched", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+			setThinkingBlocksHidden(false);
+
+			const branch = [
+				assistantEntry([subagentToolCall("a", "Coder")]),
+				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
+				assistantEntry(
+					[
+						{ type: "text", text: "resume from checkpoint" },
+						subagentToolCall("b", "Scout"),
+					],
+					{ display: false },
+				),
 				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
 			];
 			seed_subagent_renderer_from_branch(branch, renderer);

@@ -76,6 +76,7 @@ interface CustomUi {
 
 import { getSharedRenderer } from "../../../pi-compact-tools/index.ts";
 import {
+	requestGradientRender,
 	requestTuiRender,
 	subscribeGradientTick,
 	syncThinkingGradientClock,
@@ -172,7 +173,13 @@ function getOrCreateTickRecord(toolCallId: string): SubagentTickRecord {
 	if (!record) {
 		const rec: SubagentTickRecord = {
 			callback: (): void => {
+				// Rebuild the layout (Pi's invalidate also drops the component
+				// cache), then mark the gradient clock dirty so the clock issues
+				// the single native render for this tick. Pi's own ui.requestRender
+				// inside the ToolExecutionComponent invalidate coalesces with the
+				// clock's render into the same frame.
 				rec.invalidate?.();
+				requestGradientRender();
 			},
 			toolCallId,
 			args: {},

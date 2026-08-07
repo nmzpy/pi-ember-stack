@@ -13,6 +13,7 @@ import {
 	invalidate_gradient_cache,
 	neutral_pulse_hex,
 	render_gradient,
+	request_gradient_render,
 	reset_gradient_colorizer,
 	set_gradient_render_request,
 	set_gradient_colorizer,
@@ -368,12 +369,34 @@ describe("gradient engine", () => {
 		});
 		activate_gradient("thinking");
 		dispatch_gradient_tick();
+		// No subscriber staged state, so the clock must not issue a render.
 		expect(render_calls).toBe(0);
 		deactivate_gradient("thinking");
 		shutdown_gradient_clock();
 	});
 
-	test("dispatch: subscriber callback runs without blanket render_request", () => {
+	test("dispatch: subscriber that marks dirty triggers exactly one render_request", () => {
+		shutdown_gradient_clock();
+		let render_calls = 0;
+		set_gradient_render_request(() => {
+			render_calls++;
+		});
+		let tick_calls = 0;
+		const cb = (): void => {
+			tick_calls++;
+			request_gradient_render();
+		};
+		subscribe_gradient_tick(cb);
+		dispatch_gradient_tick();
+		// The clock dispatches subscribers first, then issues ONE render for
+		// the tick — the subscriber never calls the render request itself.
+		expect(tick_calls).toBe(1);
+		expect(render_calls).toBe(1);
+		unsubscribe_gradient_tick(cb);
+		shutdown_gradient_clock();
+	});
+
+	test("dispatch: subscriber that stages no change does not request a render", () => {
 		shutdown_gradient_clock();
 		let render_calls = 0;
 		set_gradient_render_request(() => {
@@ -385,6 +408,8 @@ describe("gradient engine", () => {
 		};
 		subscribe_gradient_tick(cb);
 		dispatch_gradient_tick();
+		// A subscriber that did not mark dirty (identical-text skip) must not
+		// produce a render — the clock renders only when state actually staged.
 		expect(tick_calls).toBe(1);
 		expect(render_calls).toBe(0);
 		unsubscribe_gradient_tick(cb);

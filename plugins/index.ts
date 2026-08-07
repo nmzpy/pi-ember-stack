@@ -100,7 +100,7 @@ const PLUGINS: readonly StackPlugin[] = [
 	},
 	{
 		id: "pi-ember-ui",
-		description: "Ember accent theme — orange reasoning colors, accent borders",
+		description: "Ember accent theme — green success accents, accent borders",
 		extension: piEmberUiPlugin,
 	},
 	{

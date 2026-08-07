@@ -27,7 +27,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { CompactGroupText } from "../pi-compact-tools/compact-text.ts";
+import { BULLET, CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { sync_compact_group_flags } from "../pi-compact-tools/group-flags.ts";
 import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
 import {
@@ -56,6 +56,7 @@ import {
 	MUTED_GROUP_GRADIENT_PRESET,
 	neutral_pulse_hex,
 	render_gradient,
+	request_gradient_render,
 	set_gradient_render_request,
 	shutdown_gradient_clock,
 	stop_all_gradient_animation,
@@ -78,10 +79,12 @@ import {
 	isCurrentTurnAssistantTimestamp,
 	isGroupThinkingChildActive,
 	isInterRunGap,
+	isToolExecutionInFlight,
 	isQuizActive,
 	isShellMode,
 	isSubagentDelegationActive,
 	isThinkingBlocksHidden,
+	is_thinking_stream_active,
 	isToolCallPending,
 	isTurnToolTranscriptActive,
 	isUserBashRunning,
@@ -371,7 +374,10 @@ type InteractiveModePatchProto = Record<PropertyKey, unknown>;
 type BashExecutionPatchHost = {
 	status?: string;
 	command?: string;
-	contentContainer?: { children?: unknown[] };
+	loader?: Component & { stop(): void };
+	contentContainer?: Container;
+	_bashHeader?: unknown;
+	_bashGradientTick?: () => void;
 };
 
 /** Structural prototype surface for the Bash execution patch. */
@@ -569,6 +575,19 @@ export function is_pre_tool_thinking_gap(): boolean {
 	return isAgentRunPending() && !isTurnToolTranscriptActive() && !assistantThinkingHostReady;
 }
 
+/** Pre-tool wait, no tool in flight and no text yet: the header is the
+ *  instant send feedback. Broader than `is_pre_tool_thinking_gap()` so the
+ *  in-message host (assistant bubble mounted, still pre-output) keeps the
+ *  label until tools or visible text arrive. */
+export function is_pre_tool_wait(): boolean {
+	return (
+		isAgentRunPending() &&
+		!isTurnToolTranscriptActive() &&
+		!isToolExecutionInFlight() &&
+		!isToolCallPending()
+	);
+}
+
 /** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
@@ -585,6 +604,10 @@ export function thinking_status_should_show(): boolean {
 
 	const pre_tool = is_pre_tool_thinking_gap();
 	if (pre_tool) return !thinkingHeaderSuppressed;
+	// In-message pre-tool wait: assistant bubble mounted but no tool rows, no
+	// tool in flight, no announced tool, and no visible text yet — the header
+	// stays live as send feedback until tools or text arrive.
+	if (is_pre_tool_wait()) return !thinkingHeaderSuppressed;
 
 	// With visible thinking blocks, show the placeholder only before any
 	// assistant output (no tool rows, no thinking/text stream). Once the
@@ -603,26 +626,31 @@ export function thinking_status_should_show(): boolean {
 		return true;
 	}
 
-	if (thinkingHeaderSuppressed) return false;
-	if (compact_thinking_lane_owns_status()) return false;
-	if (running_compact_group_blocks_thinking_header()) return false;
-	if (lingering_tool_children_block_thinking_header()) return false;
-	// A settled/reopenable work group owns the Thinking slot; in-group
-	// `└ Thinking` is already rendered by the compact renderer.
-	if (getSharedRenderer().hasReopenableGroup()) return false;
-	return true;
+	// No real thinking stream active: the external header must NEVER re-appear
+	// during post-tool / inter-run / agent-boundary gaps — only a real
+	// thinking stream re-shows it. Post-tool feedback belongs to the compact
+	// tool `-ing` verbs (holdToolLane), not this header.
+	return false;
 }
 
 /**
  * SSOT: whether a stream event should hide the gradient Thinking header.
  * Bare text_start, empty deltas, pre-tool/inter-run gaps, and thinking events never suppress.
+ * Non-empty text in a pre-tool/inter-run gap does not kill the header — keep
+ * the gradient Thinking row visible as the ongoing agent timer until an actual
+ * tool execution starts or the model emits a real thinking/reasoning stream.
  */
 export function should_suppress_thinking_header_for_stream_event(ev: {
 	type: string;
 	delta?: unknown;
 }): boolean {
-	if (is_pre_tool_thinking_gap() || isInterRunGap()) return false;
-	if (ev.type === "text_start") return false;
+	if (ev.type === "text_start") {
+		// text_start only keeps the header live in the genuine pre-first-tool
+		// phase (no tool announced/run yet and no text output started). Once
+		// any tool is on screen or the header is already suppressed, a text
+		// boundary must never re-open it.
+		return isTurnToolTranscriptActive() || isToolCallPending() || thinkingHeaderSuppressed;
+	}
 	// `thinking_start` is just the stream boundary; keep the placeholder until
 	// actual reasoning text arrives.
 	if (ev.type === "thinking_start") return false;
@@ -636,9 +664,9 @@ export function should_suppress_thinking_header_for_stream_event(ev: {
 	if (ev.type === "text_delta") {
 		const delta = typeof ev.delta === "string" ? ev.delta : "";
 		if (delta.trim().length === 0) return false;
-		// Any non-empty visible model output (answer, commentary, plan text)
-		// kills the gradient Thinking header; reasoning owns the slot only when
-		// a real thinking stream is active.
+		// Any non-empty non-thinking text output (answer, commentary, plan
+		// text, split-second pre-tool tokens) hides the gradient Thinking
+		// header — there is no pre-tool or inter-run-gap exemption.
 		return true;
 	}
 	return false;
@@ -708,6 +736,10 @@ function refresh_thinking_status(force_render = false): void {
 /** Hide the gradient Thinking header while tools or visible assistant text run. */
 export function suppress_thinking_header_for_work(): void {
 	thinkingHeaderSuppressed = true;
+	// The header is disappearing: stop its pass timer so a later re-arm
+	// (real thinking stream or a fresh user send) restarts the elapsed
+	// suffix from zero instead of carrying a stale long-running value.
+	thinkingPassStartedAt = 0;
 	// Always force one normal Pi frame. The header may already be marked
 	// suppressed while its prior static row is still present in a cached
 	// assistant/widget component; waiting for the next lifecycle transition
@@ -717,11 +749,12 @@ export function suppress_thinking_header_for_work(): void {
 
 /** Re-show the gradient Thinking header when a hidden thinking stream resumes.
  *  Visible thinking blocks render their own reasoning transcript, so the
- *  placeholder header must stay suppressed and the pass timer must continue
- *  from the original arming point. */
+ *  placeholder header must stay suppressed. When the header re-appears after
+ *  a tool/text suppression, its pass timer restarts from zero. */
 export function resume_thinking_header_for_think_stream(): void {
 	if (thinkingHeaderSuppressed && isThinkingBlocksHidden()) {
 		thinkingHeaderSuppressed = false;
+		reset_thinking_pass_timer();
 		refresh_thinking_status();
 	}
 }
@@ -760,7 +793,10 @@ class ThinkingStatusComponent implements Component {
 	}
 	invalidate(): void {
 		if (!thinking_status_should_show()) return;
-		requestRender?.();
+		// The gradient clock owns the single per-tick render: the host
+		// invalidate only marks the clock dirty; dispatch_gradient_tick issues
+		// one native render after every subscriber has run.
+		request_gradient_render();
 	}
 }
 
@@ -872,7 +908,14 @@ export function clear_stale_thinking_wait_blockers(): void {
 /** Re-arm Thinking after compaction_end rebuilds the transcript. */
 export function reconcile_thinking_after_transcript_rebuild(): void {
 	const renderer = getSharedRenderer();
-	renderer.armInGroupThinking();
+	// After the rebuild, re-paint the in-group `└ Thinking` lane only when a
+	// real thinking stream is active; otherwise hold the tool lane (gradient
+	// `-ing` verb) — never a premature Thinking lane.
+	if (is_thinking_stream_active()) {
+		renderer.armInGroupThinking();
+	} else {
+		renderer.holdToolLane();
+	}
 	reconcile_thinking_wait_ui({
 		clear_blockers: true,
 		force_arm: isUserTurnCommitted() || isAgentRunPending(),
@@ -888,6 +931,7 @@ function is_subagent_delegation_tool(toolName: string | undefined): boolean {
  *  (pi-compact-tools, subagent renderer) keep working without import changes. */
 export {
 	MUTED_GROUP_GRADIENT_PRESET,
+	request_gradient_render as requestGradientRender,
 	subscribe_gradient_tick as subscribeGradientTick,
 	unsubscribe_gradient_tick as unsubscribeGradientTick,
 } from "./gradient.ts";
@@ -996,6 +1040,9 @@ function installShellModeInputListener(ctx: ExtensionContext): void {
 function stopThinkingAnimation(): void {
 	thinkingActive = false;
 	set_thinking_stream_active(false);
+	// The header is gone: stop its pass timer so any future re-appearance
+	// starts the elapsed suffix from zero.
+	thinkingPassStartedAt = 0;
 	refresh_thinking_status();
 }
 
@@ -1030,21 +1077,23 @@ function thinking_status_paint_active(): boolean {
 	return thinking_status_should_show();
 }
 
-/** Arm Thinking during inter-run gaps (pre-token, post-tool, agent_start). SSOT. */
+/** Arm Thinking during agent wait states (pre-token, auto-continue). SSOT. */
 export function arm_pre_token_thinking_status(): void {
 	if (isQuizActive() || isSubagentDelegationActive()) return;
 	const renderer = getSharedRenderer();
 	sync_compact_group_flags(renderer);
-	// Pre-tool wait and post-tool gaps continue the same turn timer; only set
-	// a fresh start if no timer is currently running.
-	if (!is_thinking_pass_timer_armed()) reset_thinking_pass_timer();
+	// Every arm starts the pass timer fresh — the elapsed suffix always
+	// measures the current Thinking appearance, never a stale pass.
+	reset_thinking_pass_timer();
 	setAgentRunPending(true);
 	thinkingHeaderSuppressed = false;
-	// A settled work group owns the slot. Arm the actual compact child now;
-	// merely claiming the slot here leaves both the external widget and the
-	// transcript group empty during the post-tool wait.
+	// A settled work group owns the slot. Hold the tool lane (gradient `-ing`
+	// verb on the latest completed child) — the `└ Thinking` lane is NOT armed
+	// until a real thinking stream arrives (apply_assistant_stream_boundary →
+	// noteHiddenThinking). A premature Thinking row would claim the slot while
+	// the model is not emitting any reasoning at all.
 	if (renderer.hasReopenableGroup() && isThinkingBlocksHidden()) {
-		renderer.armInGroupThinking();
+		renderer.holdToolLane();
 		sync_compact_group_flags(renderer);
 		refresh_thinking_status();
 		return;
@@ -1059,17 +1108,21 @@ export function arm_pre_token_thinking_status(): void {
 	// stream appends the in-group `└ Thinking` lane after lingering tool
 	// rows — thinking never folds prior tool children. A settled group
 	// was armed above and intentionally keeps its children lingering.
-	activate_gradient("thinking");
+	// The external header may only paint for a real thinking stream or the
+	// pre-tool wait (no tool in flight, no text yet). Post-tool and inter-run
+	// gaps show compact tool `-ing` verbs (holdToolLane) — never the header.
+	if (is_thinking_stream_active() || is_pre_tool_wait()) {
+		activate_gradient("thinking");
+	}
 	refresh_thinking_status();
 }
 
 function startThinkingAnimation(): void {
 	thinkingActive = true;
 	set_thinking_stream_active(true);
-	// Stream start is not a new header — keep elapsed time from arm_pre_token.
-	// Never reset an already-armed pass timer; the user-sent turn timer is the
-	// single source of truth for the visible Thinking header.
-	if (!is_thinking_pass_timer_armed()) reset_thinking_pass_timer();
+	// The header (re)appears with the real thinking stream: restart the pass
+	// timer so the elapsed suffix starts fresh whenever Thinking shows.
+	reset_thinking_pass_timer();
 	activate_gradient("thinking");
 	refresh_thinking_status();
 }
@@ -1092,7 +1145,10 @@ function installThinkingWidget(ctx: ExtensionContext): void {
 			},
 			invalidate(): void {
 				if (!thinking_status_should_show()) return;
-				request_live_tui_render(tui);
+				// The gradient clock owns the single per-tick render (same as
+				// the in-message host): mark the clock dirty, let the dispatch
+				// issue the one native render for this tick.
+				request_gradient_render();
 			},
 		};
 		bind_thinking_widget_host(host);
@@ -1595,7 +1651,10 @@ function installAssistantMessagePatch(): void {
 					const renderer = getSharedRenderer();
 					renderer.repaintAfterThinkingBlocksToggle(
 						next_hidden,
-						next_hidden && is_agent_thinking_wait(thinkingActive),
+						// Re-arm the in-group `└ Thinking` lane only when a real
+					// thinking stream is active; without one the group enters the
+					// tool-lane hold (gradient `-ing` verbs) instead.
+						next_hidden && is_thinking_stream_active(),
 					);
 					sync_compact_group_flags(renderer);
 					end_work_group_boundary_suppression();
@@ -2052,7 +2111,7 @@ function installCompactionStatusPatch(): void {
 		// drives gradient text via bind_compaction_status_indicator.
 		if (typeof indicator.stop === "function") indicator.stop();
 		activate_gradient("compaction");
-		bind_compaction_status_indicator(indicator, () => requestRender?.());
+		bind_compaction_status_indicator(indicator);
 		indicator.render = (width: number): string[] => {
 			const theme = resolve_live_theme();
 			if (!theme) return [];
@@ -2115,6 +2174,27 @@ function installBashExecutionPatch(): void {
 		requestRender?.();
 	};
 
+	function renderBashHeader(this: BashExecutionPatchHost): string {
+		const theme = resolve_live_theme();
+		if (!theme) return "";
+		const status = this.status;
+		const bulletColor =
+			status === "error"
+				? "error"
+				: status === "complete" || status === "cancelled"
+					? "success"
+					: "muted";
+		const label =
+			status === "running"
+				? render_gradient("Running", MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase())
+				: status === "error"
+					? theme.fg("muted", theme.bold("Failed"))
+					: status === "cancelled"
+						? theme.fg("muted", theme.bold("Cancelled"))
+						: theme.fg("muted", theme.bold("Ran"));
+		return `${theme.fg(bulletColor, BULLET)}${label} ${theme.fg("text", this.command ?? "")}`;
+	}
+
 	proto.updateDisplay = function emberBashUpdateDisplay(this: BashExecutionPatchHost): void {
 		const running = this.status === "running";
 		if (isUserBashRunning() !== running) {
@@ -2124,16 +2204,30 @@ function installBashExecutionPatch(): void {
 		originalUpdateDisplay?.call(this);
 		const theme = resolve_live_theme();
 		if (!theme) return;
-		const status = this.status;
-		const dollarColor =
-			status === "error"
-				? "error"
-				: status === "complete" || status === "cancelled"
-					? "success"
-					: "text";
+		if (running) {
+			this.loader?.stop();
+			this.contentContainer?.removeChild(this.loader as Component);
+			if (this._bashGradientTick === undefined) {
+				this._bashGradientTick = (): void => {
+					const header = this._bashHeader as Text | undefined;
+					if (!header || this.status !== "running") return;
+					header.setText(renderBashHeader.call(this));
+					// The gradient clock owns the single per-tick render — the
+					// header text is staged here; dispatch issues one render.
+					request_gradient_render();
+				};
+				subscribe_gradient_tick(this._bashGradientTick);
+			}
+		} else {
+			if (this._bashGradientTick !== undefined) {
+				unsubscribe_gradient_tick(this._bashGradientTick);
+				this._bashGradientTick = undefined;
+			}
+		}
 		const header = this.contentContainer?.children?.[0];
+		this._bashHeader = header;
 		if (header instanceof Text) {
-			header.setText(`${theme.fg(dollarColor, theme.bold("$"))} ${theme.fg("text", this.command ?? "")}`);
+			header.setText(renderBashHeader.call(this));
 		}
 	};
 
@@ -2427,7 +2521,7 @@ function startLogoAnimation(): void {
 	logoAnimating = true;
 	logoStatic = false;
 	drop_logo_tick();
-	logo_tick_cb = () => requestRender?.();
+	logo_tick_cb = () => request_gradient_render();
 	subscribe_gradient_tick(logo_tick_cb);
 }
 
@@ -2692,6 +2786,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		armPreTokenThinkingStatus: arm_pre_token_thinking_status,
 		refreshThinkingStatus: refresh_thinking_status,
 		getThinkingActive: () => thinkingActive,
+		getThinkingStreamActive: () => is_thinking_stream_active(),
 		clearStaleBlockers: clear_stale_thinking_wait_blockers,
 	});
 	bind_thinking_status_tick_should_paint(() => thinking_status_should_show());
@@ -2912,7 +3007,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
-		reconcile_thinking_wait_ui();
+		// agent_start must NOT re-show Thinking by itself — only a real
+		// thinking stream re-arms the header. Repaint whatever state is
+		// current (pre-tool wait from the user send, or nothing).
+		refresh_thinking_status();
 	});
 
 	pi.on("agent_end", (_event, _ctx) => {
@@ -2924,7 +3022,9 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		// Turn timer + notify live on agent_settled only — agent_end fires per
 		// low-level run (tool batch, TTFB timeout retry, compact-and-retry) and
 		// must not clear turnStartedAt or show the final elapsed toast early.
-		reconcile_thinking_wait_ui();
+		// agent_end must NOT re-show Thinking either; post-tool feedback is the
+		// compact tool `-ing` verbs (holdToolLane), not the header.
+		refresh_thinking_status();
 	});
 
 	// `agent_settled` is the only event that means Pi will not auto-retry,
@@ -2999,15 +3099,15 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		if (is_subagent_delegation_tool(event.toolName)) {
 			recompute_latest_subagent_running();
 			markSubagentDelegationEnded(event.toolCallId);
-			// Last subagent finished — arm Thinking before the parent streams again.
-			if (!isSubagentDelegationActive()) {
-				reconcile_thinking_wait_ui();
-			} else {
-				refresh_thinking_status();
-			}
+			// Last subagent finished — do NOT re-arm Thinking: post-tool
+			// feedback stays with the Subagents block / compact tool verbs
+			// until a real thinking stream re-shows the header.
+			refresh_thinking_status();
 			return;
 		}
-		reconcile_thinking_wait_ui();
+		// tool_execution_end must NOT re-arm Thinking — only a real thinking
+		// stream re-shows the header. Repaint so the hidden state sticks.
+		refresh_thinking_status();
 	});
 
 	pi.registerCommand("welcome", {

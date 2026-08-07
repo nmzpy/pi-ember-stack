@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	buildQuizOptionRow,
 	format_answers_for_model,
 	format_quiz_call_row,
 	format_quiz_transcript_answers,
@@ -152,5 +153,90 @@ describe("format_quiz_transcript_answers", () => {
 			mock_theme as any,
 		);
 		expect(out).toBe("Plan Review: Choose what to do with the plan. → Implement Plan");
+	});
+});
+
+describe("buildQuizOptionRow", () => {
+	const theme = {
+		fg: (color: string, text: string) => `[${color}:${text}]`,
+	};
+
+	test("selected row paints prefix and label with the text token", () => {
+		const row = buildQuizOptionRow(theme as any, {
+			index: 0,
+			label: "Implement Plan",
+			selected: true,
+		});
+		expect(row.prefix).toBe("[text:> ]");
+		expect(row.painted).toBe("[text:1. Implement Plan]");
+		expect(row.painted).not.toContain("[dim:");
+	});
+
+	test("unselected row uses a plain prefix and the dim token for the label", () => {
+		const row = buildQuizOptionRow(theme as any, {
+			index: 1,
+			label: "Copy Plan",
+			selected: false,
+		});
+		expect(row.prefix).toBe("  ");
+		expect(row.painted).toBe("[dim:2. Copy Plan]");
+		expect(row.painted).not.toContain("[text:");
+	});
+
+	test("description follows the same direction as the label", () => {
+		const selected = buildQuizOptionRow(theme as any, {
+			index: 0,
+			label: "Implement Plan",
+			selected: true,
+			description: "Continue in code mode.",
+		});
+		expect(selected.descriptionPainted).toBe("[text:Continue in code mode.]");
+
+		const unselected = buildQuizOptionRow(theme as any, {
+			index: 0,
+			label: "Implement Plan",
+			selected: false,
+			description: "Continue in code mode.",
+		});
+		expect(unselected.descriptionPainted).toBe("[dim:Continue in code mode.]");
+	});
+
+	test("option numbering is 1-based and preserved", () => {
+		expect(buildQuizOptionRow(theme as any, { index: 0, label: "A", selected: true }).painted).toBe(
+			"[text:1. A]",
+		);
+		expect(buildQuizOptionRow(theme as any, { index: 1, label: "B", selected: false }).painted).toBe(
+			"[dim:2. B]",
+		);
+		expect(
+			buildQuizOptionRow(theme as any, { index: 11, label: "L", selected: false }).painted,
+		).toBe("[dim:12. L]");
+	});
+
+	test("regression: the inverted direction is impossible", () => {
+		const selected = buildQuizOptionRow(theme as any, {
+			index: 0,
+			label: "X",
+			selected: true,
+			description: "desc",
+		});
+		expect(selected.prefix).toBe("[text:> ]");
+		expect(selected.painted).toBe("[text:1. X]");
+		expect(selected.descriptionPainted).toBe("[text:desc]");
+		expect(selected.prefix).not.toContain("[dim:");
+		expect(selected.painted).not.toContain("[dim:");
+		expect(selected.descriptionPainted).not.toContain("[dim:");
+
+		const unselected = buildQuizOptionRow(theme as any, {
+			index: 1,
+			label: "Y",
+			selected: false,
+			description: "desc",
+		});
+		expect(unselected.prefix).toBe("  ");
+		expect(unselected.painted).toBe("[dim:2. Y]");
+		expect(unselected.descriptionPainted).toBe("[dim:desc]");
+		expect(unselected.painted).not.toContain("[text:");
+		expect(unselected.descriptionPainted).not.toContain("[text:");
 	});
 });

@@ -904,9 +904,40 @@ describe("subagent elapsed time", () => {
 		try {
 			arm_subagent_thinking_pass(id);
 			now += 2500;
-			const out = renderSubagentThinkingRow(theme, "  └ ", id);
+			// Single-mode rows use the flush `  └` prefix (no trailing space),
+			// so the Thinking lane renders `  └Thinking` with the dim elapsed
+			// suffix from the armed SSOT thinking-pass timer.
+			const out = renderSubagentThinkingRow(theme, "  \u2514", id);
+			// The fake theme wraps the prefix in one tag: `[dim:  └]` followed
+			// immediately by the gradient Thinking label proves the flush
+			// single-mode prefix (no trailing space inside the tag).
+			expect(stripAnsi(out)).toContain("[dim:  \u2514]Thinking");
+			expect(stripAnsi(out)).not.toContain("[dim:  \u2514 ]Thinking");
 			expect(stripAnsi(out)).toContain("Thinking");
 			expect(out).toContain("[dim: 2s]");
+		} finally {
+			performance.now = original_now;
+			clear_subagent_thinking_pass(id);
+		}
+	});
+
+	test("live tray Thinking lane renders the armed SSOT thinking elapsed suffix", () => {
+		const theme = makeTheme() as any;
+		const id = "call-tray-thinking";
+		const original_now = performance.now;
+		let now = 1_000_000;
+		performance.now = () => now;
+		try {
+			arm_subagent_thinking_pass(id);
+			now += 1500;
+			const items = [toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" })];
+			const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, id);
+			const out = comp.render(80);
+			const stripped = out.map((l) => stripAnsi(l));
+			// The tray in-group Thinking lane carries the same dim elapsed
+			// suffix as the nested row, refreshed each shared gradient tick.
+			expect(stripped[stripped.length - 1]).toContain("Thinking");
+			expect(out[out.length - 1]).toContain("[dim: 1s]");
 		} finally {
 			performance.now = original_now;
 			clear_subagent_thinking_pass(id);
@@ -982,6 +1013,68 @@ describe("subagent elapsed time", () => {
 		);
 		expect(stripAnsi(out)).toContain("Subagents");
 		expect(out.split("\n")[0]).not.toContain("\u001b[38;2;");
+	});
+
+	test("grouped Subagents header bullet turns success green when the whole batch completes", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 0)], displayName: "Coder A", terminal: true, toolCallId: "batch-done-a" },
+			{ args: { agent: "Scout", task: "b" }, results: [makeResult("Scout B", 0)], displayName: "Scout B", terminal: true, toolCallId: "batch-done-b" },
+		];
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "a" },
+			[makeResult("Coder A", 0)],
+			theme,
+			undefined,
+			members,
+		);
+		const header = out.split("\n")[0];
+		expect(stripAnsi(header)).toContain("Subagents");
+		// All-terminal batch: the header bullet uses the canonical success
+		// green (SSOT groupBulletColorFromFlags); the label stays dim/bold.
+		expect(header).toContain("[success:\u2022 ]");
+		expect(header).not.toContain("[muted:\u2022 ]");
+		expect(header).toContain("[dim:*Subagents*]");
+	});
+
+	test("grouped Subagents header bullet turns error red when any member failed", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 1, true)], displayName: "Coder A", terminal: true, toolCallId: "batch-fail-a" },
+			{ args: { agent: "Scout", task: "b" }, results: [makeResult("Scout B", 0)], displayName: "Scout B", terminal: true, toolCallId: "batch-fail-b" },
+		];
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "a" },
+			[makeResult("Coder A", 1, true)],
+			theme,
+			undefined,
+			members,
+		);
+		const header = out.split("\n")[0];
+		expect(stripAnsi(header)).toContain("Subagents");
+		expect(header).toContain("[error:\u2022 ]");
+		expect(header).not.toContain("[muted:\u2022 ]");
+		expect(header).not.toContain("[success:\u2022 ]");
+	});
+
+	test("grouped Subagents header bullet stays muted while any member runs", () => {
+		const theme = makeTheme() as any;
+		const members = [
+			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 0)], displayName: "Coder A", terminal: true, toolCallId: "batch-mixed-a" },
+			{ args: { agent: "Scout", task: "b" }, results: [makeRunning("Scout B")], displayName: "Scout B", toolCallId: "batch-mixed-b" },
+		];
+		const out = renderSubagentLayout(
+			{ agent: "Coder", task: "a" },
+			[makeResult("Coder A", 0)],
+			theme,
+			undefined,
+			members,
+		);
+		const header = out.split("\n")[0];
+		expect(stripAnsi(header)).toContain("Subagents");
+		expect(header).toContain("[muted:\u2022 ]");
+		expect(header).not.toContain("[success:\u2022 ]");
+		expect(header).not.toContain("[error:\u2022 ]");
 	});
 
 	test("grouped tool-level failures keep each diagnostic on its agent row", () => {
@@ -1128,6 +1221,19 @@ describe("renderSubagentLayout (string)", () => {
 		expect(lines[1]).toContain("\u001b[38;2;");
 	});
 
+	test("single-mode tool row prefix is flush: `  └Read …` with no gap", () => {
+		const theme = makeTheme() as any;
+		const running = makeResult("Coder", -1);
+		running.latestToolCall = { name: "read", args: { path: "a.ts" } };
+		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [running], theme);
+		const toolLine = out.split("\n")[1];
+		// Single-mode child rows use the flush `  └` prefix: the fake theme
+		// wraps the whole prefix in one tag, so the └ is the last char inside
+		// the tag (no trailing space) and the body sits flush against it.
+		expect(stripAnsi(toolLine).startsWith("[dim:  \u2514]")).toBe(true);
+		expect(stripAnsi(toolLine)).not.toContain("[dim:  \u2514 ]");
+	});
+
 	test("running parallel agents show Thinking until a tool starts", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout(
@@ -1153,23 +1259,31 @@ describe("renderSubagentLayout (string)", () => {
 		expect(toolLine).toContain("\u001b[38;2;");
 	});
 
-	test("completed single mode uses muted bullet and dim agent name", () => {
+	test("completed single mode uses success green bullet and dim agent name", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [makeResult("Coder", 0)], theme);
 		const line = stripAnsi(out);
 		expect(line).toContain("Coder");
 		expect(out).toContain("[dim:Coder]");
+		// Completed single rows carry the canonical success bullet (SSOT
+		// statusBulletColor) — green, not muted.
+		expect(out).toContain("[success:\u2022 ]");
+		expect(out).not.toContain("[muted:\u2022 ]");
 		expect(line).toContain("\u2022");
 		expect(line.indexOf("Coder")).toBeLessThan(line.indexOf("\u2713"));
 		expect(line.trimStart().startsWith("\u2713")).toBe(false);
 		expect(out).not.toContain("\u001b[38;2;");
 	});
 
-	test("failed single mode uses muted bullet and trailing x", () => {
+	test("failed single mode uses error red bullet and trailing x", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [makeResult("Coder", 1, true)], theme);
 		const line = stripAnsi(out);
 		expect(line).toContain("Coder");
+		// Failed single rows carry the canonical error bullet (SSOT
+		// statusBulletColor) — red, not muted.
+		expect(out).toContain("[error:\u2022 ]");
+		expect(out).not.toContain("[muted:\u2022 ]");
 		expect(line).toContain("\u2022");
 		expect(line.indexOf("Coder")).toBeLessThan(line.indexOf("\u2717"));
 		expect(line.trimStart().startsWith("\u2717")).toBe(false);

@@ -284,11 +284,31 @@ let gradient_timer: ReturnType<typeof setTimeout> | undefined;
 let _render_request: (() => void) | undefined;
 
 /**
+ * Whether a subscriber staged visible state this dispatch and therefore needs
+ * exactly one native render. The clock owns the single per-tick render:
+ * subscribers call `request_gradient_render()` instead of requesting Pi
+ * renders independently, and `dispatch_gradient_tick()` clears the flag and
+ * issues `_render_request` once after every subscriber has run.
+ */
+let dirty = false;
+
+/**
  * Bind the one public Pi render request used by animated component state.
  * The gradient clock never writes to the terminal or touches TUI diff state.
  */
 export function set_gradient_render_request(cb: (() => void) | undefined): void {
 	_render_request = cb;
+}
+
+/**
+ * Mark the gradient clock dirty so the next tick issues exactly one native
+ * render. Subscribers stage their component text (CompactGroupText cache,
+ * Text.setText, component invalidate) and then call this instead of calling
+ * `requestTuiRender()` themselves — the clock coalesces every animated
+ * subscriber into one `_render_request` per 50 ms dispatch.
+ */
+export function request_gradient_render(): void {
+	dirty = true;
 }
 let clock_start = 0;
 let next_tick_deadline = 0;
@@ -342,6 +362,14 @@ export function dispatch_gradient_tick(): void {
 			/* best effort — same contract as before */
 		}
 	}
+	// The clock owns the single per-tick render: after every subscriber has
+	// run (each staging its own component state and marking dirty via
+	// request_gradient_render), issue exactly one native render request. If no
+	// subscriber changed anything (identical-text skip), no render is queued.
+	if (dirty) {
+		dirty = false;
+		_render_request?.();
+	}
 }
 
 function run_gradient_tick(): void {
@@ -383,6 +411,8 @@ function stop_clock(): void {
 		gradient_timer = undefined;
 	}
 	next_tick_deadline = 0;
+	// A stopped clock must not carry a stale dirty flag into a future start.
+	dirty = false;
 }
 
 /** Mark a reason (e.g. "thinking", "working", "logo") as active. */
@@ -435,6 +465,7 @@ export function shutdown_gradient_clock(): void {
 	}
 	next_tick_deadline = 0;
 	clock_start = 0;
+	dirty = false;
 	_render_request = undefined;
 	invalidate_gradient_cache();
 }

@@ -169,6 +169,24 @@ export function resolve_coding_agent_dist_dir(): string | undefined {
 		return existsSync(selector) ? dist_dir : undefined;
 	};
 
+	// Primary: the running pi entry script (dist/cli.js or dist/rpc-entry.js)
+	// lives inside the runtime package's dist dir. This targets the actual
+	// runtime instance regardless of dev/prod layout, nested copies, or symlinks.
+	const entry = process.argv[1];
+	if (typeof entry === "string" && entry.length > 0) {
+		const hit = verify(dirname(entry));
+		if (hit) return hit;
+	}
+
+	// Secondary: same-install layouts where this plugin is a real package inside
+	// pi's own node_modules — the bare specifier resolves via the "." export.
+	try {
+		const hit = verify(dirname(req.resolve("@earendil-works/pi-coding-agent")));
+		if (hit) return hit;
+	} catch {
+		// try next resolver
+	}
+
 	for (const spec of [
 		"@earendil-works/pi-coding-agent/dist/index.js",
 		"@earendil-works/pi-coding-agent/dist/cli.js",

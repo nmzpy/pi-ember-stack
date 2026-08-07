@@ -1,11 +1,12 @@
-export const ORANGE = "#EB6E00";
-
 export const MUTED_BULLET_COLOR = "#666666";
 export const DIM_COLOR = MUTED_BULLET_COLOR;
 export const MUTED_COLOR = "#808080";
 
 export const PAGE_BG = "#18181e";
 export const TEXT_COLOR = "#d4d4d4";
+
+/** SSOT success/markdown green (mirrored in ember.json as `green`). */
+export const SUCCESS_GREEN = "#2af0a8";
 
 /** Tokens-per-second color thresholds used by the footer meter. */
 export const TPS_TEXT_THRESHOLD = 50;
@@ -564,7 +565,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		borderAccent: accent90,
 		customMessageLabel: accent90,
 		toolTitle: accentDesat,
-		mdHeading: "#2af0a8",
+		mdHeading: SUCCESS_GREEN,
 		mdListBullet: MUTED_COLOR,
 		mdLink: accent90,
 
@@ -585,7 +586,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		thinkingMax: accent90,
 
 		// Non-accent tokens (same as ember.json)
-		success: "#2af0a8",
+		success: SUCCESS_GREEN,
 		error: "#cc6666",
 		warning: "#ffff00",
 		muted: MUTED_COLOR,
@@ -596,12 +597,12 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		customMessageText: TEXT_COLOR,
 		toolOutput: MUTED_COLOR,
 		mdLinkUrl: "#666666",
-		mdCodeBlock: "#2af0a8",
+		mdCodeBlock: SUCCESS_GREEN,
 		mdCodeBlockBorder: MUTED_COLOR,
 		mdQuote: MUTED_COLOR,
 		mdQuoteBorder: MUTED_COLOR,
 		mdHr: MUTED_COLOR,
-		toolDiffAdded: "#2af0a8",
+		toolDiffAdded: SUCCESS_GREEN,
 		toolDiffRemoved: "#cc6666",
 		toolDiffContext: MUTED_COLOR,
 		syntaxComment: "#6A9955",
@@ -613,7 +614,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		syntaxType: "#4EC9B0",
 		syntaxOperator: TEXT_COLOR,
 		syntaxPunctuation: TEXT_COLOR,
-		bashMode: "#2af0a8",
+		bashMode: SUCCESS_GREEN,
 	};
 }
 

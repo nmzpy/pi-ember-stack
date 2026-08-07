@@ -28,8 +28,6 @@ import {
 	GROUP_CHILD_TEE,
 	merge_group_child_rows,
 	statusBulletColor,
-	TREE_BRANCH_LAST,
-	TREE_BRANCH_PIPE,
 	WORK_GROUP_KEY,
 	type CompactCall,
 	type DiscoveryGroup,
@@ -150,6 +148,16 @@ const SUBAGENT_TRAY_LAST = "\u2514"; // └ — outer branch terminator (latest 
 const SUBAGENT_TRAY_GAP = " "; // outer-branch slot for trailing Thinking/status rows
 const SUBAGENT_TRAY_INNER_TEE = "\u251c"; // ├ — work-group child, more rows follow
 const SUBAGENT_TRAY_INNER_LAST = "\u2514"; // └ — work-group child / Thinking, terminal
+
+/**
+ * Flush 1-column tree glyphs for single-mode subagent child rows (no header).
+ * No trailing space, so `  └Thinking` and `  └bash -c …` sit flush against
+ * the content — the shared compact-tools TREE_BRANCH_* constants carry a
+ * trailing space for compact group children and stay untouched. Subagent-only
+ * composition seam, like the SUBAGENT_TRAY_* flush glyphs above.
+ */
+const SUBAGENT_BRANCH_LAST = "\u2514"; // └
+const SUBAGENT_BRANCH_PIPE = "\u2502"; // │
 
 type LiveSegment =
 	| { kind: "text"; text: string }
@@ -767,10 +775,12 @@ function renderAgentLabel(
 	elapsedMs?: number,
 ): string {
 	const elapsedSuffix = formatSubagentElapsedSuffix(theme, elapsedMs);
+	// Single-mode rows use the canonical status bullet: muted while running,
+	// success green when completed, error red on failure (SSOT statusBulletColor).
 	const prefix = isSingle
 		? status === "running"
 			? statusBulletColor(false, false, theme)
-			: theme.fg("muted", BULLET)
+			: statusBulletColor(status === "failed", status === "completed", theme)
 		: "";
 	// Running rows never carry an elapsed suffix — call sites pass elapsedMs
 	// only for terminal rows, and this guard keeps it that way.
@@ -895,7 +905,8 @@ export function outerPrefixForAgent(
 /** Full tree prefix for a child item (tool, thinking, liveOutput) under an
  *  agent. Flush like the agent rows: the nested └ sits on the agent-name
  *  column (one column right of the tree pipe). Single-mode rows (no header)
- *  keep the `  └ ` spacing so the └ hangs below the bare agent name. */
+ *  use the flush `  └` prefix so the └ hangs below the bare agent name with
+ *  no gap before the content (`  └Thinking`). */
 export function childTreePrefix(
 	agentIndex: number,
 	agentCount: number,
@@ -903,7 +914,9 @@ export function childTreePrefix(
 	isLastChild = true,
 ): string {
 	if (!hasHeader) {
-		return `  ${isLastChild ? TREE_BRANCH_LAST : TREE_BRANCH_PIPE}`;
+		// Single-mode rows (no header): flush 1-column glyph with no trailing
+		// space so the nested └/│ sits against the content (`  └Thinking`).
+		return `  ${isLastChild ? SUBAGENT_BRANCH_LAST : SUBAGENT_BRANCH_PIPE}`;
 	}
 	const outer = SUBAGENT_TREE_INDENT + (agentIndex < agentCount - 1 ? "│" : " ");
 	const inner = isLastChild ? "└" : "│";
@@ -995,15 +1008,21 @@ export function renderDelegatingRow(theme: ThemeLike): string {
 
 function renderGroupLabel(
 	label: string,
-	_hasError: boolean,
-	_allDone: boolean,
+	hasError: boolean,
+	allDone: boolean,
 	theme: ThemeLike,
 	elapsedMs?: number,
 ): string {
-	// Header is plain dim/bold with the same bullet spacing as a compact
-	// group header (e.g. "• Exploring") so the group columns align.
+	// Only the bullet carries the batch status color (SSOT
+	// groupBulletColorFromFlags): success green once every member completed,
+	// error red if any member failed, muted while running/delegating. The
+	// label stays dim/bold so the group columns align with a compact group
+	// header (e.g. "• Exploring").
+	const bullet = allDone
+		? groupBulletColorFromFlags(hasError, true, theme)
+		: theme.fg("muted", BULLET);
 	return (
-		theme.fg("dim", BULLET) +
+		bullet +
 		theme.fg("dim", theme.bold(label)) +
 		formatSubagentElapsedSuffix(theme, elapsedMs)
 	);

@@ -14,7 +14,7 @@ import {
 	suppress_thinking_header_for_work,
 	thinking_status_should_show,
 } from "../index.ts";
-import { set_gradient_colorizer, reset_gradient_colorizer } from "../gradient.ts";
+import { set_gradient_colorizer, reset_gradient_colorizer, request_gradient_render } from "../gradient.ts";
 
 function forcedColorizer(rgb: [number, number, number], text: string): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
@@ -204,7 +204,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("text_start during pre-tool gap does not suppress the header", () => {
+	test("text_start during pre-tool gap does not suppress until content or a tool runs", () => {
 		setTurnToolTranscriptActive(false);
 		setAgentRunPending(true);
 		setUserTurnCommitted(true);
@@ -213,11 +213,20 @@ describe("thinking header visibility", () => {
 				should_suppress_thinking_header_for_stream_event({ type: "text_start" }),
 			).toBe(false);
 			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(true);
+			// Non-empty non-thinking text output suppresses the header.
+			expect(
+				should_suppress_thinking_header_for_stream_event({
+					type: "text_delta",
+					delta: "answer",
+				}),
+			).toBe(true);
 			suppress_thinking_header_for_work();
 			expect(thinking_status_should_show()).toBe(false);
+			// A later text_start must not re-open an already-suppressed header.
 			expect(
 				should_suppress_thinking_header_for_stream_event({ type: "text_start" }),
-			).toBe(false);
+			).toBe(true);
 		} finally {
 			setAgentRunPending(false);
 			setTurnToolTranscriptActive(false);
@@ -250,7 +259,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("shows during inter-run gap even when reopenable group flag is set", () => {
+	test("inter-run gap without a thinking stream keeps the external header hidden", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(true);
 		setAgentRunPending(true);
@@ -263,7 +272,11 @@ describe("thinking header visibility", () => {
 			setGroupReopenableActive(true);
 			arm_pre_token_thinking_status();
 			expect(isInterRunGap()).toBe(true);
-			if (!isInterRunGap()) suppress_thinking_header_for_work();
+			// Post-tool feedback is the compact tool verbs — never the header.
+			expect(thinking_status_should_show()).toBe(false);
+			expect(resolve_thinking_status_host()).toBe(null);
+			// A real thinking stream is the ONLY post-tool re-arm source.
+			arm_thinking_stream_status();
 			expect(thinking_status_should_show()).toBe(true);
 		} finally {
 			setGroupReopenableActive(false);
@@ -275,7 +288,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("hides while delegated subagents are active and restores after the last one", () => {
+	test("hides while delegated subagents are active and stays hidden after the last one", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(true);
 		setAgentRunPending(true);
@@ -284,7 +297,8 @@ describe("thinking header visibility", () => {
 		resetToolExecutionInFlight();
 		try {
 			arm_pre_token_thinking_status();
-			expect(thinking_status_should_show()).toBe(true);
+			// Post-tool context with no thinking stream: header stays hidden.
+			expect(thinking_status_should_show()).toBe(false);
 			markToolExecutionStarted("call-scout-a");
 			expect(thinking_status_should_show()).toBe(false);
 			markToolExecutionEnded("call-scout-a");
@@ -300,6 +314,10 @@ describe("thinking header visibility", () => {
 			expect(thinking_status_should_show()).toBe(false);
 			markSubagentDelegationEnded("call-scout-b");
 			arm_pre_token_thinking_status();
+			// Subagent completion is a post-tool boundary: no re-show without
+			// a real thinking stream.
+			expect(thinking_status_should_show()).toBe(false);
+			arm_thinking_stream_status();
 			expect(thinking_status_should_show()).toBe(true);
 		} finally {
 			resetSubagentDelegation();
@@ -310,7 +328,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("shows after last subagent finishes while agent run is still pending", () => {
+	test("does not re-show after the last subagent finishes without a thinking stream", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(true);
 		setAgentRunPending(true);
@@ -323,6 +341,8 @@ describe("thinking header visibility", () => {
 			setGroupThinkingChildActive(false);
 			markSubagentDelegationEnded("call-finished");
 			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(false);
+			arm_thinking_stream_status();
 			expect(thinking_status_should_show()).toBe(true);
 		} finally {
 			resetSubagentDelegation();
@@ -405,7 +425,9 @@ describe("thinking header visibility", () => {
 		set_gradient_render_request(() => mock_tui.requestRender());
 		bind_thinking_status_tick_host_resolver(() => "widget");
 		bind_thinking_status_tick_should_paint(() => thinking_status_should_show() || isGroupThinkingChildActive());
-		bind_thinking_widget_host({ invalidate: () => mock_tui.requestRender() });
+		// The host invalidate only marks the clock dirty; dispatch_gradient_tick
+		// issues the single native render after the subscriber has run.
+		bind_thinking_widget_host({ invalidate: () => request_gradient_render() });
 		setUserTurnCommitted(true);
 		setAgentRunPending(true);
 		arm_pre_token_thinking_status();
@@ -580,7 +602,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("post-tool hidden blocks show external Thinking during inter-run wait", () => {
+	test("post-tool hidden blocks keep the external header hidden during inter-run wait", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(true);
 		setTurnToolTranscriptActive(true);
@@ -592,7 +614,11 @@ describe("thinking header visibility", () => {
 		try {
 			suppress_thinking_header_for_work();
 			arm_pre_token_thinking_status();
+			expect(thinking_status_should_show()).toBe(false);
+			expect(resolve_thinking_status_host()).toBe(null);
+			arm_thinking_stream_status();
 			expect(thinking_status_should_show()).toBe(true);
+			expect(resolve_thinking_status_host()).toBe("widget");
 		} finally {
 			renderer.resetForSession();
 			setAgentRunPending(false);
@@ -756,7 +782,7 @@ describe("thinking header visibility", () => {
 		}
 	});
 
-	test("post-tool wait arms Thinking inside a settled work group", () => {
+	test("post-tool wait holds the tool lane until a real thinking stream", () => {
 		const prev_hidden = isThinkingBlocksHidden();
 		setThinkingBlocksHidden(true);
 		setTurnToolTranscriptActive(true);
@@ -785,12 +811,22 @@ describe("thinking header visibility", () => {
 			);
 			renderer.settleAllGroups();
 			arm_pre_token_thinking_status();
+			// No thinking stream yet: the group HOLDS the tool lane (gradient
+			// `-ing` verb) — never a premature `└ Thinking` lane.
+			expect(renderer.hasGroupThinkingChild()).toBe(false);
+			expect(thinking_status_should_show()).toBe(false);
+			expect(resolve_thinking_status_host()).toBe(null);
+			let row = owner_state.callText?.text?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
+			expect(row).not.toContain("Thinking");
+			expect(row).toContain("npm test");
+			// A real thinking stream arms the in-group lane as the ONE surface.
+			renderer.noteThinking();
+			sync_compact_group_flags(renderer);
 			expect(renderer.hasGroupThinkingChild()).toBe(true);
 			expect(thinking_status_should_show()).toBe(false);
 			expect(resolve_thinking_status_host()).toBe(null);
-			const row = owner_state.callText?.text?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
+			row = owner_state.callText?.text?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
 			expect(row).toContain("Thinking");
-			expect(row).toContain("npm test");
 		} finally {
 			renderer.resetForSession();
 			setGroupThinkingChildActive(false);
@@ -817,7 +853,7 @@ describe("thinking header visibility", () => {
 				latestAssistantMessageTimestamp: 250,
 				assistantThinkingHostReady: true,
 			});
-			arm_pre_token_thinking_status();
+			arm_thinking_stream_status();
 			expect(resolve_thinking_status_host()).toBe("in_message");
 			expect(is_in_message_thinking_status_target(100)).toBe(false);
 			expect(is_in_message_thinking_status_target(200)).toBe(false);

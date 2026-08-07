@@ -24,6 +24,10 @@ function forcedColorizer(rgb: [number, number, number], text: string): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
 }
 
+function strip_ansi(s: string): string {
+	return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 function makeTheme() {
 	return {
 		fg: (tag: string, text: string) => `[${tag}:${text}]`,
@@ -90,17 +94,21 @@ describe("thinking pass timer", () => {
 		set_thinking_pass_started_at_for_tests(0);
 	});
 
-	test("arm_thinking_stream_status does not reset an armed pass timer", () => {
+	test("arm_thinking_stream_status restarts the pass timer on stream start", () => {
 		const pinned = 1_000_000;
 		set_thinking_pass_started_at_for_tests(pinned);
 		expect(is_thinking_pass_timer_armed()).toBe(true);
 		try {
 			arm_thinking_stream_status();
+			// The real thinking stream (re)arms the header: the pass timer is
+			// restarted fresh instead of carrying a stale pre-stream value.
 			expect(is_thinking_pass_timer_armed()).toBe(true);
-			set_thinking_pass_started_at_for_tests(pinned);
 			const theme = makeTheme();
 			const original = performance.now;
-			performance.now = () => pinned + 2500;
+			const armedAt = performance.now();
+			performance.now = () => armedAt + 500;
+			expect(format_thinking_pass_elapsed_suffix(theme)).toBe("");
+			performance.now = () => armedAt + 2500;
 			expect(format_thinking_pass_elapsed_suffix(theme)).toBe("[dim: 2s]");
 			performance.now = original;
 		} finally {
@@ -109,15 +117,19 @@ describe("thinking pass timer", () => {
 		}
 	});
 
-	test("arm_pre_token_thinking_status does not reset an already-armed pass timer", () => {
+	test("arm_pre_token_thinking_status restarts the pass timer fresh on every arm", () => {
 		const original = performance.now;
 		const fresh = 2_000_000;
 		set_thinking_pass_started_at_for_tests(fresh - 2_500);
 		performance.now = () => fresh;
 		try {
 			arm_pre_token_thinking_status();
+			expect(is_thinking_pass_timer_armed()).toBe(true);
+			// Elapsed restarts from the new arm — no stale 3s carryover.
 			performance.now = () => fresh + 500;
-			expect(format_thinking_pass_elapsed_suffix(makeTheme())).toContain("3s");
+			expect(format_thinking_pass_elapsed_suffix(makeTheme())).toBe("");
+			performance.now = () => fresh + 2500;
+			expect(format_thinking_pass_elapsed_suffix(makeTheme())).toBe("[dim: 2s]");
 		} finally {
 			performance.now = original;
 			reset_thinking_pass_timer();
@@ -166,11 +178,13 @@ describe("thinking pass timer", () => {
 		performance.now = () => fresh;
 		try {
 			r.noteThinking();
-			// The in-group lane resets the pass timer so the visible elapsed
-			// starts from the moment the lane arms.
-			set_thinking_pass_started_at_for_tests(fresh - 2_500);
-			performance.now = () => fresh + 500;
-			expect(format_thinking_pass_elapsed_suffix(theme)).toContain("3s");
+			// The in-group lane appears, but the SHARED turn pass timer (started on
+			// the user message) is NOT reset — the lane elapsed suffix continues the
+			// full wait instead of restarting when the thinking stream arrives.
+			expect(is_thinking_pass_timer_armed()).toBe(true);
+			const row = strip_ansi((owner_state.callText as { text?: string }).text ?? "");
+			expect(row).toContain("Thinking");
+			expect(row).toContain("2s");
 		} finally {
 			performance.now = original;
 			reset_thinking_pass_timer();

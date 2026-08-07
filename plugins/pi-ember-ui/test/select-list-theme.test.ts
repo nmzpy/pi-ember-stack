@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { Theme } from "@earendil-works/pi-coding-agent";
@@ -127,5 +129,27 @@ describe("select list theme SSOT", () => {
 		expect(rows[1]).toBe(stripAnsi(format_selector_option_row(theme, "Scout", true)));
 		expect(rows[1]).toContain("Scout");
 		expect(rows[0]).toContain("Coder");
+	});
+
+	test("resolve_coding_agent_dist_dir prefers the process.argv[1] runtime entry", () => {
+		const original_argv1 = process.argv[1];
+		const tmp = mkdtempSync(join(tmpdir(), "pi-ember-select-list-"));
+		try {
+			const dist_dir = join(tmp, "dist");
+			mkdirSync(join(dist_dir, "modes/interactive/components"), { recursive: true });
+			writeFileSync(
+				join(dist_dir, "modes/interactive/components/extension-selector.js"),
+				"export class ExtensionSelectorComponent {}\n",
+			);
+			process.argv[1] = join(dist_dir, "cli.js");
+			expect(resolve_coding_agent_dist_dir()).toBe(dist_dir);
+		} finally {
+			if (original_argv1 === undefined) {
+				delete process.argv[1];
+			} else {
+				process.argv[1] = original_argv1;
+			}
+			rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 });

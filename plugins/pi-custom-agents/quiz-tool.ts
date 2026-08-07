@@ -181,6 +181,42 @@ export function format_quiz_transcript_answers(
 		.join("\n");
 }
 
+export interface QuizOptionRowParams {
+	index: number;
+	label: string;
+	selected: boolean;
+	description?: string;
+}
+
+export interface QuizOptionRowPaint {
+	prefix: string;
+	painted: string;
+	descriptionPainted?: string;
+}
+
+/**
+ * SSOT painter for quiz overlay option rows. The selected row is painted with
+ * the bright `text` token (prefix `> `, label, and description); unselected
+ * rows use a plain two-space prefix and the `dim` token. Numbering is 1-based.
+ * Keep this direction durable: the historically inverted behavior painted the
+ * selected row dim and the unselected row bright white.
+ */
+export function buildQuizOptionRow(
+	theme: Theme,
+	params: QuizOptionRowParams,
+): QuizOptionRowPaint {
+	const numberedLabel = `${params.index + 1}. ${params.label}`;
+	const prefix = params.selected ? theme.fg("text", "> ") : "  ";
+	const painted = params.selected
+		? theme.fg("text", numberedLabel)
+		: theme.fg("dim", numberedLabel);
+	const descriptionPainted =
+		params.description === undefined
+			? undefined
+			: theme.fg(params.selected ? "text" : "dim", params.description);
+	return { prefix, painted, descriptionPainted };
+}
+
 class QuizTranscriptComponent implements Component {
 	constructor(
 		private readonly args: QuizCallArgs,
@@ -426,21 +462,20 @@ export async function askQuiz(
 				if (inputMode) {
 					for (let i = 0; i < question.options.length; i++) {
 						const option = question.options[i];
-						const prefix = "  ";
-						addWrappedWithPrefix(
-							lines,
-							prefix,
-							theme.fg("dim", `${i + 1}. ${option.label}`),
-							renderWidth,
-						);
+						const row = buildQuizOptionRow(theme, {
+							index: i,
+							label: option.label,
+							selected: false,
+						});
+						addWrappedWithPrefix(lines, row.prefix, row.painted, renderWidth);
 					}
 					const noneIdx = question.options.length;
-					addWrappedWithPrefix(
-						lines,
-						theme.fg("text", "> "),
-						theme.fg("text", `${noneIdx + 1}. None ✎`),
-						renderWidth,
-					);
+					const noneRow = buildQuizOptionRow(theme, {
+						index: noneIdx,
+						label: "None ✎",
+						selected: true,
+					});
+					addWrappedWithPrefix(lines, noneRow.prefix, noneRow.painted, renderWidth);
 					lines.push("");
 					addWrappedWithPrefix(lines, " ", theme.fg("muted", "Your answer:"), renderWidth);
 					for (const line of editor.render(Math.max(1, renderWidth - 2))) {
@@ -454,25 +489,17 @@ export async function askQuiz(
 
 				const opts = displayOptions();
 				for (let i = 0; i < opts.length; i++) {
-					const { option, isNone } = opts[i];
+					const { option } = opts[i];
 					const selected = i === optionIndex;
-					const labelSuffix = isNone && inputMode ? " ✎" : "";
-					const label = `${i + 1}. ${option.label}${labelSuffix}`;
-					const prefix = selected ? theme.fg("text", "> ") : "  ";
-					const painted = selected ? theme.fg("text", label) : theme.fg("dim", label);
-					addWrappedWithPrefix(
-						lines,
-						prefix,
-						painted,
-						renderWidth,
-					);
-					if (option.description) {
-						addWrappedWithPrefix(
-							lines,
-							"     ",
-							theme.fg(selected ? "text" : "dim", option.description),
-							renderWidth,
-						);
+					const row = buildQuizOptionRow(theme, {
+						index: i,
+						label: option.label,
+						selected,
+						description: option.description,
+					});
+					addWrappedWithPrefix(lines, row.prefix, row.painted, renderWidth);
+					if (row.descriptionPainted !== undefined) {
+						addWrappedWithPrefix(lines, "     ", row.descriptionPainted, renderWidth);
 					}
 				}
 

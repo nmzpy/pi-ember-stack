@@ -1,5 +1,6 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SubAgentResult } from "./runner.ts";
+import { resolve_assistant_stream_boundary_event } from "../../../pi-ember-ui/assistant-stream-boundary.ts";
 import { isThinkingBlocksHidden } from "../../../pi-ember-ui/mode-colors.ts";
 
 export interface SubagentArgs {
@@ -175,17 +176,32 @@ const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_resume"]);
  * above the reasoning trace. Hidden thinking renders no transcript block, so
  * consecutive delegations keep collapsing exactly as before. Hidden assistant
  * messages (display: false, e.g. auto-continue) stream no visible content, so
- * their thinking never splits the batch either.
+ * their text/thinking never splits the batch either.
+ *
+ * Any visible (non-empty) text delta is likewise a hard boundary: streamed
+ * narration between delegation waves owns its transcript slot, so the next
+ * subagent call starts a fresh batch below the text — never joins a batch
+ * whose header renders above it. Bare text_start and empty deltas never split.
+ *
+ * Event classification is delegated to the shared
+ * `resolve_assistant_stream_boundary_event` from pi-ember-ui (the same SSOT
+ * the compact work group uses) so the two group boundaries can never diverge.
  */
 export function apply_subagent_group_stream_boundary(
 	renderer: SubagentGroupRenderer,
-	ev: { type?: string } | undefined,
+	ev: { type?: string; delta?: unknown } | undefined,
 	message?: { role?: string; display?: boolean } | null,
 ): void {
-	if (!ev) return;
-	if (ev.type !== "thinking_start" && ev.type !== "thinking_delta") return;
-	if (isThinkingBlocksHidden()) return;
+	if (!ev || !ev.type) return;
 	if (message?.role === "assistant" && message.display === false) return;
+	const boundary = resolve_assistant_stream_boundary_event({ type: ev.type, delta: ev.delta });
+	if (!boundary) return;
+	if (boundary === "visible_text") {
+		renderer.hardExit();
+		return;
+	}
+	// thinking
+	if (isThinkingBlocksHidden()) return;
 	renderer.hardExit();
 }
 
@@ -221,10 +237,11 @@ export function seed_subagent_renderer_from_branch(
 	}
 
 	// Chronological replay mirrors the flattened todo timeline for user-message
-	// and tool boundaries while adding the subagent chronology rule: a visible
-	// non-empty thinking part renders as a transcript block, so the next
-	// subagent call starts a fresh batch instead of attaching above the
-	// reasoning trace. Hidden thinking renders no block and keeps batching.
+	// and tool boundaries while adding the subagent chronology rule: visible
+	// non-empty thinking parts and visible non-empty text parts render as
+	// transcript blocks, so the next subagent call starts a fresh batch instead
+	// of attaching above the reasoning trace or the streamed narration. Hidden
+	// thinking/text renders no block and keeps batching.
 	let pending_visible_thinking = false;
 	for (const entry of branch) {
 		if (entry.type !== "message") continue;
@@ -242,7 +259,14 @@ export function seed_subagent_renderer_from_branch(
 		const hidden = (msg as { display?: boolean }).display === false;
 		for (const part of msg.content) {
 			if (!part || typeof part !== "object") continue;
-			const p = part as { type?: string; thinking?: unknown };
+			const p = part as { type?: string; thinking?: unknown; text?: unknown };
+			if (p.type === "text") {
+				if (!hidden && typeof p.text === "string" && p.text.trim().length > 0) {
+					renderer.hardExit();
+					pending_visible_thinking = false;
+				}
+				continue;
+			}
 			if (p.type === "thinking") {
 				if (
 					!hidden &&

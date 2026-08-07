@@ -12,14 +12,15 @@ import {
 } from "../pi-ember-applypatch/display.ts";
 import { get_gradient_phase, render_gradient } from "../pi-ember-ui/gradient.ts";
 import {
-	formatElapsed,
+	format_thinking_pass_elapsed_suffix,
 	MUTED_GROUP_GRADIENT_PRESET,
+	requestGradientRender,
 	requestTuiRender,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
 import { isThinkingBlocksHidden } from "../pi-ember-ui/mode-colors.ts";
-import { format_in_group_thinking_row, THINKING_ELAPSED_MIN_MS } from "../pi-ember-ui/thinking-status-render.ts";
+import { format_in_group_thinking_row } from "../pi-ember-ui/thinking-status-render.ts";
 import { bashGrepInfo } from "./bash-grep.ts";
 import { BULLET, CompactGroupText } from "./compact-text.ts";
 /** Kept for test imports but no longer used — different tool names fold immediately. */
@@ -185,8 +186,13 @@ export type DiscoveryGroup = {
 	 * Thinking label in the single child row slot (replacing tool rows).
 	 */
 	thinkingChild?: boolean;
-	/** Fresh monotonic start of the in-group Thinking lane. */
-	thinkingPassStartedAt?: number;
+	/**
+	 * Agent-pending wait with NO thinking stream: the latest completed child
+	 * keeps its gradient `-ing` verb (Reading/Searching/…) instead of a
+	 * premature `└ Thinking` lane. Cleared when a real thinking stream arms
+	 * the lane, a new tool wave reopens the group, or the group freezes.
+	 */
+	holdingToolLane?: boolean;
 	/**
 	 * Cached header + child-row text (NO thinking lane) for the 20 FPS tick.
 	 * Valid only while `staticTextValid` is true. The tick rebuilds just the
@@ -697,18 +703,11 @@ function renderRunningGradient(text: string): string {
 	return render_gradient(text, MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase());
 }
 
-/** In-group child lane � `Thinking` with a fresh elapsed timer
- *  local to each in-group lane appearance. */
-function formatGroupThinkingChildRow(group: DiscoveryGroup, theme: ThemeLike): string {
-	return format_in_group_thinking_row(group_thinking_elapsed_suffix(group, theme));
-}
-
-function group_thinking_elapsed_suffix(group: DiscoveryGroup, theme: ThemeLike): string {
-	const start = group.thinkingPassStartedAt ?? 0;
-	if (start <= 0) return "";
-	const elapsed = performance.now() - start;
-	if (elapsed < THINKING_ELAPSED_MIN_MS) return "";
-	return theme.fg("dim", ` ${formatElapsed(elapsed)}`);
+/** In-group `└ Thinking` lane row — elapsed comes from the SHARED turn pass
+ *  timer (started on the user message, continued across every arming pass),
+ *  so a real thinking stream never resets the visible elapsed suffix. */
+function formatGroupThinkingChildRow(_group: DiscoveryGroup, theme: ThemeLike): string {
+	return format_in_group_thinking_row(format_thinking_pass_elapsed_suffix(theme));
 }
 
 /** Present-tense child verb for absorb+linger rows (SSOT for compact + cursor). */
@@ -1223,6 +1222,8 @@ function groupVisibleChildren(group: DiscoveryGroup): CompactCall[] {
 /** Whether the group still needs the shared 20 FPS gradient tick. */
 export function group_needs_gradient_tick(group: DiscoveryGroup): boolean {
 	if (group.thinkingChild && isThinkingBlocksHidden()) return true;
+	// The tool-lane hold animates the latest child's `-ing` verb at 20 FPS.
+	if (group.holdingToolLane === true && isThinkingBlocksHidden()) return true;
 	const visible = groupVisibleChildren(group);
 	if (visible.some((record) => !record._completed)) return true;
 	if (!group.settled && group.records.some((record) => !record._completed)) return true;
@@ -1273,11 +1274,18 @@ function buildGroupStaticText(group: DiscoveryGroup, theme: ThemeLike): string {
 	const lines = [groupBulletColor(group, theme) + headerText];
 	const children = groupVisibleChildren(group);
 	const show_thinking = group.thinkingChild && isThinkingBlocksHidden();
+	// Agent-pending wait with no thinking stream: the latest visible child keeps
+	// its gradient `-ing` verb until a real thinking stream arms the lane or a
+	// new tool wave reopens the group.
+	const hold_lane = !show_thinking && group.holdingToolLane === true && isThinkingBlocksHidden();
 	const child_rows = merge_group_child_rows(children);
 	for (const [index, row_records] of child_rows.entries()) {
 		const is_last_child = index === child_rows.length - 1 && !show_thinking;
 		const prefix = is_last_child ? GROUP_CHILD_LAST : GROUP_CHILD_TEE;
-		lines.push(theme.fg("dim", prefix) + formatGroupChildRows(row_records, theme));
+		lines.push(
+			theme.fg("dim", prefix) +
+				formatGroupChildRows(row_records, theme, is_last_child && hold_lane),
+		);
 	}
 	return lines.join("\n");
 }
@@ -1328,10 +1336,29 @@ export function formatGroupChildEditWriteStats(
 	return stats ? paint_compact_tool(theme, "  ", completed) + stats : "";
 }
 
-function formatGroupChildRow(record: CompactCall, theme: ThemeLike): string {
+/** Hold-state verb for the latest visible child during an agent-pending wait
+ *  with no thinking stream: discovery tools keep the gradient `-ing` verb
+ *  (Reading/Searching/…) as if the agent is still working, while completed
+ *  mutations (edit/write/apply_patch) snap to past tense (Edited/Wrote/Patched). */
+function hold_child_verb(record: CompactCall, theme: ThemeLike): string {
+	switch (record.name) {
+		case "edit":
+			return paint_compact_tool_label(theme, "Edited", true);
+		case "write":
+			return paint_compact_tool_label(theme, "Wrote", true);
+		case "apply_patch":
+			return paint_compact_tool_label(theme, "Patched", true);
+		default:
+			return formatGroupChildGradientVerb(record.name, record.args);
+	}
+}
+
+function formatGroupChildRow(record: CompactCall, theme: ThemeLike, hold_lane = false): string {
 	const completed = record._completed === true;
 	const verb = completed
-		? formatCallBodyVerb(record.name, record.args, theme, true, true)
+		? hold_lane
+			? hold_child_verb(record, theme)
+			: formatCallBodyVerb(record.name, record.args, theme, true, true)
 		: formatGroupChildGradientVerb(record.name, record.args);
 	const details = formatCallBodyDetails(record.name, record.args, theme, true, completed);
 	return (
@@ -1440,13 +1467,19 @@ function merged_child_diff_stats(
 
 /** One visible child row; merged same-file records accumulate their +N -N.
  *  Exported for the subagent live output tray (same shape as main groups). */
-export function formatGroupChildRows(records: readonly CompactCall[], theme: ThemeLike): string {
+export function formatGroupChildRows(
+	records: readonly CompactCall[],
+	theme: ThemeLike,
+	hold_lane = false,
+): string {
 	const last = records[records.length - 1];
 	if (!last) return "";
-	if (records.length === 1) return formatGroupChildRow(last, theme);
+	if (records.length === 1) return formatGroupChildRow(last, theme, hold_lane);
 	const completed = last._completed === true;
 	const verb = completed
-		? formatCallBodyVerb(last.name, last.args, theme, true, true)
+		? hold_lane
+			? hold_child_verb(last, theme)
+			: formatCallBodyVerb(last.name, last.args, theme, true, true)
 		: formatGroupChildGradientVerb(last.name, last.args);
 	const details = formatCallBodyDetails(last.name, last.args, theme, true, completed);
 	const counts = merged_child_diff_stats(records);
@@ -1511,8 +1544,11 @@ export class CompactRenderer {
 	 * - Tool lane: running/lingering children (Searching, Reading, …).
 	 * - Thinking lane: one gradient `└ Thinking` row replaces the linger child.
 	 *
-	 * Enter thinking lane: the wait arm or a real thinking stream
-	 * (`armInGroupThinking()` / `noteThinking()`).
+	 * Enter thinking lane: a REAL thinking stream only
+	 * (`apply_assistant_stream_boundary` → `noteHiddenThinking()` →
+	 * `arm_in_group_thinking()`). The wait arm (`holdToolLane()`) never paints
+	 * the lane — it keeps the tool lane with the latest child in its gradient
+	 * `-ing` verb until the model actually emits reasoning.
 	 * Leave thinking lane:
 	 *   - same-key `tool_call` → `appendToGroup` (reopen tool lane);
 	 *   - visible assistant text, user message, or hard non-groupable tool
@@ -1527,6 +1563,7 @@ export class CompactRenderer {
 	private freezeGroup(group: DiscoveryGroup | undefined): void {
 		if (!group || group.records.length === 0) return;
 		this.setThinkingChild(group, false);
+		group.holdingToolLane = false;
 		if (!group.settled) group.settled = true;
 		this.refreshGroupVisual(group);
 		this.scheduleGroupInvalidation(group);
@@ -1599,6 +1636,7 @@ export class CompactRenderer {
 		if (!group || group.records.length < 1) return;
 		this.settleGroups();
 		this.setThinkingChild(group, false);
+		group.holdingToolLane = false;
 		if (group.key) this.reopenGroupKey = group.key;
 		group.migrateAnchorOnNextWave = true;
 		this.currentGroup = group;
@@ -1629,8 +1667,6 @@ export class CompactRenderer {
 		this.hardExitGroup();
 	}
 
-	/** Soft settle for hidden thinking: past-tense header + in-group `└ Thinking`
-	 *  appended after lingering tool rows until the next tool call reopens the lane. */
 	/** Core implementation for arming the in-group `└ Thinking` lane. */
 	private arm_in_group_thinking(): void {
 		let group = this.resolveLiveGroup();
@@ -1652,8 +1688,11 @@ export class CompactRenderer {
 			// genuinely new tool wave (different tool name) or a hard boundary.
 			this.setThinkingChild(group, true);
 			group.settled = true;
-			// Start a fresh in-group thinking timer every time the lane appears.
-			group.thinkingPassStartedAt = performance.now();
+			// The lane's elapsed suffix reads the SHARED turn pass timer (started
+			// on the user message) — arming here never resets it, so a real
+			// thinking stream continues the post-tool wait timer instead of
+			// restarting it on every thinking_delta.
+			group.holdingToolLane = false;
 		}
 		this.reopenGroupKey = group.key;
 		this.refreshGroupInPlace(group);
@@ -1665,6 +1704,44 @@ export class CompactRenderer {
 	armInGroupThinking(): void {
 		if (!isThinkingBlocksHidden()) return;
 		this.arm_in_group_thinking();
+	}
+
+	/** Keep the tool lane live during an agent-pending wait with NO thinking
+	 *  stream: the latest completed child keeps its gradient `-ing` verb
+	 *  (Reading/Searching/…) until a real thinking stream arms the `└ Thinking`
+	 *  lane or a new tool wave reopens the group. A real thinking stream owns
+	 *  the lane — the hold must never disarm it. The lane's elapsed suffix is
+	 *  driven by the shared turn pass timer, so nothing here starts or resets
+	 *  a timer. */
+	holdToolLane(): void {
+		if (!isThinkingBlocksHidden()) return;
+		let group = this.resolveLiveGroup();
+		if (!group && this.reopenGroupKey) {
+			group = this.findReopenableGroup(this.reopenGroupKey);
+			if (group) this.currentGroup = group;
+		}
+		if (!group || group.hardExited || group.migrateAnchorOnNextWave) return;
+		if (group.records.length < 1) return;
+		// A real thinking stream owns the lane; never replace it with a hold.
+		if (group.thinkingChild) return;
+		this.currentGroup = group;
+		// Pure multi-patch groups have no verb lanes to animate — settle them to
+		// the past-tense summary like a normal completion.
+		if (is_multi_patch_group(group)) {
+			this.settleGroups();
+			return;
+		}
+		if (group.holdingToolLane) {
+			// agent_end/settle may have dropped the tick; keep it running so the
+			// gradient `-ing` verb keeps animating through the whole wait.
+			this.syncGroupTick(group);
+			return;
+		}
+		group.holdingToolLane = true;
+		group.settled = true;
+		this.reopenGroupKey = group.key;
+		this.refreshGroupInPlace(group);
+		this.syncGroupTick(group);
 	}
 
 	noteThinking(): void {
@@ -1875,8 +1952,12 @@ export class CompactRenderer {
 		this.groupTickGroup = group;
 		if (this.groupTickCb) return;
 		this.groupTickCb = (): void => {
+			// refreshActiveGroupText stages the rebuilt lane and returns false
+			// when the text is unchanged (identical-frame skip). When it changed,
+			// mark the gradient clock dirty — the clock issues the single native
+			// render for this tick instead of the subscriber requesting one.
 			if (!this.refreshActiveGroupText()) return;
-			requestTuiRender();
+			requestGradientRender();
 		};
 		subscribeGradientTick(this.groupTickCb);
 	}
@@ -1887,8 +1968,13 @@ export class CompactRenderer {
 		if (!group?.callText || !theme) return false;
 		let next: string;
 		const lane_active = group.thinkingChild && isThinkingBlocksHidden();
+		// The hold's gradient `-ing` verb is per-tick dynamic, so bypass the
+		// static-prefix cache and re-bake the whole block (same cost as a
+		// running child wave).
+		const hold_active = group.holdingToolLane === true && isThinkingBlocksHidden();
 		const all_visible_completed =
-			!lane_active || groupVisibleChildren(group).every((record) => record._completed === true);
+			(!lane_active || groupVisibleChildren(group).every((record) => record._completed === true)) &&
+			!hold_active;
 		if (group.staticTextValid && group.staticText !== undefined && all_visible_completed) {
 			// Static prefix cache hit: only the `└ Thinking` lane (gradient label
 			// + elapsed suffix) is dynamic, so rebuild just that row instead of
@@ -1914,7 +2000,8 @@ export class CompactRenderer {
 			const next = formatStandaloneCallRow(rec, theme);
 			if (rec.callText.text === next) return;
 			set_compact_call_text(rec, rec.callText, next);
-			requestTuiRender();
+			// The gradient clock owns the single per-tick render.
+			requestGradientRender();
 		};
 		subscribeGradientTick(this.standaloneTickCb);
 	}
@@ -1961,14 +2048,17 @@ export class CompactRenderer {
 			}
 		}
 		if (blocks_hidden && restore_thinking_lane) {
-			this.restoreInGroupThinkingLaneIfSettled();
+			this.restoreInGroupThinkingLaneIfSettled(true);
 		}
 		this.repaintAllGroupVisuals();
 		this.resyncGroupGradientTick();
 	}
 
-	/** Re-arm in-group `└ Thinking` after hiding blocks during an active wait. */
-	restoreInGroupThinkingLaneIfSettled(): void {
+	/** Re-arm in-group `└ Thinking` after hiding blocks during an active wait.
+	 *  `arm_lane` is true only when a real thinking stream is active — without
+	 *  a stream the group enters the tool-lane hold (gradient `-ing` verbs)
+	 *  instead of painting a premature Thinking lane. */
+	restoreInGroupThinkingLaneIfSettled(arm_lane: boolean): void {
 		if (!isThinkingBlocksHidden()) return;
 		let group = this.resolveLiveGroup();
 		if (!group && this.reopenGroupKey) {
@@ -1979,12 +2069,17 @@ export class CompactRenderer {
 		if (group.records.length < 1 || group.records.some((record) => !record._completed)) return;
 		if (group.thinkingChild) return;
 		if (!group.settled && groupVisibleChildren(group).length === 0) return;
-		this.setThinkingChild(group, true);
-		group.settled = true;
 		this.currentGroup = group;
 		this.reopenGroupKey = group.key;
-		this.refreshGroupInPlace(group);
-		this.syncGroupTick(group);
+		if (arm_lane) {
+			this.setThinkingChild(group, true);
+			group.settled = true;
+			group.holdingToolLane = false;
+			this.refreshGroupInPlace(group);
+			this.syncGroupTick(group);
+			return;
+		}
+		this.holdToolLane();
 	}
 
 	private repaintAllGroupVisuals(): void {
@@ -2056,6 +2151,7 @@ export class CompactRenderer {
 			fold_group_child_rows(group);
 		}
 		this.setThinkingChild(group, false);
+		group.holdingToolLane = false;
 		group.settled = false;
 		group.records.push(record);
 		record.group = group;
