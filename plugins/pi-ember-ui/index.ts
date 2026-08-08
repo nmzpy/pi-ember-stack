@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
+	type AgentSession,
 	AssistantMessageComponent,
 	BashExecutionComponent,
 	CompactionSummaryMessageComponent,
@@ -20,8 +21,10 @@ import {
 	Container,
 	type DefaultTextStyle,
 	type Editor,
+	Key,
 	Markdown,
 	type MarkdownTheme,
+	matchesKey,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -30,6 +33,7 @@ import {
 import { BULLET, CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { sync_compact_group_flags } from "../pi-compact-tools/group-flags.ts";
 import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
+import { TREE_BRANCH_LAST, TREE_BRANCH_PIPE } from "../pi-compact-tools/renderer.ts";
 import {
 	apply_assistant_stream_boundary,
 	resolve_assistant_stream_boundary_event,
@@ -835,9 +839,10 @@ type LiveTuiLike = {
 	};
 };
 
-let sessionCtx: ExtensionContext | undefined;
+let sessionCtx: (ExtensionContext & { session?: AgentSession }) | undefined;
 let shellInputUnsubscribe: (() => void) | undefined;
 let getShellEditor: (() => ShellModeEditor | undefined) | undefined;
+let bashCancelUnsubscribe: (() => void) | undefined;
 
 type EditorWithBorder = Editor & {
 	borderColor: (text: string) => string;
@@ -1004,6 +1009,10 @@ function installShellModeInputListener(ctx: ExtensionContext): void {
 		shellInputUnsubscribe();
 		shellInputUnsubscribe = undefined;
 	}
+	if (bashCancelUnsubscribe) {
+		bashCancelUnsubscribe();
+		bashCancelUnsubscribe = undefined;
+	}
 
 	getShellEditor = (): ShellModeEditor | undefined => {
 		const focused = tui.focusedComponent;
@@ -1034,6 +1043,17 @@ function installShellModeInputListener(ctx: ExtensionContext): void {
 		}
 
 		return result;
+	});
+
+	bashCancelUnsubscribe = ctx.ui.onTerminalInput((data: string) => {
+		if (isUserBashRunning() && matchesKey(data, Key.ctrl("c"))) {
+			const session = sessionCtx?.session;
+			if (session && typeof (session as unknown as { isBashRunning?: boolean })?.isBashRunning === "boolean" && session.isBashRunning) {
+				session.abortBash();
+			}
+			return { consume: false };
+		}
+		return undefined;
 	});
 }
 
@@ -1488,24 +1508,27 @@ function is_horizontal_rule_line(line: string): boolean {
 	return /^[\s\u2500]*$/.test(stripped) && stripped.includes("\u2500");
 }
 
-/** Ember bash transcript rows — running mode drops the bottom rule for chatbox integration. */
+/** Ember bash transcript rows — no top/bottom rules, with a dim vertical pipe connecting the header to the latest output row. */
 export function format_ember_bash_transcript_lines(
 	rawLines: string[],
 	width: number,
 	running: boolean,
 ): string[] {
-	const result: string[] = [];
-	let ruleIndex = 0;
+	const contentLines: string[] = [];
 	for (const line of rawLines) {
-		if (is_horizontal_rule_line(line)) {
-			ruleIndex += 1;
-			if (ruleIndex > 1 && running) continue;
-			result.push(chatboxBorderColor("\u2500".repeat(width)));
-			continue;
-		}
+		if (!is_horizontal_rule_line(line)) contentLines.push(line);
+	}
 
-		const pad = " ".repeat(running ? bash_execution_content_pad_cols() : 1);
-		result.push(fit_terminal_content_line(pad + line, width));
+	if (contentLines.length === 0) return [];
+
+	const result: string[] = [contentLines[0] ?? ""];
+	const pad = " ".repeat(running ? bash_execution_content_pad_cols() - 1 : 0);
+	const branchPipe = colorize(TREE_BRANCH_PIPE, MUTED_COLOR);
+	for (let i = 1; i < contentLines.length; i++) {
+		const isLast = i === contentLines.length - 1;
+		const branch = isLast ? colorize(TREE_BRANCH_LAST, MUTED_COLOR) : branchPipe;
+		const line = contentLines[i] ?? "";
+		result.push(fit_terminal_content_line(`${pad}${branch}${line}`, width));
 	}
 	return result;
 }
@@ -3178,6 +3201,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		if (shellInputUnsubscribe) {
 			shellInputUnsubscribe();
 			shellInputUnsubscribe = undefined;
+		}
+		if (bashCancelUnsubscribe) {
+			bashCancelUnsubscribe();
+			bashCancelUnsubscribe = undefined;
 		}
 		getShellEditor = undefined;
 	});

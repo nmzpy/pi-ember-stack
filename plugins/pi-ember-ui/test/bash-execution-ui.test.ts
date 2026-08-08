@@ -46,26 +46,23 @@ describe("user bash integrated UI helpers", () => {
 		expect(bash_execution_content_pad_cols()).toBe(shell_aware_editor_inner_pad() + 2);
 	});
 
-	test("format_ember_bash_transcript_lines drops bottom rule while running", () => {
+	test("format_ember_bash_transcript_lines drops all horizontal rules and draws a pipe tree", () => {
 		const width = 40;
-		const raw = [ruleLine(38), "$ bash foo", ruleLine(38)];
+		const raw = [ruleLine(38), "$ bash foo", ruleLine(38), "output"];
 		const running = format_ember_bash_transcript_lines(raw, width, true);
-		const complete = format_ember_bash_transcript_lines(raw, width, false);
 
-		expect(running.filter((line) => line.includes("\u2500"))).toHaveLength(1);
-		expect(complete.filter((line) => line.includes("\u2500"))).toHaveLength(2);
+		expect(running.filter((line) => line.includes("\u2500"))).toHaveLength(0);
 		expect(running.some((line) => line.includes("$ bash foo"))).toBe(true);
+		expect(running[running.length - 1]?.includes("\u2514")).toBe(true);
 	});
 
 	test("format_ember_bash_transcript_lines indents content while running", () => {
 		const width = 30;
-		const raw = [ruleLine(28), "output line", ruleLine(28)];
+		const raw = [ruleLine(28), "header", ruleLine(28), "output line"];
 		const running = format_ember_bash_transcript_lines(raw, width, true)[1];
-		const complete = format_ember_bash_transcript_lines(raw, width, false)[1];
+		const stripped = running.replace(/\x1b\[[0-9;]*m/g, "");
 
-		expect(running.startsWith(" ".repeat(bash_execution_content_pad_cols()))).toBe(true);
-		expect(complete.startsWith(" ")).toBe(true);
-		expect(running.startsWith(complete)).toBe(false);
+		expect(stripped.startsWith(" ".repeat(bash_execution_content_pad_cols() - 2))).toBe(true);
 	});
 
 	test("isUserBashRunning tracks lifecycle flag", () => {
@@ -83,7 +80,7 @@ describe("user bash integrated UI helpers", () => {
 
 	test("format_ember_bash_transcript_lines does not pad content to full width", () => {
 		const width = 80;
-		const raw = [ruleLine(78), "short output", ruleLine(78)];
+		const raw = [ruleLine(78), "header", ruleLine(78), "short output"];
 		const row = format_ember_bash_transcript_lines(raw, width, false)[1];
 		expect(visibleWidth(row)).toBeLessThan(width);
 	});
