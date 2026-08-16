@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
-import piEmberUiPlugin from "../index.ts";
+import piEmberUiPlugin, { create_live_thinking_markdown } from "../index.ts";
 import {
 	buildThemeBgColors,
 	buildThemeFgColors,
@@ -153,5 +153,32 @@ describe("live Markdown headings", () => {
 		expect(orchestrate_split_output).toContain(orchestrate_theme.getFgAnsi("text"));
 		expect(orchestrate_list_output).toContain(orchestrate_theme.getFgAnsi("mdListBullet"));
 		expect(orchestrate_list_output).not.toContain(orchestrate_theme.getFgAnsi("accent"));
+	});
+
+	test("shared child-thinking Markdown follows the live theme and parses Markdown", () => {
+		temp_home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ember-ui-thinking-"));
+		process.env.HOME = temp_home;
+		setActiveMode("code");
+
+		const { pi, events, handlers } = make_pi();
+		piEmberUiPlugin(pi);
+		shutdown_handler = handlers.get("session_shutdown");
+		const mode_change = events.get("pi-ember-ui:mode-change");
+		const code_theme = make_theme("code");
+		const plan_theme = make_theme("plan");
+		(globalThis as Record<PropertyKey, unknown>)[THEME_KEY] = code_theme;
+
+		const markdown = create_live_thinking_markdown("# Reasoning\n\n**Compare** the call site.");
+		const code_output = markdown.render(80).join("\n");
+		expect(code_output).toContain(code_theme.getFgAnsi("thinkingText"));
+		expect(code_output).not.toContain("# Reasoning");
+		expect(code_output).not.toContain("**Compare**");
+
+		setActiveMode("plan");
+		mode_change?.({ liveOnly: true }, {});
+		(globalThis as Record<PropertyKey, unknown>)[THEME_KEY] = plan_theme;
+		markdown.invalidate();
+		const plan_output = markdown.render(80).join("\n");
+		expect(plan_output).toContain(plan_theme.getFgAnsi("thinkingText"));
 	});
 });

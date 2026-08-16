@@ -64,6 +64,7 @@ import {
 import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
 import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
 import { with_suppressed_shell_history_sync as withSuppressedShellHistorySync } from "../pi-ember-ui/shell-mode.ts";
+import { installAgentsMdHooks } from "./agents-md.ts";
 import {
 	build_auto_continue_content,
 	is_benign_compact_error,
@@ -288,14 +289,26 @@ const BASE_RESEARCH_TOOLS = [
 	...WEB_ACCESS_TOOLS,
 ];
 const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATION_TOOLS];
-const ORCHESTRATE_TOOLS = [
+/**
+ * Canonical Orchestrate allowlist — single source for the mode tool set, the
+ * enter prompt, and the plan-implement orchestrate prompt. Quiz is present so
+ * Orchestrate can resolve material uncertainty before delegating.
+ */
+export const ORCHESTRATE_TOOLS = [
 	"quiz",
 	"todo",
 	"subagent",
 	SUBAGENT_RESUME_TOOL_NAME,
 	...WEB_ACCESS_TOOLS,
 ];
-function mode_tools_for_provider(modeId: string, provider: string | undefined): string[] {
+
+/**
+ * Canonical per-mode tool resolution used by the tool_call guard, mode
+ * switches, and session restore. For orchestrate it returns ORCHESTRATE_TOOLS
+ * itself, so the allowlist that advertises tools is the same one that permits
+ * them.
+ */
+export function mode_tools_for_provider(modeId: string, provider: string | undefined): string[] {
 	if (modeId === "code") return build_full_tools(provider);
 	return MODES[modeId]?.tools ?? build_full_tools(provider);
 }
@@ -363,20 +376,27 @@ so batching saves round-trips and reduces latency.
 
 const OUTPUT_STYLE_DIRECTIVE = `
 
-Output style: Reply in plain dense text. No markdown headers (#, ##, ###), no
-bold or italics (**, *), no decorative bulleted lists (-, *). Use short labeled
-lines (Label: value) or compact key: value pairs. Keep code fences only for
-multi-line code blocks. Be concise.
+Output template: User-facing changes in natural language. Reply in plain dense
+text. No markdown headers (#, ##, ###), no bold or italics (**, *), no
+decorative bulleted lists (-, *). Use short labeled lines (Label: value) or
+compact key: value pairs. Keep code fences only for multi-line code blocks. Be
+concise.
 `;
 
 const PLAN_OUTPUT_STYLE_DIRECTIVE = `
 
-Output style: Use markdown for structure. Prefer ## and ### section headers,
-**bold** for emphasis, and bullet lists where they aid scanability. Keep code
-fences for multi-line code blocks. Be concise and dense — no filler prose.
+Output template: User-facing changes in natural language. Reply in plain dense
+text. No markdown headers (#, ##, ###), no bold or italics (**, *), no
+decorative bulleted lists (-, *). Use short labeled lines (Label: value) or
+compact key: value pairs. Keep code fences only for multi-line code blocks. Be
+concise.
 `;
 
-const QUIZ_UNCERTAINTY_GUIDANCE = `If you are uncertain about a materially important requirement, tradeoff, or interpretation that would change what you do next, ask a clarifying question via the quiz tool before proceeding. Do not quiz for trivial or low-risk choices; make those autonomously.`;
+/**
+ * Canonical uncertainty guidance for the quiz tool. Injected into every parent
+ * mode prompt (plan, code, orchestrate) — never duplicate this text elsewhere.
+ */
+export const QUIZ_UNCERTAINTY_GUIDANCE = `If you are uncertain about a materially important requirement, tradeoff, or interpretation that would change what you do next, ask a clarifying question via the quiz tool before proceeding. Do not quiz for trivial or low-risk choices; make those autonomously.`;
 
 const SUBAGENT_AWARENESS_PROMPT = `
 
@@ -438,69 +458,28 @@ Planning requirements:
 - If architecture, ownership, or persistence rules change, include an AGENTS.md (or plugin AGENTS.md) docs module that records durable rules, not patch history.
 - Keep Investigation with file:line evidence; scale section depth to change size.
 
-Output format — use markdown section headers and bullets:
-
-## Task
-<one-sentence goal>
-
-## Investigation
-<files read, patterns found, relevant file:line references>
-
-## Summary
-- <user-visible result>
-- <architectural direction>
-- <behavior that must remain unchanged>
-- <persistence or ownership model when relevant>
-
-## Problems
-- <only the problems this change solves>
-
-## Behavior
-- <observable invariants and capability constraints>
-
-## Plan
-
-### Module 1: <action>
-- **Files:** <paths>
-- **What:** <change>
-- **Why:** <rationale tied to Problems>
-- **Risks:** <regression surfaces>
-- **Cleanup:** <obsolete code to remove, or none>
-- **Validation:** bash t.gate.sh <files>
-
-### Module 2: <action>
-- **Files:** <paths>
-- **What:** <change>
-- **Why:** <rationale tied to Problems>
-- **Risks:** <regression surfaces>
-- **Cleanup:** <obsolete code to remove, or none>
-- **Validation:** bash t.gate.sh <files>
-
-## Test Plan
-- <pure logic / persistence / mapping / architecture checks as relevant>
-- **Exclusions:** <intentional non-coverage>
-
-## Working Tree
-- Preserve unrelated uncommitted work; scope the patch to this plan; do not revert or reformat unrelated files.
-
-## Acceptance Criteria
-- <user-visible>
-- <persistence/SSOT when relevant>
-- <architecture / no duplicate ownership>
-- <backward compatibility>
-- <cleanup complete>
-- <named suites pass>
+Output: describe user-facing changes in natural language. Use concise labeled
+lines (e.g. Task:, Investigation:, Summary:, Problems:, Behavior:, Module 1:,
+Test Plan:, Working Tree:, Acceptance Criteria:) instead of markdown headers or
+decorative bullets. Keep code fences only for multi-line code blocks.
 
 ## Quiz When Uncertain
 - If you are uncertain about a materially important requirement, tradeoff, or interpretation that would change what you do next, ask a clarifying question via the quiz tool before proceeding. Do not assume.`);
 
-const ORCHESTRATOR_PROMPT =
+/**
+ * Canonical Orchestrate enter/reminder prompt. Advertises ORCHESTRATE_TOOLS and
+ * consumes the single QUIZ_UNCERTAINTY_GUIDANCE constant so quiz guidance stays
+ * SSOT with the allowlist.
+ */
+export const ORCHESTRATOR_PROMPT =
 	compose_mode_prompt(`Orchestrate mode is active. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.
 
 ${mode_intro(
 	"orchestrate",
 	ORCHESTRATE_TOOLS,
-	`Subagent delegation is your primary mechanism for getting work done. ${QUIZ_UNCERTAINTY_GUIDANCE}`,
+	`Subagent delegation is your primary mechanism for getting work done. ${QUIZ_UNCERTAINTY_GUIDANCE}
+
+When you have a ready plan and you have asked clarifying questions about unknowns, spawn implementation Coder subagents directly. Do not wait for explicit user confirmation before delegating work.`,
 )}${SUBAGENT_AWARENESS_PROMPT}
 
 Decomposition rules:
@@ -509,32 +488,7 @@ Decomposition rules:
 - Group independent modules into parallel clusters; chain dependent modules.
 - Pin shared interfaces in every dependent subagent prompt.
 
-Output format — plain labeled lines, no markdown headers or bullets:
-
-Task Summary: <one-sentence goal>
-
-Modules:
-
-Module 1: <name>
-  Owned files: <full paths>
-  Goal: <what this module achieves>
-  Dependencies: <none | Module N>
-  Parallel cluster: <A | B | sequential>
-  Steps:
-    1. <step>
-    2. <step>
-  Acceptance: <done criteria>
-  Validation: bash t.gate.sh <files>
-  Risks: <regression surfaces>
-
-Module 2: <name>
-  ...
-
-Execution Order:
-  1. Cluster A (parallel): Module 1, Module 2
-  2. Cluster B (parallel): Module 3, Module 4
-
-Delegation Prompts: <self-contained prompt for each module, ready for the Coder subagent>`);
+Respond in plain labeled lines, no markdown headers or bullets. Provide a Task Summary, a concise Modules section, an Execution Order, and the self-contained prompts you would send to each Coder subagent. Do not emit "Delegation Prompts:" or other scaffold headings after you have already finished delegating the work.`);
 
 const HEALTH_CHECK_PROMPT_APPENDIX = `If the user's request is a health-check or diagnostic task, classify each finding as 'Confirmed issue' or 'Needs owner decision' and include File, Evidence, Impact, Correction, and Risks.
 
@@ -1841,6 +1795,11 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		// handler). Do NOT write top-level legacy `model` key.
 		writePersistedState({ mode: persisted_mode, modeModels: mode_models });
 	});
+
+	// Hierarchical AGENTS.md auto-loader: discovers nested AGENTS.md files as
+	// tools touch their directories and injects them into every LLM request
+	// as one virtual custom context message (shallow -> deep activation).
+	installAgentsMdHooks(pi);
 
 	await subagentPlugin(pi);
 }

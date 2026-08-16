@@ -48,6 +48,7 @@ interface CustomFactoryTui {
 interface CustomFactoryTheme {
 	fg(tag: string, text: string): string;
 	bold(text: string): string;
+	strikethrough(text: string): string;
 }
 
 interface CustomFactoryResult {
@@ -118,14 +119,12 @@ import {
 } from "./runner.ts";
 import { runNamedAgent, SUBAGENT_REQUEST_EVENT, type SubagentRunRequest } from "./service.ts";
 import {
-	apply_subagent_group_stream_boundary,
 	getSubagentGroupRenderer,
 	isSingleModeSubagentArgs,
 	type SubagentArgs,
 	type SubagentCallRecord,
 	seed_subagent_renderer_from_branch,
 } from "./subagent-group.ts";
-import { install_subagent_render_spacing_patch } from "./subagent-render-spacing.ts";
 import { ThreadViewer, type ThreadViewerCallbacks } from "./thread-viewer.ts";
 import { type SubagentThread, threadStore } from "./threads.ts";
 
@@ -241,40 +240,22 @@ function is_subagent_member_running(member: SubagentCallRecord): boolean {
 	);
 }
 
-function any_batch_member_running(batch: SubagentCallRecord[]): boolean {
-	return batch.some(is_subagent_member_running);
-}
-
-function batch_owner(batch: SubagentCallRecord[]): SubagentCallRecord | undefined {
-	return batch[0];
-}
-
 function note_subagent_live_partial(toolCallId: string, partial: SubAgentResult): void {
+	const memberToolCallId = partial.toolCallId ?? toolCallId;
 	if (partial.isThinking) {
-		arm_subagent_thinking_pass(toolCallId);
+		arm_subagent_thinking_pass(memberToolCallId);
 	} else {
-		clear_subagent_thinking_pass(toolCallId);
+		clear_subagent_thinking_pass(memberToolCallId);
 	}
 	if (partial.latestToolCall) {
-		clear_subagent_thinking_pass(toolCallId);
+		clear_subagent_thinking_pass(memberToolCallId);
 	}
 	const group_renderer = getSubagentGroupRenderer();
 	const record = group_renderer.getRecord(toolCallId);
 	if (record && isSingleModeSubagentArgs(record.args)) {
 		group_renderer.register(toolCallId, record.args, [partial], record.invalidate);
 	}
-	batch_owner(group_renderer.getBatch(toolCallId))?.invalidate?.();
-}
-
-function map_grouped_members(batch: SubagentCallRecord[]) {
-	return batch.map((member) => ({
-		args: member.args,
-		results: member.results,
-		failureMessage: member.failureMessage,
-		displayName: member.displayName,
-		terminal: isSubagentToolTerminal(member.toolCallId),
-		toolCallId: member.toolCallId,
-	}));
+	record?.invalidate?.();
 }
 
 function sync_owner_gradient_tick(
@@ -295,9 +276,8 @@ import {
 	arm_subagent_thinking_pass,
 	clear_subagent_thinking_pass,
 	clearSubagentTiming,
-	getGroupElapsedMs,
-	getSubagentElapsedMs,
 	isSubagentToolTerminal,
+	make_subagent_member_tool_call_id,
 	markSubagentRunning,
 	markSubagentTerminal,
 } from "./subagent-timing.ts";
@@ -423,7 +403,6 @@ interface SubagentDetails {
 // ---------------------------------------------------------------------------
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-	await install_subagent_render_spacing_patch();
 	let currentCtx: ExtensionContext | undefined;
 
 	// Session-global per-type letter counters. Each agent type (e.g. "Coder",
@@ -485,9 +464,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			setGroupReopenableActive(isThinkingBlocksHidden() && compact.hasReopenableGroup());
 			setToolGroupActive(compact.hasActiveGroups());
 			syncThinkingGradientClock();
-			return;
 		}
-		getSubagentGroupRenderer().hardExit();
 	});
 
 	pi.on("tool_execution_end", (event: { toolName?: string; toolCallId?: string }) => {
@@ -497,34 +474,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		) {
 			markSubagentTerminal(event.toolCallId);
 			clear_subagent_thinking_pass(event.toolCallId);
-			const batch = getSubagentGroupRenderer().getBatch(event.toolCallId);
-			if (!any_batch_member_running(batch)) {
-				const owner = batch_owner(batch);
-				if (owner) unsubscribeTick(owner.toolCallId);
+			const record = getSubagentGroupRenderer().getRecord(event.toolCallId);
+			if (record && !is_subagent_member_running(record)) {
+				unsubscribeTick(record.toolCallId);
 			}
-			batch_owner(batch)?.invalidate?.();
+			record?.invalidate?.();
 		}
-	});
-
-	pi.on("message_start", (event: { message?: { role?: string } }) => {
-		if (event.message?.role === "user") {
-			getSubagentGroupRenderer().hardExit();
-		}
-	});
-
-	// A visible thinking block is a chronological transcript boundary: a later
-	// subagent tool call must not join an earlier Subagents batch whose header
-	// renders above the reasoning trace. Hidden thinking renders no block and
-	// keeps consecutive delegations collapsing into one batch.
-	pi.on("message_update", (event: {
-		assistantMessageEvent?: { type?: string };
-		message?: { role?: string; display?: boolean };
-	}) => {
-		apply_subagent_group_stream_boundary(
-			getSubagentGroupRenderer(),
-			event.assistantMessageEvent,
-			event.message,
-		);
 	});
 
 	// Proactively steer agents toward sub-agent delegation when users mention it
@@ -693,19 +648,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			context.invalidate,
 		);
 		const results = record.results;
-		const batch = group_renderer.getBatch(context.toolCallId);
-		const owner = batch_owner(batch);
-		const batch_running = any_batch_member_running(batch);
-		const owner_tool_call_id = owner?.toolCallId ?? context.toolCallId;
-		const terminal = isSubagentToolTerminal(owner_tool_call_id);
-
-		if (!group_renderer.isOwner(context.toolCallId)) {
-			if (owner && batch_running) {
-				sync_owner_gradient_tick(owner, true, theme, owner.invalidate ?? context.invalidate);
-				owner.invalidate?.();
-			}
-			return new Text("", 0, 0);
-		}
+		const running = is_subagent_member_running(record);
+		const terminal = isSubagentToolTerminal(context.toolCallId);
 
 		let shell = context.state.shell;
 		if (!(shell instanceof Container)) {
@@ -714,35 +658,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 		(shell as Container).clear();
 
-		const grouped_members = group_renderer.shouldUseGroupLayout(context.toolCallId)
-			? map_grouped_members(batch)
-			: undefined;
-		if (batch_running) {
-			markSubagentRunning(owner_tool_call_id);
-			if (!isSubagentToolTerminal(context.toolCallId)) {
-				markSubagentRunning(context.toolCallId);
-			}
-		}
-		const elapsedMs = grouped_members
-			? getGroupElapsedMs(batch)
-			: getSubagentElapsedMs(context.toolCallId);
 		const layout = buildSubagentLayoutComponent(
 			args,
 			results,
 			theme,
-			elapsedMs,
-			grouped_members,
-			!batch_running && terminal,
-			context.toolCallId,
+			undefined,
+			!running && terminal,
+			undefined,
 			undefined,
 			!isThinkingBlocksHidden(),
 		);
 		context.state.layout = layout;
 		(shell as Container).addChild(layout);
 
-		if (owner) {
-			sync_owner_gradient_tick(owner, batch_running, theme, context.invalidate);
-		}
+		sync_owner_gradient_tick(record, running, theme, context.invalidate);
 		return shell as Container;
 	}
 
@@ -773,7 +702,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						.join(" ") || undefined
 				: undefined;
 		context.state.results = results;
-		group_renderer.register(
+		const record = group_renderer.register(
 			context.toolCallId,
 			context.args,
 			results,
@@ -781,34 +710,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			failureMessage,
 		);
 
-		const batch = group_renderer.getBatch(context.toolCallId);
-		const owner = batch_owner(batch);
-		const batch_running = any_batch_member_running(batch);
-
-		if (!group_renderer.isOwner(context.toolCallId)) {
-			if (owner && batch_running) {
-				sync_owner_gradient_tick(owner, true, theme, owner.invalidate ?? context.invalidate);
-			}
-			owner?.invalidate?.();
-			return new Text("", 0, 0);
-		}
-
-		const owner_tool_call_id = owner?.toolCallId ?? context.toolCallId;
-		let terminal = isSubagentToolTerminal(owner_tool_call_id);
-		const isRunning = batch_running;
+		let terminal = isSubagentToolTerminal(context.toolCallId);
+		const isRunning = is_subagent_member_running(record);
 		if (!isRunning) {
 			markSubagentTerminal(context.toolCallId);
 		}
-		terminal = isSubagentToolTerminal(owner_tool_call_id);
-		const grouped_members = group_renderer.shouldUseGroupLayout(context.toolCallId)
-			? map_grouped_members(batch)
-			: undefined;
-		const elapsedMs = grouped_members
-			? getGroupElapsedMs(batch)
-			: getSubagentElapsedMs(context.toolCallId);
-		if (owner) {
-			sync_owner_gradient_tick(owner, isRunning, theme, context.invalidate);
-		}
+		terminal = isSubagentToolTerminal(context.toolCallId);
+		sync_owner_gradient_tick(record, isRunning, theme, context.invalidate);
 		if (!details) {
 			const outputBlock = result.content.find((item) => item.type === "text");
 			const output = outputBlock?.type === "text" ? outputBlock.text : "(no output)";
@@ -822,10 +730,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				context.args,
 				results,
 				theme,
-				elapsedMs,
-				grouped_members,
+				undefined,
 				!isRunning && terminal,
-				context.toolCallId,
+				undefined,
 				failureMessage,
 				!isThinkingBlocksHidden(),
 			);
@@ -856,7 +763,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		promptGuidelines: [
 			"Use subagent to delegate work that would flood the main context with search results or file contents.",
 			"Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}).",
-			"Bundled agents: Scout (fast recon), Coder (implementation). Coder's `todo` list is child-session-local: use ids from its own `create`, or an exact `task` subject; call `list` only when needed.",
+			"Bundled agents: Scout (fast recon), Coder (implementation). Coder's `Todo` list is child-session-local: use ids from its own `create`, or an exact `task` subject; call `list` only when needed.",
 			"Agent names are case-insensitive and surrounding whitespace is ignored.",
 			"Use /subagent to list all available agents or /subagent <name> for agent details.",
 		],
@@ -1073,8 +980,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					// Assign a session-global letter for chain mode so the user and
 					// orchestrating agent can track individual agents.
 					const stepDisplayName = assign_agent_letter(stepAgentName);
+					// Assign a per-step member id so each chain step has its own
+					// independent elapsed timer that freezes when the step finishes.
+					const stepToolCallId = make_subagent_member_tool_call_id(_toolCallId, i);
 					// Publish the active step before awaiting it so chain mode shows
-					// the running agent's gradient instead of an empty group header.
+					// the running agent's gradient instead of an empty per-agent block.
 					results.push({
 						agent: stepDisplayName,
 						task: taskWithContext,
@@ -1090,6 +1000,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							contextTokens: 0,
 							turns: 0,
 						},
+						toolCallId: stepToolCallId,
 					});
 					if (onUpdate) {
 						onUpdate({
@@ -1097,15 +1008,20 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							details: makeDetails("chain")(results),
 						});
 					}
+					markSubagentRunning(stepToolCallId);
 					const result = await runOne(
 						stepAgentName,
 						taskWithContext,
 						step.cwd,
 						signal,
 						step.timeout ?? params.timeout,
-						(partial) => threadStore.updateThread(thread.id, { result: partial }),
+						(partial) => {
+							partial.toolCallId = stepToolCallId;
+							threadStore.updateThread(thread.id, { result: partial });
+						},
 						stepDisplayName,
 						(partial) => {
+							partial.toolCallId = stepToolCallId;
 							note_subagent_live_partial(_toolCallId, partial);
 							threadStore.updateThread(thread.id, { result: partial });
 							results[i] = partial;
@@ -1117,6 +1033,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							}
 						},
 					);
+					result.toolCallId = stepToolCallId;
+					markSubagentTerminal(stepToolCallId);
 					threadStore.updateThread(thread.id, {
 						status: isFailedResult(result)
 							? result.stopReason === "aborted"
@@ -1243,6 +1161,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							contextTokens: 0,
 							turns: 0,
 						},
+						toolCallId: make_subagent_member_tool_call_id(_toolCallId, i),
 					};
 				}
 
@@ -1301,21 +1220,29 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							emitParallelUpdate();
 							return skippedResult;
 						}
+						const memberToolCallId = make_subagent_member_tool_call_id(_toolCallId, index);
+						markSubagentRunning(memberToolCallId);
 						const result = await runOne(
 							resolve_agent_name(t.agent),
 							t.task,
 							t.cwd,
 							parallelSignal,
 							t.timeout ?? params.timeout,
-							(partial) => threadStore.updateThread(parallelThreads[index].id, { result: partial }),
+							(partial) => {
+								partial.toolCallId = memberToolCallId;
+								threadStore.updateThread(parallelThreads[index].id, { result: partial });
+							},
 							parallelDisplayNames[index],
 							(partial) => {
+								partial.toolCallId = memberToolCallId;
 								note_subagent_live_partial(_toolCallId, partial);
 								threadStore.updateThread(parallelThreads[index].id, { result: partial });
 								allResults[index] = partial;
 								emitParallelUpdate();
 							},
 						);
+						result.toolCallId = memberToolCallId;
+						markSubagentTerminal(memberToolCallId);
 						allResults[index] = result;
 						threadStore.updateThread(parallelThreads[index].id, {
 							status: isFailedResult(result)
@@ -1383,6 +1310,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					messages: [],
 					stderr: "",
 					usage: emptyUsage,
+					toolCallId: make_subagent_member_tool_call_id(_toolCallId, 0),
 				};
 				if (onUpdate) {
 					onUpdate({
@@ -1390,15 +1318,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						details: makeDetails("single")([runningPlaceholder]),
 					});
 				}
+				const memberToolCallId = make_subagent_member_tool_call_id(_toolCallId, 0);
+				markSubagentRunning(memberToolCallId);
 				const result = await runOne(
 					agentName,
 					params.task,
 					params.cwd,
 					signal,
 					params.timeout,
-					(partial) => threadStore.updateThread(thread.id, { result: partial }),
+					(partial) => {
+						partial.toolCallId = memberToolCallId;
+						threadStore.updateThread(thread.id, { result: partial });
+					},
 					displayName,
 					(partial) => {
+						partial.toolCallId = memberToolCallId;
 						note_subagent_live_partial(_toolCallId, partial);
 						threadStore.updateThread(thread.id, { result: partial });
 						if (onUpdate) {
@@ -1417,6 +1351,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						},
 					},
 				);
+				result.toolCallId = memberToolCallId;
+				markSubagentTerminal(memberToolCallId);
 				threadStore.updateThread(thread.id, {
 					status: isFailedResult(result)
 						? result.stopReason === "aborted"
@@ -1564,6 +1500,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					contextTokens: 0,
 					turns: 0,
 				},
+				toolCallId: make_subagent_member_tool_call_id(_toolCallId, 0),
 			};
 			const makeDetails = (results: SubAgentResult[]): SubagentDetails => ({
 				mode: "single",
@@ -1579,6 +1516,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				});
 			}
 
+			const resumeToolCallId = make_subagent_member_tool_call_id(_toolCallId, 0);
+			markSubagentRunning(resumeToolCallId);
 			const result = await runSubAgent({
 				cwd: params.cwd ?? target.cwd ?? ctx.cwd,
 				systemPrompt: params.instructions
@@ -1592,8 +1531,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				timeoutMs: params.timeout,
 				agentName: displayName,
 				thinkingLevel: agent.thinking,
-				onMessage: (partial) => threadStore.updateThread(thread.id, { result: partial }),
+				onMessage: (partial) => {
+					partial.toolCallId = resumeToolCallId;
+					threadStore.updateThread(thread.id, { result: partial });
+				},
 				onToolCall: (partial) => {
+					partial.toolCallId = resumeToolCallId;
 					note_subagent_live_partial(_toolCallId, partial);
 					threadStore.updateThread(thread.id, { result: partial });
 					onUpdate?.({
@@ -1607,6 +1550,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					displayName,
 				},
 			});
+			result.toolCallId = resumeToolCallId;
+			markSubagentTerminal(resumeToolCallId);
 
 			threadStore.updateThread(thread.id, {
 				status: isFailedResult(result)

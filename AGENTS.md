@@ -174,10 +174,18 @@
   content has no base inner padding (`INNER_PAD = 0`; user-bash streaming adds
   one temporary column per side) plus a 2-col gutter on the left.
   The gutter shows a `> ` prompt glyph on the first editor body row and a
-  `  ` (two-space) gutter on subsequent rows; in shell mode the prompt
-  glyph is `! ` instead of `> `. The `innerWidth` passed to Pi's original
+  `  ` (two-space) gutter on subsequent rows; the glyph stays `> ` in shell
+  mode (the footer "shell" label is the mode indicator) and flips to `! `
+  only while a user `!` bash command is actually running. The `innerWidth` passed to Pi's original
   render subtracts `INSET * 2 + 2 + INNER_PAD * 2` from the terminal width
-  (the `+ 2` is the gutter, not pipe columns). While the agent is running
+  (the `+ 2` is the gutter, not pipe columns). Body rows render at exactly
+  `innerWidth` (Pi pads every editor row to its content width), and the
+  wrapper adds ONLY the 1-col prompt glyph on the first row or the 2-col
+  gutter on continuation rows — never any extra side padding. Any added
+  side columns overflow the reserved width and `truncateToWidth()` tacks a
+  `...` onto every wrapped chatbox line (2026-08-09 regression: a
+  `subsequentSidePad` made wrapped rows 123 wide at a 121-col terminal,
+  truncating the end of every continuation line; removed). While the agent is running
   (`agentRunPending`, from `agent_start` to `agent_settled`) or in shell mode,
   the prompt glyph uses `MUTED_COLOR` instead of `TEXT_COLOR`, giving the
   chatbox a dimmed appearance while the agent is running. The middle separator
@@ -295,6 +303,18 @@
   (top muted `#808080`, bottom text `TEXT_COLOR` from `mode-colors.ts`) with
   a box-drawing drop-shadow contour (`─│┌┐└┘├┤┬┴┼` glyphs at 25% opacity,
   offset one cell down and right).
+  **Startup logo animation is startup-only:** `startLogoAnimation()` runs only
+  when `session_start` reason is `startup` AND the session has zero entries
+  (`startup_logo_should_animate` SSOT in `pi-ember-ui/index.ts`); every
+  resume/reload/fork/new session and any restored-transcript startup renders
+  the header statically. The logo occupies line 0 of the TUI buffer, and
+  animating it at 20 FPS over a non-empty long transcript changes a line
+  above the live viewport every tick — pi-tui then issues its
+  scrollback-clearing full redraw (`\x1b[2J` + `\x1b[H` + `\x1b[3J`,
+  jump-to-top + scroll lock) on every frame, which is the reported
+  one-scroll-wheel-tick / text-selection snap-to-top after long sessions.
+  Ember never owns scroll; the invariant is that no plugin-owned render loop
+  may ever touch a line above the live viewport.
   `session_shutdown` is the safety floor. `PULSE_INTERVAL_MS` and
   `PulseManager` remain exported from `pi-compact-tools/renderer.ts` for
   rebuild-safe invalidate wiring; compact tool bullets do not pulse. The
@@ -375,12 +395,24 @@
   (`message_update` → `apply_assistant_stream_boundary` in
   `assistant-stream-boundary.ts`, SSOT → `noteHiddenThinking()`); the wait arm
   never paints it prematurely. During a post-tool wait with NO thinking stream,
-  `arm_pre_token_thinking_status()` calls `renderer.holdToolLane()` instead:
-  the group keeps its tool lane with the latest completed child in the gradient
-  `-ing` verb (Reading/Searching/Finding/Listing/Running) while completed
+  `arm_pre_token_thinking_status()` calls `renderer.holdToolLane()` instead
+  (and `tool_execution_end` re-arms it while the agent is pending, covering the
+  first-batch post-tool gap where no group existed at user-send): the group
+  keeps its tool lane with the VISIBLE children of the current wave in their
+  gradient `-ing` verbs (Reading/Searching/Finding/Listing/Running) while
+  completed
   mutations snap to past tense (Edited/Wrote/Patched) — the lane appends after
   lingering tool rows without folding them, and only appears once the model is
-  actually emitting reasoning. Inter-run planning
+  actually emitting reasoning. The hold applies in BOTH block-visibility modes
+  (with blocks visible the transcript owns reasoning once it starts, but the
+  pre-thinking wait still reads as ongoing work); `settleGroups` keeps the
+  hold's 20 FPS gradient tick alive through `agent_end` so the `-ing` verbs
+  keep animating until a thinking stream or `agent_settled` takes over. Active
+  compact child rows and the in-group Thinking frontier use the SSOT `─` dash
+  (`├─`/`└─`); completed prior children use the bare `│` continuation with no
+  connector-width trailing pad, so their body sits flush against the pipe.
+  `format_compact_group_child_prefix` in `pi-compact-tools/renderer.ts` is the
+  one owner for both main and nested-subagent work-group prefixes. Inter-run planning
   `text_delta` holds the lane the same way (no fake Thinking).
   When the last subagent finishes (`tool_execution_end` for `subagent` with no
   remaining delegated subagent call), `reconcile_thinking_wait_ui()` runs so the
@@ -416,8 +448,9 @@
   editor border stays muted, so the header state is never lost during
   compaction/retry/follow-up gaps. **Post-tool / inter-run Thinking:** while
   tools are idle and the SSOT wait predicate holds with NO thinking stream, a
-  settled work group HOLDS the tool lane — the latest completed child keeps its
-  gradient `-ing` verb (Reading/Searching/…) and edit/write snap to
+  settled work group HOLDS the tool lane — the visible children of the current
+  wave keep their
+  gradient `-ing` verbs (Reading/Searching/…) and edit/write snap to
   Edited/Wrote; the in-group `└ Thinking` lane is NOT painted (a premature lane
   would claim the slot while the model is not emitting reasoning). When a real
   thinking or inter-run planning stream arrives (blocks hidden),
@@ -446,10 +479,18 @@
   lingering tool rows. Same-key batches reopen the latest
   settled group (`findReopenableGroup`) instead of spawning another
   `Explored`/`Edited`/… header. The elapsed suffix is ONE shared turn pass
-  timer (`thinkingPassStartedAt`, started on the user `message_start`, cleared
-  on `agent_settled`) read by the widget, the in-message host, AND the in-group
-  `└ Thinking` lane — SSOT, never reset per pass or when the thinking stream
-  arrives; total turn time still notifies once on `agent_settled`.
+  timer (`thinkingPassStartedAt`, armed idempotently by
+  `arm_thinking_pass_timer()` on user `message_start` / `arm_pre_token_thinking_status`
+  / `startThinkingAnimation` / `resume_thinking_header_for_think_stream`,
+  cleared only by `clear_thinking_pass_timer()` at hard boundaries: visible
+  text, visible thinking, `agent_settled`, and session shutdown) read by the
+  widget, the in-message host, AND the in-group `└ Thinking` lane — SSOT,
+  never reset per pass or when the thinking stream arrives; total turn time
+  still notifies once on `agent_settled`. Tool boundaries
+  (`tool_call`, `tool_execution_start`, `toolcall_start`) suppress the
+  header but do NOT clear the timer — the pass continues through tools.
+  `message_end` and `agent_end` (inter-run events) also do NOT clear the
+  timer; only `agent_settled` (the true end of the user's task) clears it.
   When Pi is compacting context (manual
   `/compact`, threshold, or overflow recovery), `installCompactionStatusPatch`
   replaces Pi's `CompactionStatusIndicator` with a compact tool row: muted
@@ -521,8 +562,15 @@
   or a real thinking stream — `agent_start`/`agent_end`/`tool_execution_end`
   never re-arm (post-tool feedback stays with compact tool `-ing` verbs via
   `holdToolLane`), non-empty non-thinking text always suppresses (no pre-tool /
-  inter-run exemption), and the pass timer starts on show (every arm/stream
-  start resets `thinkingPassStartedAt`).
+  inter-run exemption), and the pass timer starts on the user-send pre-token
+  arm and CONTINUES seamlessly through hidden reasoning — `thinking_start` /
+  repeated `thinking_delta` never reset `thinkingPassStartedAt` (the idempotent
+  `arm_thinking_pass_timer()` only sets when zero, so repeated arms preserve
+  the live timestamp). A visible-text / visible-thinking / `agent_settled`
+  boundary ends the pass and zeroes the timer via `clear_thinking_pass_timer()`,
+  so the next re-show starts fresh. Tool boundaries suppress the header but do
+  NOT zero the timer; `message_end`/`agent_end` (inter-run events) also do NOT
+  zero it.
 - **Message/Row Background Token:** The `MUTED_MESSAGE_BG` constant in
   `mode-colors.ts` (`desaturateHex(blendToHex("#ffffff", PAGE_BG, 0.05), 1)` —
   white at 5% opacity over `PAGE_BG`, desaturated to a pure neutral grey =
@@ -532,11 +580,29 @@
   into message backgrounds. `buildThemeBgColors` assigns the same constant
   to `subagentBg` and `customMessageBg`; the static `ember.json` seed mirrors
   it (`subagentBg`/`customMsgBg` = `#262626`). Never inline a hex value for
-  these backgrounds and never re-derive them from the accent. The subagent
-  background is applied per completed/failed row only; running rows and the
-  `Subagents` header remain transparent.
+  these backgrounds and never re-derive them from the accent. Subagent rows
+  no longer use a background at all — the transcript renders per-agent
+  blocks transparently (no `subagentBg` Box), so `MUTED_MESSAGE_BG` applies
+  only to custom/compaction message backgrounds where the chatbox rule style
+  has not been applied.
 - **User-message / quiz / compaction / bash border style:**
-  `UserMessageComponent`, the quiz `renderCall`/`renderResult`,
+  `UserMessageComponent` renders as prompt-glyph-led markdown: the patched
+  `rebuild` builds a `Markdown` wrapped by `PromptGlyphContent` (exported
+  from `pi-ember-ui/index.ts`), which prepends a live-accent `❭ ` glyph to
+  the first rendered row. `PromptGlyphContent` renders its child at
+  `width - visibleWidth(glyph)` and re-truncates the glyph row as a safety
+  net, so the prefixed first row never exceeds the terminal width (Pi's
+  TUI throws on any rendered line wider than the terminal — 2026-08-09
+  crash: the glyph was prepended to a row already at the Box content width,
+  making it 122 wide at a 121-col terminal). It ALWAYS returns a fresh
+  array (`[fitted, ...rows.slice(1)]`) and never mutates the child's
+  output: pi-tui components (Markdown, Box) cache their render result and
+  return the same array reference every call, so writing `rows[0]` in
+  place made the `❭ ` accumulate by one glyph per TUI frame into an
+  infinite spam line. Never mutate a child's cached render output in a
+  wrapping component — build a new array instead. OSC133 zone markers are
+  preserved by `UserMessageComponent.render` wrapping the rendered block.
+  The quiz `renderCall`/`renderResult`,
   `CompactionSummaryMessageComponent`, the finished-bash transcript rules
   (`format_ember_bash_transcript_lines`), and the slash-command / model-picker
   middle separator all use chatbox-style horizontal rules (`──`) colored by
@@ -558,7 +624,7 @@
   `MUTED_MESSAGE_BG` still applies to subagent-row and custom/compaction
   message backgrounds where the chatbox rule style has not been applied.
   OSC133 zone markers are preserved by `UserMessageComponent.render` wrapping
-  the rendered block.
+  the rendered block (see the User-message border style bullet above).
 - **Mode-switch tool-access reminder:** When `apply_mode` switches between two
   different modes, it injects a hidden `pi-agents-tool-access` custom message
   (`display: false`, same channel as `pi-agents-auto-continue` and
@@ -648,6 +714,7 @@ Pi
     │   └── Cross-platform clipboard/path image attachments and compact previews
     ├── plugins/pi-custom-agents/
     │   ├── primary modes, plans, quiz
+    │   ├── hierarchical AGENTS.md auto-loader (agents-md.ts)
     │   └── subagent implementation and bundled agent definitions
     ├── plugins/devin-auth/
     │   └── Devin provider, OAuth, catalog, and streaming
@@ -905,9 +972,33 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Image placeholders use the single `[image N]` format in the editor. On submit,
   the input handler removes placeholders from prompt text and attaches native
   Pi `ImageContent` parts.
-- Submitted images render through Pi TUI's public `Image` component in a compact
-  custom message renderer (`maxWidthCells`/`maxHeightCells`); this plugin never
-  writes terminal frames or maintains a parallel renderer.
+- **Fallback capability SSOT:** `isImageFallbackMode()` in
+  `image-utils.ts` is the single predicate — true exactly when
+  `getCapabilities().images === null` (no supported inline-image protocol).
+  Both the input handler (`index.ts`) and the preview component (`preview.ts`)
+  read this one predicate; never inline a second `getCapabilities().images`
+  check or a parallel capability cache.
+- **Fallback path (unsupported protocol):** on submit, the input handler
+  replaces each attachment placeholder with its fallback label
+  (`[image N: WxH]`, via the SSOT `format_image_fallback_label` in
+  `types.ts`) inside the originating user-message text at that transcript
+  position (`replaceImagePlaceholdersWithFallbackLabels` in
+  `image-utils.ts`). Separate preview custom messages
+  (`pi-ember-images-preview`) are NOT injected — `pendingPreview` is never
+  set on the fallback path, so `before_agent_start` has nothing to inject.
+  Native `ImageContent` parts are still attached for the model in both paths.
+- **Supported-protocol path (unchanged):** the transcript renders compact
+  inline previews through Pi TUI's public `Image` component in the
+  `pi-ember-images-preview` custom message (idle deferral or
+  `deliverAs: "followUp"`); placeholders are stripped from the prompt text.
+- **Fallback tradeoff / public-seam rationale:** replacing the placeholder
+  with the dimensioned label inside the originating user text keeps the
+  image reference at its transcript position and readable on terminals that
+  cannot display inline images, at the cost of making the label model-visible
+  in the user message (the model sees `[image N: WxH]` instead of nothing).
+  The `input` transform + `sendMessage`/`before_agent_start` public seams are
+  the only integration points — this plugin never writes terminal frames or
+  maintains a parallel renderer.
 - The placeholder line and terminal fallback text are rendered with the
   `text` token, not `dim`, so the label is readable in terminals that cannot
   display inline images (e.g. Windows Terminal).
@@ -933,7 +1024,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
   when uncertain about a materially important requirement, tradeoff, or
   interpretation. Trivial or low-risk decisions remain autonomous. The canonical
   guidance text lives once in `QUIZ_UNCERTAINTY_GUIDANCE` in `index.ts` and is
-  injected into each parent mode prompt.
+  injected into each parent mode prompt. Quiz is registered exactly once
+  (`registerQuizTool`), is explicitly present in the canonical `ORCHESTRATE_TOOLS`
+  allowlist (which both advertises and permits it via
+  `mode_tools_for_provider`), and the Orchestrate prompt consumes the one
+  `QUIZ_UNCERTAINTY_GUIDANCE` constant. These invariants are pinned by
+  `test/orchestrate-quiz.test.ts` — never fork the guidance text or the
+  allowlist.
 - **Provider-aware patch tool selection:** `edit-tools.ts` is the SSOT for
   choosing `apply_patch` vs `edit`, `SUBAGENT_DELEGATION_TOOLS`
   (`subagent` / `subagent_resume`), and `without_subagent_delegation_tools()`.
@@ -1050,6 +1147,37 @@ field. Keep that mechanism aligned with the actual plugin folders.
   option. Retry injects the hidden `pi-agents-loop-retry` message instructing the
   model to back off and use a different tool; a custom None answer is injected
   as hidden guidance. Tracking resets at each agent run and session shutdown.
+- **Hierarchical AGENTS.md auto-loader:** `agents-md.ts` (SSOT, wired from
+  `index.ts`) discovers nested `AGENTS.md` files under the session cwd as tools
+  touch their directories and injects them into every LLM request as ONE
+  virtual custom context message (`customType: "pi-agents-md-instructions"`,
+  `display: false`). Pi natively loads the project-root AGENTS.md, so the root
+  file is never re-injected; the loader only activates files below it. Activation
+  is shallow → deep per directory walk with a deterministic first-activation
+  order per session, so directory-local precedence comes from ordering (deeper
+  files append after shallower ones) and parent instructions remain active
+  after the model changes modules. The `context` event is the dynamic
+  mechanism: `before_agent_start` cannot introduce instructions discovered by a
+  tool call in the same agent loop. Paths derive from `read`/`edit`/`write`/
+  `grep`/`find`/`ls` (`path`, `file_path`, `filePath` aliases), bash (heuristic
+  `cd <dir>` / `cd -- <dir>` plus absolute/dot-relative operands only), and
+  `apply_patch` (shared `parse_patch` envelope parser). Resolution is
+  filesystem-real: relative paths resolve against the canonical root, `..` is
+  normalized, symlinks are realpath'd (existing symlinks cannot escape; a
+  nonexistent create target is judged through its nearest existing ancestor),
+  and outside-root targets are rejected. Content is cached by stat signature
+  (mtime:size) with a content hash; `tool_execution_end` rescans the touched
+  dirs and updates/drops edited, created, or deleted files, and a prune-missing
+  safety net drops files removed by any means. The context message is virtual
+  per request (never persisted via `sendMessage`), represents the current
+  active set, is delimited as
+  `<agents_md path="relative/posix/path">\n...\n</agents_md>`, never mutates
+  the incoming message array, and skips when the array already carries the
+  `customType` marker. `session_start` captures `ctx.cwd`; `session_shutdown`
+  clears all loader state under Pi jiti semantics. Tests:
+  `test/agents-md.test.ts` (temp-dir fixtures covering root exclusion,
+  hierarchy order, `..`/outside rejection, multi-path, symlink escape,
+  create-parent resolution, reload/delete, and context serialization/dedup).
 - Thinking blocks are shown/hidden through the built-in thinking-toggle
   keybinding, preserving Pi's native behavior.
 - `/model` and `/resume` picking is owned by `pi-ember-ui/model-picker.ts`: it
@@ -1123,40 +1251,44 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `resolveAgent()` helper; names are case-insensitive and surrounding whitespace
   is ignored, while the resolved frontmatter name is used for display and threads.
 - **Subagent rendering:** The `subagent` tool uses `renderShell: "self"` and
-  renders a compact, Exploring-style grouped layout. Running agent names use
-  `theme.fg("text", …)`; completed and failed agent names use `theme.fg("dim", …)`.
-  Completed agents use green bullets and failed agents use red bullets.
-  **Per-agent elapsed time:** each done agent (single mode, and grouped
-  members under a `Subagents` header) appends a dim frozen elapsed suffix
-  (` 12s`, ` 2m 26s`) after its ✓/✗ so the user can see how long each
+  renders every agent as a **direct per-agent block** — there is no visual
+  `Subagents`/`Delegating` group header and no cross-call batching. Every
+  single-mode call, and every member of a native parallel/chain call, renders
+  through the one `buildSubagentLayoutComponent`/`renderSubagentLayout` path
+  (`render.ts`): bullet + name + status suffix + frozen elapsed, then the
+  agent's nested latest-tool / Thinking / live-output tray rows. Running agent
+  names use `theme.fg("text", …)`; completed and failed agent names use
+  `theme.fg("dim", …)`. Completed agents use green bullets and failed agents
+  use red bullets (SSOT `statusBulletColor` from `pi-compact-tools`).
+  **Spacing contract:** exactly one blank terminal row separates visible
+  agent blocks — the string renderer joins blocks with one `\n\n`, and the
+  component builder inserts one `Spacer(1)` between members with no extra
+  top/trailing padding inside the multi-member component. Separate subagent
+  tool calls each retain Pi's one native leading separator (the
+  `subagent-render-spacing.ts` separator-stripping patch is gone — every call
+  is its own owner, so Pi's self-shell padding applies uniformly). Pending
+  chain members remain hidden until they start.
+  **Per-agent elapsed time:** each done agent (single mode, and every
+  terminal member of a parallel/chain call) appends a dim frozen elapsed
+  suffix (` 12s`, ` 2m 26s`) after its ✓/✗ so the user can see how long each
   subagent took. The value is the member's own tool-call duration frozen at
   `markSubagentTerminal` (SSOT in `subagent-timing.ts`, same
   `formatElapsed`/1s threshold as Thinking); running and delegating members
-  never show a live timer. Grouped headers additionally show the batch max
-  once every member is done. Per-row placement is gated at the call sites
-  (`memberRecordsToRows` sets `elapsedMs` only for terminal members;
-  `renderAgentLabel` never renders it for running rows) — never render a
-  live ticking elapsed on subagent rows.
-  Parallel/chain mode shows a
-  `Subagents` header + `└ agent` children with the same status treatment. No
+  never show a live timer, and there is no batch-max suffix (no header).
+  Per-row placement is gated at the call site
+  (`addAgentBlockToContainer`/`renderAgentBlockString` pass `elapsedMs` only
+  for terminal rows; `renderAgentLabel` never renders it for running rows) —
+  never render a live ticking elapsed on subagent rows.
+  Parallel/chain mode renders each task/step as its own direct block (no
+  `Subagents` header, no `└ agent` children). No
   `⏳`, `[scope]`, or `parallel (N tasks)` labels. Chain mode only shows
   running + completed steps (pending steps hidden until they start).
-  **Streaming delegation collapse:** consecutive `subagent` tool calls whose
-  args brace is still open (or whose results have not arrived) join the same
-  `SubagentGroupRenderer` batch instead of hard-exiting, so an orchestrator
-  emitting a burst of delegations renders ONE gradient `Delegating` header
-  (`renderGroupHeaderLine` SSOT in `render.ts`) rather than one redundant
-  `Delegating` row per call. While the group is still delegating, child rows
-  surface each unveiled agent type (`memberRecordsToRows` SSOT — agent type
-  from `displayName` or streamed `args.agent`, never bare `subagent`) with the
-  shared subagent gradient on the *current* member only; prior members settle
-  to static text when the next invocation starts (`lastDelegatingIndex` +
-  `renderDelegatingAgentLabel`). Unknown-agent members render no child row so
-  `Delegating` never repeats. A streaming member that closes as a native
-  parallel/chain call is ejected back into its own isolated batch. Once every
-  member has results the header reverts to the static `Subagents` label — no
-  gradient on settled headers. `subagent-group.ts` `register()` is the SSOT
-  for batch join/eject; never duplicate the streaming-join logic in providers.
+  `subagent-group.ts` `SubagentGroupRenderer` is now a **per-call record
+  store** (SSOT): `register()` keeps one `SubagentCallRecord` per
+  `toolCallId` (args, live results, display name, invalidate target) and
+  never groups or batches calls; `seed_subagent_renderer_from_branch`
+  restores those records before Pi rebuilds. Never reintroduce cross-call
+  batching or a shared header in providers.
   The completed/failed bullet logic reuses `statusBulletColor` from
   `pi-compact-tools/renderer.ts` — never duplicate it. Failed rows append
   the real failure reason inline next to the agent name in `theme.fg("error", …)`
@@ -1244,14 +1376,20 @@ field. Keep that mechanism aligned with the actual plugin folders.
   Ember compaction wiring
   (`plugins/pi-custom-agents/compaction-wiring.ts` on `session_before_compact`,
   same prompts as parent via `stack-compaction.ts`). `build_subagent_settings()` enables Pi compaction
-  (`compaction.enabled: true`) and disables retry. Overflow recovery may call
-  `session.compact()` once before retrying the task prompt (hook supplies
-  summarizer). Never
+  (`compaction.enabled: true`) and disables retry, making Pi AgentSession the
+  **sole overflow recovery owner**: its canonical overflow check classifies the
+  resolved Codex overflow form (`stopReason: "error"` + `errorMessage` matching
+  `isContextOverflow`) and runs bounded overflow compaction plus continuation
+  inside `session.prompt()`, using Ember's structured stack summary through the
+  loaded `compaction-wiring.ts` hook (reason `overflow`, split-turn semantics).
+  The runner never catches overflow and re-prompts the task; it only keeps a
+  proactive token-estimate pre-prompt guard. Never
   hardcode model or provider names in the subagent runner — resolve the
   model from the parent context and let the inherited registry provide
   the API provider.
-  All agent rows (running, completed, failed) and the `Subagents` header
-  are transparent — no `subagentBg` background. Completed/failed agent
+  All agent blocks (running, completed, failed — single and every
+  parallel/chain member) are transparent — no `subagentBg` background and no
+  group header row. Completed/failed agent
   names render in plain text color (`theme.fg("text", …)`, not the live
   mode accent) so finished subagents don't flash the active mode color.
   The expanded view (Ctrl+O) is likewise transparent — each terminal
@@ -1270,13 +1408,36 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `TOOL_ROW_WIDTH_FRACTION` constant is the single source for the half-width
   threshold.
   When thinking blocks are visible (`!isThinkingBlocksHidden()`), a running
-  subagent also renders its live child activity directly below the agent
-  name via `SubagentLiveOutputText` (a multi-line `Component` defined in
-  `render.ts`), replacing the single latest-tool / `└ Thinking` preview row.
+  subagent renders its live child activity directly below the agent name via
+  `SubagentLiveOutputText` (a multi-line `Component` defined in `render.ts`),
+  replacing the single latest-tool / `└ Thinking` preview row. Visible child
+  reasoning is a chronological Markdown sibling of compact tool bursts, built
+  only through `create_live_thinking_markdown` in `pi-ember-ui/index.ts`
+  (the canonical CachedMarkdown/live-theme/thinking-style pipeline): never
+  split it manually, render it as Text, or create a per-subagent Markdown
+  theme patch. Adjacent visible thinking items coalesce as Markdown paragraphs
+  only until a tool or text boundary. Empty thinking markers and empty rendered
+  Markdown rows never gain a tree prefix; internal Markdown paragraph blanks
+  remain unprefixed, so no branch-only or fake-space row appears. When blocks
+  are hidden, a real child `thinking_delta` with a live tool wave promotes the
+  same compact tray so the `└─ Thinking` lane remains inside that work group;
+  it filters raw child text while hidden. The tray-gating predicate and child
+  prefix formatter are the SSOTs in `render.ts` and
+  `pi-compact-tools/renderer.ts`, respectively. When parent thinking blocks
+  are hidden, child `agent_end` sets the transient `SubAgentResult.isFinishing`
+  state and the nested tray suppresses every retained work header, tool row,
+  raw thinking block, and streamed text row. It renders only the normal outer
+  tree continuation plus one nested `└─ Finishing` row using the existing
+  `thinking` gradient preset, including when no live item or child tool row
+  exists. `agent_start`/`turn_start` clear it for retries and follow-ups;
+  `agent_settled` clears it authoritatively. It is status-only, not a
+  `liveItems` entry, so retained explicit child thinking cannot be evicted;
+  visible parent thinking blocks never render Finishing.
   The tray mirrors the main agent's `pi-compact-tools` work bundle: the
-  chronological `liveItems` buffer splits at visible assistant text (a hard
-  transcript boundary, like the main agent's `noteVisibleText()`), and each
-  work burst renders ONE unified `•` header via the SSOT
+  chronological `liveItems` buffer splits at visible assistant text and, in
+  visible-thinking mode, at visible reasoning (each is a hard transcript
+  boundary, like the main agent's `noteVisibleText()`). Each compact tool
+  burst renders ONE unified `•` header via the SSOT
   `formatUnifiedWorkHeader` (past-tense `Edited N files, Explored M files, …
   +N -N` summary once any member completed, present-tense
   Exploring/Editing/… while everything is still running) with the shared
@@ -1288,25 +1449,26 @@ field. Keep that mechanism aligned with the actual plugin folders.
   the next tool family. Child rows reuse the SSOT
   `merge_group_child_rows` + `formatGroupChildRows` formatters (gradient
   verbs while running, muted past-tense when done, merged same-file
-  `edit`/`write`/`apply_patch` rows with accumulated `+N -N`), and an
-  in-group `└ Thinking` lane (shared 20 FPS gradient clock) paints while the
-  child reasons after its latest tool wave. Streamed assistant messages
+  `edit`/`write`/`apply_patch` rows with accumulated `+N -N`). Only
+  hidden-thinking mode paints the in-group `└ Thinking` lane (shared 20 FPS
+  gradient clock) after the child's latest tool wave; visible reasoning is
+  never a compact tool child. Streamed assistant messages
   (narration between tools or the streaming answer) render as plain
   `theme.fg("text", …)` lines, ANSI-aware truncated via `truncateToWidth`,
   capped at `LIVE_TEXT_MAX_LINES` (6) per block and
-  `SUBAGENT_LIVE_TEXT_MAX_CHARS` (400) per block. One spacer row
-  separates consecutive tray segments (tool bursts and text blocks), matching
-  the main transcript's block spacing; spacer rows keep the vertical branch
-  pipe continuous (dim `TREE_BRANCH_PIPE` under the outer agent prefix)
-  through the one-row padding gap and count toward the 15-line budget. No top
-  horizontal rule; a bottom `──` rule (via `chatboxBorderColor`) appears only
+  `SUBAGENT_LIVE_TEXT_MAX_CHARS` (400) per block. Consecutive tray segments
+  have no synthetic spacer row: every outer tree gutter belongs to real
+  content only. Internal visible-Markdown paragraph blanks remain unprefixed
+  and count toward the 15-line budget; empty markers and blank-only Markdown
+  results are omitted. No top horizontal rule; a bottom `──` rule (via
+  `chatboxBorderColor`) appears only
   when the agent settles. When more than one subagent is shown, the agent tree
   stays continuous (`│` / `├` / `└`) and no extra horizontal rule is inserted
   between consecutive agent blocks. The live buffer
   (`SubAgentResult.liveItems`, `SubagentLiveItem[]` — one `tool` item per
   child call keyed by its `toolCallId` so running rows complete in place
-  instead of stacking a running row AND a completed duplicate, plus `text`
-  items for assistant messages) is accumulated in
+  instead of stacking a running row AND a completed duplicate, retained
+  `thinking` items, plus `text` items for assistant messages) is accumulated in
   `apply_subagent_stream_event` (`runner.ts` SSOT) from child
   `tool_execution_start`/`tool_execution_update`/`tool_execution_end`,
   `text_start`, and `text_delta` events; it is bounded to the last
@@ -1320,13 +1482,15 @@ field. Keep that mechanism aligned with the actual plugin folders.
   or the border logic in
   other plugins.
   The subagent extension delegates Pi's native `ToolExecutionComponent.render`
-  and keeps its native leading separator for `subagent` and `subagent_resume`
-  so the `Subagents`/`Delegating`/single-agent header gets the same 1-row
+  and keeps its native leading separator for every `subagent` and
+  `subagent_resume` call, so each per-agent block gets the same 1-row
   padding above as every other tool row and never sits flush against the
-  previous transcript block; it drops the separator only for pure-spacer
-  (empty) non-owner members so grouped batches stay tight with no stray blanks
-  below the block, without touching Pi's render scheduler or differential
-  state.
+  previous transcript block. There is no separator-stripping patch
+  (`subagent-render-spacing.ts` was removed): every call is its own owner, so
+  Pi's self-shell separator applies uniformly and multi-member
+  (parallel/chain) components add exactly one `Spacer(1)` between blocks
+  with no extra top/trailing padding — nothing touches Pi's render scheduler
+  or differential state.
 - Keep read-only modes read-only through their active-tool allowlists.
   Plan and orchestrate include `SUBAGENT_DELEGATION_TOOLS`; code mode does
   not. Plan mode is Scout-only for exploration (`subagent-policy.ts` SSOT:
@@ -1739,6 +1903,12 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `session_start`. The factory body must not call into session-bound state
   before `session_start` fires. There is no `session_switch` event — use
   `session_start` with `event.reason === "resume"` instead.
+  The compact renderer additionally stamps every queued microtask render
+  (`debouncedGroupRenderRequest`, `scheduleRecordShrinkSnap`) with a
+  `renderGeneration` counter; `resetForSession()` bumps it so a render queued
+  by the old session self-cancels instead of firing against the replaced
+  session's TUI. Queued invalidation sets are cleared on reset. Never queue a
+  render microtask across a session boundary without a generation guard.
 - Treat project trust as a Pi security decision. Do not bypass it in code.
 - **Read the Pi extensions docs before modifying extensions.** Consult
   `@earendil-works/pi-coding-agent/docs/extensions.md` (resolved from the installed

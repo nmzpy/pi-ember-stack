@@ -1,4 +1,5 @@
-import { Image, type Component, getCapabilities, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Image, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isImageFallbackMode } from "./image-utils.ts";
 import { format_image_fallback_label, type ImageAttachment } from "./types.ts";
 
 export class ImagePreviewMessage implements Component {
@@ -31,7 +32,7 @@ export class ImagePreviewMessage implements Component {
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
 		const lines: string[] = [];
-		const supportsImages = getCapabilities().images !== null;
+		const supportsImages = !isImageFallbackMode();
 		for (let index = 0; index < this.attachments.length; index++) {
 			const attachment = this.attachments[index];
 			if (!attachment) continue;
@@ -41,7 +42,9 @@ export class ImagePreviewMessage implements Component {
 			} else {
 				const label = format_image_fallback_label(attachment.id, attachment.dimensions);
 				lines.push(
-					visibleWidth(label) > safeWidth ? truncateToWidth(label, safeWidth, "") : this.fallbackColor(label),
+					visibleWidth(label) > safeWidth
+						? truncateToWidth(label, safeWidth, "")
+						: this.fallbackColor(label),
 				);
 			}
 			if (index < this.attachments.length - 1) lines.push("");

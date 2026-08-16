@@ -1,27 +1,44 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Message } from "@earendil-works/pi-ai";
+import {
+	createAssistantMessageEventStream,
+	type Api,
+	type AssistantMessage,
+	type Message,
+	type Model,
+} from "@earendil-works/pi-ai";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
 	type Http500RetryRollback,
 	type SubAgentResult,
+	type SubagentPromptAttempt,
 	type SubagentRetrySession,
+	MAX_SUBAGENT_WEBSOCKET_RETRIES,
+	classify_safe_pre_response_failure,
+	decide_pre_response_websocket_retry,
 	DEFAULT_SUBAGENT_TIMEOUT_MS,
 	annotate_parser_stream_error,
 	decide_pre_response_http500_retry,
 	extractFailureMessage,
 	format_agent_tool_result_batch,
 	format_agent_tool_result_text,
+	getFinalOutput,
 	get_agent_result_body,
 	getResultOutput,
 	is_empty_body_http500_error,
 	isFailedResult,
 	is_parser_stream_error,
 	merge_failure_message,
+	note_subagent_prompt_attempt_event,
 	PARSER_STREAM_ERROR_LIMITATION_SUFFIX,
 	resolve_failure_message,
 	resolve_subagent_timeout_ms,
 	retryable_pre_response_http500_failure,
 	rollback_failed_prompt_attempt,
+	runSubAgent,
 	SUBAGENT_HTTP500_RETRY_BACKOFF_MS,
 } from "../runner.ts";
 
@@ -134,6 +151,133 @@ function makeRollback(overrides: Partial<Http500RetryRollback> = {}): Http500Ret
 		...overrides,
 	};
 }
+
+const RUNNER_WEBSOCKET_PROVIDER = "runner-websocket-test";
+const RUNNER_WEBSOCKET_MODEL_ID = "runner-websocket-model";
+
+const RUNNER_WEBSOCKET_MODEL = {
+	id: RUNNER_WEBSOCKET_MODEL_ID,
+	name: "Runner WebSocket Test Model",
+	api: "openai-completions",
+	provider: RUNNER_WEBSOCKET_PROVIDER,
+	baseUrl: "http://127.0.0.1:9/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 128_000,
+	maxTokens: 4096,
+} as unknown as Model<Api>;
+
+function runner_assistant_message(options: {
+	stopReason: "error" | "stop";
+	errorMessage?: string;
+	text?: string;
+}): AssistantMessage {
+	return {
+		role: "assistant",
+		content: options.text ? [{ type: "text", text: options.text }] : [],
+		api: "openai-completions",
+		provider: RUNNER_WEBSOCKET_PROVIDER,
+		model: RUNNER_WEBSOCKET_MODEL_ID,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: options.stopReason,
+		errorMessage: options.errorMessage,
+		timestamp: Date.now(),
+	};
+}
+
+async function run_resolved_websocket_retry_fixture(options: { firstResponseText?: string } = {}): Promise<{
+	result: SubAgentResult;
+	streamCalls: number;
+}> {
+	const outcomes = [
+		runner_assistant_message({
+			stopReason: "error",
+			errorMessage: "WebSocket error",
+			text: options.firstResponseText,
+		}),
+		runner_assistant_message({ stopReason: "stop", text: "Recovered." }),
+	];
+	let streamCalls = 0;
+	const runtime = await ModelRuntime.create({ allowModelNetwork: false });
+	runtime.registerProvider(RUNNER_WEBSOCKET_PROVIDER, {
+		name: "Runner WebSocket Test Provider",
+		baseUrl: "http://127.0.0.1:9/v1",
+		api: "openai-completions",
+		apiKey: "test-key",
+		models: [
+			{
+				id: RUNNER_WEBSOCKET_MODEL_ID,
+				name: "Runner WebSocket Test Model",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 4096,
+			},
+		],
+		streamSimple: () => {
+			const stream = createAssistantMessageEventStream();
+			const outcome = outcomes[streamCalls++];
+			if (!outcome) throw new Error("Unexpected extra runner fixture prompt");
+			queueMicrotask(() => {
+				if (outcome.stopReason === "error") {
+					stream.push({ type: "error", reason: "error", error: outcome });
+				} else {
+					stream.push({ type: "done", reason: "stop", message: outcome });
+				}
+				stream.end(outcome);
+			});
+			return stream;
+		},
+	});
+	await runtime.setRuntimeApiKey(RUNNER_WEBSOCKET_PROVIDER, "test-key");
+	const cwd = mkdtempSync(join(tmpdir(), "pi-ember-runner-websocket-"));
+	try {
+		const result = await runSubAgent({
+			cwd,
+			systemPrompt: "Test system prompt",
+			task: "Test task",
+			tools: [],
+			model: RUNNER_WEBSOCKET_MODEL,
+			modelRegistry: new ModelRegistry(runtime),
+			timeoutMs: 30_000,
+		});
+		return { result, streamCalls };
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+}
+
+describe("runSubAgent resolved WebSocket retry", () => {
+	test("rolls back a no-output resolved provider error and completes the next prompt", async () => {
+		const { result, streamCalls } = await run_resolved_websocket_retry_fixture();
+		expect(streamCalls).toBe(2);
+		expect(result.exitCode).toBe(0);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(getFinalOutput(result.messages)).toBe("Recovered.");
+		expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+	});
+
+	test("does not replay a resolved WebSocket failure after child text", async () => {
+		const { result, streamCalls } = await run_resolved_websocket_retry_fixture({
+			firstResponseText: "Partial output.",
+		});
+		expect(streamCalls).toBe(1);
+		expect(result.exitCode).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("WebSocket error");
+		expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+	});
+});
 
 describe("resolve_subagent_timeout_ms", () => {
 	test("undefined or invalid values use the 120s default", () => {
@@ -702,7 +846,7 @@ describe("retryable_pre_response_http500_failure", () => {
 	});
 });
 
-describe("decide_pre_response_http500_retry", () => {
+describe("pre-response retry decisions", () => {
 	function makeRetrySession(options: { contextMessages?: Message[] } = {}): {
 		session: SubagentRetrySession;
 		calls: string[];
@@ -890,6 +1034,220 @@ describe("decide_pre_response_http500_retry", () => {
 		});
 		expect(decision).toBe("skip");
 		expect(result.errorMessage).toBe("500 status code (no body)");
+	});
+
+	test("retries a resolved WebSocket assistant error after the configured backoff", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "WebSocket error",
+			messages: [assistantMessage({ errorMessage: "WebSocket error" })],
+		});
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "WebSocket error",
+		};
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBe("websocket");
+		const decisionPromise = decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 10,
+		});
+		await Promise.resolve();
+		expect(calls).toEqual([]);
+		expect(await decisionPromise).toBe("retry");
+		expect(calls).toEqual(["branch:pre-attempt-leaf"]);
+		expect(result.stopReason).toBeUndefined();
+		expect(result.errorMessage).toBeUndefined();
+	});
+
+	test("keeps empty text markers retryable before a resolved WebSocket error", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult({ exitCode: 1, stopReason: "error" });
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		note_subagent_prompt_attempt_event(attempt, {
+			type: "message_update",
+			assistantMessageEvent: { type: "text_start" },
+		});
+		note_subagent_prompt_attempt_event(attempt, {
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", delta: "" },
+		});
+		note_subagent_prompt_attempt_event(attempt, {
+			type: "message_end",
+			message: assistantMessage({
+				stopReason: "error",
+				errorMessage: "WebSocket error",
+			}),
+		});
+		expect(attempt.sawVisibleOrToolSideEffect).toBe(false);
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBe("websocket");
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("retry");
+		expect(calls).toEqual(["branch:pre-attempt-leaf"]);
+	});
+
+	test("does not classify a later non-WebSocket resolved error from stale history", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "WebSocket error",
+			messages: [assistantMessage({ errorMessage: "WebSocket error" })],
+		});
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "503 Service Unavailable",
+		};
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBeUndefined();
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("skip");
+		expect(calls).toEqual([]);
+		expect(result.errorMessage).toBe("WebSocket error");
+	});
+
+	test("honors the WebSocket retry budget and preserves the exhausted error", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "WebSocket error",
+		};
+		for (let retry = 0; retry < MAX_SUBAGENT_WEBSOCKET_RETRIES; retry++) {
+			result.stopReason = "error";
+			result.errorMessage = "WebSocket error";
+			const decision = await decide_pre_response_websocket_retry({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: retry,
+				session,
+				rollback: makeRollback(),
+				backoffMs: 0,
+			});
+			expect(decision).toBe("retry");
+		}
+		result.stopReason = "error";
+		result.errorMessage = "WebSocket error";
+		const exhausted = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: MAX_SUBAGENT_WEBSOCKET_RETRIES,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(exhausted).toBe("skip");
+		expect(calls).toHaveLength(MAX_SUBAGENT_WEBSOCKET_RETRIES);
+		expect(result.errorMessage).toBe("WebSocket error");
+		expect(result.stopReason).toBe("error");
+	});
+
+	test("does not retry or roll back a resolved WebSocket error after visible or tool activity", async () => {
+		const sideEffectEvents = [
+			{
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", delta: "Visible output" },
+			},
+			{ type: "tool_execution_start" },
+		] as const;
+		for (const event of sideEffectEvents) {
+			const { session, calls } = makeRetrySession();
+			const result = makeResult({
+				exitCode: 1,
+				stopReason: "error",
+				errorMessage: "WebSocket error",
+			});
+			const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "WebSocket error",
+		};
+			note_subagent_prompt_attempt_event(attempt, event);
+			const decision = await decide_pre_response_websocket_retry({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				session,
+				rollback: makeRollback(),
+				backoffMs: 0,
+			});
+			expect(decision).toBe("skip");
+			expect(calls).toEqual([]);
+			expect(result.errorMessage).toBe("WebSocket error");
+		}
+	});
+
+	test("retries a thrown WebSocket error with the same safe rollback semantics", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			promptError: new Error("WEBSOCKET ERROR"),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("retry");
+		expect(calls).toEqual(["branch:pre-attempt-leaf"]);
+	});
+
+	test("stops a WebSocket retry when the parent aborts during backoff", async () => {
+		const { session, calls } = makeRetrySession();
+		const controller = new AbortController();
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "WebSocket error",
+		});
+		const decisionPromise = decide_pre_response_websocket_retry({
+			result,
+			attempt: {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "WebSocket error",
+		},
+			aborted: false,
+			websocketRetries: 0,
+			signal: controller.signal,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 100,
+		});
+		setTimeout(() => controller.abort(), 5);
+		expect(await decisionPromise).toBe("aborted");
+		expect(calls).toEqual([]);
+		expect(result.errorMessage).toBe("WebSocket error");
 	});
 });
 

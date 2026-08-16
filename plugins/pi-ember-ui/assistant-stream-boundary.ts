@@ -1,5 +1,9 @@
 import type { CompactRenderer } from "../pi-compact-tools/renderer.ts";
-import { isThinkingBlocksHidden, is_work_group_boundary_suppressed } from "./mode-colors.ts";
+import {
+	is_non_conventional_thinking_header,
+	isThinkingBlocksHidden,
+	is_work_group_boundary_suppressed,
+} from "./mode-colors.ts";
 
 /** Classify assistant stream events that affect compact group boundaries. */
 export function resolve_assistant_stream_boundary_event(ev: {
@@ -10,7 +14,16 @@ export function resolve_assistant_stream_boundary_event(ev: {
 		const delta = ev.delta;
 		return typeof delta === "string" && delta.trim().length > 0 ? "visible_text" : null;
 	}
-	if (ev.type === "thinking_start" || ev.type === "thinking_delta") return "thinking";
+	if (ev.type === "thinking_start" || ev.type === "thinking_delta") {
+		// Non-conventional thinking headers (e.g. **Thinking**, Thinking:)
+		// are a continuation of the current thinking pass, not a new boundary.
+		// They still classify as "thinking" so the pass timer keeps running.
+		const delta = ev.delta;
+		if (typeof delta === "string" && is_non_conventional_thinking_header(delta)) {
+			return "thinking";
+		}
+		return "thinking";
+	}
 	return null;
 }
 

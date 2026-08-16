@@ -1,16 +1,17 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
-import { getImageDimensions } from "@earendil-works/pi-tui";
+import { getCapabilities, getImageDimensions } from "@earendil-works/pi-tui";
 import { compressAttachment } from "./compress.ts";
 import type { AttachmentStore } from "./store.ts";
 import {
-	MAX_IMAGE_BYTES,
+	format_image_fallback_label,
+	IMAGE_PLACEHOLDER_PATTERN,
 	type ImageAttachment,
 	type ImageContent,
 	type LoadImageResult,
+	MAX_IMAGE_BYTES,
 	type SupportedImageMimeType,
-	IMAGE_PLACEHOLDER_PATTERN,
 } from "./types.ts";
 
 interface PathToken {
@@ -318,6 +319,31 @@ export function removeImagePlaceholders(text: string): string {
 		.replace(/[ \t]+\n/g, "\n")
 		.replace(/\n[ \t]+/g, "\n")
 		.trim();
+}
+
+/** SSOT terminal inline-image capability check. True when pi-tui is on the
+ *  image fallback path (no supported inline-image protocol), so the transcript
+ *  must show text labels instead of rendered previews. */
+export function isImageFallbackMode(): boolean {
+	return getCapabilities().images === null;
+}
+
+/** Replaces every attachment placeholder in the submitted text with its
+ *  fallback display label, so an unsupported terminal renders the image label
+ *  inside the originating user-message text area at that transcript position.
+ *  Attachments must come from `store.matchingPlaceholders()` so only
+ *  placeholders actually present in the text are substituted, in order. */
+export function replaceImagePlaceholdersWithFallbackLabels(
+	text: string,
+	attachments: ImageAttachment[],
+): string {
+	let output = text;
+	for (const attachment of attachments) {
+		output = output
+			.split(attachment.placeholder)
+			.join(format_image_fallback_label(attachment.id, attachment.dimensions));
+	}
+	return output;
 }
 
 export function describeReject(

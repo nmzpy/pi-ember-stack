@@ -17,15 +17,23 @@ let active_compaction_indicator: CompactionStatusIndicator | undefined;
 let compaction_tick_cb: (() => void) | undefined;
 
 function ensure_compaction_status_tick(): void {
-	if (compaction_tick_cb) return;
-	compaction_tick_cb = (): void => {
-		active_compaction_indicator?.invalidate?.();
-		// Text.invalidate() only drops Pi's component cache. The native TUI still
-		// needs its public render request to observe the new gradient phase — but
-		// the gradient clock owns that single per-tick render, so mark the clock
-		// dirty instead of requesting a frame from the subscriber.
-		request_gradient_render();
-	};
+	// Self-healing subscription: a prior compaction end (or session reset) may
+	// have dropped this cb from the subscriber set while compaction_tick_cb
+	// stayed set, so the `if (compaction_tick_cb) return` guard would leave a
+	// new compaction with NO live tick — the frozen "• Compacting" row.
+	// Unsubscribing is a no-op when the cb is absent; re-subscribing the same
+	// cb is idempotent in the Set, so every bind is safe to re-attach it.
+	if (!compaction_tick_cb) {
+		compaction_tick_cb = (): void => {
+			active_compaction_indicator?.invalidate?.();
+			// Text.invalidate() only drops Pi's component cache. The native TUI still
+			// needs its public render request to observe the new gradient phase — but
+			// the gradient clock owns that single per-tick render, so mark the clock
+			// dirty instead of requesting a frame from the subscriber.
+			request_gradient_render();
+		};
+	}
+	unsubscribe_gradient_tick(compaction_tick_cb);
 	subscribe_gradient_tick(compaction_tick_cb);
 }
 
@@ -41,8 +49,14 @@ export function bind_compaction_status_indicator(indicator: unknown): void {
 	ensure_compaction_status_tick();
 }
 
-/** Clear compaction status tick wiring when the indicator is removed. */
-export function unbind_compaction_status_indicator(): void {
+/** Clear compaction status tick wiring when the indicator is removed.
+ *  Pass the indicator being cleared so a stale clear from an earlier
+ *  compaction cannot kill the live tick of a newer compaction that is still
+ *  running (sequential compaction_start/end events interleave: end of run 1
+ *  may arrive after start of run 2). With no argument (session shutdown) the
+ *  wiring is always dropped. */
+export function unbind_compaction_status_indicator(indicator?: unknown): void {
+	if (indicator !== undefined && active_compaction_indicator !== indicator) return;
 	active_compaction_indicator = undefined;
 	drop_compaction_status_tick();
 }

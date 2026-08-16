@@ -7,10 +7,13 @@ import {
 	shell_aware_editor_inner_pad,
 } from "../index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { Theme } from "@earendil-works/pi-coding-agent";
 import {
 	MUTED_COLOR,
 	PAGE_BG,
 	TEXT_COLOR,
+	buildThemeBgColors,
+	buildThemeFgColors,
 	isUserBashRunning,
 	setUserBashRunning,
 } from "../mode-colors.ts";
@@ -56,13 +59,48 @@ describe("user bash integrated UI helpers", () => {
 		expect(running[running.length - 1]?.includes("\u2514")).toBe(true);
 	});
 
-	test("format_ember_bash_transcript_lines indents content while running", () => {
+	test("format_ember_bash_transcript_lines places the branch pipe at column 2", () => {
 		const width = 30;
-		const raw = [ruleLine(28), "header", ruleLine(28), "output line"];
-		const running = format_ember_bash_transcript_lines(raw, width, true)[1];
-		const stripped = running.replace(/\x1b\[[0-9;]*m/g, "");
+		const raw = [ruleLine(28), "header", ruleLine(28), "output one", "output two"];
+		const rows = format_ember_bash_transcript_lines(raw, width, true);
+		const pipe = rows[1]?.replace(/\x1b\[[0-9;]*m/g, "");
+		const last = rows[2]?.replace(/\x1b\[[0-9;]*m/g, "");
 
-		expect(stripped.startsWith(" ".repeat(bash_execution_content_pad_cols() - 2))).toBe(true);
+		// `• ` occupies columns 0-1, so the `│`/`└` sits below the `R` of `Ran`.
+		expect(pipe?.indexOf("\u2502")).toBe(2);
+		expect(last?.indexOf("\u2514")).toBe(2);
+	});
+
+	test("format_ember_bash_transcript_lines skips the stock Spacer and keeps the header flush", () => {
+		const width = 40;
+		const raw = ["", ruleLine(38), " • Ran foo", ruleLine(38), "output"];
+		const rows = format_ember_bash_transcript_lines(raw, width, false);
+		const header = rows[0]?.replace(/\x1b\[[0-9;]*m/g, "");
+
+		// The leading Spacer row is dropped, so the header is the first row,
+		// the stock Text paddingX=1 margin is stripped, and it carries no branch.
+		expect(header).toBe("• Ran foo");
+		expect(rows[1]?.includes("\u2514")).toBe(true);
+	});
+
+	test("format_ember_bash_transcript_lines wraps rows in userMessageBg when a theme is supplied", () => {
+		const width = 40;
+		const theme = new Theme(
+			buildThemeFgColors(MUTED_COLOR),
+			buildThemeBgColors(MUTED_COLOR),
+			"truecolor",
+			{ name: "test" },
+		);
+		const raw = ["", ruleLine(38), " • Ran foo", ruleLine(38), "output"];
+		const rows = format_ember_bash_transcript_lines(raw, width, false, theme);
+
+		expect(rows.length).toBe(4);
+		for (const row of rows) {
+			// One blank bg row above and below, content rows padded to full width.
+			expect(visibleWidth(row)).toBe(width);
+			expect(row.startsWith("\x1b[48;2;")).toBe(true);
+			expect(row.endsWith("\x1b[49m")).toBe(true);
+		}
 	});
 
 	test("isUserBashRunning tracks lifecycle flag", () => {

@@ -740,8 +740,9 @@ describe("thinking header visibility", () => {
 			// Pre-token arm requests a fold for the next real thinking stream.
 			arm_pre_token_thinking_status();
 			expect(thinking_status_should_show()).toBe(false);
-			// Planning text arrives: arm the in-group lane without folding.
-			renderer.armInGroupThinkingForPlanning();
+			// Hidden reasoning (blocks hidden) arrives: arm the in-group lane
+			// without folding.
+			renderer.noteHiddenThinking();
 			setGroupThinkingChildActive(renderer.hasGroupThinkingChild());
 			expect(renderer.hasGroupThinkingChild()).toBe(true);
 			// Children linger (soft boundary — no fold).

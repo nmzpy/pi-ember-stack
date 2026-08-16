@@ -26,7 +26,7 @@ Animations must respect is_animation_enabled().
 Workflow:
 
 1. Read the files you need to understand the context.
-2. For complex work, use `todo`; use an id returned by this agent session's `create`, or target an exact subject with `task`. Do not reuse parent-session ids; call `list` only when this session's id is unknown.
+2. For complex work, use the `Todo` tool; use an id returned by this agent session's `create`, or target an exact subject with `task`. Do not reuse parent-session ids; call `list` only when this session's id is unknown.
 3. Implement the change in ordered, single-logical-change steps.
 4. After each logical change, run bash t.gate.sh <files> to validate.
 5. Report what you did, any deviations, and user-facing benefits.

@@ -35,6 +35,42 @@ describe("apply_subagent_stream_event", () => {
 		expect(notify_count).toBe(1);
 	});
 
+	test("agent_end enters the transient finishing state", () => {
+		const result = make_running_result();
+		let notify_count = 0;
+		apply_subagent_stream_event(result, { type: "agent_end", willRetry: true }, () => {
+			notify_count += 1;
+		});
+		expect(result.isFinishing).toBe(true);
+		expect(notify_count).toBe(1);
+	});
+
+	test("agent_start and turn_start clear finishing for another child run", () => {
+		for (const type of ["agent_start", "turn_start"]) {
+			const result = make_running_result({ isFinishing: true, isThinking: false });
+			let notify_count = 0;
+			apply_subagent_stream_event(result, { type }, () => {
+				notify_count += 1;
+			});
+			expect(result.isFinishing).toBe(false);
+			expect(notify_count).toBe(1);
+		}
+	});
+
+	test("agent_settled clears finishing without dropping retained thinking", () => {
+		const result = make_running_result({
+			isFinishing: true,
+			liveItems: [{ kind: "thinking", text: "final checks" }],
+		});
+		let notify_count = 0;
+		apply_subagent_stream_event(result, { type: "agent_settled" }, () => {
+			notify_count += 1;
+		});
+		expect(result.isFinishing).toBe(false);
+		expect(result.liveItems).toEqual([{ kind: "thinking", text: "final checks" }]);
+		expect(notify_count).toBe(1);
+	});
+
 	test("tool_execution_start captures latest tool and clears thinking", () => {
 		const result = make_running_result({ isThinking: true });
 		apply_subagent_stream_event(
@@ -89,6 +125,47 @@ describe("apply_subagent_stream_event", () => {
 		expect(result.latestToolCall).toBeUndefined();
 		expect(result.isThinking).toBe(true);
 		expect(notify_count).toBe(1);
+	});
+
+	test("thinking deltas accumulate and publish while the state stays active", () => {
+		const result = make_running_result();
+		let notify_count = 0;
+		const notify = (): void => {
+			notify_count += 1;
+		};
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			notify,
+		);
+		apply_subagent_stream_event(
+			result,
+			{
+				type: "message_update",
+				assistantMessageEvent: { type: "thinking_delta", delta: "Inspect " },
+			},
+			notify,
+		);
+		apply_subagent_stream_event(
+			result,
+			{
+				type: "message_update",
+				assistantMessageEvent: { type: "thinking_delta", delta: "the current flow." },
+			},
+			notify,
+		);
+		expect(result.isThinking).toBe(true);
+		expect(result.liveItems).toEqual([{ kind: "thinking", text: "Inspect the current flow." }]);
+		expect(notify_count).toBe(3);
+
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_end" } },
+			notify,
+		);
+		expect(result.isThinking).toBe(false);
+		expect(result.liveItems).toEqual([{ kind: "thinking", text: "Inspect the current flow." }]);
+		expect(notify_count).toBe(4);
 	});
 
 	test("text_delta clears thinking without removing the lingering tool preview", () => {
@@ -261,6 +338,43 @@ describe("apply_subagent_stream_event live items", () => {
 		const tool = result.liveItems?.[1];
 		expect(tool?.kind).toBe("tool");
 		if (tool?.kind === "tool") expect(tool.row.name).toBe("read");
+	});
+
+	test("thinking stays in one burst between tool calls", () => {
+		const result = make_running_result();
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolName: "read", args: { path: "a.ts" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_start" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{
+				type: "message_update",
+				assistantMessageEvent: { type: "thinking_delta", delta: "Reasoning" },
+			},
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "message_update", assistantMessageEvent: { type: "thinking_end" } },
+			() => {},
+		);
+		apply_subagent_stream_event(
+			result,
+			{ type: "tool_execution_start", toolName: "grep", args: { pattern: "flow" } },
+			() => {},
+		);
+		expect(result.liveItems?.map((item) => item.kind)).toEqual([
+			"tool",
+			"thinking",
+			"tool",
+		]);
 	});
 
 	test("liveItems trims to last 15 items", () => {

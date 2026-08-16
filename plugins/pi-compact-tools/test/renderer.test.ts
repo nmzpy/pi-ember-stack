@@ -7,6 +7,7 @@ import { CompactRenderer, formatCallBody, formatCompactChildRow, formatUnifiedWo
 import {
 	deactivate_gradient,
 	dispatch_gradient_tick,
+	gradient_clock_is_idle,
 	set_gradient_render_request,
 	shutdown_gradient_clock,
 } from "../../pi-ember-ui/gradient.ts";
@@ -770,6 +771,107 @@ describe("CompactRenderer group child visibility", () => {
 		expect(row).toContain("1 search");
 		expect(row).not.toContain("Search");
 		expect(r.hasActiveGroups()).toBe(false);
+	});
+
+	test("hold keeps every visible child in its gradient -ing verb with a dashed branch", () => {
+		// Blocks VISIBLE (default): the hold must still arm during the
+		// pre-thinking wait so completed children read as ongoing work until a
+		// thinking delta arrives.
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const g1 = makeContext("hold-wave-1", owner_state) as any;
+		const g2 = makeContext("hold-wave-2", {}) as any;
+		const g3 = makeContext("hold-wave-3", {}) as any;
+
+		r.renderCall(
+			"grep",
+			{ pattern: "def get_interaction_render_snapshot", path: "gui/services/timeline_render_service.py" },
+			theme,
+			g1,
+		);
+		r.renderCall("grep", { pattern: "link", path: "gui/services/timeline_render_service.py" }, theme, g2);
+		r.renderCall("grep", { pattern: "LINKS", path: "gui/components/timeline/constants.py" }, theme, g3);
+		r.renderResult(
+			"grep",
+			{ pattern: "def get_interaction_render_snapshot", path: "gui/services/timeline_render_service.py" },
+			{ content: [{ type: "text", text: "a" }], details: { totalMatched: 2 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...g1, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "link", path: "gui/services/timeline_render_service.py" },
+			{ content: [{ type: "text", text: "b" }], details: { totalMatched: 1 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...g2, isError: false },
+		);
+		r.renderResult(
+			"grep",
+			{ pattern: "LINKS", path: "gui/components/timeline/constants.py" },
+			{ content: [{ type: "text", text: "c" }], details: { totalMatched: 1 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...g3, isError: false },
+		);
+
+		// Wait with no thinking stream: the group HOLDS the tool lane and ALL
+		// visible children of the wave keep their gradient `-ing` verbs.
+		r.holdToolLane();
+		const row = stripAnsi((owner_state.callText as any).text);
+		expect(row).not.toContain("Thinking");
+		// Only the latest visible child keeps its gradient `-ing` verb;
+		// earlier completed children render as completed with a bare `│`.
+		expect(row.split("Searching").length - 1).toBe(1);
+		expect(row).toContain("Search");
+		expect(row).not.toContain("├─");
+		expect(row).toContain("└─");
+		expect(row).not.toContain("├Search");
+	});
+
+	test("agent settlement clears a held tool lane and its gradient subscription", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const state: Record<string, any> = {};
+		const ctx = makeContext("hold-settle", state) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...ctx, isError: false },
+		);
+		r.holdToolLane();
+		expect(gradient_clock_is_idle()).toBe(false);
+
+		// agent_settled clears the hold before stopping remaining
+		// standalone/group subscriptions.
+		r.clearGroupThinkingChild();
+		expect(gradient_clock_is_idle()).toBe(true);
+		expect(stripAnsi(state.callText.text)).not.toContain("Reading");
+	});
+
+	test("stopGradientTicks kills a running standalone edit tick without a result", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const state: Record<string, any> = {};
+		const ctx = makeContext("standalone-no-result", state) as any;
+
+		// A standalone edit streams args but never receives a result callback
+		// (interrupted stream): its gradient verb tick must not rely on
+		// renderResult cleanup.
+		r.renderCall("edit", { file_path: "foo.ts", oldText: "a", newText: "b" }, theme, ctx);
+		expect(gradient_clock_is_idle()).toBe(false);
+
+		r.stopGradientTicks();
+		expect(gradient_clock_is_idle()).toBe(true);
 	});
 
 	test("holdToolLane renders edit/write children past tense (Edited/Wrote)", () => {
@@ -1660,7 +1762,7 @@ describe("CompactRenderer thinking collapse", () => {
 		expect(row).toContain("b.ts");
 	});
 
-	test("armInGroupThinkingForPlanning arms in-group Thinking without folding children", () => {
+	test("noteHiddenThinking arms in-group Thinking without folding children", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -1688,11 +1790,12 @@ describe("CompactRenderer thinking collapse", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		// Arm planning-text in-group Thinking. Thinking never folds prior
-		// tool children — the `└ Thinking` lane appends after lingering rows.
-		r.armInGroupThinkingForPlanning();
+		// Hidden reasoning (blocks hidden) arms the in-group Thinking lane.
+		// Thinking never folds prior tool children — the `└ Thinking` lane
+		// appends after lingering rows.
+		r.noteHiddenThinking();
 		expect(r.hasGroupThinkingChild()).toBe(true);
-		// Children must linger (not fold) for the soft planning-text boundary.
+		// Children must linger (not fold) for the hidden-thinking boundary.
 		expect(r.hasVisibleGroupChildren()).toBe(true);
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Thinking");
@@ -3319,5 +3422,287 @@ describe("formatCompactChildRow (native SSOT)", () => {
 			formatCompactChildRow("read", { path: "c.ts" }, false, undefined, theme),
 		);
 		expect(body).toBe(native);
+	});
+});
+
+describe("CompactRenderer pipe-only prior-completed child prefix", () => {
+	test("completed prior child uses pipe-only prefix with no tee dash", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("pipe-1", owner_state) as any;
+		const child_ctx = makeContext("pipe-2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		const lines = row.split("\n");
+		// Header is line 0; two child rows follow.
+		expect(lines.length).toBe(3);
+		// First child (completed, not terminal): pipe-only `  │` — no `─`
+		// and no connector-width trailing pad before the compact row body.
+		expect(lines[1]).toContain("│");
+		expect(lines[1]).toContain("[dim:  │][muted:*");
+		expect(lines[1]).not.toContain("├─");
+		expect(lines[1]).not.toContain("└─");
+		// Second child (completed, terminal): `  └─`.
+		expect(lines[2]).toContain("└─");
+		expect(lines[2]).not.toContain("│");
+	});
+
+	test("terminal/latest tool row remains └─", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("pipe-term-1", owner_state) as any;
+		const child_ctx = makeContext("pipe-term-2", {}) as any;
+		const third_ctx = makeContext("pipe-term-3", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "c.ts" }, theme, third_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "c.ts" },
+			{ content: [{ type: "text", text: "c" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...third_ctx, isError: false },
+		);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		const lines = row.split("\n");
+		expect(lines.length).toBe(4);
+		// First two completed children: pipe-only.
+		expect(lines[1]).toContain("│");
+		expect(lines[1]).not.toContain("├─");
+		expect(lines[2]).toContain("│");
+		expect(lines[2]).not.toContain("├─");
+		// Last child: terminal `└─`.
+		expect(lines[3]).toContain("└─");
+		expect(lines[3]).not.toContain("│");
+	});
+
+	test("Thinking lane is └─ while preceding completed children are pipe-only", () => {
+		setThinkingBlocksHidden(true);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("pipe-think-1", owner_state) as any;
+		const child_ctx = makeContext("pipe-think-2", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+
+		r.noteThinking();
+		const row = stripAnsi((owner_state.callText as any).text);
+		const lines = row.split("\n");
+		// Header, first child (pipe-only), second child (pipe-only),
+		// Thinking lane (└─). When Thinking is terminal, ALL completed
+		// children are pipe-only — including the immediately previous one.
+		expect(lines.length).toBe(4);
+		// First completed child: pipe-only — no `─` connector.
+		expect(lines[1]).toContain("│");
+		expect(lines[1]).not.toContain("├─");
+		expect(lines[1]).not.toContain("└─");
+		// Second completed child (last before Thinking): also pipe-only.
+		expect(lines[2]).toContain("│");
+		expect(lines[2]).not.toContain("├─");
+		expect(lines[2]).not.toContain("└─");
+		// Thinking lane: `└─` — the only row with a horizontal connector.
+		expect(lines[3]).toContain("└─");
+		expect(lines[3]).not.toContain("│");
+		expect(lines[3]).toContain("Thinking");
+	});
+
+	test("still-running parallel child keeps ├─ while prior completed child is pipe-only", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("pipe-run-1", owner_state) as any;
+		const child_ctx = makeContext("pipe-run-2", {}) as any;
+		const running_ctx = makeContext("pipe-run-3", {}) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("read", { path: "b.ts" }, theme, child_ctx);
+		r.renderCall("read", { path: "c.ts" }, theme, running_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderResult(
+			"read",
+			{ path: "a.ts" },
+			{ content: [{ type: "text", text: "a" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"read",
+			{ path: "b.ts" },
+			{ content: [{ type: "text", text: "b" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		// c.ts is still running (no renderResult).
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		const lines = row.split("\n");
+		expect(lines.length).toBe(4);
+		// First completed child: pipe-only.
+		expect(lines[1]).toContain("│");
+		expect(lines[1]).not.toContain("├─");
+		// Second completed child: pipe-only.
+		expect(lines[2]).toContain("│");
+		expect(lines[2]).not.toContain("├─");
+		// Running child (terminal): `└─`.
+		expect(lines[3]).toContain("└─");
+		expect(lines[3]).toContain("Reading");
+		expect(lines[3]).toContain("c.ts");
+	});
+
+	test("pure apply_patch group: completed prior file uses pipe-only prefix", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("pipe-patch-1", owner_state) as any;
+		const second_ctx = makeContext("pipe-patch-2", {}) as any;
+
+		const first_input = [
+			"*** Begin Patch",
+			"*** Add File: first.ts",
+			"+first",
+			"*** End Patch",
+		].join("\n");
+		const second_input = [
+			"*** Begin Patch",
+			"*** Add File: second.ts",
+			"+second",
+			"*** End Patch",
+		].join("\n");
+
+		r.renderCall("apply_patch", { input: first_input }, theme, owner_ctx);
+		r.renderCall("apply_patch", { input: second_input }, theme, second_ctx);
+		r.renderCall("apply_patch", { input: first_input }, theme, owner_ctx);
+		r.renderResult(
+			"apply_patch",
+			{ input: first_input },
+			{ details: { ok: true, fileCount: 1, results: [{ path: "first.ts", op: "add", status: "ok" }] } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"apply_patch",
+			{ input: second_input },
+			{ details: { ok: true, fileCount: 1, results: [{ path: "second.ts", op: "add", status: "ok" }] } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...second_ctx, isError: false },
+		);
+		r.renderCall("apply_patch", { input: first_input }, theme, owner_ctx);
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		const lines = row.split("\n");
+		// Header, first.ts (completed, not terminal), second.ts (completed, terminal).
+		expect(lines.length).toBe(3);
+		// First completed file: pipe-only.
+		expect(lines[1]).toContain("│");
+		expect(lines[1]).not.toContain("├─");
+		// Last file: `└─`.
+		expect(lines[2]).toContain("└─");
+		expect(lines[2]).not.toContain("│");
+	});
+
+	test("merged row is completed only when all source records are completed", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("pipe-merge-1", owner_state) as any;
+		const child_ctx = makeContext("pipe-merge-2", {}) as any;
+		const third_ctx = makeContext("pipe-merge-3", {}) as any;
+
+		// Three edits to the same file: first two completed, third still running.
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "y" }, theme, owner_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "y", newText: "z" }, theme, child_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "z", newText: "w" }, theme, third_ctx);
+		r.renderCall("edit", { file_path: "a.ts", oldText: "x", newText: "y" }, theme, owner_ctx);
+		r.renderResult(
+			"edit",
+			{ file_path: "a.ts", oldText: "x", newText: "y" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+1\n" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...owner_ctx, isError: false },
+		);
+		r.renderResult(
+			"edit",
+			{ file_path: "a.ts", oldText: "y", newText: "z" },
+			{ content: [{ type: "text", text: "ok" }], details: { diff: "+1\n" } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		// Third edit still running (no renderResult) — merged row is NOT completed.
+
+		const row = stripAnsi((owner_state.callText as any).text);
+		const lines = row.split("\n");
+		// Header + one merged child row (terminal, still running).
+		expect(lines.length).toBe(2);
+		// Merged row has a running member → not completed → uses `└─` (terminal).
+		expect(lines[1]).toContain("└─");
+		expect(lines[1]).not.toContain("│");
+		expect(lines[1]).toContain("Editing");
 	});
 });

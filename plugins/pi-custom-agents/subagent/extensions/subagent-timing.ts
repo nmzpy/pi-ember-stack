@@ -1,11 +1,18 @@
 import { formatElapsed } from "../../../pi-ember-ui/index.ts";
 import { THINKING_ELAPSED_MIN_MS } from "../../../pi-ember-ui/thinking-status-render.ts";
 
-/** Elapsed-time + terminal tracking per subagent tool call — SSOT with Thinking's formatElapsed. */
+/** Elapsed-time + terminal tracking per subagent member — SSOT with Thinking's formatElapsed. */
 
 const subagent_started_at = new Map<string, number>();
 const subagent_final_elapsed_ms = new Map<string, number>();
 const subagent_thinking_started_at = new Map<string, number>();
+
+export function make_subagent_member_tool_call_id(
+	parentToolCallId: string,
+	index: number,
+): string {
+	return `${parentToolCallId}#${index}`;
+}
 
 export function markSubagentRunning(toolCallId: string): void {
 	if (!subagent_started_at.has(toolCallId)) {
@@ -58,14 +65,6 @@ export function getSubagentElapsedMs(toolCallId: string): number {
 	const start = subagent_started_at.get(toolCallId);
 	if (start === undefined) return 0;
 	return performance.now() - start;
-}
-
-export function getGroupElapsedMs(batch: Array<{ toolCallId: string }>): number {
-	let max = 0;
-	for (const member of batch) {
-		max = Math.max(max, getSubagentElapsedMs(member.toolCallId));
-	}
-	return max;
 }
 
 export function clearSubagentTiming(): void {

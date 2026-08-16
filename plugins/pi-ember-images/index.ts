@@ -12,8 +12,10 @@ import { EmberImagesEditor } from "./editor.ts";
 import {
 	describeReject,
 	imagesForText,
+	isImageFallbackMode,
 	removeImagePlaceholders,
 	replaceImagePathsInText,
+	replaceImagePlaceholdersWithFallbackLabels,
 } from "./image-utils.ts";
 import { ImagePreviewMessage } from "./preview.ts";
 import { AttachmentStore } from "./store.ts";
@@ -88,6 +90,19 @@ export default function piEmberImagesPlugin(pi: ExtensionAPI): void {
 		const attachments = store.matchingPlaceholders(submittedText);
 		if (attachments.length === 0) return { action: "continue" as const };
 
+		const images = imagesForText(store, submittedText, event.images);
+		// Fallback terminals (no supported inline-image protocol): render each
+		// image's fallback label inside the originating user-message text area
+		// at that transcript position instead of injecting a separate preview
+		// message. Native ImageContent is still attached for the model.
+		if (isImageFallbackMode()) {
+			return {
+				action: "transform" as const,
+				text: replaceImagePlaceholdersWithFallbackLabels(submittedText, attachments),
+				images,
+			};
+		}
+
 		if (ctx.isIdle()) {
 			pendingPreview = attachments;
 		} else {
@@ -105,7 +120,7 @@ export default function piEmberImagesPlugin(pi: ExtensionAPI): void {
 		return {
 			action: "transform" as const,
 			text: removeImagePlaceholders(submittedText),
-			images: imagesForText(store, submittedText, event.images),
+			images,
 		};
 	});
 

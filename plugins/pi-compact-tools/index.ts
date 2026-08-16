@@ -104,6 +104,10 @@ export default function piCompactToolsPlugin(
 		renderer.refreshThemeColors(theme);
 	});
 	pi.on("session_shutdown", () => {
+		renderer.resetForSession();
+		setToolGroupActive(false);
+		setGroupThinkingChildActive(false);
+		setGroupReopenableActive(false);
 		unsubscribe_theme_refresh?.();
 		unsubscribe_theme_refresh = undefined;
 	});
@@ -124,7 +128,7 @@ export default function piCompactToolsPlugin(
 	});
 	pi.on("agent_settled", () => {
 		renderer.clearGroupThinkingChild();
-		renderer.resyncGroupGradientTick();
+		renderer.stopGradientTicks();
 		sync_compact_group_flags(renderer);
 	});
 	pi.on("message_start", (event) => {

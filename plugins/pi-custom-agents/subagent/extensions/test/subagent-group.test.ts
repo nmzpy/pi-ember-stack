@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { isThinkingBlocksHidden, setThinkingBlocksHidden } from "../../../../pi-ember-ui/mode-colors.ts";
 import {
-	apply_subagent_group_stream_boundary,
 	getSubagentGroupRenderer,
 	has_live_nested_preview,
 	seed_subagent_renderer_from_branch,
@@ -40,81 +39,47 @@ function subagentToolCall(id: string, agent: string) {
 }
 
 describe("SubagentGroupRenderer", () => {
-	test("consecutive single-mode calls share one batch", () => {
+	test("every call is its own owner record (no cross-call batching)", () => {
 		const renderer = getSubagentGroupRenderer();
 		renderer.resetForSession();
 
-		renderer.register("a", { agent: "Coder", task: "one" }, []);
-		renderer.register("b", { agent: "Coder", task: "two" }, [makeResult("Coder", -1)]);
+		const a = renderer.register("a", { agent: "Coder", task: "one" }, []);
+		const b = renderer.register("b", { agent: "Coder", task: "two" }, [makeResult("Coder A", -1)]);
 
-		expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-		expect(renderer.isOwner("a")).toBe(true);
-		expect(renderer.isOwner("b")).toBe(false);
-		expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
+		// Consecutive single-mode calls never share a batch: each record is
+		// independent so every call renders its own direct agent block.
+		expect(renderer.getRecord("a")).toBe(a);
+		expect(renderer.getRecord("b")).toBe(b);
+		expect(a).not.toBe(b);
+		expect(a.toolCallId).toBe("a");
+		expect(b.toolCallId).toBe("b");
 	});
 
-	test("streaming partial-args calls join the same batch (no Delegating spam)", () => {
+	test("parallel args stay isolated per tool call", () => {
 		const renderer = getSubagentGroupRenderer();
 		renderer.resetForSession();
 
-		// Call a streaming with the brace not closed: args have agent only.
-		renderer.register("a", { agent: "Coder" }, []);
-		renderer.register("b", {}, []);
-		renderer.register("c", { agent: "Scout" }, []);
-
-		expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-		expect(renderer.isOwner("a")).toBe(true);
-		expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-
-		// Args close for a: it stays in the batch once recognized as single-mode.
-		renderer.register("a", { agent: "Coder", task: "one" }, [makeResult("Coder", -1)]);
-		expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-	});
-
-	test("streaming call that closes as native parallel ejects from the singles batch", () => {
-		const renderer = getSubagentGroupRenderer();
-		renderer.resetForSession();
-
-		renderer.register("a", { agent: "Coder", task: "one" }, [makeResult("Coder", -1)]);
-		// b starts streaming (unknown args), joins the group...
-		renderer.register("b", {}, []);
-		expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-		// ...then closes with parallel tasks: it must be ejected, not absorbed.
-		renderer.register(
-			"b",
-			{ tasks: [{ agent: "Coder", task: "x" }, { agent: "Scout", task: "y" }] },
-			[makeResult("Coder", -1), makeResult("Scout", -1)],
-		);
-		expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
-		expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-	});
-
-	test("non-subagent hard exit starts a fresh batch", () => {
-		const renderer = getSubagentGroupRenderer();
-		renderer.resetForSession();
-
-		renderer.register("a", { agent: "Coder", task: "one" }, []);
-		renderer.register("b", { agent: "Coder", task: "two" }, []);
-		renderer.hardExit();
-		renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-		expect(renderer.shouldUseGroupLayout("c")).toBe(false);
-		expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["c"]);
-	});
-
-	test("native parallel tasks stay isolated per tool call", () => {
-		const renderer = getSubagentGroupRenderer();
-		renderer.resetForSession();
-
-		renderer.register(
+		const a = renderer.register(
 			"a",
 			{ tasks: [{ agent: "Coder", task: "one" }, { agent: "Scout", task: "two" }] },
-			[makeResult("Coder", -1), makeResult("Scout", -1)],
+			[makeResult("Coder A", -1), makeResult("Scout A", -1)],
 		);
-		renderer.register("b", { agent: "Coder", task: "solo" }, []);
+		const b = renderer.register("b", { agent: "Coder", task: "solo" }, []);
 
-		expect(renderer.shouldUseGroupLayout("a")).toBe(false);
-		expect(renderer.shouldUseGroupLayout("b")).toBe(false);
+		expect(renderer.getRecord("a")).toBe(a);
+		expect(renderer.getRecord("b")).toBe(b);
+		expect(a.results.length).toBe(2);
+	});
+
+	test("register updates the same record in place on rebuild", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		const invalidate = () => {};
+		const record = renderer.register("a", { agent: "Coder", task: "one" }, [], invalidate);
+		const rebound = renderer.register("a", { agent: "Coder", task: "one" }, [], invalidate);
+		expect(rebound).toBe(record);
+		expect(rebound.invalidate).toBe(invalidate);
 	});
 
 	test("register preserves populated results across empty rebuild placeholder", () => {
@@ -148,181 +113,56 @@ describe("SubagentGroupRenderer", () => {
 		expect(should_keep_existing_subagent_results(live, stale)).toBe(true);
 	});
 
-	describe("apply_subagent_group_stream_boundary (live visible-thinking boundary)", () => {
-		afterEach(() => {
-			setThinkingBlocksHidden(false);
-		});
+	test("rebuild preserves finishing over an empty live snapshot", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
 
-		test("visible thinking_start hard-exits so the next call starts a fresh batch", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
+		const finishing = [
+			{
+				...makeResult("Coder A", -1),
+				toolCallId: "member-0",
+				isFinishing: true,
+			},
+		];
+		renderer.register("call", { agent: "Coder", task: "one" }, finishing);
+		renderer.register("call", { agent: "Coder", task: "one" }, []);
 
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-
-			apply_subagent_group_stream_boundary(
-				renderer,
-				{ type: "thinking_start" },
-				{ role: "assistant" },
-			);
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.shouldUseGroupLayout("c")).toBe(false);
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["c"]);
-			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-		});
-
-		test("visible thinking_delta hard-exits the same way", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-
-			apply_subagent_group_stream_boundary(
-				renderer,
-				{ type: "thinking_delta" },
-				{ role: "assistant" },
-			);
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["c"]);
-		});
-
-		test("hidden thinking does not split the batch (streaming collapse preserved)", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(true);
-			expect(isThinkingBlocksHidden()).toBe(true);
-
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-
-			apply_subagent_group_stream_boundary(
-				renderer,
-				{ type: "thinking_start" },
-				{ role: "assistant" },
-			);
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-		});
-
-		test("hidden assistant messages never split on their thinking", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-
-			apply_subagent_group_stream_boundary(renderer, { type: "thinking_delta" }, {
-				role: "assistant",
-				display: false,
-			});
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-		});
-
-		test("bare text_start / empty text_delta never split", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-
-			apply_subagent_group_stream_boundary(
-				renderer,
-				{ type: "text_start" },
-				{ role: "assistant" },
-			);
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-
-			// Whitespace-only deltas carry no visible content either.
-			const renderer2 = getSubagentGroupRenderer();
-			renderer2.resetForSession();
-			renderer2.register("a", { agent: "Coder", task: "one" }, []);
-			renderer2.register("b", { agent: "Coder", task: "two" }, []);
-			apply_subagent_group_stream_boundary(
-				renderer2,
-				{ type: "text_delta", delta: "   \n" },
-				{ role: "assistant" },
-			);
-			renderer2.register("c", { agent: "Coder", task: "three" }, []);
-			expect(renderer2.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-		});
-
-		test("visible non-empty text_delta hard-exits so the next call starts a fresh batch", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-
-			apply_subagent_group_stream_boundary(
-				renderer,
-				{ type: "text_delta", delta: "Wrapper PTS fix landed. Next: renderer instant-start." },
-				{ role: "assistant" },
-			);
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.shouldUseGroupLayout("c")).toBe(false);
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["c"]);
-			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-		});
-
-		test("hidden assistant message text never splits", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-
-			apply_subagent_group_stream_boundary(renderer, { type: "text_delta", delta: "resume..." }, {
-				role: "assistant",
-				display: false,
-			});
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-		});
-
-		test("other non-text, non-thinking events never split", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			renderer.register("a", { agent: "Coder", task: "one" }, []);
-			renderer.register("b", { agent: "Coder", task: "two" }, []);
-
-			apply_subagent_group_stream_boundary(
-				renderer,
-				{ type: "toolcall_start" },
-				{ role: "assistant" },
-			);
-			renderer.register("c", { agent: "Coder", task: "three" }, []);
-
-			expect(renderer.getBatch("c").map((m) => m.toolCallId)).toEqual(["a", "b", "c"]);
-		});
+		expect(renderer.getRecord("call")?.results).toEqual(finishing);
+		expect(has_live_nested_preview(renderer.getRecord("call")?.results ?? [])).toBe(true);
 	});
 
-	describe("seed_subagent_renderer_from_branch (visible-thinking seed split)", () => {
+	test("authoritative settled false clears stale finishing on rebuild", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		renderer.register("call", { agent: "Coder", task: "one" }, [
+			{ ...makeResult("Coder A", -1), toolCallId: "member-0", isFinishing: true },
+		]);
+		renderer.register("call", { agent: "Coder", task: "one" }, [
+			{ ...makeResult("Coder A", 0), toolCallId: "member-0", isFinishing: false },
+		]);
+
+		expect(renderer.getRecord("call")?.results[0]?.isFinishing).toBe(false);
+	});
+
+	test("display names are stored per call and reset with the session", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		renderer.register("a", { agent: "Coder", task: "one" }, []);
+		renderer.setDisplayName("a", "Coder A");
+		expect(renderer.getRecord("a")?.displayName).toBe("Coder A");
+
+		renderer.resetForSession();
+		expect(renderer.getRecord("a")).toBeUndefined();
+	});
+
+	describe("seed_subagent_renderer_from_branch (record-only rebuild seeding)", () => {
 		afterEach(() => {
 			setThinkingBlocksHidden(false);
 		});
 
-		test("visible non-empty thinking between two subagent calls splits their batches", () => {
+		test("registers one record per subagent call regardless of boundaries", () => {
 			const renderer = getSubagentGroupRenderer();
 			renderer.resetForSession();
 			setThinkingBlocksHidden(false);
@@ -335,38 +175,26 @@ describe("SubagentGroupRenderer", () => {
 					subagentToolCall("b", "Scout"),
 				]),
 				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
+				assistantEntry([{ type: "text", text: "narration between waves" }, subagentToolCall("c", "Coder")]),
+				toolResultEntry("subagent", "c", [makeResult("Coder B", 0)]),
 			];
 			seed_subagent_renderer_from_branch(branch, renderer);
 
-			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
-			expect(renderer.shouldUseGroupLayout("b")).toBe(false);
+			// Every call is its own independent record — visible thinking and
+			// streamed text between calls never merge or split anything.
+			expect(renderer.getRecord("a")?.args.agent).toBe("Coder");
+			expect(renderer.getRecord("b")?.args.agent).toBe("Scout");
+			expect(renderer.getRecord("c")?.args.agent).toBe("Coder");
+			expect(renderer.getRecord("a")?.results[0]?.agent).toBe("Coder A");
+			expect(renderer.getRecord("b")?.results[0]?.agent).toBe("Scout A");
+			expect(renderer.getRecord("c")?.results[0]?.agent).toBe("Coder B");
 		});
 
-		test("visible thinking inside the same message splits a following tool call", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			const branch = [
-				assistantEntry([
-					subagentToolCall("a", "Coder"),
-					{ type: "thinking", thinking: "reconsidering" },
-					subagentToolCall("b", "Scout"),
-				]),
-				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
-				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
-			];
-			seed_subagent_renderer_from_branch(branch, renderer);
-
-			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
-		});
-
-		test("hidden thinking keeps historical subagent calls batched", () => {
+		test("hidden thinking still seeds independent records", () => {
 			const renderer = getSubagentGroupRenderer();
 			renderer.resetForSession();
 			setThinkingBlocksHidden(true);
+			expect(isThinkingBlocksHidden()).toBe(true);
 
 			const branch = [
 				assistantEntry([subagentToolCall("a", "Coder")]),
@@ -379,115 +207,11 @@ describe("SubagentGroupRenderer", () => {
 			];
 			seed_subagent_renderer_from_branch(branch, renderer);
 
-			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
+			expect(renderer.getRecord("a")?.args.agent).toBe("Coder");
+			expect(renderer.getRecord("b")?.args.agent).toBe("Scout");
 		});
 
-		test("empty visible thinking parts do not split historical batches", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			const branch = [
-				assistantEntry([subagentToolCall("a", "Coder")]),
-				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
-				assistantEntry([
-					{ type: "thinking", thinking: "" },
-					subagentToolCall("b", "Scout"),
-				]),
-				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
-			];
-			seed_subagent_renderer_from_branch(branch, renderer);
-
-			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
-		});
-
-		test("visible non-empty text between two subagent calls splits their batches", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			const branch = [
-				assistantEntry([subagentToolCall("a", "Coder")]),
-				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
-				assistantEntry([
-					{ type: "text", text: "Wrapper PTS fix landed. Next: renderer instant-start." },
-					subagentToolCall("b", "Scout"),
-				]),
-				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
-			];
-			seed_subagent_renderer_from_branch(branch, renderer);
-
-			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
-			expect(renderer.shouldUseGroupLayout("b")).toBe(false);
-		});
-
-		test("visible text inside the same message splits a following tool call", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			const branch = [
-				assistantEntry([
-					subagentToolCall("a", "Coder"),
-					{ type: "text", text: "continuing between waves" },
-					subagentToolCall("b", "Scout"),
-				]),
-				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
-				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
-			];
-			seed_subagent_renderer_from_branch(branch, renderer);
-
-			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
-		});
-
-		test("empty text parts do not split historical batches", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			const branch = [
-				assistantEntry([subagentToolCall("a", "Coder")]),
-				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
-				assistantEntry([
-					{ type: "text", text: "   " },
-					subagentToolCall("b", "Scout"),
-				]),
-				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
-			];
-			seed_subagent_renderer_from_branch(branch, renderer);
-
-			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
-		});
-
-		test("hidden assistant message text keeps historical subagent calls batched", () => {
-			const renderer = getSubagentGroupRenderer();
-			renderer.resetForSession();
-			setThinkingBlocksHidden(false);
-
-			const branch = [
-				assistantEntry([subagentToolCall("a", "Coder")]),
-				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
-				assistantEntry(
-					[
-						{ type: "text", text: "resume from checkpoint" },
-						subagentToolCall("b", "Scout"),
-					],
-					{ display: false },
-				),
-				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
-			];
-			seed_subagent_renderer_from_branch(branch, renderer);
-
-			expect(renderer.shouldUseGroupLayout("a")).toBe(true);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["a", "b"]);
-		});
-
-		test("user message still hard-splits historical batches", () => {
+		test("user messages never merge records — each call stays independent", () => {
 			const renderer = getSubagentGroupRenderer();
 			renderer.resetForSession();
 			setThinkingBlocksHidden(false);
@@ -501,8 +225,39 @@ describe("SubagentGroupRenderer", () => {
 			];
 			seed_subagent_renderer_from_branch(branch, renderer);
 
-			expect(renderer.getBatch("a").map((m) => m.toolCallId)).toEqual(["a"]);
-			expect(renderer.getBatch("b").map((m) => m.toolCallId)).toEqual(["b"]);
+			expect(renderer.getRecord("a")?.results[0]?.agent).toBe("Coder A");
+			expect(renderer.getRecord("b")?.results[0]?.agent).toBe("Scout A");
+		});
+
+		test("non-subagent tool calls between delegations keep records independent", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+
+			const branch = [
+				assistantEntry([subagentToolCall("a", "Coder")]),
+				toolResultEntry("subagent", "a", [makeResult("Coder A", 0)]),
+				assistantEntry([{ type: "toolCall", id: "x", name: "grep", arguments: { pattern: "foo" } }]),
+				{ type: "message", message: { role: "toolResult", toolName: "grep", toolCallId: "x", details: {} } } as any,
+				assistantEntry([subagentToolCall("b", "Scout")]),
+				toolResultEntry("subagent", "b", [makeResult("Scout A", 0)]),
+			];
+			seed_subagent_renderer_from_branch(branch, renderer);
+
+			expect(renderer.getRecord("a")).toBeDefined();
+			expect(renderer.getRecord("b")).toBeDefined();
+			expect(renderer.getRecord("x")).toBeUndefined();
+		});
+
+		test("calls without results still get an args record (live partials recover)", () => {
+			const renderer = getSubagentGroupRenderer();
+			renderer.resetForSession();
+
+			const branch = [assistantEntry([subagentToolCall("a", "Coder")])];
+			seed_subagent_renderer_from_branch(branch, renderer);
+
+			const record = renderer.getRecord("a");
+			expect(record?.args.agent).toBe("Coder");
+			expect(record?.results).toEqual([]);
 		});
 	});
 });

@@ -118,4 +118,32 @@ describe("parse_patch", () => {
 			]);
 		}
 	});
+
+	test("merges multiple Update File blocks for the same path", () => {
+		const input = `*** Begin Patch
+*** Update File: src/main.py
+@@ def foo():
+-old_foo
++new_foo
+*** Update File: src/other.py
+-old_other
++new_other
+*** Update File: src/main.py
+@@ def bar():
+-old_bar
++new_bar
+*** End Patch
+`;
+		const result = parse_patch(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.ops).toHaveLength(2);
+		expect(result.ops[0].path).toBe("src/main.py");
+		if (result.ops[0].op === "update") {
+			expect(result.ops[0].hunks).toHaveLength(2);
+			expect(result.ops[0].hunks[0].header).toBe("def foo():");
+			expect(result.ops[0].hunks[1].header).toBe("def bar():");
+		}
+		expect(result.ops[1].path).toBe("src/other.py");
+	});
 });

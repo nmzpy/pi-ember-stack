@@ -168,6 +168,128 @@ describe("apply_hunks_to_content", () => {
 		]);
 		expect(next).toBe("a\nb\nc\n");
 	});
+
+	test("multi-hunk in single file with identical context lines applies sequentially", () => {
+		const original = [
+			"def test_one():",
+			'    with pytest.raises(EmberError, match="without usable source timing"):',
+			"        func_a()",
+			"",
+			"def test_two():",
+			'    with pytest.raises(EmberError, match="without usable source timing"):',
+			"        func_b()",
+			"",
+		].join("\n");
+
+		const next = apply_hunks_to_content(original, [
+			{
+				lines: [
+					{
+						kind: "keep",
+						text: '    with pytest.raises(EmberError, match="without usable source timing"):',
+					},
+					{ kind: "remove", text: "        func_a()" },
+					{ kind: "add", text: "        func_a_new()" },
+				],
+				end_of_file: false,
+			},
+			{
+				lines: [
+					{
+						kind: "keep",
+						text: '    with pytest.raises(EmberError, match="without usable source timing"):',
+					},
+					{ kind: "remove", text: "        func_b()" },
+					{ kind: "add", text: "        func_b_new()" },
+				],
+				end_of_file: false,
+			},
+		]);
+
+		expect(next).toContain("func_a_new()");
+		expect(next).toContain("func_b_new()");
+	});
+
+	test("multi-hunk with repeated @@ soft anchors", () => {
+		const original = [
+			"@pytest.mark.unit",
+			"def test_one():",
+			"    old_a()",
+			"",
+			"@pytest.mark.unit",
+			"def test_two():",
+			"    old_b()",
+			"",
+		].join("\n");
+
+		const next = apply_hunks_to_content(original, [
+			{
+				header: "@pytest.mark.unit",
+				lines: [
+					{ kind: "remove", text: "    old_a()" },
+					{ kind: "add", text: "    new_a()" },
+				],
+				end_of_file: false,
+			},
+			{
+				header: "@pytest.mark.unit",
+				lines: [
+					{ kind: "remove", text: "    old_b()" },
+					{ kind: "add", text: "    new_b()" },
+				],
+				end_of_file: false,
+			},
+		]);
+
+		expect(next).toContain("new_a()");
+		expect(next).toContain("new_b()");
+	});
+
+	test("out-of-order hunks within single file", () => {
+		const original = ["line1", "line2", "line3", "line4"].join("\n") + "\n";
+		const next = apply_hunks_to_content(original, [
+			{
+				lines: [
+					{ kind: "remove", text: "line3" },
+					{ kind: "add", text: "LINE3" },
+				],
+				end_of_file: false,
+			},
+			{
+				lines: [
+					{ kind: "remove", text: "line1" },
+					{ kind: "add", text: "LINE1" },
+				],
+				end_of_file: false,
+			},
+		]);
+		expect(next).toBe(["LINE1", "line2", "LINE3", "line4"].join("\n") + "\n");
+	});
+
+	test("anchored single hunk with duplicate lines downstream applies at anchor", () => {
+		const original = [
+			"def first():",
+			"    shared_code()",
+			"",
+			"def second():",
+			"    shared_code()",
+			"",
+		].join("\n");
+
+		const next = apply_hunks_to_content(original, [
+			{
+				header: "def first():",
+				lines: [
+					{ kind: "remove", text: "    shared_code()" },
+					{ kind: "add", text: "    updated_code()" },
+				],
+				end_of_file: false,
+			},
+		]);
+
+		expect(next).toContain("def first():\n    updated_code()");
+		expect(next).toContain("def second():\n    shared_code()");
+	});
 });
 
 describe("apply_ops filesystem", () => {
@@ -339,5 +461,40 @@ describe("apply_ops filesystem", () => {
 		const summary = await apply_ops(root, parsed.ops);
 		expect(summary.ok).toBe(true);
 		expect(read(root, "eof.txt")).toBe("a\nb\nc\n");
+	});
+
+	test("multi-hunk parallel updates on single file on disk with repeated patterns", async () => {
+		const root = tmp();
+		const original = [
+			"def test_one():",
+			'    with pytest.raises(EmberError, match="without usable source timing"):',
+			"        func_a()",
+			"",
+			"def test_two():",
+			'    with pytest.raises(EmberError, match="without usable source timing"):',
+			"        func_b()",
+			"",
+		].join("\n");
+		write(root, "tests/test_service.py", original);
+
+		const patch = `*** Begin Patch
+*** Update File: tests/test_service.py
+@@ def test_one():
+-        func_a()
++        func_a_fixed()
+*** Update File: tests/test_service.py
+@@ def test_two():
+-        func_b()
++        func_b_fixed()
+*** End Patch
+`;
+		const parsed = parse_patch(patch);
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		const summary = await apply_ops(root, parsed.ops);
+		expect(summary.ok).toBe(true);
+		const content = read(root, "tests/test_service.py");
+		expect(content).toContain("func_a_fixed()");
+		expect(content).toContain("func_b_fixed()");
 	});
 });

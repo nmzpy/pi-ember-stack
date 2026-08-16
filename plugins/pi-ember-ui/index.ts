@@ -9,6 +9,7 @@ import {
 	CompactionSummaryMessageComponent,
 	DynamicBorder,
 	type ExtensionAPI,
+	getMarkdownTheme,
 	type ExtensionContext,
 	InteractiveMode,
 	Theme,
@@ -67,10 +68,7 @@ import {
 	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
-import {
-	request_live_tui_render,
-	reset_slash_command_tracking,
-} from "./layout.ts";
+import { request_live_tui_render, reset_slash_command_tracking } from "./layout.ts";
 import {
 	begin_work_group_boundary_suppression,
 	buildThemeBgColors,
@@ -100,6 +98,7 @@ import {
 	markToolCallAnnounced,
 	markToolExecutionEnded,
 	markToolExecutionStarted,
+	is_non_conventional_thinking_header,
 	PAGE_BG,
 	resetSubagentDelegation,
 	resetToolExecutionInFlight,
@@ -207,10 +206,7 @@ import {
 	set_shell_sync_callback as setShellSyncCallback,
 } from "./shell-mode.ts";
 import { notify_theme_refresh } from "./theme-refresh.ts";
-import {
-	bind_thinking_wait_handlers,
-	reconcile_thinking_wait_ui,
-} from "./thinking-wait.ts";
+import { bind_thinking_wait_handlers, reconcile_thinking_wait_ui } from "./thinking-wait.ts";
 import { build_transcript_entries } from "./transcript-entries.ts";
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -453,9 +449,32 @@ export function formatElapsed(ms: number): string {
 	return `${minutes}m ${seconds}s`;
 }
 
-/** Reset the live Thinking-pass timer (each new header arm starts fresh). */
-export function reset_thinking_pass_timer(): void {
+/** SSOT: arm the Thinking-pass timer. Idempotent — sets the start
+ *  timestamp only when no pass is live, so repeated arms (before_agent_start,
+ *  compaction rebuild, hidden thinking_start/delta) never restart an
+ *  already-running pass. The timer persists seamlessly from user send
+ *  through hidden reasoning until a hard boundary (visible text, visible
+ *  thinking, agent_settled, session shutdown) calls
+ *  clear_thinking_pass_timer(). */
+export function arm_thinking_pass_timer(): void {
+	if (thinkingPassStartedAt > 0) return;
 	thinkingPassStartedAt = performance.now();
+}
+
+/** SSOT: clear the Thinking-pass timer. Called only from hard pass boundaries:
+ *  visible text / visible thinking in message_update, agent_settled, and
+ *  reset_thinking_header_session_state (session shutdown). Never called from
+ *  tool boundaries or inter-run events — those suppress the header but keep
+ *  the pass timer alive so the elapsed continues when Thinking re-appears. */
+export function clear_thinking_pass_timer(): void {
+	thinkingPassStartedAt = 0;
+}
+
+/** Backward-compatible alias — now delegates to the idempotent arm. Existing
+ *  call sites and tests that referenced reset_thinking_pass_timer get the
+ *  safe idempotent behavior without a separate import path. */
+export function reset_thinking_pass_timer(): void {
+	arm_thinking_pass_timer();
 }
 
 /** Whether a thinking-pass timer is already running for the current header. */
@@ -661,6 +680,10 @@ export function should_suppress_thinking_header_for_stream_event(ev: {
 	if (ev.type === "thinking_delta") {
 		const delta = typeof ev.delta === "string" ? ev.delta : "";
 		if (delta.trim().length === 0) return false;
+		// Non-conventional thinking headers (e.g. **Thinking**, Thinking:)
+		// are a continuation of the current thinking pass — never suppress
+		// the external header or reset the pass timer for them.
+		if (is_non_conventional_thinking_header(delta)) return false;
 		// In visible thinking mode the reasoning block becomes the transcript
 		// slot; suppress the placeholder after the first reasoning text output.
 		return !isThinkingBlocksHidden();
@@ -737,13 +760,15 @@ function refresh_thinking_status(force_render = false): void {
 	}
 }
 
-/** Hide the gradient Thinking header while tools or visible assistant text run. */
+/** Hide the gradient Thinking header while tools or visible assistant text run.
+ *  This suppresses header VISIBILITY only — it does NOT clear the pass timer.
+ *  Tool boundaries (tool_call, tool_execution_start, toolcall_start) suppress
+ *  the header but keep the pass alive so the elapsed continues when Thinking
+ *  re-appears after the tool. The hard-boundary caller (visible text / visible
+ *  thinking in message_update) clears the timer separately via
+ *  clear_thinking_pass_timer(). */
 export function suppress_thinking_header_for_work(): void {
 	thinkingHeaderSuppressed = true;
-	// The header is disappearing: stop its pass timer so a later re-arm
-	// (real thinking stream or a fresh user send) restarts the elapsed
-	// suffix from zero instead of carrying a stale long-running value.
-	thinkingPassStartedAt = 0;
 	// Always force one normal Pi frame. The header may already be marked
 	// suppressed while its prior static row is still present in a cached
 	// assistant/widget component; waiting for the next lifecycle transition
@@ -754,11 +779,12 @@ export function suppress_thinking_header_for_work(): void {
 /** Re-show the gradient Thinking header when a hidden thinking stream resumes.
  *  Visible thinking blocks render their own reasoning transcript, so the
  *  placeholder header must stay suppressed. When the header re-appears after
- *  a tool/text suppression, its pass timer restarts from zero. */
+ *  a tool suppression, its pass timer continues from the original arm — the
+ *  idempotent arm preserves an already-live timestamp. */
 export function resume_thinking_header_for_think_stream(): void {
 	if (thinkingHeaderSuppressed && isThinkingBlocksHidden()) {
 		thinkingHeaderSuppressed = false;
-		reset_thinking_pass_timer();
+		arm_thinking_pass_timer();
 		refresh_thinking_status();
 	}
 }
@@ -787,6 +813,34 @@ export function set_thinking_status_host_fixtures_for_tests(fixtures: {
 /** Test seam: render the resolved Thinking status lines at a width. */
 export function render_thinking_status_lines_for_tests(width: number): string[] {
 	return render_thinking_status_lines(width);
+}
+
+/** Wraps a child Component and prepends a U+276D prompt glyph (cyan-green
+ *  `success` foreground) to the first rendered row. Used by UserMessageComponent
+ *  to replace the old chatbox horizontal rules with a flush, prompt-led layout.
+ *  The glyph is read from the live Theme at render time so mode switches
+ *  recolor it — never close over a Theme from construction. The background
+ *  comes from the outer Box, not from the glyph itself. */
+export class PromptGlyphContent implements Component {
+	private child: Component;
+	private themeRef: Theme;
+	constructor(child: Component, theme: Theme) {
+		this.child = child;
+		this.themeRef = theme;
+	}
+	render(width: number): string[] {
+		const glyph = this.themeRef.fg("success", "\u276d ");
+		const glyphWidth = visibleWidth(glyph);
+		const rows = this.child.render(Math.max(1, width - glyphWidth));
+		if (rows.length === 0) return rows;
+		const firstRow = `${glyph}${rows[0]}`;
+		const fitted = visibleWidth(firstRow) > width ? truncateToWidth(firstRow, width) : firstRow;
+		return [fitted, ...rows.slice(1)];
+	}
+	invalidate(): void {
+		const childInvalidate = (this.child as { invalidate?: () => void }).invalidate;
+		if (typeof childInvalidate === "function") childInvalidate.call(this.child);
+	}
 }
 
 class ThinkingStatusComponent implements Component {
@@ -1048,7 +1102,11 @@ function installShellModeInputListener(ctx: ExtensionContext): void {
 	bashCancelUnsubscribe = ctx.ui.onTerminalInput((data: string) => {
 		if (isUserBashRunning() && matchesKey(data, Key.ctrl("c"))) {
 			const session = sessionCtx?.session;
-			if (session && typeof (session as unknown as { isBashRunning?: boolean })?.isBashRunning === "boolean" && session.isBashRunning) {
+			if (
+				session &&
+				typeof (session as unknown as { isBashRunning?: boolean })?.isBashRunning === "boolean" &&
+				session.isBashRunning
+			) {
 				session.abortBash();
 			}
 			return { consume: false };
@@ -1060,9 +1118,12 @@ function installShellModeInputListener(ctx: ExtensionContext): void {
 function stopThinkingAnimation(): void {
 	thinkingActive = false;
 	set_thinking_stream_active(false);
-	// The header is gone: stop its pass timer so any future re-appearance
-	// starts the elapsed suffix from zero.
-	thinkingPassStartedAt = 0;
+	// Do NOT clear the pass timer here — message_end and agent_end fire per
+	// low-level run and may be followed by auto-retry, compact-and-retry, or
+	// queued follow-ups. The pass timer must survive inter-run gaps so the
+	// elapsed continues when Thinking re-appears. Only hard boundaries
+	// (visible text, visible thinking, agent_settled, session shutdown)
+	// clear the timer via clear_thinking_pass_timer().
 	refresh_thinking_status();
 }
 
@@ -1072,7 +1133,6 @@ export function reset_thinking_header_session_state(): void {
 	thinkingHeaderSuppressed = false;
 	assistantThinkingHostReady = false;
 	latestAssistantMessageTimestamp = undefined;
-	thinkingPassStartedAt = 0;
 	turnStartedAt = 0;
 	sessionEndStatusPending = false;
 	thinking_status_last_painted = false;
@@ -1080,6 +1140,7 @@ export function reset_thinking_header_session_state(): void {
 	setUserTurnCommitted(false);
 	resetToolExecutionInFlight();
 	set_thinking_stream_active(false);
+	clear_thinking_pass_timer();
 }
 
 /** Test seam: clear leaked thinking-header module state between unit tests. */
@@ -1102,17 +1163,23 @@ export function arm_pre_token_thinking_status(): void {
 	if (isQuizActive() || isSubagentDelegationActive()) return;
 	const renderer = getSharedRenderer();
 	sync_compact_group_flags(renderer);
-	// Every arm starts the pass timer fresh — the elapsed suffix always
-	// measures the current Thinking appearance, never a stale pass.
-	reset_thinking_pass_timer();
+	// The pass timer is armed idempotently: a fresh arm (user send / new
+	// wait) starts it; a re-arm from before_agent_start, compaction rebuild,
+	// or hidden thinking_delta preserves the already-live timestamp so the
+	// elapsed continues seamlessly. A post-boundary re-arm (timer was cleared
+	// by a hard boundary) starts fresh because thinkingPassStartedAt is 0.
+	arm_thinking_pass_timer();
 	setAgentRunPending(true);
 	thinkingHeaderSuppressed = false;
 	// A settled work group owns the slot. Hold the tool lane (gradient `-ing`
-	// verb on the latest completed child) — the `└ Thinking` lane is NOT armed
+	// verbs on the visible children) — the `└ Thinking` lane is NOT armed
 	// until a real thinking stream arrives (apply_assistant_stream_boundary →
 	// noteHiddenThinking). A premature Thinking row would claim the slot while
-	// the model is not emitting any reasoning at all.
-	if (renderer.hasReopenableGroup() && isThinkingBlocksHidden()) {
+	// the model is not emitting any reasoning at all. The hold applies in both
+	// block-visibility modes: with blocks visible the transcript owns
+	// reasoning once it starts, but the pre-thinking wait still reads as
+	// ongoing work.
+	if (renderer.hasReopenableGroup()) {
 		renderer.holdToolLane();
 		sync_compact_group_flags(renderer);
 		refresh_thinking_status();
@@ -1140,9 +1207,11 @@ export function arm_pre_token_thinking_status(): void {
 function startThinkingAnimation(): void {
 	thinkingActive = true;
 	set_thinking_stream_active(true);
-	// The header (re)appears with the real thinking stream: restart the pass
-	// timer so the elapsed suffix starts fresh whenever Thinking shows.
-	reset_thinking_pass_timer();
+	// Idempotent arm: a real thinking stream that CONTINUES an armed pre-token
+	// wait keeps the same pass timer. A stream that starts with no live pass
+	// (post-boundary re-show) starts fresh because the hard boundary already
+	// cleared the timer via clear_thinking_pass_timer().
+	arm_thinking_pass_timer();
 	activate_gradient("thinking");
 	refresh_thinking_status();
 }
@@ -1352,6 +1421,27 @@ class CachedMarkdown {
 	}
 }
 
+/**
+ * Build a cached Markdown component for child reasoning. The shared factory
+ * keeps subagent trays on the same live heading binding, thinking style, and
+ * theme-generation cache as assistant thinking blocks without a second
+ * Markdown patch or theme source.
+ */
+export function create_live_thinking_markdown(text: string): Component {
+	const markdown_theme = bind_live_markdown_theme({ ...getMarkdownTheme() });
+	return new CachedMarkdown(
+		text,
+		0,
+		0,
+		markdown_theme,
+		{
+			color: (content: string) => resolve_live_theme().fg("thinkingText", content),
+			italic: true,
+		},
+		"thinking",
+	);
+}
+
 /** Pi's theme file watcher reloads ember.json 100ms after any disk write
  *  (ensureThemeInstalled / updateInstalledThemeExport). That reload goes
  *  through createTheme(), which only knows the built-in ThemeBg keys and
@@ -1508,27 +1598,56 @@ function is_horizontal_rule_line(line: string): boolean {
 	return /^[\s\u2500]*$/.test(stripped) && stripped.includes("\u2500");
 }
 
-/** Ember bash transcript rows — no top/bottom rules, with a dim vertical pipe connecting the header to the latest output row. */
+/** Ember bash transcript rows — no top/bottom rules, with a dim vertical pipe
+ *  connecting the flush bullet header to the latest output row. Leading empty
+ *  rows (the stock component's Spacer) are skipped so the header is never
+ *  branch-prefixed; following rows carry `│ ` / `└ ` at column 2, below the
+ *  `R` of `Ran` (the `• ` bullet occupies columns 0-1). When a live theme is
+ *  supplied every row — plus one blank row above and below — is padded to the
+ *  full terminal width and wrapped in the `userMessageBg` background so the
+ *  whole bash output reads as one user-message block. */
 export function format_ember_bash_transcript_lines(
 	rawLines: string[],
 	width: number,
-	running: boolean,
+	_running: boolean,
+	theme?: Theme,
 ): string[] {
 	const contentLines: string[] = [];
 	for (const line of rawLines) {
 		if (!is_horizontal_rule_line(line)) contentLines.push(line);
 	}
 
-	if (contentLines.length === 0) return [];
+	// The stock BashExecutionComponent opens with a Spacer(1), so the first
+	// raw row is an empty spacer line. Skip leading empty rows so the first
+	// rendered row is the flush bullet header — never a branch-prefixed line.
+	let headerIndex = 0;
+	while (headerIndex < contentLines.length && visibleWidth(contentLines[headerIndex] ?? "") === 0) {
+		headerIndex++;
+	}
+	if (headerIndex >= contentLines.length) return [];
 
-	const result: string[] = [contentLines[0] ?? ""];
-	const pad = " ".repeat(running ? bash_execution_content_pad_cols() - 1 : 0);
+	// Stock content Texts render with paddingX=1, adding a leading margin
+	// column. Strip it so the bullet sits flush and branches align exactly.
+	const stripMargin = (line: string): string => (line.startsWith(" ") ? line.slice(1) : line);
+	const indent = "  ";
 	const branchPipe = colorize(TREE_BRANCH_PIPE, MUTED_COLOR);
-	for (let i = 1; i < contentLines.length; i++) {
+	const branchLast = colorize(TREE_BRANCH_LAST, MUTED_COLOR);
+	const bgFn = theme
+		? (text: string): string =>
+				theme.bg("userMessageBg", text + " ".repeat(Math.max(0, width - visibleWidth(text))))
+		: undefined;
+
+	const result: string[] = [];
+	for (let i = headerIndex; i < contentLines.length; i++) {
 		const isLast = i === contentLines.length - 1;
-		const branch = isLast ? colorize(TREE_BRANCH_LAST, MUTED_COLOR) : branchPipe;
-		const line = contentLines[i] ?? "";
-		result.push(fit_terminal_content_line(`${pad}${branch}${line}`, width));
+		const branch = i === headerIndex ? "" : `${indent}${isLast ? branchLast : branchPipe}`;
+		const row = fit_terminal_content_line(`${branch}${stripMargin(contentLines[i] ?? "")}`, width);
+		result.push(bgFn ? bgFn(row) : row);
+	}
+
+	if (bgFn) {
+		result.unshift(bgFn(""));
+		result.push(bgFn(""));
 	}
 	return result;
 }
@@ -1584,7 +1703,10 @@ function render_shell_aware_editor(
 
 	const pad = " ".repeat(INSET);
 	const innerPadStr = " ".repeat(innerPad);
-	const promptGlyph = isShellMode() || isUserBashRunning() ? "!" : "\u276d";
+	// The prompt glyph stays `❭ ` in shell mode — the footer "shell" label is
+	// the mode indicator. Only while a user `!` bash command is actually
+	// running does the glyph flip to `! `.
+	const promptGlyph = isUserBashRunning() ? "!" : "\u276d";
 	const promptStr = border(promptGlyph);
 	const gutter = "  ";
 	const fit = (s: string): string => fit_terminal_content_line(s, width);
@@ -1613,6 +1735,11 @@ function render_shell_aware_editor(
 			continue;
 		}
 		const gutterStr = firstBody ? promptStr : gutter;
+		// Body rows render at exactly `innerWidth` (Pi pads every row to its
+		// content width), so the only added columns are the prompt glyph (1)
+		// on the first row or the 2-col gutter on continuation rows. Anything
+		// more (e.g. side pads) overflows and truncateToWidth() would tack a
+		// `...` onto every wrapped chatbox line.
 		lines[i] = fit(`${pad}${innerPadStr}${gutterStr}${lines[i]}`);
 		firstBody = false;
 	}
@@ -1675,8 +1802,8 @@ function installAssistantMessagePatch(): void {
 					renderer.repaintAfterThinkingBlocksToggle(
 						next_hidden,
 						// Re-arm the in-group `└ Thinking` lane only when a real
-					// thinking stream is active; without one the group enters the
-					// tool-lane hold (gradient `-ing` verbs) instead.
+						// thinking stream is active; without one the group enters the
+						// tool-lane hold (gradient `-ing` verbs) instead.
 						next_hidden && is_thinking_stream_active(),
 					);
 					sync_compact_group_flags(renderer);
@@ -1989,7 +2116,11 @@ function installUpdateNotificationPatch(): void {
 		// one explicit row above it even when the preceding transcript component
 		// already ends in a blank row; ordinary status messages retain the native
 		// compact spacing behavior.
-		if (status_requires_leading_spacer(component_ends_with_blank_row(last as BlankRowProbeNode | undefined))) {
+		if (
+			status_requires_leading_spacer(
+				component_ends_with_blank_row(last as BlankRowProbeNode | undefined),
+			)
+		) {
 			const spacer = new Spacer(1);
 			this.chatContainer.addChild(spacer);
 			this.lastStatusSpacer = spacer;
@@ -2043,9 +2174,7 @@ function installCompactionTranscriptPatch(): void {
 	if (proto[COMPACTION_TRANSCRIPT_PATCH_MARKER]) return;
 	proto[COMPACTION_TRANSCRIPT_PATCH_MARKER] = true;
 
-	const original_handle_event = proto.handleEvent as
-		| ((...args: unknown[]) => unknown)
-		| undefined;
+	const original_handle_event = proto.handleEvent as ((...args: unknown[]) => unknown) | undefined;
 
 	proto.rebuildChatFromMessages = function emberRebuildChatFromMessages(this: {
 		chatContainer: { clear(): void };
@@ -2145,7 +2274,7 @@ function installCompactionStatusPatch(): void {
 	function clear_compaction_status_indicator(indicator: CompactionStatusIndicatorLike): void {
 		if (indicator?.kind !== "compaction") return;
 		deactivate_gradient("compaction");
-		unbind_compaction_status_indicator();
+		unbind_compaction_status_indicator(indicator);
 	}
 
 	proto.showStatusIndicator = function emberShowStatusIndicator(
@@ -2182,9 +2311,7 @@ function installBashExecutionPatch(): void {
 	const originalUpdateDisplay = proto.updateDisplay as
 		| ((this: BashExecutionPatchHost) => void)
 		| undefined;
-	const originalSetComplete = proto.setComplete as
-		| ((...args: unknown[]) => void)
-		| undefined;
+	const originalSetComplete = proto.setComplete as ((...args: unknown[]) => void) | undefined;
 
 	proto.setComplete = function emberBashSetComplete(
 		this: BashExecutionPatchHost,
@@ -2259,9 +2386,11 @@ function installBashExecutionPatch(): void {
 		const theme = resolve_live_theme();
 		if (!theme) return originalRender?.call(this, width) ?? [];
 
-		const innerWidth = Math.max(1, width - 2);
+		// Reserve 4 columns for the `"  " + branch` prefix (2-col indent plus
+		// `│ `/`└ `), so stripped rows never overflow the terminal width.
+		const innerWidth = Math.max(1, width - 4);
 		const rawLines = (originalRender?.call(this, innerWidth) ?? []) as string[];
-		return format_ember_bash_transcript_lines(rawLines, width, running);
+		return format_ember_bash_transcript_lines(rawLines, width, running, theme);
 	};
 }
 
@@ -2292,25 +2421,42 @@ function installUserMessagePatch(): void {
 	proto[EMBER_PATCH_MARKER] = true;
 
 	proto.rebuild = function emberUserMessageRebuild(this: UserMessagePatchHost): void {
-		this.outputPad = 1;
+		this.outputPad = 0;
 		this.clear();
 		const theme = resolve_live_theme();
+		// Inline code must not paint its own background: the whole message
+		// already carries the `userMessageBg` Box background, and `mdCode`'s
+		// background is the same `MUTED_MESSAGE_BG`, so the wrapped theme's
+		// trailing `\x1b[49m` reset would cancel the outer background for the
+		// rest of the row. Foreground-only code lets it live on the user
+		// message background instead of inverting/cancelling it.
+		const userMessageMarkdownTheme: MarkdownTheme = {
+			...(this.markdownTheme ?? {}),
+			code: (text: string) => theme.fg("mdCode", text),
+		};
 		const markdown = new Markdown(
 			this.text ?? "",
 			0,
 			0,
-			this.markdownTheme,
+			userMessageMarkdownTheme,
 			{
 				color: (text: string) => theme.fg("userMessageText", text),
 			},
 			{ preserveOrderedListMarkers: true, preserveBackslashEscapes: true },
 		);
-		this.addChild(chatboxBorderContainer(markdown, this.outputPad));
+		// Flush, prompt-led user message: no left padding, full-width
+		// `userMessageBg` background, one row padding top/bottom, cyan-green
+		// prompt glyph on the first line.
+		const glyphComponent = new PromptGlyphContent(markdown, theme);
+		const inner = new Box(this.outputPad, 1, (text: string) => theme.bg("userMessageBg", text));
+		inner.addChild(glyphComponent);
+		this.addChild(inner);
 	};
 }
 
 function installCompactionSummaryPatch(): void {
-	const proto = CompactionSummaryMessageComponent.prototype as unknown as CompactionSummaryPatchProto;
+	const proto =
+		CompactionSummaryMessageComponent.prototype as unknown as CompactionSummaryPatchProto;
 	if (proto[EMBER_PATCH_MARKER]) return;
 	proto[EMBER_PATCH_MARKER] = true;
 
@@ -2563,8 +2709,26 @@ function stopLogoOnFirstUserMessage(): void {
 	stopLogoAnimation();
 }
 
-/** @deprecated Logo no longer stops on editor keystrokes — only on first send. */
-export function stopLogoOnEditorInput(): void {}
+/**
+ * SSOT: the startup logo animates ONLY on the empty first startup screen.
+ *
+ * The logo lives at line 0 of the TUI buffer (the top of the transcript).
+ * Animating it at the shared 20 FPS cadence changes line 0 every tick, and
+ * pi-tui's differential renderer issues a scrollback-clearing full redraw
+ * (`[2J` + `[H` + `[3J` — jump-to-top + scroll lock) whenever
+ * the first changed line sits above the previous viewport top. On a resumed/
+ * reloaded/forked long session the viewport is far below line 0, so every
+ * logo tick snaps the terminal to the top and wipes the user's scrollback —
+ * exactly the reported bug: one scroll-wheel tick or selecting text snaps
+ * the Pi TUI to the top. Ember never owns scroll, so the fix is to never
+ * animate line 0 while a transcript exists below the live viewport.
+ */
+export function startup_logo_should_animate(
+	reason: string | undefined,
+	has_session_entries: boolean,
+): boolean {
+	return reason === "startup" && !has_session_entries;
+}
 
 function renderLogoWithGradient(): string[] {
 	const logoRows = LOGO.length;
@@ -2846,7 +3010,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	installUpdateNotificationPatch();
 	applyDynamicTheme();
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		sessionCtx = ctx;
 		tuiRef = undefined;
 		requestRender = undefined;
@@ -2869,7 +3033,25 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		applyDynamicTheme();
 		if (ctx.mode === "tui") {
 			sync_thinking_blocks_hidden_from_ctx(ctx);
-			startLogoAnimation();
+			// The logo is at the top of the TUI buffer. Animating it while a
+			// resumed/reloaded session has transcript rows below the viewport
+			// changes line 0 every 50 ms; Pi must then full-redraw because that
+			// line is above its live viewport, which clears terminal scrollback.
+			// Animate only the empty first startup screen. Off-screen startup
+			// visuals remain static; Pi remains the sole renderer.
+			let has_session_entries = false;
+			try {
+				has_session_entries = ctx.sessionManager.getEntries().length > 0;
+			} catch {
+				// A partially initialized session is safer rendered statically:
+				// a missed logo animation cannot damage scrollback.
+				has_session_entries = true;
+			}
+			if (startup_logo_should_animate(event.reason, has_session_entries)) {
+				startLogoAnimation();
+			} else {
+				stopLogoAnimation();
+			}
 			installStartupHeader(ctx);
 			installThinkingWidget(ctx);
 			installEmberFooter(ctx);
@@ -2933,7 +3115,8 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 
 		const isHiddenAssistantMessage =
-			event.message?.role === "assistant" && (event.message as { display?: boolean }).display === false;
+			event.message?.role === "assistant" &&
+			(event.message as { display?: boolean }).display === false;
 		if (ev && !isHiddenAssistantMessage) {
 			const boundary = resolve_assistant_stream_boundary_event(ev);
 			if (boundary === "visible_text" || boundary === "thinking") {
@@ -2948,6 +3131,20 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			reconcile_thinking_wait_ui();
 		}
 		if (ev && should_suppress_thinking_header_for_stream_event(ev)) {
+			// Visible text (non-empty text_delta) and visible thinking
+			// (thinking_delta with blocks visible) are hard pass boundaries —
+			// they end the current Thinking pass and zero the timer so the
+			// next re-show starts fresh. text_start suppression (tools already
+			// on screen) is NOT a hard boundary — the pass timer stays alive.
+			const ev_any = ev as { type: string; delta?: unknown };
+			const delta = typeof ev_any.delta === "string" ? ev_any.delta : "";
+			const is_hard_boundary =
+				(ev.type === "text_delta" && delta.trim().length > 0) ||
+				(ev.type === "thinking_delta" &&
+					delta.trim().length > 0 &&
+					!isThinkingBlocksHidden() &&
+					!is_non_conventional_thinking_header(delta));
+			if (is_hard_boundary) clear_thinking_pass_timer();
 			suppress_thinking_header_for_work();
 		}
 		if (isText || isThinking) {
@@ -2969,7 +3166,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 				stopLogoOnFirstUserMessage();
 			}
 			turnStartedAt = performance.now();
-			reset_thinking_pass_timer();
+			// SSOT: the pre-answer Thinking pass timer is started by
+			// arm_pre_token_thinking_status when the wait predicate arms. Do
+			// not reset it here; the header should continue the elapsed
+			// started at user send through hidden reasoning.
 			setTurnToolTranscriptActive(false);
 			assistantThinkingHostReady = false;
 			setUserTurnAnchorTimestamp(
@@ -3069,7 +3269,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		thinking_status_last_painted = false;
 		const duration = turnStartedAt > 0 ? performance.now() - turnStartedAt : 0;
 		turnStartedAt = 0;
-		thinkingPassStartedAt = 0;
+		clear_thinking_pass_timer();
 		try {
 			if (ctx.mode === "tui" && duration >= 1000) {
 				const model = ctx.model;
@@ -3127,6 +3327,15 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			// until a real thinking stream re-shows the header.
 			refresh_thinking_status();
 			return;
+		}
+		// Post-tool wait with the agent still pending: hold the compact tool
+		// lane (gradient `-ing` verbs on the visible children) until a real
+		// thinking stream or a new tool wave takes over. This is the compact-
+		// verb feedback path — NOT the external Thinking header. A new tool
+		// call (appendToGroup) or a thinking stream clears the hold itself.
+		if (isAgentRunPending()) {
+			getSharedRenderer().holdToolLane();
+			sync_compact_group_flags(getSharedRenderer());
 		}
 		// tool_execution_end must NOT re-arm Thinking — only a real thinking
 		// stream re-shows the header. Repaint so the hidden state sticks.

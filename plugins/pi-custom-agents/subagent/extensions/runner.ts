@@ -73,46 +73,46 @@ searching for different patterns), emit them all in a single response rather
 than one at a time. The runtime executes independent tool calls in parallel,
 so batching saves round-trips and reduces latency.
 
-Todo is session-local: use ids returned by this child session's \`create\`, or an
+The Todo tool is session-local: use ids returned by this child session's \`create\`, or an
 exact \`task\` subject. Do not reuse ids from the parent session.
 `;
 
-const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
-	/prompt is too long/i,
-	/exceeds the context window/i,
-	/maximum context length/i,
-	/context window exceeds/i,
-	/too many tokens/i,
-	/token limit exceeded/i,
-];
-
-/** Headroom above the model context window before we pre-emptively compact. */
 const CONTEXT_SAFETY_FACTOR = 1.1;
 
 /** Buffer reserved for the next turn's output and overhead. */
 const CONTEXT_PROMPT_RESERVE = 8192;
 
-/** In-memory settings for subagent child sessions — auto-compaction off (handled by runner), retry off. */
+/**
+ * In-memory settings for subagent child sessions — auto-compaction on, retry off.
+ *
+ * Pi AgentSession is the sole overflow recovery owner: with `compaction.enabled`
+ * true, its canonical overflow check detects a resolved context-overflow
+ * assistant message (Codex: `stopReason: "error"` + "Your input exceeds the
+ * context window...") via pi-ai's `isContextOverflow` and runs overflow
+ * compaction (reason `overflow`, bounded one compact-and-retry attempt, with
+ * Ember's structured stack summary through compaction-wiring) inside
+ * `session.prompt()`. Generic retry stays disabled so unrelated 401/429/
+ * provider failures are never re-prompted.
+ */
 export function build_subagent_settings(): {
 	compaction: { enabled: boolean };
 	retry: { enabled: boolean };
 } {
 	return {
-		compaction: { enabled: false },
+		compaction: { enabled: true },
 		retry: { enabled: false },
 	};
 }
 
-export function is_context_overflow_error(message: string | undefined): boolean {
-	if (!message) return false;
-	return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
-}
-
-async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResult> {
+export async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResult> {
 	// The child receives the same task-list tool as the parent. Without loading
 	// this extension, `todo` remains in the agent's allowlist but has no
 	// registration in the isolated AgentSession, which makes checklist updates
-	// fail or silently disappear.
+	// fail or silently disappear. The compaction-wiring extension is what makes
+	// native reason=overflow/threshold compaction use Ember's structured stack
+	// summary (session_before_compact hook) instead of Pi's default summarizer.
+	// Exported so tests exercise the real loading seam rather than re-deriving
+	// the paths.
 	const paths = [TODO_EXTENSION_PATH, COMPACTION_WIRING_PATH];
 	return discoverAndLoadExtensions(paths, cwd);
 }
@@ -129,7 +129,9 @@ async function compact_subagent_session(
 	}
 }
 
-/** Estimate the tokens the next prompt will send, using the child's live messages. */
+/** Estimate the tokens the next prompt will send, using the child's live messages.
+ *  Used only by the proactive pre-prompt guard below; overflow *recovery* is
+ *  owned by Pi AgentSession, never by the runner. */
 function estimate_subagent_prompt_tokens(
 	session: NonNullable<Awaited<ReturnType<typeof createAgentSession>>["session"]>,
 	pendingPrompt: string,
@@ -144,7 +146,11 @@ function estimate_subagent_prompt_tokens(
 	return messageTokens + promptTokens;
 }
 
-/** True when the next prompt would exceed the model's context window plus safety headroom. */
+/** True when the next prompt would exceed the model's context window plus safety
+ *  headroom. Proactive avoidance only: if the estimate is over budget the child
+ *  session is compacted (canonical `session.compact()` → Ember compaction-wiring)
+ *  before sending. Any overflow that still occurs is left to Pi AgentSession's
+ *  native recovery — the runner never catches overflow and re-prompts the task. */
 function should_compact_before_prompt(
 	session: NonNullable<Awaited<ReturnType<typeof createAgentSession>>["session"]>,
 	pendingPrompt: string,
@@ -156,7 +162,8 @@ function should_compact_before_prompt(
 }
 
 const MAX_SUBAGENT_LENGTH_CONTINUES = 5;
-const MAX_SUBAGENT_WEBSOCKET_RETRIES = 3;
+export const MAX_SUBAGENT_WEBSOCKET_RETRIES = 3;
+export const SUBAGENT_WEBSOCKET_RETRY_BACKOFF_MS = [2000, 5000, 15_000] as const;
 const SUBAGENT_WEBSOCKET_PATTERNS: readonly RegExp[] = [
 	/websocket/i,
 	/socket hang up/i,
@@ -169,6 +176,27 @@ const SUBAGENT_CONTINUE_PROMPT = "continue from where you left off";
 function is_websocket_error(message: string | undefined): boolean {
 	if (!message) return false;
 	return SUBAGENT_WEBSOCKET_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function websocket_retry_backoff_ms(retry: number): number {
+	return SUBAGENT_WEBSOCKET_RETRY_BACKOFF_MS[retry] ?? 0;
+}
+
+/** Backoff before the next websocket retry, or reject if the run is aborted during the wait. */
+async function sleep_abortable(ms: number, signal?: AbortSignal): Promise<void> {
+	if (ms <= 0) return;
+	return new Promise<void>((resolve, reject) => {
+		const timer = setTimeout(resolve, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(new Error("Sub-agent aborted"));
+		};
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 /** Short abortable backoff before the single pre-response HTTP 500 retry. */
@@ -192,12 +220,152 @@ export function is_empty_body_http500_error(message: string | undefined): boolea
 	return EMPTY_BODY_HTTP500_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
-/** The last assistant message in the stream, if any. */
-function lastAssistantMessage(messages: Message[]): Message | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.role === "assistant") return msg;
+export type PreResponseFailureKind = "http500" | "websocket";
+
+/** Per-prompt activity observed by the runner's child-session subscription. */
+export interface SubagentPromptAttempt {
+	sawVisibleOrToolSideEffect: boolean;
+	/** Final assistant stop reason observed during this prompt attempt only. */
+	resolvedStopReason?: string;
+	/** Final resolved assistant diagnostic observed during this prompt attempt only. */
+	resolvedFailureMessage?: string;
+}
+
+/** True when a finalized assistant message contains text, reasoning, or a tool call. */
+function assistant_message_has_visible_or_tool_output(message: Message): boolean {
+	if (message.role !== "assistant") return false;
+	for (const part of message.content) {
+		if (part.type === "text") {
+			if (part.text.trim()) return true;
+			continue;
+		}
+		if (part.type === "thinking") {
+			if (part.thinking.trim()) return true;
+			continue;
+		}
+		return true;
 	}
+	return false;
+}
+
+/** True when the most recent assistant message emitted visible output or a tool call. */
+function last_assistant_message_has_visible_or_tool_output(messages: Message[]): boolean {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role === "assistant") {
+			return assistant_message_has_visible_or_tool_output(message);
+		}
+	}
+	return false;
+}
+
+/** Capture only the terminal assistant state emitted by this prompt attempt. */
+function note_subagent_prompt_attempt_message(
+	attempt: SubagentPromptAttempt,
+	message: Message,
+): void {
+	if (message.role !== "assistant") return;
+	attempt.resolvedStopReason = message.stopReason;
+	attempt.resolvedFailureMessage =
+		message.stopReason === "error" ? message.errorMessage : undefined;
+}
+
+/** Mark a prompt attempt unsafe to replay after output or tool activity begins. */
+export function note_subagent_prompt_attempt_event(
+	attempt: SubagentPromptAttempt,
+	event: {
+		type: string;
+		message?: unknown;
+		assistantMessageEvent?: { type?: unknown; delta?: unknown };
+	},
+): void {
+	const message = event.message;
+	if (
+		event.type === "message_end" &&
+		message &&
+		typeof message === "object" &&
+		"role" in message &&
+		(message as Message).role === "assistant"
+	) {
+		note_subagent_prompt_attempt_message(attempt, message as Message);
+	}
+	if (attempt.sawVisibleOrToolSideEffect) return;
+	if (
+		event.type === "tool_call" ||
+		event.type === "tool_execution_start" ||
+		event.type === "tool_execution_update" ||
+		event.type === "tool_execution_end"
+	) {
+		attempt.sawVisibleOrToolSideEffect = true;
+		return;
+	}
+	if (event.type === "message_update") {
+		const update_type = event.assistantMessageEvent?.type;
+		if (
+			update_type === "toolcall_start" ||
+			update_type === "toolcall_delta" ||
+			update_type === "toolcall_end"
+		) {
+			attempt.sawVisibleOrToolSideEffect = true;
+			return;
+		}
+		if (update_type === "text_delta" || update_type === "thinking_delta") {
+			const delta = event.assistantMessageEvent?.delta;
+			if (typeof delta === "string" && delta.trim()) {
+				attempt.sawVisibleOrToolSideEffect = true;
+				return;
+			}
+		}
+	}
+	if (event.type === "message_update" || event.type === "message_end") {
+		if (
+			message &&
+			typeof message === "object" &&
+			"role" in message &&
+			(message as Message).role === "assistant" &&
+			assistant_message_has_visible_or_tool_output(message as Message)
+		) {
+			attempt.sawVisibleOrToolSideEffect = true;
+		}
+	}
+}
+
+/** Infer replay safety for direct helper callers that have no event subscription. */
+function infer_subagent_prompt_attempt(result: SubAgentResult): SubagentPromptAttempt {
+	const saw_live_output = (result.liveItems ?? []).some((item) => {
+		if (item.kind === "tool") return true;
+		return item.text.trim().length > 0;
+	});
+	return {
+		sawVisibleOrToolSideEffect:
+			Boolean(result.latestToolCall) ||
+			saw_live_output ||
+			last_assistant_message_has_visible_or_tool_output(result.messages),
+	};
+}
+
+/**
+ * Classify only a failed prompt that is safe to roll back and replay. Both
+ * resolved provider errors and thrown failures use this one predicate, while
+ * the live attempt state excludes prior valid session history from the check.
+ */
+export function classify_safe_pre_response_failure(options: {
+	result: SubAgentResult;
+	attempt: SubagentPromptAttempt;
+	promptError?: unknown;
+}): PreResponseFailureKind | undefined {
+	const { result, attempt, promptError } = options;
+	if (attempt.sawVisibleOrToolSideEffect) return undefined;
+	if (promptError !== undefined) {
+		return is_websocket_error(extractFailureMessage(promptError)) ? "websocket" : undefined;
+	}
+	if (attempt.resolvedStopReason !== undefined) {
+		if (attempt.resolvedStopReason !== "error") return undefined;
+		return is_websocket_error(attempt.resolvedFailureMessage) ? "websocket" : undefined;
+	}
+	if (result.stopReason !== "error") return undefined;
+	const messages = [result.errorMessage, lastAssistantErrorMessage(result.messages)];
+	if (messages.some(is_empty_body_http500_error)) return "http500";
 	return undefined;
 }
 
@@ -207,23 +375,12 @@ function lastAssistantMessage(messages: Message[]): Message | undefined {
  * safely re-run without duplicating emitted work.
  */
 export function retryable_pre_response_http500_failure(result: SubAgentResult): boolean {
-	if (result.stopReason !== "error") return false;
-	const matches =
-		is_empty_body_http500_error(result.errorMessage) ||
-		is_empty_body_http500_error(lastAssistantErrorMessage(result.messages));
-	if (!matches) return false;
-	if (result.latestToolCall) return false;
-	for (const item of result.liveItems ?? []) {
-		if (item.kind === "tool") return false;
-	}
-	const lastAssistant = lastAssistantMessage(result.messages);
-	if (!lastAssistant) return true;
-	for (const part of lastAssistant.content) {
-		if (typeof part === "string") continue; // legacy plain-text content part
-		if (part.type === "text" && part.text.trim()) return false;
-		if (part.type === "toolCall") return false;
-	}
-	return true;
+	return (
+		classify_safe_pre_response_failure({
+			result,
+			attempt: infer_subagent_prompt_attempt(result),
+		}) === "http500"
+	);
 }
 
 /**
@@ -240,6 +397,11 @@ export interface Http500RetryRollback {
 	liveItemsBefore: number;
 	/** Usage/turn accounting before the prompt; restored so a successful retry counts once. */
 	usageBefore: UsageStats;
+	/** Existing activity retained when a later no-output prompt is rolled back. */
+	latestToolCallBefore?: { name: string; args: Record<string, unknown> };
+	/** Existing transient state retained when a later no-output prompt is rolled back. */
+	isThinkingBefore?: boolean;
+	isFinishingBefore?: boolean;
 }
 
 /**
@@ -282,8 +444,9 @@ export function rollback_failed_prompt_attempt(
 		liveItems.length = rollback.liveItemsBefore;
 	}
 	result.usage = { ...rollback.usageBefore };
-	result.latestToolCall = undefined;
-	result.isThinking = false;
+	result.latestToolCall = rollback.latestToolCallBefore;
+	result.isThinking = rollback.isThinkingBefore ?? false;
+	result.isFinishing = rollback.isFinishingBefore ?? false;
 	const { sessionManager } = session;
 	if (rollback.retryAnchor) {
 		sessionManager.branch(rollback.retryAnchor);
@@ -341,6 +504,52 @@ export async function decide_pre_response_http500_retry(options: {
 	if (aborted || http500_retried) return "skip";
 	if (!retryable_pre_response_http500_failure(result)) return "skip";
 	await abortable_delay(options.backoffMs ?? SUBAGENT_HTTP500_RETRY_BACKOFF_MS, signal);
+	if (signal?.aborted) return "aborted";
+	rollback_failed_prompt_attempt(result, session, rollback);
+	result.stopReason = undefined;
+	result.errorMessage = undefined;
+	return "retry";
+}
+
+export type PreResponseWebSocketRetryDecision = "retry" | "aborted" | "skip";
+
+/**
+ * Apply the bounded WebSocket retry policy for either a resolved assistant
+ * error or a thrown prompt error. A retry is permitted only before the child
+ * emitted visible output or tool activity, so rollback removes only this
+ * failed attempt and never replays user-visible work.
+ */
+export async function decide_pre_response_websocket_retry(options: {
+	result: SubAgentResult;
+	attempt: SubagentPromptAttempt;
+	aborted: boolean;
+	websocketRetries: number;
+	signal?: AbortSignal;
+	session: SubagentRetrySession;
+	rollback: Http500RetryRollback;
+	promptError?: unknown;
+	backoffMs?: number;
+}): Promise<PreResponseWebSocketRetryDecision> {
+	const { result, attempt, aborted, websocketRetries, signal, session, rollback, promptError } =
+		options;
+	if (aborted || websocketRetries >= MAX_SUBAGENT_WEBSOCKET_RETRIES) return "skip";
+	if (
+		classify_safe_pre_response_failure({
+			result,
+			attempt,
+			promptError,
+		}) !== "websocket"
+	) {
+		return "skip";
+	}
+	try {
+		await sleep_abortable(
+			options.backoffMs ?? websocket_retry_backoff_ms(websocketRetries),
+			signal,
+		);
+	} catch {
+		return "aborted";
+	}
 	if (signal?.aborted) return "aborted";
 	rollback_failed_prompt_attempt(result, session, rollback);
 	result.stopReason = undefined;
@@ -417,13 +626,14 @@ export interface SubagentLiveTextBlock {
 	text: string;
 }
 
-/** Chronological live item from the child session: one tool call or one
- *  assistant text block, in arrival order. `liveItems` is the single live
- *  buffer — tools and agent messages interleave exactly as the child emitted
- *  them, so the tray's fold boundaries (visible text hard-splits the work
- *  bundle) never reorder content. */
+/** Chronological live item from the child session: one tool call, one
+ *  thinking block, or one assistant text block, in arrival order. `liveItems`
+ *  is the single live buffer — tools, reasoning, and agent messages
+ *  interleave exactly as the child emitted them. Thinking is activity inside
+ *  a work burst; only visible assistant text hard-splits that bundle. */
 export type SubagentLiveItem =
 	| { kind: "tool"; row: SubagentLiveToolRow }
+	| { kind: "thinking"; text: string }
 	| { kind: "text"; text: string };
 
 export interface SubAgentResult {
@@ -438,19 +648,25 @@ export interface SubAgentResult {
 	reasoning?: boolean;
 	/** Live thinking/reasoning stream from the child session. */
 	isThinking?: boolean;
+	/** True only during child agent_end finalization before agent_settled. */
+	isFinishing?: boolean;
 	stopReason?: string;
 	errorMessage?: string;
 	latestToolCall?: { name: string; args: Record<string, unknown> };
+	/** Stable member id for this subagent within a parent tool call. */
+	toolCallId?: string;
 	/**
 	 * Bounded chronological live buffer from the child session: the last
-	 * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` tool calls and assistant text blocks
+	 * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` tool calls, thinking blocks, and assistant
+	 * text blocks
 	 * (`liveItems`), rendered by the subagent renderer as a compact work-bundle
 	 * tray (unified `•` header + folded child waves + streamed agent messages)
 	 * that mirrors the main agent's `pi-compact-tools` grouping with the same
 	 * SSOT formatters. One tool item per child tool call (keyed by
 	 * `toolCallId`), so running rows complete in place instead of stacking
-	 * duplicate Reading/Searching rows. Updated on every tool/text event;
-	 * cleared at session start.
+	 * duplicate Reading/Searching rows. Thinking items retain the child's
+	 * streamed reasoning without splitting the surrounding work burst. Updated
+	 * on every tool/thinking/text event; cleared at session start.
 	 */
 	liveItems?: SubagentLiveItem[];
 }
@@ -544,10 +760,7 @@ export const PARSER_STREAM_ERROR_LIMITATION_SUFFIX =
 
 /** Append the limitation note once (idempotent). */
 export function annotate_parser_stream_error(message: string): string {
-	if (
-		is_parser_stream_error(message) &&
-		!message.includes(PARSER_STREAM_ERROR_LIMITATION_SUFFIX)
-	) {
+	if (is_parser_stream_error(message) && !message.includes(PARSER_STREAM_ERROR_LIMITATION_SUFFIX)) {
 		return `${message}${PARSER_STREAM_ERROR_LIMITATION_SUFFIX}`;
 	}
 	return message;
@@ -829,6 +1042,34 @@ function note_live_text_delta(result: SubAgentResult, delta: string, openBlock =
 	}
 }
 
+/**
+ * Retain a child reasoning block in the live buffer. Thinking does not create
+ * a visible-text boundary: a later tool call stays in the same work burst.
+ * `thinking_start` opens a new block, while repeated deltas append to the
+ * current block, including after `isThinking` was already true from
+ * `turn_start`. Returns true only when the published live buffer changes.
+ */
+function note_live_thinking_delta(
+	result: SubAgentResult,
+	delta: string,
+	openBlock = false,
+): boolean {
+	const items = result.liveItems ?? [];
+	if (!result.liveItems) result.liveItems = items;
+	if (openBlock || items[items.length - 1]?.kind !== "thinking") {
+		items.push({ kind: "thinking", text: "" });
+		trim_live_items(items);
+	}
+	const last = items[items.length - 1];
+	if (last?.kind !== "thinking" || delta.length === 0) return openBlock;
+	const next = last.text + delta;
+	const bounded =
+		next.length > SUBAGENT_LIVE_TEXT_MAX_CHARS ? next.slice(0, SUBAGENT_LIVE_TEXT_MAX_CHARS) : next;
+	if (bounded === last.text) return false;
+	last.text = bounded;
+	return true;
+}
+
 /** Coerce a child event to a toolCallId when the provider supplies one. */
 function event_tool_call_id(event: { toolCallId?: unknown }): string | undefined {
 	return typeof event.toolCallId === "string" ? event.toolCallId : undefined;
@@ -840,14 +1081,37 @@ export function apply_subagent_stream_event(
 	event: {
 		type: string;
 		assistantMessageEvent?: SubagentStreamAssistantEvent;
+		willRetry?: boolean;
 	} & SubagentStreamToolEvent,
 	notify: () => void,
 ): void {
-	if (event.type === "turn_start" || event.type === "agent_start") {
-		if (result.reasoning !== false && !result.latestToolCall && !result.isThinking) {
-			result.isThinking = true;
+	if (event.type === "agent_end") {
+		// Pi may still retry, compact, or process a queued follow-up after this
+		// low-level run ends. Keep the nested status alive until agent_settled.
+		if (!result.isFinishing) {
+			result.isFinishing = true;
 			notify();
 		}
+		return;
+	}
+	if (event.type === "agent_settled") {
+		// This is the authoritative terminal lifecycle event. The parent render
+		// path receives the explicit false so a rebuild cannot retain Finishing.
+		if (result.isFinishing) {
+			result.isFinishing = false;
+			notify();
+		}
+		return;
+	}
+	if (event.type === "turn_start" || event.type === "agent_start") {
+		const was_finishing = result.isFinishing === true;
+		result.isFinishing = false;
+		let state_changed = was_finishing;
+		if (result.reasoning !== false && !result.latestToolCall && !result.isThinking) {
+			result.isThinking = true;
+			state_changed = true;
+		}
+		if (state_changed) notify();
 		return;
 	}
 	if (event.type === "message_update") {
@@ -855,11 +1119,17 @@ export function apply_subagent_stream_event(
 		if (ev?.type === "thinking_start" || ev?.type === "thinking_delta") {
 			const cleared_tool = Boolean(result.latestToolCall);
 			if (cleared_tool) delete result.latestToolCall;
-			if (!result.isThinking || cleared_tool) {
-				result.isThinking = true;
-				notify();
-			}
+			const delta = typeof ev.delta === "string" ? ev.delta : "";
+			const live_changed = note_live_thinking_delta(result, delta, ev.type === "thinking_start");
+			const state_changed = !result.isThinking || cleared_tool;
+			if (state_changed) result.isThinking = true;
+			// Publish every meaningful delta, not only the transition into the
+			// thinking state. The renderer receives the same result object, so the
+			// explicit live item is visible on every streamed update.
+			if (state_changed || live_changed) notify();
 		} else if (ev?.type === "thinking_end") {
+			// Keep the explicit thinking item. It is the retained tray content that
+			// lets a later tool extend the same visible activity block.
 			if (result.isThinking) {
 				result.isThinking = false;
 				notify();
@@ -1003,6 +1273,7 @@ export async function runSubAgent(options: {
 		model: `${model.provider}/${model.id}`,
 		reasoning: model.reasoning !== false,
 		isThinking: false,
+		isFinishing: false,
 	};
 
 	// Compaction (no parent UI extensions/skills).
@@ -1038,6 +1309,7 @@ export async function runSubAgent(options: {
 
 	let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 	let unsubscribe: (() => void) | undefined;
+	let active_prompt_attempt: SubagentPromptAttempt | undefined;
 
 	// Abort handling: if the parent signal fires before the session is created,
 	// we bail. Once the session exists, we call session.abort() so the SDK can
@@ -1152,6 +1424,9 @@ export async function runSubAgent(options: {
 		};
 
 		unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+			if (active_prompt_attempt) {
+				note_subagent_prompt_attempt_event(active_prompt_attempt, event);
+			}
 			// Idle timeout: reset on every child-session event so it fires only when
 			// the subagent stops producing *any* output/activity for timeoutMs.
 			resetOutputTimeout();
@@ -1197,6 +1472,9 @@ export async function runSubAgent(options: {
 				}
 				for (const m of end_msgs) {
 					if (m && m.role === "assistant") {
+						if (active_prompt_attempt) {
+							note_subagent_prompt_attempt_message(active_prompt_attempt, m);
+						}
 						if (m.stopReason) result.stopReason = m.stopReason;
 						// Aborts are skipped here (the dedicated abort finalization owns
 						// them); parser/stream and specific messages merge with the same
@@ -1212,7 +1490,6 @@ export async function runSubAgent(options: {
 			}
 		});
 
-		let overflow_retried = false;
 		let length_continues = 0;
 		let pending_task = task;
 		let websocket_retries = 0;
@@ -1227,9 +1504,10 @@ export async function runSubAgent(options: {
 
 			// Pre-emptive overflow guard: if the next prompt would exceed the model's
 			// context window plus a 10% tokenizer-safety headroom, compact the child
-			// session before sending. This deterministically avoids the arbitrary
-			// "prompt is too long" / "exceeds the context window" errors instead of
-			// catching them after they happen.
+			// session before sending. This is proactive avoidance only — overflow
+			// *recovery* (detect + compact + retry) is owned by Pi AgentSession via
+			// native `_checkCompaction`; the runner never catches overflow errors and
+			// re-prompts the task itself.
 			if (session && should_compact_before_prompt(session, pending_task)) {
 				await compact_subagent_session(session);
 				// If compaction did not shrink enough, the next iteration's check will
@@ -1246,36 +1524,58 @@ export async function runSubAgent(options: {
 				messagesBefore: result.messages.length,
 				liveItemsBefore: result.liveItems?.length ?? 0,
 				usageBefore: { ...result.usage },
+				latestToolCallBefore: result.latestToolCall,
+				isThinkingBefore: result.isThinking,
+				isFinishingBefore: result.isFinishing,
 			};
+			active_prompt_attempt = { sawVisibleOrToolSideEffect: false };
 
 			try {
 				await session.prompt(pending_task);
 			} catch (prompt_error) {
-				const prompt_error_message = extractFailureMessage(prompt_error);
-				if (!overflow_retried && session && is_context_overflow_error(prompt_error_message)) {
-					overflow_retried = true;
-					await compact_subagent_session(session);
+				const websocket_retry = await decide_pre_response_websocket_retry({
+					result,
+					attempt: active_prompt_attempt,
+					aborted,
+					websocketRetries: websocket_retries,
+					signal: combinedSignal,
+					session,
+					rollback: retry_rollback,
+					promptError: prompt_error,
+				});
+				if (websocket_retry === "retry") {
+					websocket_retries++;
 					continue;
 				}
-				if (
-					!aborted &&
-					session &&
-					is_websocket_error(prompt_error_message) &&
-					websocket_retries < MAX_SUBAGENT_WEBSOCKET_RETRIES
-				) {
-					websocket_retries++;
-					rollback_failed_prompt_attempt(result, session, retry_rollback);
-					result.stopReason = undefined;
-					result.errorMessage = undefined;
-					continue;
+				if (websocket_retry === "aborted") {
+					aborted = true;
+					break;
 				}
 				throw prompt_error;
 			}
+			const websocket_retry = await decide_pre_response_websocket_retry({
+				result,
+				attempt: active_prompt_attempt,
+				aborted,
+				websocketRetries: websocket_retries,
+				signal: combinedSignal,
+				session,
+				rollback: retry_rollback,
+			});
+			if (websocket_retry === "retry") {
+				websocket_retries++;
+				continue;
+			}
+			if (websocket_retry === "aborted") {
+				aborted = true;
+				break;
+			}
+
 			// Pre-response transient HTTP 500 retry (at most once). The child
 			// runner intentionally disables core retry, and providers surface a
-			// pre-response empty-body 500 as a *resolved* failed assistant message
-			// rather than a thrown error, so the catch-based websocket retry above
-			// never fires. Detect the resolved failure after prompt() settles and
+			// pre-response empty-body 500 as a *resolved* failed assistant message.
+			// Resolved WebSocket failures are handled immediately above; this branch
+			// detects the distinct HTTP 500 failure after prompt() settles and
 			// re-run the same task once after a short abortable backoff when no
 			// visible text or tool call was emitted.
 			const http500_retry = await decide_pre_response_http500_retry({
@@ -1338,6 +1638,12 @@ export async function runSubAgent(options: {
 			result.errorMessage = merge_failure_message(result.errorMessage, caught);
 		}
 	} finally {
+		// A thrown prompt/session failure can bypass agent_settled. Clear the
+		// transient state through the same partial route before final rendering.
+		if (result.isFinishing) {
+			result.isFinishing = false;
+			onToolCall?.({ ...result, messages: [...result.messages] });
+		}
 		if (timeoutId) clearTimeout(timeoutId);
 		if (combinedSignal) combinedSignal.removeEventListener("abort", onAbort);
 		unsubscribe?.();

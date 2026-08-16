@@ -39,21 +39,22 @@ export function apply_hunks_to_content(original: string, hunks: Hunk[]): string 
 	let search_from = 0;
 
 	for (const hunk of hunks) {
+		let anchor_pos: number | undefined;
 		if (hunk.header) {
-			const anchor = find_context_matches(working, [hunk.header], search_from);
-			if (anchor.length === 0) {
+			let anchor_matches = find_context_matches(working, [hunk.header], search_from);
+			if (anchor_matches.length === 0 && search_from > 0) {
+				// Out-of-order anchor fallback: search from beginning of file
+				anchor_matches = find_context_matches(working, [hunk.header], 0);
+			}
+			if (anchor_matches.length === 0) {
 				throw Object.assign(new Error(`Invalid Context: @@ ${hunk.header}`), {
 					code: "invalid_context",
 					hint: "Re-read the file and use an @@ anchor line that exists once, or omit @@.",
 				});
 			}
-			if (anchor.length > 1) {
-				throw Object.assign(new Error(`Ambiguous Context: @@ ${hunk.header}`), {
-					code: "ambiguous_context",
-					hint: "Provide a more unique @@ header or more surrounding context lines.",
-				});
-			}
-			search_from = anchor[0] + 1;
+			// Use first matching anchor at/after search cursor (or from beginning)
+			anchor_pos = anchor_matches[0];
+			search_from = anchor_pos + 1;
 		}
 
 		const old_lines = context_old_lines(hunk.lines);
@@ -72,8 +73,21 @@ export function apply_hunks_to_content(original: string, hunks: Hunk[]): string 
 			continue;
 		}
 
-		const window_start = search_from;
-		const matches = find_context_matches(working, old_lines, window_start, hunk.end_of_file);
+		let window_start = search_from;
+		let matches = find_context_matches(working, old_lines, window_start, hunk.end_of_file);
+
+		// If no match found forward from search_from:
+		if (matches.length === 0) {
+			if (anchor_pos !== undefined) {
+				// If anchored, also check if context starts slightly before or at anchor_pos
+				const anchored_start = Math.max(0, anchor_pos - 5);
+				matches = find_context_matches(working, old_lines, anchored_start, hunk.end_of_file);
+			}
+			if (matches.length === 0 && window_start > 0) {
+				// Out-of-order hunk fallback: search from beginning of file
+				matches = find_context_matches(working, old_lines, 0, hunk.end_of_file);
+			}
+		}
 
 		if (matches.length === 0) {
 			throw Object.assign(
@@ -84,7 +98,17 @@ export function apply_hunks_to_content(original: string, hunks: Hunk[]): string 
 				},
 			);
 		}
-		if (matches.length > 1) {
+
+		// Ambiguity check:
+		// When an @@ anchor was provided, or multiple hunks are being applied in a file,
+		// or prefer_eof was matched, the first match at/after search_from is unambiguous.
+		// Only throw Ambiguous Context when there is a single unanchored hunk with multiple matches.
+		if (
+			matches.length > 1 &&
+			hunk.header === undefined &&
+			hunks.length === 1 &&
+			!hunk.end_of_file
+		) {
 			throw Object.assign(
 				new Error(`Ambiguous Context:\n${old_lines.map((l) => ` ${l}`).join("\n")}`),
 				{

@@ -10,7 +10,7 @@
  *     modelUid: 'swe-1-6',
  *     messages: [{ role: 'user', content: 'hi' }],
  *   })) {
- *     process.stdout.write(delta);
+ *     stream.write(delta);
  *   }
  */
 

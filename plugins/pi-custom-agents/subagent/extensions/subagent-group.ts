@@ -1,7 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SubAgentResult } from "./runner.ts";
-import { resolve_assistant_stream_boundary_event } from "../../../pi-ember-ui/assistant-stream-boundary.ts";
-import { isThinkingBlocksHidden } from "../../../pi-ember-ui/mode-colors.ts";
 
 export interface SubagentArgs {
 	agent?: string;
@@ -27,17 +25,35 @@ export function isSingleModeSubagentArgs(args: SubagentArgs): boolean {
 	);
 }
 
-function isNativeMultiModeSubagentArgs(args: SubagentArgs): boolean {
-	return (args.tasks?.length ?? 0) > 0 || (args.chain?.length ?? 0) > 0;
-}
-
 /** Whether a snapshot still has live nested tool/text/thinking rows beneath the agent. */
 export function has_live_nested_preview(results: SubAgentResult[]): boolean {
-	const head = results[0];
-	return Boolean(
-		head?.latestToolCall ||
-			head?.isThinking ||
-			(head?.liveItems?.length ?? 0) > 0,
+	return results.some(
+		(result) =>
+			result.latestToolCall ||
+			result.isThinking ||
+			result.isFinishing ||
+			(result.liveItems?.length ?? 0) > 0,
+	);
+}
+
+/**
+ * An explicit false from agent_settled is authoritative. Do not let the
+ * stale-preview guard retain a transient Finishing row after the child has
+ * reached its terminal lifecycle event.
+ */
+function has_authoritative_finishing_clear(
+	existing: SubAgentResult[],
+	incoming: SubAgentResult[],
+): boolean {
+	return existing.some((old_result, old_index) =>
+		old_result.isFinishing === true &&
+		incoming.some(
+			(next_result, next_index) =>
+				next_result.isFinishing === false &&
+					(old_result.toolCallId && next_result.toolCallId
+						? old_result.toolCallId === next_result.toolCallId
+						: old_index === next_index),
+		),
 	);
 }
 
@@ -48,22 +64,26 @@ export function should_keep_existing_subagent_results(
 ): boolean {
 	if (existing.length === 0) return false;
 	if (incoming.length === 0) return true;
+	if (has_authoritative_finishing_clear(existing, incoming)) return false;
 	if (has_live_nested_preview(existing) && !has_live_nested_preview(incoming)) return true;
 	return false;
 }
 
-/** Groups consecutive single-mode subagent tool calls under one Subagents header. */
+/**
+ * Per-tool-call subagent render state.
+ *
+ * Every subagent tool call is its own independent visual owner: there is no
+ * cross-call batching, so consecutive single-mode delegations never collapse
+ * under a shared `Subagents` header and a native parallel/chain call never
+ * shares a `Delegating` header. The renderer only stores the per-call record
+ * (args, live results, display name, invalidate target) so Pi rebuilds and
+ * onToolCall partials can recover state by toolCallId.
+ */
 export class SubagentGroupRenderer {
-	private batch: SubagentCallRecord[] | undefined;
 	private readonly by_id = new Map<string, SubagentCallRecord>();
 
 	resetForSession(): void {
-		this.batch = undefined;
 		this.by_id.clear();
-	}
-
-	hardExit(): void {
-		this.batch = undefined;
 	}
 
 	getRecord(toolCallId: string): SubagentCallRecord | undefined {
@@ -89,73 +109,17 @@ export class SubagentGroupRenderer {
 			}
 			if (invalidate) existing.invalidate = invalidate;
 			if (failureMessage) existing.failureMessage = failureMessage;
-			// A call that joined the batch while its args were still streaming may
-			// turn out to be a native parallel/chain call once the brace closes;
-			// eject it back into its own isolated batch so the singles group does
-			// not absorb a multi-mode layout.
-			if (
-				isNativeMultiModeSubagentArgs(args) &&
-				this.batch &&
-				this.batch.length > 1 &&
-				this.batch.includes(existing)
-			) {
-				const remaining = this.batch.filter((member) => member !== existing);
-				this.batch = remaining;
-				remaining[0]?.invalidate?.();
-			}
 			return existing;
 		}
 
 		const record: SubagentCallRecord = { toolCallId, args, results, invalidate, failureMessage };
 		this.by_id.set(toolCallId, record);
-
-		if (isNativeMultiModeSubagentArgs(args)) {
-			this.hardExit();
-			this.batch = [record];
-			return record;
-		}
-
-		if (!this.batch || this.batch.length === 0) {
-			this.batch = [record];
-			return record;
-		}
-
-		const anchor = this.batch[0];
-		if (isNativeMultiModeSubagentArgs(anchor.args)) {
-			this.batch = [record];
-			return record;
-		}
-
-		// Single-mode AND still-streaming calls (args brace not closed yet) share
-		// one consecutive batch, so an orchestrator emitting several `subagent`
-		// tool calls in a burst does not render a fresh "Delegating" row per call.
-		const prev_owner = anchor;
-		this.batch.push(record);
-		if (this.batch.length === 2) {
-			prev_owner.invalidate?.();
-		}
 		return record;
-	}
-
-	getBatch(toolCallId: string): SubagentCallRecord[] {
-		const record = this.by_id.get(toolCallId);
-		if (!record) return [];
-		if (!this.batch?.includes(record)) return [record];
-		return [...this.batch];
 	}
 
 	setDisplayName(toolCallId: string, displayName: string): void {
 		const record = this.by_id.get(toolCallId);
 		if (record) record.displayName = displayName;
-	}
-
-	isOwner(toolCallId: string): boolean {
-		const batch = this.getBatch(toolCallId);
-		return batch.length <= 1 || batch[0]?.toolCallId === toolCallId;
-	}
-
-	shouldUseGroupLayout(toolCallId: string): boolean {
-		return this.getBatch(toolCallId).length > 1;
 	}
 }
 
@@ -169,43 +133,12 @@ export function getSubagentGroupRenderer(): SubagentGroupRenderer {
 const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_resume"]);
 
 /**
- * Live subagent-batch boundary for assistant stream events (SSOT).
- *
- * A visible thinking block is a chronological transcript boundary: a later
- * subagent tool call must not join a Subagents batch whose header renders
- * above the reasoning trace. Hidden thinking renders no transcript block, so
- * consecutive delegations keep collapsing exactly as before. Hidden assistant
- * messages (display: false, e.g. auto-continue) stream no visible content, so
- * their text/thinking never splits the batch either.
- *
- * Any visible (non-empty) text delta is likewise a hard boundary: streamed
- * narration between delegation waves owns its transcript slot, so the next
- * subagent call starts a fresh batch below the text — never joins a batch
- * whose header renders above it. Bare text_start and empty deltas never split.
- *
- * Event classification is delegated to the shared
- * `resolve_assistant_stream_boundary_event` from pi-ember-ui (the same SSOT
- * the compact work group uses) so the two group boundaries can never diverge.
+ * Restore per-call subagent render state from branch history before Pi
+ * rebuilds (ctrl+t thinking toggle, compaction, output-pad changes). Every
+ * subagent tool call gets its own record so live partials and display names
+ * survive the rebuild. No batch/header state exists anymore — each call is
+ * already an independent owner.
  */
-export function apply_subagent_group_stream_boundary(
-	renderer: SubagentGroupRenderer,
-	ev: { type?: string; delta?: unknown } | undefined,
-	message?: { role?: string; display?: boolean } | null,
-): void {
-	if (!ev || !ev.type) return;
-	if (message?.role === "assistant" && message.display === false) return;
-	const boundary = resolve_assistant_stream_boundary_event({ type: ev.type, delta: ev.delta });
-	if (!boundary) return;
-	if (boundary === "visible_text") {
-		renderer.hardExit();
-		return;
-	}
-	// thinking
-	if (isThinkingBlocksHidden()) return;
-	renderer.hardExit();
-}
-
-/** Restore grouped subagent layout state from branch history before Pi rebuilds. */
 export function seed_subagent_renderer_from_branch(
 	branch: SessionEntry[],
 	renderer: SubagentGroupRenderer,
@@ -236,65 +169,9 @@ export function seed_subagent_renderer_from_branch(
 		}
 	}
 
-	// Chronological replay mirrors the flattened todo timeline for user-message
-	// and tool boundaries while adding the subagent chronology rule: visible
-	// non-empty thinking parts and visible non-empty text parts render as
-	// transcript blocks, so the next subagent call starts a fresh batch instead
-	// of attaching above the reasoning trace or the streamed narration. Hidden
-	// thinking/text renders no block and keeps batching.
-	let pending_visible_thinking = false;
-	for (const entry of branch) {
-		if (entry.type !== "message") continue;
-		const msg = entry.message;
-		if (!msg) continue;
-		if (msg.role === "user") {
-			const display = (msg as { display?: boolean }).display;
-			if (display !== false) {
-				renderer.hardExit();
-				pending_visible_thinking = false;
-			}
-			continue;
-		}
-		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-		const hidden = (msg as { display?: boolean }).display === false;
-		for (const part of msg.content) {
-			if (!part || typeof part !== "object") continue;
-			const p = part as { type?: string; thinking?: unknown; text?: unknown };
-			if (p.type === "text") {
-				if (!hidden && typeof p.text === "string" && p.text.trim().length > 0) {
-					renderer.hardExit();
-					pending_visible_thinking = false;
-				}
-				continue;
-			}
-			if (p.type === "thinking") {
-				if (
-					!hidden &&
-					!isThinkingBlocksHidden() &&
-					typeof p.thinking === "string" &&
-					p.thinking.trim().length > 0
-				) {
-					pending_visible_thinking = true;
-				}
-				continue;
-			}
-			if (p.type !== "toolCall") continue;
-			const tc = p as { id?: string; name?: string };
-			if (typeof tc.id !== "string" || typeof tc.name !== "string") continue;
-			if (!SUBAGENT_TOOL_NAMES.has(tc.name)) {
-				renderer.hardExit();
-				pending_visible_thinking = false;
-				continue;
-			}
-			if (pending_visible_thinking) {
-				renderer.hardExit();
-				pending_visible_thinking = false;
-			}
-			const args = args_by_id.get(tc.id) ?? {};
-			const results = results_by_id.get(tc.id) ?? [];
-			renderer.register(tc.id, args, results);
-			const displayName = results[0]?.agent;
-			if (displayName) renderer.setDisplayName(tc.id, displayName);
-		}
+	for (const [toolCallId, args] of args_by_id) {
+		renderer.register(toolCallId, args, results_by_id.get(toolCallId) ?? []);
+		const displayName = results_by_id.get(toolCallId)?.[0]?.agent;
+		if (displayName) renderer.setDisplayName(toolCallId, displayName);
 	}
 }

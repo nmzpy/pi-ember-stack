@@ -1,4 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
+import { Theme } from "@earendil-works/pi-coding-agent";
+import { Spacer } from "@earendil-works/pi-tui";
 import {
 	renderSubagentLayout,
 	buildSubagentLayoutComponent,
@@ -7,7 +9,6 @@ import {
 	shouldShowSubagentDelegating,
 	renderDelegatingRow,
 	formatSubagentElapsedSuffix,
-	memberRecordsToRows,
 	SubagentToolText,
 	SubagentLiveOutputText,
 	renderSubagentExpanded,
@@ -24,14 +25,26 @@ import {
 	TREE_SINGLE_TOOL,
 } from "../../../../pi-compact-tools/renderer.ts";
 import { set_gradient_colorizer, reset_gradient_colorizer, type Rgb } from "../../../../pi-ember-ui/gradient.ts";
-import { strip_subagent_leading_render_gap } from "../subagent-render-spacing.ts";
+import {
+	buildThemeBgColors,
+	buildThemeFgColors,
+	MUTED_COLOR,
+} from "../../../../pi-ember-ui/mode-colors.ts";
 import {
 	arm_subagent_thinking_pass,
 	clear_subagent_thinking_pass,
 	clearSubagentTiming,
+	make_subagent_member_tool_call_id,
 	markSubagentRunning,
 	markSubagentTerminal,
 } from "../subagent-timing.ts";
+
+const TEST_THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
+(globalThis as Record<PropertyKey, unknown>)[TEST_THEME_KEY] = new Theme(
+	buildThemeFgColors(MUTED_COLOR) as never,
+	buildThemeBgColors(MUTED_COLOR) as never,
+	"truecolor",
+);
 
 function forcedColorizer(rgb: Rgb, text: string): string {
 	return `\x1b[38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${text}\x1b[39m`;
@@ -100,6 +113,10 @@ function toolItem(
 
 function textItem(text: string): any {
 	return { kind: "text", text };
+}
+
+function thinkingItem(text: string): any {
+	return { kind: "thinking", text };
 }
 
 function renderComponent(component: any, width = 80): string {
@@ -171,7 +188,7 @@ describe("SubagentLiveOutputText", () => {
 		expect(text).toContain("LaunchWindow.tsx");
 	});
 
-	test("streamed agent text renders between folded work bursts in order", () => {
+	test("streamed agent text renders between work bursts in order", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true }),
@@ -185,13 +202,14 @@ describe("SubagentLiveOutputText", () => {
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
 		const text = stripAnsi(out.join("\n"));
-		expect(text.indexOf("Explored 1 file")).toBeLessThan(text.indexOf("Let me check the launch window."));
-		expect(text.indexOf("Let me check the launch window.")).toBeLessThan(
-			text.indexOf("Edited 1 file"),
-		);
+		// Single-tool bursts render as bare standalone rows (no `Explored`/
+		// `Edited` headers) — the Read row precedes the streamed text, which
+		// precedes the Edit row.
+		expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Let me check the launch window."));
+		expect(text.indexOf("Let me check the launch window.")).toBeLessThan(text.indexOf("Edit"));
 	});
 
-	test("inserts a one-row spacer with a continuous branch pipe between segments", () => {
+	test("keeps chronological segments contiguous with one pipe padding row below output", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true }),
@@ -202,20 +220,13 @@ describe("SubagentLiveOutputText", () => {
 				{ completed: true, details: { diff: "+1\n" } },
 			),
 		];
-		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
-		const out = comp.render(80);
-		// header, spacer, text, spacer, header (+ child)
-		expect(stripAnsi(out[0])).toContain("Explored 1 file");
-		// Spacer rows keep the vertical branch continuous through the one-row
-		// padding gap (outer prefix + flush dim pipe, no inner content).
-		expect(stripAnsi(out[1])).toBe("  [dim:\u2502]");
-		expect(stripAnsi(out[2])).toContain("Checking the popover.");
-		expect(stripAnsi(out[3])).toBe("  [dim:\u2502]");
-		expect(stripAnsi(out[4])).toContain("Edited 1 file");
-		// The outer branch terminates at the latest tool-call block header
-		// (the second work burst), not at the trailing child row below it.
-		expect(stripAnsi(out[4])).toContain("[dim:\u2514]");
-		expect(stripAnsi(out[4])).not.toContain("[dim:\u2502]");
+		const out = new SubagentLiveOutputText(items, "  ", true, theme).render(80);
+		const text = stripAnsi(out.join("\n"));
+		expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Checking the popover."));
+		expect(text.indexOf("Checking the popover.")).toBeLessThan(text.indexOf("Edit"));
+		// Exactly one pipe-continuation padding row below the streamed output,
+		// before the next tool call — no other bare-pipe rows.
+		expect(out.map(stripAnsi).filter((line) => line === "  [dim:│]").length).toBe(1);
 	});
 
 	test("spacer rows stay width-safe at narrow widths", () => {
@@ -266,21 +277,65 @@ describe("SubagentLiveOutputText", () => {
 		expect(text).toContain("test");
 	});
 
-	test("renders an in-group Thinking lane after a tool wave with continuous tree branching", () => {
+	test("hidden thinking keeps the canonical in-group Thinking lane", () => {
 		const theme = makeTheme() as any;
 		const items = [toolItem("read", { path: "a.ts" }, { completed: true })];
-		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1");
-		const out = comp.render(60);
+		const out = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1", false).render(60);
 		const text = stripAnsi(out.join("\n"));
 		expect(text).toContain("Thinking");
-		// Exact branch prefixes: the outer `└` terminates at the latest
-		// tool-call block header, the preceding work-group child branches `├`
-		// into the Thinking lane (continuous tree), and Thinking carries the
-		// terminal inner `└` without extending the outer pipe. (The fake
-		// theme keeps `[tag:…]` markup; stripAnsi only removes real ANSI.)
-		expect(stripAnsi(out[0])).toBe("  [dim:\u2514][muted:*Explored 1 file*]");
-		expect(stripAnsi(out[1])).toBe("   [dim:\u251c][muted:*Read*][muted: a.ts]");
-		expect(stripAnsi(out[2])).toBe("   [dim:\u2514]Thinking");
+		expect(stripAnsi(out[out.length - 1])).toContain("[dim:└─]Thinking");
+	});
+
+	test("renders visible thinking content without a tool burst", () => {
+		const theme = makeTheme() as any;
+		const items = [thinkingItem("I am checking the current implementation.")];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1");
+		const text = stripAnsi(comp.render(80).join("\n"));
+		expect(text).toContain("I am checking the current implementation.");
+	});
+
+	test("renders visible Markdown paragraphs without dead branch-only rows", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			thinkingItem(""),
+			thinkingItem("# Reasoning\n\n**First paragraph.**\n\nSecond paragraph."),
+		];
+		const out = new SubagentLiveOutputText(items, "  ", true, theme).render(80);
+		const text = stripAnsi(out.join("\n"));
+		expect(text).toContain("Reasoning");
+		expect(text).toContain("First paragraph.");
+		expect(text).toContain("Second paragraph.");
+		expect(text).not.toContain("#");
+		expect(text).not.toContain("**");
+	});
+
+	test("keeps visible thinking chronological between tool waves", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			thinkingItem("I need to compare the related call site."),
+			toolItem("grep", { pattern: "call site", path: "b.ts" }, { completed: true, toolCallId: "c2" }),
+		];
+		const text = stripAnsi(new SubagentLiveOutputText(items, "  ", true, theme).render(80).join("\n"));
+		// Unified work groups on either side of the reasoning keep chronological order.
+		expect(text.indexOf("Read")).toBeLessThan(text.indexOf("I need to compare"));
+		expect(text.indexOf("I need to compare")).toBeLessThan(text.indexOf("Search"));
+		expect(text).toContain("Explored");
+	});
+
+	test("hidden thinking stays compact and does not split the tool burst", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			thinkingItem("secret child reasoning"),
+			toolItem("read", { path: "b.ts" }, { completed: true, toolCallId: "c2" }),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1", false);
+		const text = stripAnsi(comp.render(80).join("\n"));
+		expect(text).not.toContain("secret child reasoning");
+		expect(text).toContain("Explored 2 files");
+		expect((text.match(/Explored 2 files/g) ?? []).length).toBe(1);
+		expect(text).toContain("Thinking");
 	});
 
 	test("adds a bottom rule when settled", () => {
@@ -288,6 +343,7 @@ describe("SubagentLiveOutputText", () => {
 		const items = [toolItem("read", { path: "a.ts" }, { completed: true })];
 		const comp = new SubagentLiveOutputText(items, "", false, theme);
 		const out = comp.render(40);
+		// A single-tool burst now uses a unified work group (header + child), then the rule.
 		expect(out.length).toBe(3);
 		expect(stripAnsi(out[2])).toBe("\u2500".repeat(40));
 	});
@@ -297,7 +353,7 @@ describe("SubagentLiveOutputText", () => {
 		const items = [toolItem("bash", { command: "ls" })];
 		const comp = new SubagentLiveOutputText(items, "", true, theme);
 		const out = comp.render(40);
-		expect(stripAnsi(out.join("\n"))).not.toContain("\u2500");
+		expect(out.some((line) => stripAnsi(line) === "\u2500".repeat(40))).toBe(false);
 	});
 
 	test("truncates long rows to available width", () => {
@@ -305,6 +361,7 @@ describe("SubagentLiveOutputText", () => {
 		const items = [toolItem("bash", { command: "x".repeat(120) })];
 		const comp = new SubagentLiveOutputText(items, "  │ ", true, theme);
 		const out = comp.render(40);
+		// Unified group header + child; each width-safe.
 		expect(out.length).toBe(2);
 		for (const line of out) {
 			expect(stripAnsi(line).length).toBeLessThanOrEqual(40);
@@ -335,7 +392,7 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		// only non-empty visible text is.
 		expect(is_live_text_boundary("")).toBe(false);
 		expect(is_live_text_boundary("   ")).toBe(false);
-		expect(is_live_text_boundary("\n \t\n")).toBe(false);
+		expect(is_live_text_boundary("\n 	\n")).toBe(false);
 		expect(is_live_text_boundary("ok")).toBe(true);
 		expect(is_live_text_boundary("\nok")).toBe(true);
 	});
@@ -359,8 +416,8 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		// row, NO blank line — the exact row shape of the main message
 		// surface (header + children contiguous).
 		expect(stripped).toEqual([
-			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*] [success:+1]",
-			"   [dim:\u2514][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
+			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*]",
+			"   [dim:\u2514\u2500][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
 		]);
 		expect(stripped.some((line) => line === "" || line.trim() === "[dim:\u2502]")).toBe(false);
 	});
@@ -369,7 +426,7 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
-			textItem("  \n \t"),
+			textItem("  \n 	"),
 			toolItem(
 				"edit",
 				{ file_path: "b.ts", oldText: "x", newText: "y" },
@@ -380,8 +437,8 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
 		expect(stripped).toEqual([
-			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*] [success:+1]",
-			"   [dim:\u2514][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
+			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*]",
+			"   [dim:\u2514\u2500][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
 		]);
 	});
 
@@ -396,25 +453,18 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 				{ completed: true, toolCallId: "c2", details: { diff: "+1\n" } },
 			),
 		];
-		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
-		const out = comp.render(80);
-		const stripped = out.map((l) => stripAnsi(l));
-		// Two work bursts split by the streamed text, each with its own
-		// summary header, separated by the one-row pipe-continuous spacer —
-		// real visible text still folds the prior wave and hard-splits.
-		expect(stripped).toEqual([
-			"  [dim:\u2502][muted:*Explored 1 file*]",
-			"  [dim:\u2502]",
-			"  [dim:\u2502][text:Let me check the popover.]",
-			"  [dim:\u2502]",
-			"  [dim:\u2514][muted:*Edited 1 file*]",
-			"   [dim:\u2514][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
-		]);
+		const out = new SubagentLiveOutputText(items, "  ", true, theme).render(80);
+		const text = stripAnsi(out.join("\n"));
+		// Single-tool bursts stay separate bare rows (no unified header), and
+		// the non-empty text splits them in order.
+		expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Let me check"));
+		expect(text.indexOf("Let me check")).toBeLessThan(text.indexOf("Edit"));
+		expect(out.map(stripAnsi).filter((line) => line === "  [dim:│]").length).toBe(1);
 	});
 });
 
 describe("nested tray tree composition (regression)", () => {
-	test("no nested work-group bullet; 3-column tightening flush against the outer └", () => {
+	test("single-tool burst still uses the unified work group with tree prefix", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
@@ -423,102 +473,67 @@ describe("nested tray tree composition (regression)", () => {
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
-		// No `•` anywhere in the nested tray, and every line sits 3 columns
-		// tighter than the old `  │ • Explored` / `  │   └ Read` layout:
-		// header text at column 4 (flush against the outer └ at column 3),
-		// inner tree glyphs at column 4 (flush with the header text).
-		expect(stripped.join("\n")).not.toContain("\u2022");
+		// All tool bursts go through the unified work-group renderer; single
+		// calls get a header + one child row so the outer tree branch is
+		// continuous and no standalone `•` bullet appears.
 		expect(stripped).toEqual([
 			"  [dim:\u2514][muted:*Explored 1 file*]",
-			"   [dim:\u2514][muted:*Read*][muted: a.ts]",
+			"   [dim:\u2514\u2500][muted:*Read*][muted: a.ts]",
 		]);
 	});
 
-	test("in-group Thinking: child branches ├ and Thinking carries the terminal └", () => {
+	test("hidden in-group Thinking keeps completed children pipe-connected", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
 			toolItem("read", { path: "b.ts" }, { completed: true, toolCallId: "c2" }),
 		];
-		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1");
-		const out = comp.render(80);
-		const stripped = out.map((l) => stripAnsi(l));
-		// Both work-group children branch `├` (the tree continues into
-		// Thinking); the Thinking lane closes the group with `└` and does
-		// NOT extend the outer pipe (no outer glyph at column 3 on it).
-		expect(stripped).toEqual([
-			"  [dim:\u2514][muted:*Explored 2 files*]",
-			"   [dim:\u251c][muted:*Read*][muted: a.ts]",
-			"   [dim:\u251c][muted:*Read*][muted: b.ts]",
-			"   [dim:\u2514]Thinking",
-		]);
+		const out = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1", false).render(80);
+		const text = stripAnsi(out.join("\n"));
+		expect(text).toContain("[dim:│][muted:*Read*]");
+		expect(text).toContain("[dim:└─]Thinking");
 	});
 
-	test("outer branch terminates at the latest tool-call block, not the trailing Thinking", () => {
+	test("visible thinking is a Markdown sibling rather than a compact tool child", () => {
 		const theme = makeTheme() as any;
 		const items = [
-			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
-			textItem("Checking the popover."),
-			toolItem(
-				"edit",
-				{ file_path: "b.ts", oldText: "x", newText: "y" },
-				{ completed: true, toolCallId: "c2", details: { diff: "+1\n" } },
-			),
+			toolItem("read", { path: "a.ts" }, { completed: true }),
+			thinkingItem("## Reasoning\n\n**Compare** the call site."),
+			toolItem("edit", { file_path: "b.ts", oldText: "x", newText: "y" }, { completed: true }),
 		];
-		const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1");
-		const out = comp.render(80);
-		const stripped = out.map((l) => stripAnsi(l));
-		// First burst + spacer + text + spacer continue the outer pipe; the
-		// second (latest) burst header terminates it with `└`; the trailing
-		// child and Thinking rows hang inside the group without an outer pipe.
-		expect(stripped).toEqual([
-			"  [dim:\u2502][muted:*Explored 1 file*]",
-			"  [dim:\u2502]",
-			"  [dim:\u2502][text:Checking the popover.]",
-			"  [dim:\u2502]",
-			"  [dim:\u2514][muted:*Edited 1 file*]",
-			"   [dim:\u251c][muted:*Edit*][muted: b.ts][muted:  ][muted:+1]",
-			"   [dim:\u2514]Thinking",
-		]);
+		const text = stripAnsi(new SubagentLiveOutputText(items, "  ", true, theme).render(80).join("\n"));
+		// The reasoning sits between the two bare tool rows (no header).
+		expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Reasoning"));
+		expect(text.indexOf("Reasoning")).toBeLessThan(text.indexOf("Edit"));
+		expect(text).not.toContain("## Reasoning");
+		expect(text).not.toContain("**Compare**");
+		expect(text).not.toContain("Thinking");
 	});
 
-	test("grouped tray keeps the 3-column tightening flush with the agent branch", () => {
+	test("visible empty thinking markers do not create a branch-only row", () => {
 		const theme = makeTheme() as any;
 		const items = [
-			toolItem("grep", { pattern: "auth", path: "src" }, { completed: true, toolCallId: "c1" }),
+			toolItem("read", { path: "a.ts" }, { completed: true }),
+			thinkingItem(""),
+			toolItem("read", { path: "b.ts" }, { completed: true }),
 		];
-		// Grouped outer prefix "  │" — the tray's own └/│ glyph sits one column
-		// right of the tree pipe, directly below the agent name's first letter
-		// (`C` of Coder / `S` of Scout at column 3), matching childTreePrefix.
-		const comp = new SubagentLiveOutputText(items, "  │", true, theme, true, "call-1");
-		const out = comp.render(80);
-		const stripped = out.map((l) => stripAnsi(l));
-		// Header text and inner tree align at column 5 (flush with the agent
-		// branch, not one column right under the agent name's second letter).
-		expect(stripped).toEqual([
-			"  │[dim:\u2514][muted:*1 search*]",
-			"  │ [dim:\u251c][muted:*Search*][muted: auth][muted: in src]",
-			"  │ [dim:\u2514]Thinking",
-		]);
+		const out = new SubagentLiveOutputText(items, "  │", true, theme, true, "call-1").render(80);
+		const text = stripAnsi(out.join("\n"));
+		expect(text).toContain("Explored 2 files");
+		expect(text).not.toContain("Thinking");
+		expect(out.map(stripAnsi).some((line) => /\[dim:[│└]\]$/.test(line))).toBe(false);
 	});
 
-	test("trailing agent message snaps the outer └ to the message", () => {
+	test("trailing agent text terminates the outer gutter without fake spacers", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
 			textItem("Let me check the launch window."),
 		];
-		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
-		const out = comp.render(80);
-		const stripped = out.map((l) => stripAnsi(l));
-		// The work-burst header keeps the continuous pipe; the agent message
-		// is the latest output, so the outer branch terminates `└` on it
-		// rather than staying on the older work header.
-		expect(stripped).toEqual([
-			"  [dim:\u2502][muted:*Explored 1 file*]",
-			"  [dim:\u2502]",
-			"  [dim:\u2514][text:Let me check the launch window.]",
-		]);
+		const out = new SubagentLiveOutputText(items, "  ", true, theme).render(80);
+		const text = stripAnsi(out.join("\n"));
+		expect(text).toContain("[dim:└][text:Let me check the launch window.]");
+		expect(out.map(stripAnsi)).not.toContain("  [dim:│]");
 	});
 
 	test("running tray without Thinking closes the inner tree on the last child", () => {
@@ -530,13 +545,46 @@ describe("nested tray tree composition (regression)", () => {
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
-		// No thinking lane: the last work-group child closes with `└` (the
+		// No thinking lane: active child rows use `├─` / `└─` (the
 		// outer branch still terminates at the burst header).
 		expect(stripped).toEqual([
 			"  [dim:\u2514][muted:*Exploring*]",
-			"   [dim:\u251c]Reading[text: a.ts]",
-			"   [dim:\u2514]Reading[text: b.ts]",
+			"   [dim:\u251c\u2500]Reading[text: a.ts]",
+			"   [dim:\u2514\u2500]Reading[text: b.ts]",
 		]);
+	});
+
+	test("completed prior children use pipe-only prefix; terminal child keeps └─", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			toolItem("read", { path: "b.ts" }, { completed: true, toolCallId: "c2" }),
+			toolItem("read", { path: "c.ts" }, { completed: true, toolCallId: "c3" }),
+		];
+		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
+		const out = comp.render(80);
+		const stripped = out.map((l) => stripAnsi(l));
+		// First two completed children: pipe-only `│` (no `├` tee).
+		// Last child: terminal `└─`.
+		expect(stripped).toEqual([
+			"  [dim:\u2514][muted:*Explored 3 files*]",
+			"   [dim:\u2502][muted:*Read*][muted: a.ts]",
+			"   [dim:\u2502][muted:*Read*][muted: b.ts]",
+			"   [dim:\u2514\u2500][muted:*Read*][muted: c.ts]",
+		]);
+	});
+
+	test("hidden Thinking lane remains terminal after completed children", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			toolItem("read", { path: "b.ts" }, { completed: true, toolCallId: "c2" }),
+		];
+		const text = stripAnsi(
+			new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1", false).render(80).join("\n"),
+		);
+		expect(text).toContain("[dim:│][muted:*Read*]");
+		expect(text).toContain("[dim:└─]Thinking");
 	});
 });
 
@@ -596,36 +644,106 @@ describe("subagent native compact row SSOT", () => {
 	});
 });
 
-describe("subagent render spacing", () => {
-	test("keeps the native leading separator so the header gets padding above", () => {
-		expect(strip_subagent_leading_render_gap(["", "Subagents", "  └Coder A"])).toEqual([
-			"",
-			"Subagents",
-			"  └Coder A",
-		]);
+describe("per-agent block spacing", () => {
+	test("string layout joins member blocks with exactly one blank row", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[makeResult("Coder A", 0), makeResult("Scout B", 0)],
+			theme,
+		);
+		const lines = out.split("\n");
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(lines[1]).toBe("");
+		expect(stripAnsi(lines[2])).toContain("Scout B");
+		// Exactly one blank row — no duplicate top/trailing padding inside the call.
+		expect(lines.filter((line) => line === "").length).toBe(1);
+		expect(out.endsWith("\n")).toBe(false);
 	});
 
-	test("does not remove a real first content row", () => {
-		const lines = ["Subagents", "  └Coder A"];
-		expect(strip_subagent_leading_render_gap(lines)).toBe(lines);
+	test("component layout inserts one Spacer between member blocks and no top/trailing padding", () => {
+		const theme = makeTheme() as any;
+		const component = buildSubagentLayoutComponent(
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[makeResult("Coder A", 0), makeResult("Scout B", 0)],
+			theme,
+		);
+		// agent row, spacer, agent row — exactly one blank row between blocks.
+		expect(component.children.length).toBe(3);
+		expect(component.children[1] instanceof Spacer).toBe(true);
+		const lines = renderComponent(component).split("\n");
+		expect(lines.length).toBe(3);
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(lines[1]).toBe("");
+		expect(stripAnsi(lines[2])).toContain("Scout B");
 	});
 
-	test("drops the lone separator for empty non-owner members", () => {
-		expect(strip_subagent_leading_render_gap([""])).toEqual([]);
-		expect(strip_subagent_leading_render_gap([])).toEqual([]);
+	test("single call renders one block with no internal blank rows", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, [makeResult("Coder A", 0)], theme);
+		expect(out.split("\n").filter((line) => line === "").length).toBe(0);
+		expect(stripAnsi(out)).toContain("Coder A");
 	});
 
-	test("complete work-group surface keeps exactly one native leading row and adds no trailing rows", () => {
-		// Pi's ToolExecutionComponent self-shell render prepends ONE leading
-		// blank separator row, then the group's header + children. The wrapper
-		// must preserve that single row above and never inject padding below —
-		// the group block is header + children contiguous, matching the main
-		// message surface (no dead pipe/blank rows inside or after).
-		const surface = ["", "  └ Edited 1 file, Explored 1 file +1", "    └ Edit b.ts +1"];
-		expect(strip_subagent_leading_render_gap(surface)).toEqual(surface);
-		expect(surface[0]).toBe("");
-		expect(surface.filter((line) => line === "").length).toBe(1);
-		expect(surface[surface.length - 1]).toContain("Edit b.ts");
+	test("three parallel members render three blocks with two blank rows total", () => {
+		const theme = makeTheme() as any;
+		const out = renderSubagentLayout(
+			{
+				tasks: [
+					{ agent: "Coder", task: "a" },
+					{ agent: "Scout", task: "b" },
+					{ agent: "Coder", task: "c" },
+				],
+			},
+			[makeResult("Coder A", 0), makeResult("Scout B", 0), makeResult("Coder C", 0)],
+			theme,
+		);
+		const lines = out.split("\n");
+		expect(lines.filter((line) => line === "").length).toBe(2);
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(stripAnsi(lines[2])).toContain("Scout B");
+		expect(stripAnsi(lines[4])).toContain("Coder C");
+	});
+
+	test("chain started steps render as direct blocks with no header and pending steps hidden", () => {
+		const theme = makeTheme() as any;
+		const args = {
+			chain: [
+				{ agent: "Scout", task: "a" },
+				{ agent: "Coder", task: "b" },
+				{ agent: "Coder", task: "c" },
+			],
+		};
+		const out = renderSubagentLayout(args, [makeResult("Scout A", 0), makeResult("Coder B", 0)], theme);
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		expect(stripAnsi(out)).toContain("Scout A");
+		expect(stripAnsi(out)).toContain("Coder B");
+		expect(stripAnsi(out)).not.toContain("Coder C");
+		const lines = out.split("\n");
+		expect(lines.length).toBe(3);
+		expect(lines[1]).toBe("");
+	});
+
+	test("chain running step renders its own block with live nested state", () => {
+		const theme = makeTheme() as any;
+		const args = { chain: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] };
+		const running = makeRunning("Scout A", { isThinking: true, reasoning: true });
+		const out = renderSubagentLayout(args, [running], theme);
+		const lines = out.split("\n");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		expect(stripAnsi(lines[0])).toContain("Scout A");
+		expect(stripAnsi(lines[1])).toContain("Thinking");
+		expect(stripAnsi(out)).not.toContain("Coder");
+	});
+
+	test("chain pending steps stay hidden in the component builder", () => {
+		const theme = makeTheme() as any;
+		const args = { chain: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] };
+		const component = buildSubagentLayoutComponent(args, [makeResult("Scout A", 0)], theme);
+		const out = renderComponent(component);
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		expect(stripAnsi(out)).toContain("Scout A");
+		expect(stripAnsi(out)).not.toContain("Coder");
 	});
 });
 
@@ -640,7 +758,7 @@ describe("subagent delegating state", () => {
 		expect(stripAnsi(renderDelegatingRow(theme))).toContain("Delegating");
 	});
 
-	test("running placeholders without activity show Subagents header rows", () => {
+	test("running placeholders render per-agent blocks without a Subagents header", () => {
 		const theme = makeTheme() as any;
 		const placeholders = [makeResult("Scout A", -1), makeResult("Scout B", -1)];
 		expect(isSubagentDelegating(placeholders)).toBe(false);
@@ -649,12 +767,13 @@ describe("subagent delegating state", () => {
 			placeholders,
 			theme,
 		);
-		expect(stripAnsi(out)).toContain("Subagents");
+		expect(stripAnsi(out)).not.toContain("Subagents");
 		expect(stripAnsi(out)).toContain("Scout A");
 		expect(stripAnsi(out)).toContain("Scout B");
+		expect(stripAnsi(out)).toContain("\u2022");
 	});
 
-	test("first subagent tool call leaves delegating for the agent tree", () => {
+	test("single parallel member renders its own block without a header", () => {
 		const theme = makeTheme() as any;
 		const active = makeResult("Scout A", -1);
 		expect(isSubagentDelegating([active])).toBe(false);
@@ -663,7 +782,7 @@ describe("subagent delegating state", () => {
 			[active],
 			theme,
 		);
-		expect(stripAnsi(out)).toContain("Subagents");
+		expect(stripAnsi(out)).not.toContain("Subagents");
 		expect(stripAnsi(out)).toContain("Scout A");
 	});
 
@@ -681,7 +800,7 @@ describe("subagent delegating state", () => {
 	test("terminal empty results show failed agent row, not Delegating", () => {
 		const theme = makeTheme() as any;
 		expect(shouldShowSubagentDelegating([], true)).toBe(false);
-		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [], theme, 146_000, undefined, true);
+		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [], theme, 146_000, true);
 		expect(stripAnsi(out)).not.toContain("Delegating");
 		expect(stripAnsi(out)).toContain("Coder");
 		expect(out).toContain("[dim:Coder]");
@@ -724,7 +843,7 @@ describe("subagent elapsed time", () => {
 		expect(completed).toContain("[dim: 12s]");
 	});
 
-	test("parallel mode shows elapsed only on the Subagents header when all done", () => {
+	test("parallel mode shows elapsed on each terminal member block, never on running blocks", () => {
 		const theme = makeTheme() as any;
 		const out = renderSubagentLayout(
 			{ tasks: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] },
@@ -732,12 +851,7 @@ describe("subagent elapsed time", () => {
 			theme,
 			65_000,
 		);
-		const lines = out.split("\n");
-		expect(lines[0]).not.toContain("[dim: 1m 5s]");
-		expect(stripAnsi(lines[1] ?? "")).toContain("Scout");
-		expect(lines[1]).not.toContain("1m 5s");
-		expect(stripAnsi(lines[3] ?? "")).toContain("Coder");
-		expect(lines[3]).not.toContain("1m 5s");
+		expect(out).not.toContain("1m 5s");
 
 		const done = renderSubagentLayout(
 			{ tasks: [{ agent: "Scout", task: "a" }, { agent: "Coder", task: "b" }] },
@@ -747,6 +861,7 @@ describe("subagent elapsed time", () => {
 		);
 		const doneLines = done.split("\n");
 		expect(doneLines[0]).toContain("[dim: 1m 5s]");
+		expect(doneLines[2]).toContain("[dim: 1m 5s]");
 	});
 
 	test("single delegating row never shows an elapsed timer", () => {
@@ -756,139 +871,74 @@ describe("subagent elapsed time", () => {
 		expect(out).not.toContain("[dim: 3s]");
 	});
 
-	test("grouped members show frozen per-agent elapsed next to done agents only", () => {
+	test("consecutive single calls show per-call elapsed next to done agents only", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{
-				args: { agent: "Coder", task: "a" },
-				results: [makeResult("Coder A", 0)],
-				displayName: "Coder A",
-				terminal: true,
-				toolCallId: "grouped-elapsed-done-a",
-			},
-			{
-				args: { agent: "Coder", task: "b" },
-				results: [makeRunning("Coder B")],
-				displayName: "Coder B",
-				toolCallId: "grouped-elapsed-running-b",
-			},
-		];
+		const done = renderSubagentLayout(
+			{ agent: "Coder", task: "a" },
+			[makeResult("Coder A", 0)],
+			theme,
+			25_000,
+		);
+		expect(stripAnsi(done)).toContain("Coder A");
+		expect(done).toContain("[dim: 25s]");
+
+		const running = renderSubagentLayout(
+			{ agent: "Coder", task: "b" },
+			[makeRunning("Coder B")],
+			theme,
+			25_000,
+		);
+		expect(stripAnsi(running)).toContain("Coder B");
+		expect(running).not.toMatch(/\[dim: \d/);
+	});
+
+	test("parallel component blocks show elapsed on the done member only", () => {
+		const theme = makeTheme() as any;
+		const comp = buildSubagentLayoutComponent(
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Coder", task: "b" }] },
+			[makeResult("Coder A", 0), makeRunning("Coder B")],
+			theme,
+			12_500,
+		);
+		const lines = renderComponent(comp).split("\n");
+		expect(lines.find((l) => l.includes("Coder A"))).toContain("[dim: 12s]");
+		expect(lines.find((l) => l.includes("Coder B"))).not.toMatch(/\[dim: \d/);
+	});
+
+	test("parallel members each freeze at their own completion with independent timers", () => {
+		const theme = makeTheme() as any;
 		const original_now = performance.now;
 		let now = 1_000_000;
 		performance.now = () => now;
 		try {
-			markSubagentRunning("grouped-elapsed-done-a");
-			markSubagentRunning("grouped-elapsed-running-b");
-			now += 25_000;
-			markSubagentTerminal("grouped-elapsed-done-a");
-			const out = renderSubagentLayout(
-				{ agent: "Coder", task: "a" },
-				[],
-				theme,
-				25_000,
-				members,
-			);
+			const firstId = make_subagent_member_tool_call_id("call-parallel", 0);
+			const secondId = make_subagent_member_tool_call_id("call-parallel", 1);
+			markSubagentRunning(firstId);
+			markSubagentRunning(secondId);
+			now += 3000; // first member finishes at 3s
+			markSubagentTerminal(firstId);
+			const firstDone = makeResult("Scout G", 0);
+			firstDone.toolCallId = firstId;
+			const secondRunning = makeRunning("Scout H", { isThinking: false });
+			secondRunning.toolCallId = secondId;
+			const args = { tasks: [{ agent: "Scout", task: "a" }, { agent: "Scout", task: "b" }] };
+			const out = renderSubagentLayout(args, [firstDone, secondRunning], theme);
 			const lines = out.split("\n");
-			// Done member shows its own frozen elapsed next to the ✓; the
-			// running member never shows a timer.
-			const doneLine = lines.find((l) => stripAnsi(l).includes("Coder A"));
-			expect(doneLine).toContain("[dim: 25s]");
-			const runningLine = lines.find((l) => stripAnsi(l).includes("Coder B"));
-			expect(runningLine).not.toMatch(/\[dim: \d/);
-			// Header shows no elapsed while any member is still running.
-			expect(stripAnsi(lines[0])).toContain("Subagents");
-			expect(lines[0]).not.toContain("[dim: 25s]");
-		} finally {
-			performance.now = original_now;
-			markSubagentTerminal("grouped-elapsed-running-b");
-		}
-	});
-
-	test("grouped component rows show per-agent elapsed for done members", () => {
-		const theme = makeTheme() as any;
-		const members = [
-			{
-				args: { agent: "Coder", task: "a" },
-				results: [makeResult("Coder A", 0)],
-				displayName: "Coder A",
-				terminal: true,
-				toolCallId: "grouped-comp-elapsed-done",
-			},
-			{
-				args: { agent: "Coder", task: "b" },
-				results: [makeRunning("Coder B")],
-				displayName: "Coder B",
-				toolCallId: "grouped-comp-elapsed-running",
-			},
-		];
-		const original_now = performance.now;
-		let now = 2_000_000;
-		performance.now = () => now;
-		try {
-			markSubagentRunning("grouped-comp-elapsed-done");
-			markSubagentRunning("grouped-comp-elapsed-running");
-			now += 12_500;
-			markSubagentTerminal("grouped-comp-elapsed-done");
-			const comp = buildSubagentLayoutComponent(
-				{ agent: "Coder", task: "a" },
-				[],
-				theme,
-				12_500,
-				members,
-			);
-			const lines = renderComponent(comp).split("\n");
-			expect(lines.find((l) => l.includes("Coder A"))).toContain("[dim: 12s]");
-			expect(lines.find((l) => l.includes("Coder B"))).not.toMatch(/\[dim: \d/);
-		} finally {
-			performance.now = original_now;
-			markSubagentTerminal("grouped-comp-elapsed-running");
-			clearSubagentTiming();
-		}
-	});
-
-	test("non-owner batch members freeze their own elapsed from their execution start", () => {
-		const theme = makeTheme() as any;
-		const members = [
-			{
-				args: { agent: "Coder", task: "a" },
-				results: [makeResult("Coder A", 0)],
-				displayName: "Coder A",
-				terminal: true,
-				toolCallId: "member-elapsed-a",
-			},
-			{
-				args: { agent: "Coder", task: "b" },
-				results: [makeResult("Coder B", 0)],
-				displayName: "Coder B",
-				terminal: true,
-				toolCallId: "member-elapsed-b",
-			},
-		];
-		const original_now = performance.now;
-		let now = 3_000_000;
-		performance.now = () => now;
-		try {
-			// Only member A is marked by the render path (batch owner); B's
-			// mark comes from its own tool_execution_start, the production
-			// wiring this test simulates.
-			markSubagentRunning("member-elapsed-a");
-			now += 40_000;
-			markSubagentRunning("member-elapsed-b");
-			now += 20_000;
-			markSubagentTerminal("member-elapsed-a");
-			markSubagentTerminal("member-elapsed-b");
-			const out = renderSubagentLayout(
-				{ agent: "Coder", task: "a" },
-				[],
-				theme,
-				60_000,
-				members,
-			);
-			const lines = out.split("\n");
-			const lineA = lines.find((l) => stripAnsi(l).includes("Coder A"));
-			expect(lineA).toContain("[dim: 1m 0s]");
-			const lineB = lines.find((l) => stripAnsi(l).includes("Coder B"));
-			expect(lineB).toContain("[dim: 20s]");
+			expect(stripAnsi(lines[0])).toContain("Scout G");
+			expect(stripAnsi(lines[0])).toContain("[dim: 3s]");
+			expect(stripAnsi(lines[2])).toContain("Scout H");
+			expect(stripAnsi(lines[2])).not.toMatch(/\[dim: \d/);
+			// Time keeps advancing for the still-running member only.
+			now += 4000; // second member finishes at 7s
+			markSubagentTerminal(secondId);
+			const secondDone = makeResult("Scout H", 0);
+			secondDone.toolCallId = secondId;
+			const out2 = renderSubagentLayout(args, [firstDone, secondDone], theme);
+			const lines2 = out2.split("\n");
+			expect(stripAnsi(lines2[0])).toContain("Scout G");
+			expect(stripAnsi(lines2[0])).toContain("[dim: 3s]");
+			expect(stripAnsi(lines2[2])).toContain("Scout H");
+			expect(stripAnsi(lines2[2])).toContain("[dim: 7s]");
 		} finally {
 			performance.now = original_now;
 			clearSubagentTiming();
@@ -921,7 +971,7 @@ describe("subagent elapsed time", () => {
 		}
 	});
 
-	test("live tray Thinking lane renders the armed SSOT thinking elapsed suffix", () => {
+	test("hidden tray Thinking lane renders the armed SSOT thinking elapsed suffix", () => {
 		const theme = makeTheme() as any;
 		const id = "call-tray-thinking";
 		const original_now = performance.now;
@@ -931,12 +981,8 @@ describe("subagent elapsed time", () => {
 			arm_subagent_thinking_pass(id);
 			now += 1500;
 			const items = [toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" })];
-			const comp = new SubagentLiveOutputText(items, "  ", true, theme, true, id);
-			const out = comp.render(80);
-			const stripped = out.map((l) => stripAnsi(l));
-			// The tray in-group Thinking lane carries the same dim elapsed
-			// suffix as the nested row, refreshed each shared gradient tick.
-			expect(stripped[stripped.length - 1]).toContain("Thinking");
+			const out = new SubagentLiveOutputText(items, "  ", true, theme, true, id, false).render(80);
+			expect(stripAnsi(out[out.length - 1])).toContain("Thinking");
 			expect(out[out.length - 1]).toContain("[dim: 1s]");
 		} finally {
 			performance.now = original_now;
@@ -944,213 +990,134 @@ describe("subagent elapsed time", () => {
 		}
 	});
 
-	test("grouped consecutive singles render one Subagents header", () => {
+	test("consecutive single calls each render their own block with no shared header", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{ args: { agent: "Coder", task: "a" }, results: [makeRunning("Coder A")], displayName: "Coder A" },
-			{ args: { agent: "Coder", task: "b" }, results: [makeRunning("Coder B")], displayName: "Coder B" },
-			{ args: { agent: "Coder", task: "c" }, results: [makeRunning("Coder C")], displayName: "Coder C" },
-		];
-		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, [], theme, 5000, members);
-		const lines = out.split("\n");
-		expect(stripAnsi(lines[0])).toContain("Subagents");
-		expect(lines[0]).not.toContain("[dim: 5s]");
-		expect(lines.length).toBeGreaterThanOrEqual(4);
-		expect(memberRecordsToRows(members).length).toBe(3);
-		expect(stripAnsi(out)).toContain("Coder A");
-		expect(stripAnsi(out)).toContain("Coder B");
-		expect(stripAnsi(out)).toContain("Coder C");
+		const first = renderSubagentLayout({ agent: "Coder", task: "a" }, [makeRunning("Coder A")], theme);
+		const second = renderSubagentLayout({ agent: "Coder", task: "b" }, [makeRunning("Coder B")], theme);
+		const third = renderSubagentLayout({ agent: "Coder", task: "c" }, [makeRunning("Coder C")], theme);
+		for (const out of [first, second, third]) {
+			expect(stripAnsi(out)).not.toContain("Subagents");
+			expect(stripAnsi(out)).not.toContain("Delegating");
+		}
+		expect(stripAnsi(first)).toContain("Coder A");
+		expect(stripAnsi(second)).toContain("Coder B");
+		expect(stripAnsi(third)).toContain("Coder C");
 	});
 
-	test("grouped streaming members render one gradient Delegating header, agent types as they stream", () => {
+	test("a single-mode call with no results yet shows one gradient Delegating row", () => {
 		const theme = makeTheme() as any;
-		// Brace still open: `agent` is written, `task` is not yet closed.
-		const members = [
-			{ args: { agent: "Coder", task: "a" }, results: [makeRunning("Coder A")], displayName: "Coder A" },
-			{ args: { agent: "Scout" }, results: [], toolCallId: "call-b" },
-		];
-		const out = renderSubagentLayout(
-			{ agent: "Coder", task: "a" },
-			[makeRunning("Coder A")],
-			theme,
-			undefined,
-			members,
-		);
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, [], theme);
 		const output = stripAnsi(out);
-		// ONE Delegating label (the header), not one per streaming call.
 		expect(output.split("Delegating").length - 1).toBe(1);
-		expect(output).toContain("Coder A");
-		expect(output).toContain("Scout");
-		// Header carries the shared subagent gradient.
-		expect(out.split("\n")[0]).toContain("\u001b[38;2;");
+		expect(output).toContain("\u2022");
+		expect(out).toContain("\u001b[38;2;");
 	});
 
-	test("first streaming member with no agent yet shows only the header, no bare subagent text", () => {
+	test("unrecognized streaming args render Delegating, never bare subagent text", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{ args: {}, results: [], toolCallId: "call-a" },
-			{ args: { agent: "Scout" }, results: [], toolCallId: "call-b" },
-		];
-		const out = renderSubagentLayout({}, [], theme, undefined, members);
+		const out = renderSubagentLayout({}, [], theme);
 		const output = stripAnsi(out);
 		expect(output.split("Delegating").length - 1).toBe(1);
 		expect(output).not.toContain("subagent");
-		expect(output).toContain("Scout");
 	});
 
-	test("settled grouped members keep the static Subagents header (no gradient)", () => {
+	test("settled parallel members render static per-agent blocks (no gradient, no header)", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 0)], displayName: "Coder A" },
-			{ args: { agent: "Scout", task: "b" }, results: [makeResult("Scout B", 0)], displayName: "Scout B" },
-		];
 		const out = renderSubagentLayout(
-			{ agent: "Coder", task: "a" },
-			[makeResult("Coder A", 0)],
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[makeResult("Coder A", 0), makeResult("Scout B", 0)],
 			theme,
-			undefined,
-			members,
 		);
-		expect(stripAnsi(out)).toContain("Subagents");
-		expect(out.split("\n")[0]).not.toContain("\u001b[38;2;");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		expect(out).not.toContain("\u001b[38;2;");
+		expect(stripAnsi(out)).toContain("Coder A");
+		expect(stripAnsi(out)).toContain("Scout B");
 	});
 
-	test("grouped Subagents header bullet turns success green when the whole batch completes", () => {
+	test("completed parallel blocks carry success green bullets (no header)", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 0)], displayName: "Coder A", terminal: true, toolCallId: "batch-done-a" },
-			{ args: { agent: "Scout", task: "b" }, results: [makeResult("Scout B", 0)], displayName: "Scout B", terminal: true, toolCallId: "batch-done-b" },
-		];
 		const out = renderSubagentLayout(
-			{ agent: "Coder", task: "a" },
-			[makeResult("Coder A", 0)],
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[makeResult("Coder A", 0), makeResult("Scout B", 0)],
 			theme,
-			undefined,
-			members,
 		);
-		const header = out.split("\n")[0];
-		expect(stripAnsi(header)).toContain("Subagents");
-		// All-terminal batch: the header bullet uses the canonical success
-		// green (SSOT groupBulletColorFromFlags); the label stays dim/bold.
-		expect(header).toContain("[success:\u2022 ]");
-		expect(header).not.toContain("[muted:\u2022 ]");
-		expect(header).toContain("[dim:*Subagents*]");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		const lines = out.split("\n");
+		expect(lines[0]).toContain("[success:\u2022 ]");
+		expect(lines[0]).not.toContain("[muted:\u2022 ]");
+		expect(lines[2]).toContain("[success:\u2022 ]");
 	});
 
-	test("grouped Subagents header bullet turns error red when any member failed", () => {
+	test("failed parallel block carries the error red bullet, sibling stays success", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 1, true)], displayName: "Coder A", terminal: true, toolCallId: "batch-fail-a" },
-			{ args: { agent: "Scout", task: "b" }, results: [makeResult("Scout B", 0)], displayName: "Scout B", terminal: true, toolCallId: "batch-fail-b" },
-		];
 		const out = renderSubagentLayout(
-			{ agent: "Coder", task: "a" },
-			[makeResult("Coder A", 1, true)],
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[makeResult("Coder A", 1, true), makeResult("Scout B", 0)],
 			theme,
-			undefined,
-			members,
 		);
-		const header = out.split("\n")[0];
-		expect(stripAnsi(header)).toContain("Subagents");
-		expect(header).toContain("[error:\u2022 ]");
-		expect(header).not.toContain("[muted:\u2022 ]");
-		expect(header).not.toContain("[success:\u2022 ]");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		const lines = out.split("\n");
+		expect(lines[0]).toContain("[error:\u2022 ]");
+		expect(lines[0]).not.toContain("[muted:\u2022 ]");
+		expect(lines[0]).not.toContain("[success:\u2022 ]");
+		expect(lines[2]).toContain("[success:\u2022 ]");
 	});
 
-	test("grouped Subagents header bullet stays muted while any member runs", () => {
+	test("running parallel block bullet stays muted while a sibling completed", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{ args: { agent: "Coder", task: "a" }, results: [makeResult("Coder A", 0)], displayName: "Coder A", terminal: true, toolCallId: "batch-mixed-a" },
-			{ args: { agent: "Scout", task: "b" }, results: [makeRunning("Scout B")], displayName: "Scout B", toolCallId: "batch-mixed-b" },
-		];
 		const out = renderSubagentLayout(
-			{ agent: "Coder", task: "a" },
-			[makeResult("Coder A", 0)],
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[makeResult("Coder A", 0), makeRunning("Scout B")],
 			theme,
-			undefined,
-			members,
 		);
-		const header = out.split("\n")[0];
-		expect(stripAnsi(header)).toContain("Subagents");
-		expect(header).toContain("[muted:\u2022 ]");
-		expect(header).not.toContain("[success:\u2022 ]");
-		expect(header).not.toContain("[error:\u2022 ]");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		const lines = out.split("\n");
+		expect(lines[0]).toContain("[success:\u2022 ]");
+		const runningLine = lines.find((l) => stripAnsi(l).includes("Scout B"));
+		expect(runningLine).toContain("[muted:\u2022 ]");
+		expect(runningLine).not.toContain("[success:\u2022 ]");
+		expect(runningLine).not.toContain("[error:\u2022 ]");
 	});
 
-	test("grouped tool-level failures keep each diagnostic on its agent row", () => {
+	test("tool-level failures keep each diagnostic on its own block", () => {
 		const theme = makeTheme() as any;
-		const members = [
-			{
-				args: { agent: "Coder", task: "a" },
-				results: [],
-				displayName: "Coder A",
-				terminal: true,
-				failureMessage: "401 Unauthorized",
-			},
-			{
-				args: { agent: "Coder", task: "b" },
-				results: [],
-				displayName: "Coder B",
-				terminal: true,
-				failureMessage: "503 Service Unavailable",
-			},
-		];
-		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, [], theme, undefined, members, true);
-		const output = stripAnsi(out);
-		expect(output).toContain("Coder A");
-		expect(output).toContain("401 Unauthorized");
-		expect(output).toContain("Coder B");
-		expect(output).toContain("503 Service Unavailable");
+		const a = renderSubagentLayout({ agent: "Coder", task: "a" }, [], theme, undefined, true, "401 Unauthorized");
+		const b = renderSubagentLayout({ agent: "Coder", task: "b" }, [], theme, undefined, true, "503 Service Unavailable");
+		expect(stripAnsi(a)).toContain("Coder");
+		expect(stripAnsi(a)).toContain("401 Unauthorized");
+		expect(stripAnsi(a)).not.toContain("503");
+		expect(stripAnsi(b)).toContain("Coder");
+		expect(stripAnsi(b)).toContain("503 Service Unavailable");
+		expect(stripAnsi(b)).not.toContain("401");
 	});
 
-	test("grouped second running agent shows thinking after first completes", () => {
+	test("parallel block for the running member shows Thinking after a sibling completes", () => {
 		const theme = makeTheme() as any;
 		const completed = makeResult("Coder A", 0);
 		const thinking = makeRunning("Scout B", { isThinking: true, reasoning: true });
-		const members = [
-			{
-				args: { agent: "Coder", task: "a" },
-				results: [completed],
-				displayName: "Coder A",
-				terminal: true,
-				toolCallId: "call-a",
-			},
-			{
-				args: { agent: "Scout", task: "b" },
-				results: [thinking],
-				displayName: "Scout B",
-				terminal: false,
-				toolCallId: "call-b",
-			},
-		];
-		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, members[0].results, theme, 5000, members);
-		expect(stripAnsi(out)).toContain("Coder A");
-		expect(stripAnsi(out)).toContain("Scout B");
-		expect(stripAnsi(out)).toContain("Thinking");
+		const out = renderSubagentLayout(
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[completed, thinking],
+			theme,
+		);
+		const lines = out.split("\n");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(stripAnsi(lines[2])).toContain("Scout B");
+		expect(stripAnsi(lines[3])).toContain("Thinking");
 	});
 
-	test("grouped second running agent shows nested tool row", () => {
+	test("parallel running member shows its nested tool row", () => {
 		const theme = makeTheme() as any;
 		const completed = makeResult("Coder A", 0);
 		const withTool = makeRunning("Scout B", { isThinking: false, reasoning: true });
 		withTool.latestToolCall = { name: "read", args: { path: "src/foo.ts" } };
-		const members = [
-			{
-				args: { agent: "Coder", task: "a" },
-				results: [completed],
-				displayName: "Coder A",
-				terminal: true,
-				toolCallId: "call-a",
-			},
-			{
-				args: { agent: "Scout", task: "b" },
-				results: [withTool],
-				displayName: "Scout B",
-				terminal: false,
-				toolCallId: "call-b",
-			},
-		];
-		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, members[0].results, theme, undefined, members);
+		const out = renderSubagentLayout(
+			{ tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] },
+			[completed, withTool],
+			theme,
+		);
+		expect(stripAnsi(out)).not.toContain("Subagents");
 		expect(stripAnsi(out)).toContain("Reading");
 		expect(stripAnsi(out)).toContain("src/foo.ts");
 	});
@@ -1350,7 +1317,6 @@ describe("renderSubagentLayout (string)", () => {
 			[],
 			theme,
 			undefined,
-			undefined,
 			true,
 			"No model resolved for agent",
 		);
@@ -1388,9 +1354,10 @@ describe("renderSubagentLayout (string)", () => {
 	});
 
 	test("tool row └ sits on the agent name column", () => {
-		// Grouped (Subagents/Delegating) agent names start at column 3
-		// (bullet-width indent + flush `├`); nested └ sits there too. A
-		// single subagent has no header so its name and └ sit at column 2.
+		// Per-agent blocks have no header: the agent name and its nested └ both
+		// start at column 2 (bullet-width indent). The TREE_* constants below
+		// stay SSOT for the compact renderer's grouped trees and the subagent
+		// live tray, which still branch at the deeper columns they encode.
 		expect(TREE_BRANCH_TEE.length).toBe(2);
 		expect(TREE_NESTED_PIPE.indexOf("\u2514")).toBe(3);
 		expect(TREE_NESTED_LAST.indexOf("\u2514")).toBe(3);
@@ -1398,7 +1365,7 @@ describe("renderSubagentLayout (string)", () => {
 		expect(TREE_SINGLE_TOOL.indexOf("\u2514")).toBe(2);
 	});
 
-	test("running parallel mode uses full Exploring-style tree with nested tool rows", () => {
+	test("running parallel mode renders two direct agent blocks with nested tool rows", () => {
 		const theme = makeTheme() as any;
 		const args = { tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] };
 		const coderRunning = makeResult("Coder A", -1);
@@ -1407,37 +1374,36 @@ describe("renderSubagentLayout (string)", () => {
 		scoutRunning.latestToolCall = { name: "read", args: { path: "README.md" } };
 		const out = renderSubagentLayout(args, [coderRunning, scoutRunning], theme);
 		const lines = out.split("\n");
+		// block 1 (bullet + nested tool), blank, block 2 (bullet + nested tool)
 		expect(lines.length).toBe(5);
-		expect(stripAnsi(lines[0])).toContain("Subagents");
+		expect(stripAnsi(out)).not.toContain("Subagents");
 		expect(stripAnsi(lines[0])).toContain("\u2022");
-		expect(stripAnsi(lines[1])).toContain("\u251c");
-		expect(stripAnsi(lines[1])).toContain("Coder A");
-		expect(stripAnsi(lines[2])).toContain("\u2502\u2514");
-		expect(stripAnsi(lines[2])).toContain("Search");
-		expect(stripAnsi(lines[3])).toContain("\u2514");
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(stripAnsi(lines[1])).toContain("  \u2514");
+		expect(stripAnsi(lines[1])).toContain("Search");
+		expect(lines[2]).toBe("");
+		expect(stripAnsi(lines[3])).toContain("\u2022");
 		expect(stripAnsi(lines[3])).toContain("Scout A");
-		expect(stripAnsi(lines[4])).toContain("   \u2514");
+		expect(stripAnsi(lines[4])).toContain("  \u2514");
 		expect(stripAnsi(lines[4])).toContain("Read");
 	});
 
-	test("parallel mode shows plain Subagents header with pipe tree children", () => {
+	test("parallel mode renders per-agent blocks with no group header", () => {
 		const theme = makeTheme() as any;
 		const args = { tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] };
 		const out = renderSubagentLayout(args, [makeRunning("Coder A"), makeRunning("Scout A")], theme);
 		const lines = out.split("\n");
-		const header = lines[0];
-		expect(stripAnsi(header)).toContain("Subagents");
-		expect(header).not.toContain("\u001b[38;2;");
-		expect(stripAnsi(lines[1])).toContain("\u251c");
-		expect(stripAnsi(lines[1])).toContain("Coder A");
-		expect(stripAnsi(lines[2])).toContain("Thinking");
-		expect(stripAnsi(lines[3])).toContain("\u2514");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		expect(stripAnsi(lines[0])).toContain("\u2022");
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(stripAnsi(lines[1])).toContain("Thinking");
+		expect(lines[2]).toBe("");
+		expect(stripAnsi(lines[3])).toContain("\u2022");
 		expect(stripAnsi(lines[3])).toContain("Scout A");
 		expect(stripAnsi(lines[4])).toContain("Thinking");
 		expect(out).not.toContain("\u23f3");
 		expect(out).not.toContain("parallel");
 		expect(out).not.toContain("[user]");
-		expect(stripAnsi(header)).toContain("\u2022");
 	});
 
 	test("chain mode only shows started steps", () => {
@@ -1510,7 +1476,7 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		expect(out).not.toContain("[bg:subagentBg:");
 	});
 
-	test("parallel mode header is transparent (no subagentBg)", () => {
+	test("parallel blocks are transparent (no subagentBg, no header)", () => {
 		const theme = makeTheme() as any;
 		const args = { tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] };
 		const component = buildSubagentLayoutComponent(
@@ -1520,12 +1486,12 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		);
 		const out = renderComponent(component);
 		const lines = out.split("\n");
-		// Header is the first line
-		expect(stripAnsi(lines[0])).toContain("Subagents");
+		expect(stripAnsi(out)).not.toContain("Subagents");
 		expect(lines[0]).not.toContain("[bg:subagentBg:");
+		expect(lines[3]).not.toContain("[bg:subagentBg:");
 	});
 
-	test("mixed parallel: running and completed rows are both transparent", () => {
+	test("mixed parallel: running and completed blocks are both transparent", () => {
 		const theme = makeTheme() as any;
 		const args = { tasks: [{ agent: "Coder", task: "a" }, { agent: "Scout", task: "b" }] };
 		const component = buildSubagentLayoutComponent(
@@ -1535,23 +1501,20 @@ describe("buildSubagentLayoutComponent (transparent rows)", () => {
 		);
 		const out = renderComponent(component);
 		const lines = out.split("\n");
-		// Line 0: header (transparent)
-		// Line 1: Coder A running (transparent, text color)
-		// Line 2+: Scout A completed (transparent, dim)
-		expect(stripAnsi(lines[1])).toContain("Coder A");
-		expect(lines[1]).not.toContain("[bg:subagentBg:");
-		expect(lines[1]).toContain("[text:Coder A]");
+		expect(stripAnsi(out)).not.toContain("Subagents");
+		// Running block: muted bullet + text-color name (transparent).
+		expect(stripAnsi(lines[0])).toContain("Coder A");
+		expect(lines[0]).not.toContain("[bg:subagentBg:");
+		expect(lines[0]).toContain("[text:Coder A]");
+		expect(lines[0]).toContain("[muted:\u2022 ]");
+		// One blank row between the two blocks.
+		expect(lines[1]).toBe("");
+		// Completed block: success bullet + dim name (transparent).
 		const scoutLine = lines.find((l) => stripAnsi(l).includes("Scout A"));
 		expect(scoutLine).toBeDefined();
 		expect(scoutLine).not.toContain("[bg:subagentBg:");
 		expect(scoutLine).toContain("[dim:Scout A]");
-		// Tree-prefix column alignment: the completed row's prefix must start at
-		// the same column as the running row's prefix. Both rows carry the
-		// bullet-width indent so the `├` / `└` pipe sits below the header's
-		// first letter (column 2), flush with the agent name. Tree branch prefixes always use the `dim` token, matching the
-		// live output tray rows.
-		expect(stripAnsi(lines[1]).startsWith("[dim:  \u251c]")).toBe(true);
-		expect(stripAnsi(scoutLine!).startsWith("[dim:  \u2514]")).toBe(true);
+		expect(scoutLine).toContain("[success:\u2022 ]");
 	});
 
 	test("all completed parallel: no subagentBg on any row", () => {
@@ -1734,7 +1697,6 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 			[result],
 			theme,
 			undefined,
-			undefined,
 			false,
 			undefined,
 			undefined,
@@ -1749,6 +1711,27 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		expect(text).toContain("auth");
 		// No duplicate single latest-tool preview row above the tray.
 		expect((text.match(/auth/g) ?? []).length).toBe(1);
+	});
+
+	test("visible child thinking mounts the tray without a tool", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveItems = [thinkingItem("No tool has run yet.")];
+		result.latestToolCall = undefined;
+		result.isThinking = true;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			true,
+		);
+		const text = stripAnsi(renderComponent(component));
+		expect(text).toContain("No tool has run yet.");
+		expect(text).not.toContain("Delegating");
 	});
 
 	test("live tray shows streamed agent messages above the tool burst", () => {
@@ -1769,7 +1752,6 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 			[result],
 			theme,
 			undefined,
-			undefined,
 			false,
 			undefined,
 			undefined,
@@ -1778,8 +1760,14 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		const out = renderComponent(component);
 		const text = stripAnsi(out);
 		expect(text).toContain("Fixing the launch window.");
-		expect(text).toContain("Edited 1 file");
-		expect(text.indexOf("Fixing the launch window.")).toBeLessThan(text.indexOf("Edited 1 file"));
+		// A single edit renders as the bare standalone row (no `Edited 1 file`
+		// header) below the streamed message, with the accumulated diff stats.
+		expect(text).toContain("Edit");
+		expect(text).toContain("LaunchWindow.tsx");
+		// (The fake theme's literal tags count toward truncateToWidth's width,
+		// so the trailing +1 -1 stats truncate here — a test-only artifact;
+		// the real ANSI theme fits the full row.)
+		expect(text.indexOf("Fixing the launch window.")).toBeLessThan(text.indexOf("Edit"));
 	});
 
 	test("omits live items when thinking blocks hidden", () => {
@@ -1793,7 +1781,6 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 			[result],
 			theme,
 			undefined,
-			undefined,
 			false,
 			undefined,
 			undefined,
@@ -1801,6 +1788,140 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		);
 		const out = renderComponent(component);
 		expect(stripAnsi(out)).not.toContain("secret.ts");
+	});
+
+	test("hidden child thinking keeps the compact Thinking lane inside its work group", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveItems = [
+			textItem("hidden child narration"),
+			toolItem("read", { path: "src/a.ts" }, { completed: true }),
+			toolItem("read", { path: "src/b.ts" }, { completed: true }),
+		];
+		result.latestToolCall = undefined;
+		result.isThinking = true;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			false,
+			"hidden-thinking-call",
+			undefined,
+			false,
+		);
+		const text = stripAnsi(renderComponent(component));
+		expect(text).toContain("Explored 2 files");
+		expect(text).toContain("a.ts");
+		expect(text).toContain("b.ts");
+		expect(text).toContain("Thinking");
+		expect(text).not.toContain("hidden child narration");
+		// Completed rows are the shared bare-pipe style: their body starts
+		// immediately after `│`, without the live connector-width pad.
+		expect(text).toContain("[dim:\u2502][muted:*Read*]");
+		expect(text).toContain("[dim:\u2514\u2500]Thinking");
+	});
+
+	test("hidden child narration still splits compact work bursts", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveItems = [
+			toolItem("read", { path: "src/first.ts" }, { completed: true }),
+			textItem("hidden boundary"),
+			toolItem("read", { path: "src/second.ts" }, { completed: true }),
+		];
+		result.latestToolCall = undefined;
+		result.isThinking = true;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			false,
+			"hidden-thinking-boundary",
+			undefined,
+			false,
+		);
+		const text = stripAnsi(renderComponent(component));
+		expect(text).not.toContain("hidden boundary");
+		// Hidden narration splits the compact work burst, so each side becomes
+		// its own unified work group.
+		expect(text).toContain("first.ts");
+		expect(text).toContain("second.ts");
+		expect(text).toContain("Explored");
+		expect(text).toContain("Thinking");
+	});
+
+	test("hidden finishing suppresses every retained child tray row", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveItems = [
+			toolItem("read", { path: "src/a.ts" }, { completed: true }),
+			thinkingItem("private child reasoning"),
+			textItem("streamed child narration"),
+		];
+		result.latestToolCall = { name: "read", args: { path: "src/a.ts" } };
+		result.isThinking = false;
+		result.isFinishing = true;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			false,
+		);
+		const tray = renderComponent(component).split("\n").slice(1).map(stripAnsi);
+		expect(tray).toEqual(["[dim:  ] [dim:└─]Finishing"]);
+		expect(tray.join("\n")).not.toContain("src/a.ts");
+		expect(tray.join("\n")).not.toContain("reasoning");
+		expect(tray.join("\n")).not.toContain("narration");
+	});
+
+	test("hidden finishing mounts the nested tray without live items", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveItems = undefined;
+		result.latestToolCall = undefined;
+		result.isThinking = false;
+		result.isFinishing = true;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			false,
+		);
+		const text = stripAnsi(renderComponent(component));
+		expect(text).toContain("Finishing");
+		expect((text.match(/Finishing/g) ?? []).length).toBe(1);
+	});
+
+	test("visible parent thinking blocks never render Finishing", () => {
+		const theme = makeTheme() as any;
+		const result = makeRunning("Coder");
+		result.liveItems = [toolItem("read", { path: "src/a.ts" }, { completed: true })];
+		result.isThinking = false;
+		result.isFinishing = true;
+		const component = buildSubagentLayoutComponent(
+			{ agent: "Coder", task: "do stuff" },
+			[result],
+			theme,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			true,
+		);
+		const text = stripAnsi(renderComponent(component));
+		expect(text).toContain("Read");
+		expect(text).toContain("src/a.ts");
+		expect(text).not.toContain("Finishing");
 	});
 
 	test("omits live items for completed agents even when thinking blocks visible", () => {
@@ -1811,7 +1932,6 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 			{ agent: "Coder", task: "do stuff" },
 			[result],
 			theme,
-			undefined,
 			undefined,
 			false,
 			undefined,
@@ -1851,7 +1971,6 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 			{ agent: "Scout B", task: "find index" },
 			[result],
 			theme,
-			undefined,
 			undefined,
 			false,
 			undefined,

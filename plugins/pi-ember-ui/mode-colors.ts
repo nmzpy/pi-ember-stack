@@ -637,6 +637,29 @@ export function buildThemeBgColors(_accentHex: string): Record<string, string> {
  *  active accent and PAGE_BG. These are used by Pi's HTML export feature
  *  and by the curator page. Derived from the SSOT accent — never hardcode
  *  hex values for export backgrounds. */
+/**
+ * SSOT: detect non-conventional thinking-style summary headers that some
+ * models emit as `thinking_delta` / `thinking_start` content. Patterns like
+ * `**Thinking**`, `Thinking:`, bold/heading `Thinking` text are continuation
+ * of the current thinking pass — not a hard work-group exit, not a fresh
+ * header, and not an external-header suppressor. The pass timer must keep
+ * running seamlessly through these deltas.
+ *
+ * Recognized patterns (case-insensitive, after trimming whitespace and
+ * stripping markdown emphasis markers):
+ * - `**Thinking**` / `*Thinking*` / `__Thinking__`
+ * - `Thinking:` / `Thinking :`
+ * - `# Thinking` / `## Thinking` (markdown headings)
+ * - Bare `Thinking` on its own line
+ */
+const THINKING_HEADER_RE = /^(?:#{1,6}\s+)?(?:\*{1,2}|_{1,2})?\s*thinking\s*(?:\*{1,2}|_{1,2})?\s*:?\s*$/i;
+
+export function is_non_conventional_thinking_header(delta: string): boolean {
+	const trimmed = delta.trim();
+	if (!trimmed) return false;
+	return THINKING_HEADER_RE.test(trimmed);
+}
+
 export function buildThemeExportColors(accentHex: string): {
 	pageBg: string;
 	cardBg: string;

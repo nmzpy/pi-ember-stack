@@ -72,7 +72,7 @@ export function parse_patch(input: string): ParseResult {
 	i++;
 
 	const ops: FileOp[] = [];
-	const seen_paths = new Set<string>();
+	const exclusive_paths = new Set<string>();
 
 	while (i < lines.length) {
 		const line = lines[i];
@@ -90,8 +90,14 @@ export function parse_patch(input: string): ParseResult {
 		if (trimmed.startsWith(ADD)) {
 			const file_path = trimmed.slice(ADD.length).trim();
 			if (!file_path) return { ok: false, error: "Add File path is empty" };
-			const dup = check_dup(seen_paths, file_path);
-			if (dup) return dup;
+			const path_key = file_path.replace(/\\/g, "/");
+			if (
+				exclusive_paths.has(path_key) ||
+				ops.some((o) => o.path.replace(/\\/g, "/") === path_key)
+			) {
+				return { ok: false, error: `Duplicate path in patch: ${file_path}` };
+			}
+			exclusive_paths.add(path_key);
 			i++;
 			const content_lines: string[] = [];
 			while (i < lines.length) {
@@ -126,8 +132,14 @@ export function parse_patch(input: string): ParseResult {
 		if (trimmed.startsWith(DELETE)) {
 			const file_path = trimmed.slice(DELETE.length).trim();
 			if (!file_path) return { ok: false, error: "Delete File path is empty" };
-			const dup = check_dup(seen_paths, file_path);
-			if (dup) return dup;
+			const path_key = file_path.replace(/\\/g, "/");
+			if (
+				exclusive_paths.has(path_key) ||
+				ops.some((o) => o.path.replace(/\\/g, "/") === path_key)
+			) {
+				return { ok: false, error: `Duplicate path in patch: ${file_path}` };
+			}
+			exclusive_paths.add(path_key);
 			i++;
 			ops.push({ op: "delete", path: file_path });
 			continue;
@@ -136,8 +148,10 @@ export function parse_patch(input: string): ParseResult {
 		if (trimmed.startsWith(UPDATE)) {
 			const file_path = trimmed.slice(UPDATE.length).trim();
 			if (!file_path) return { ok: false, error: "Update File path is empty" };
-			const dup = check_dup(seen_paths, file_path);
-			if (dup) return dup;
+			const path_key = file_path.replace(/\\/g, "/");
+			if (exclusive_paths.has(path_key)) {
+				return { ok: false, error: `Duplicate path in patch: ${file_path}` };
+			}
 			i++;
 
 			let move_to: string | undefined;
@@ -235,7 +249,24 @@ export function parse_patch(input: string): ParseResult {
 				hunks.push({ header, lines: hunk_lines, end_of_file });
 			}
 
-			ops.push({ op: "update", path: file_path, move_to, hunks });
+			const existing_update = ops.find(
+				(op): op is Extract<FileOp, { op: "update" }> =>
+					op.op === "update" && op.path.replace(/\\/g, "/") === path_key,
+			);
+			if (existing_update) {
+				existing_update.hunks.push(...hunks);
+				if (move_to) {
+					if (existing_update.move_to && existing_update.move_to !== move_to) {
+						return {
+							ok: false,
+							error: `Conflicting Move to destinations for ${file_path}: ${existing_update.move_to} vs ${move_to}`,
+						};
+					}
+					existing_update.move_to = move_to;
+				}
+			} else {
+				ops.push({ op: "update", path: file_path, move_to, hunks });
+			}
 			continue;
 		}
 
@@ -253,15 +284,6 @@ export function parse_patch(input: string): ParseResult {
 	}
 
 	return { ok: true, ops };
-}
-
-function check_dup(seen: Set<string>, file_path: string): ParseErr | undefined {
-	const key = file_path.replace(/\\/g, "/");
-	if (seen.has(key)) {
-		return { ok: false, error: `Duplicate path in patch: ${file_path}` };
-	}
-	seen.add(key);
-	return undefined;
 }
 
 function split_lines(text: string): string[] {

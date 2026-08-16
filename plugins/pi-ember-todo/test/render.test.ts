@@ -39,9 +39,12 @@ describe("todo transcript render", () => {
 			],
 			mock_theme,
 		);
-		const header = text.split("\n")[0];
+		const lines = text.split("\n");
+		const header = lines[0];
 		expect(header).toContain("[success]• [");
 		expect(header).not.toMatch(/\[success\].*\[success\]/);
+		expect(lines[1]).toContain("[dim]  │[/dim]");
+		expect(lines[2]).toContain("[dim]  │[/dim]");
 	});
 
 	test("header bullet stays muted while any task is incomplete", () => {
@@ -70,12 +73,12 @@ describe("todo transcript render", () => {
 		const lines = comp.render(120);
 		expect(lines).toHaveLength(4);
 		expect(lines[0]).toContain("Todo");
-		expect(lines[1]).toContain("[dim]  ├─[/dim]");
+		expect(lines[1]).toContain("[dim]  ├[/dim]");
 		expect(lines[1]).toContain("First");
 		expect(lines[2]).toContain("[dim]  ├─[/dim]");
 		expect(lines[2]).toContain("Second");
 		expect(lines[2]).not.toContain("(Working on it)");
-		expect(lines[3]).toContain("[dim]  └─[/dim]");
+		expect(lines[3]).toContain("[dim]  │[/dim]");
 		expect(lines[3]).toContain("Done");
 	});
 

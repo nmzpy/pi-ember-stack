@@ -79,7 +79,7 @@ function makeSim(renderer: ReturnType<typeof getSharedRenderer>): SimEvents {
 		},
 		agent_settled(): void {
 			renderer.clearGroupThinkingChild();
-			renderer.resyncGroupGradientTick();
+			renderer.stopGradientTicks();
 			sync_compact_group_flags(renderer);
 		},
 		message_start_user(): void {

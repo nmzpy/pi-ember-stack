@@ -15,6 +15,12 @@ import { statusBulletColor } from "../pi-compact-tools/renderer.ts";
 import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
 import { flatten_todo_timeline, todo_group_boundary_before, branch_entries_after_last_compaction } from "./timeline.ts";
 
+export interface TodoThemeLike {
+	fg(tag: string, text: string): string;
+	bold(text: string): string;
+	strikethrough(text: string): string;
+}
+
 type TaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 
 export interface TranscriptTask {
@@ -30,7 +36,7 @@ function task_subject_token(status: TaskStatus): "dim" | "text" | "muted" {
 	return "dim";
 }
 
-function format_transcript_task_subject(task: TranscriptTask, theme: Theme): string {
+function format_transcript_task_subject(task: TranscriptTask, theme: TodoThemeLike): string {
 	let subject = theme.fg(task_subject_token(task.status), task.subject);
 	if (task.status === "completed" || task.status === "deleted") {
 		subject = theme.strikethrough(subject);
@@ -41,41 +47,66 @@ function format_transcript_task_subject(task: TranscriptTask, theme: Theme): str
 const TODO_TREE_INDENT = "  ";
 
 /**
- * Tree prefix indented so the `├`/`└` pipe starts below the `T` of the
+ * Tree prefix indented so the `├`/`└`/`│` pipe starts below the `T` of the
  * `• Todo` header (bullet + space = 2 columns), not below the `d`.
  */
 function format_transcript_task_tree_row(
 	task: TranscriptTask,
-	theme: Theme,
-	is_last: boolean,
+	theme: TodoThemeLike,
+	branch: string,
+	tree_indent: string = TODO_TREE_INDENT,
 ): string {
-	const prefix = TODO_TREE_INDENT + (is_last ? "└─" : "├─");
+	const dash = task.status === "in_progress" ? "─" : "";
+	const prefix = tree_indent + branch + dash;
 	return theme.fg("dim", prefix) + format_transcript_task_subject(task, theme);
 }
 
-function todo_header_bullet(tasks: TranscriptTask[], theme: Theme): string {
+function todo_header_bullet(tasks: TranscriptTask[], theme: TodoThemeLike): string {
 	const visible = tasks.filter((t) => t.status !== "deleted");
 	const all_completed = visible.length > 0 && visible.every((t) => t.status === "completed");
 	if (all_completed) return statusBulletColor(false, true, theme);
 	return theme.fg("muted", BULLET);
 }
 
-/** Compact todo header plus subject-only task rows for CompactGroupText. */
-export function format_todo_block(tasks: TranscriptTask[], theme: Theme, error?: string): string {
+/** Todo tree rows (header + subject-only task rows) without leading bullet. */
+export function format_todo_tree(
+	tasks: TranscriptTask[],
+	theme: TodoThemeLike,
+	error?: string,
+	tree_indent: string = TODO_TREE_INDENT,
+): string[] {
 	const visible = tasks.filter((t) => t.status !== "deleted");
-	const header = todo_header_bullet(visible, theme) + theme.fg("muted", theme.bold("Todo"));
-	if (error) return `${header}\n${theme.fg("error", error)}`;
+	const header = theme.fg("muted", theme.bold("Todo"));
+	if (error) return [header, theme.fg("error", error)];
 	const lines = [header];
+	const last_visible_index = visible.length - 1;
 	for (let i = 0; i < visible.length; i++) {
-		lines.push(format_transcript_task_tree_row(visible[i], theme, i === visible.length - 1));
+		const task = visible[i];
+		let branch: string;
+		if (task.status === "completed" || task.status === "deleted") {
+			branch = "│";
+		} else if (i === last_visible_index) {
+			branch = "└";
+		} else {
+			branch = "├";
+		}
+		lines.push(format_transcript_task_tree_row(task, theme, branch, tree_indent));
 	}
-	return lines.join("\n");
+	return lines;
+}
+
+/** Compact todo header plus subject-only task rows for CompactGroupText. */
+export function format_todo_block(tasks: TranscriptTask[], theme: TodoThemeLike, error?: string): string {
+	const visible = tasks.filter((t) => t.status !== "deleted");
+	const tree = format_todo_tree(tasks, theme, error);
+	const header = todo_header_bullet(visible, theme) + tree[0];
+	return [header, ...tree.slice(1)].join("\n");
 }
 
 export class TodoTranscriptComponent implements Component {
 	constructor(
 		private readonly tasks: TranscriptTask[],
-		private readonly theme: Theme,
+		private readonly theme: TodoThemeLike,
 		private readonly error?: string,
 	) {}
 
@@ -89,7 +120,7 @@ export class TodoTranscriptComponent implements Component {
 
 export function build_todo_transcript_component(
 	tasks: TranscriptTask[],
-	theme: Theme,
+	theme: TodoThemeLike,
 	error?: string,
 ): TodoTranscriptComponent {
 	return new TodoTranscriptComponent(tasks, theme, error);

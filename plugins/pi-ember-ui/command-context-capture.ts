@@ -33,6 +33,9 @@ function global_state(): GlobalCaptureState {
 }
 
 function set_switch_session_fn(fn: SwitchSessionFn): void {
+	// Do not close over a command ctx. Call the captured source function later
+	// so it resolves the live ctx on every invocation (safe across session
+	// replacement).
 	global_state().switchSession = fn;
 }
 

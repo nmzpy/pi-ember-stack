@@ -19,14 +19,10 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import {
-	BULLET,
+	buildGroupStaticText,
 	formatCompactChildRow,
-	formatGroupChildRows,
-	formatUnifiedWorkHeader,
+	format_compact_group_child_prefix,
 	groupBulletColorFromFlags,
-	GROUP_CHILD_LAST,
-	GROUP_CHILD_TEE,
-	merge_group_child_rows,
 	statusBulletColor,
 	WORK_GROUP_KEY,
 	type CompactCall,
@@ -34,10 +30,19 @@ import {
 } from "../../../pi-compact-tools/renderer.ts";
 import {
 	chatboxBorderColor,
+	create_live_thinking_markdown,
 	formatElapsed,
 	renderLiveGradient,
 } from "../../../pi-ember-ui/index.ts";
-import { format_in_group_thinking_row } from "../../../pi-ember-ui/thinking-status-render.ts";
+import {
+	format_in_group_thinking_row,
+	THINKING_GRADIENT_PRESET,
+} from "../../../pi-ember-ui/thinking-status-render.ts";
+import {
+	format_todo_tree,
+	type TranscriptTask,
+	type TodoThemeLike,
+} from "../../../pi-ember-todo/render.ts";
 import {
 	getResultOutput,
 	isFailedResult,
@@ -55,10 +60,7 @@ import {
 
 export type { SubagentArgs };
 
-interface ThemeLike {
-	fg(tag: string, text: string): string;
-	bold(text: string): string;
-}
+interface ThemeLike extends TodoThemeLike {}
 
 /**
  * Width-aware truncating text for the latest-tool-call row under a running
@@ -68,15 +70,6 @@ interface ThemeLike {
  * visually compact under the agent name without sprawling across the TUI.
  */
 const TOOL_ROW_WIDTH_FRACTION = 0.5;
-
-/**
- * Per-subagent gradient phase offset in ms, multiplied by the agent's
- * index. Staggers the gradient sweep of parallel/chain subagents so
- * their running labels don't animate in perfect sync. 64 ms per index
- * gives 2x the divergence of the previous 32 ms step, making the
- * stagger clearly visible across simultaneous agents.
- */
-const SUBAGENT_PHASE_OFFSET_MS = 64;
 
 export class SubagentToolText implements Component {
 	text = "";
@@ -97,71 +90,57 @@ export class SubagentToolText implements Component {
 	}
 }
 
-/**
- * Dim horizontal separator between consecutive subagent blocks. When an
- * inset prefix is provided, the rule starts with a connected tee `├` so it
- * visually hooks into the agent tree on the left, then continues as `──` to
- * the right edge. Renders a single row at the supplied width. Colors flow
- * through the theme token when a theme is supplied, otherwise falls back to
- * the SSOT `chatboxBorderColor` (DIM_COLOR token).
- */
-export class DimSeparator implements Component {
-	private theme?: ThemeLike;
-	private color: string;
-	private left: string;
-
-	constructor(theme?: ThemeLike, color = "dim", left = "\u251c") {
-		this.theme = theme;
-		this.color = color;
-		this.left = left;
-	}
-
-	invalidate(): void {}
-
-	render(width: number): string[] {
-		const leftWidth = visibleWidth(this.left);
-		const ruleWidth = Math.max(0, width - leftWidth);
-		const text = this.left + "\u2500".repeat(ruleWidth);
-		if (this.theme) return [this.theme.fg(this.color, text)];
-		return [chatboxBorderColor(text)];
-	}
-}
-
 /** Cap on visible text lines per live agent text block (before truncation). */
 const LIVE_TEXT_MAX_LINES = 6;
 
 /** Single source for subagent tree branch color — must always be `dim`. */
 const SUBAGENT_TREE_COLOR = "dim";
 
+/** Detect rendered content after Markdown's ANSI styles are removed. */
+const ANSI_SGR_PATTERN = new RegExp(`${String.fromCharCode(27, 92, 91)}[0-9;]*m`, "g");
+
+function hasVisibleTrayContent(text: string): boolean {
+	return text.replace(ANSI_SGR_PATTERN, "").trim().length > 0;
+}
+
 /**
- * Subagent live-tray tree prefixes — flush 1-column variants (no leading or
- * trailing whitespace) so the nested work-group tray sits 3 terminal columns
- * tighter than the shared GROUP_CHILD_* / TREE_BRANCH_* constants and aligns
- * flush with the outer agent `└` branch. Subagent-only composition: the
- * shared compact renderer constants stay untouched for the main agent's
- * groups. The outer branch runs `│` through the tray and terminates `└` on
- * the latest tool-call block header; trailing Thinking/status rows keep the
- * `SUBAGENT_TRAY_GAP` slot so they stay visible without extending the pipe.
+ * Outer subagent-tray branch. Inner work-group child prefixes are built by
+ * `format_compact_group_child_prefix()` from pi-compact-tools so completed
+ * rows and live Thinking lanes share the main renderer's one spacing policy.
  */
 const SUBAGENT_TRAY_PIPE = "\u2502"; // │ — outer branch continuation
 const SUBAGENT_TRAY_LAST = "\u2514"; // └ — outer branch terminator (latest tool-call block)
 const SUBAGENT_TRAY_GAP = " "; // outer-branch slot for trailing Thinking/status rows
-const SUBAGENT_TRAY_INNER_TEE = "\u251c"; // ├ — work-group child, more rows follow
-const SUBAGENT_TRAY_INNER_LAST = "\u2514"; // └ — work-group child / Thinking, terminal
 
 /**
- * Flush 1-column tree glyphs for single-mode subagent child rows (no header).
+ * Flush 1-column tree glyph for single-mode subagent child rows (no header).
  * No trailing space, so `  └Thinking` and `  └bash -c …` sit flush against
  * the content — the shared compact-tools TREE_BRANCH_* constants carry a
  * trailing space for compact group children and stay untouched. Subagent-only
  * composition seam, like the SUBAGENT_TRAY_* flush glyphs above.
  */
 const SUBAGENT_BRANCH_LAST = "\u2514"; // └
-const SUBAGENT_BRANCH_PIPE = "\u2502"; // │
+
+/** Render the transient hidden-mode finalization row with Thinking's gradient. */
+function renderLiveFinishingRow(theme: ThemeLike): string {
+	return (
+		theme.fg(SUBAGENT_TREE_COLOR, format_compact_group_child_prefix("last", "")) +
+		renderLiveGradient("Finishing", THINKING_GRADIENT_PRESET)
+	);
+}
 
 type LiveSegment =
 	| { kind: "text"; text: string }
-	| { kind: "work"; rows: SubagentLiveToolRow[] };
+	| { kind: "thinking"; text: string }
+	| { kind: "work"; rows: SubagentLiveToolRow[] }
+	| { kind: "todo"; row: SubagentLiveToolRow };
+
+type TrayRow = {
+	body: string;
+	header: boolean;
+	/** Pipe-continuation padding row below an output segment (one row of separation). */
+	pad?: boolean;
+};
 
 /**
  * SSOT subagent mirror of the main assistant stream boundary
@@ -176,49 +155,80 @@ export function is_live_text_boundary(text: string): boolean {
 }
 
 /**
- * Split the chronological live buffer into alternating text blocks and work
- * bursts. Non-empty visible assistant text is a hard transcript boundary — it
- * closes the current work burst (its children fold into the header summary)
- * exactly like the main agent's `noteVisibleText()` hard exit. Consecutive
- * tool calls stay in one burst; empty/whitespace-only text blocks (bare
- * `text_start`, empty `text_delta`) are skipped entirely so a tool → empty
- * text_start → tool sequence stays ONE contiguous work group with no dead
- * pipe-only spacer row between two half bursts.
+ * Split the chronological live buffer into transcript siblings and compact
+ * tool bursts. Visible thinking is a chronological Markdown sibling: it closes
+ * the preceding tool burst and lets the following wave start below the
+ * reasoning. Hidden thinking remains activity within its surrounding compact
+ * work burst, where the canonical in-group Thinking lane owns the slot.
  */
-function buildLiveSegments(items: SubagentLiveItem[]): LiveSegment[] {
+function buildLiveSegments(items: SubagentLiveItem[], showText = true): LiveSegment[] {
 	const segments: LiveSegment[] = [];
-	let burst: SubagentLiveToolRow[] | null = null;
+	let burst: Extract<LiveSegment, { kind: "work" }> | null = null;
+	let pendingTodo: SubagentLiveToolRow | undefined;
+
+	function closeBurst(): void {
+		burst = null;
+	}
+
+	function flushTodo(): void {
+		if (pendingTodo) {
+			segments.push({ kind: "todo", row: pendingTodo });
+			pendingTodo = undefined;
+		}
+	}
+
+	function ensureBurst(): Extract<LiveSegment, { kind: "work" }> {
+		if (burst === null) {
+			burst = { kind: "work", rows: [] };
+			segments.push(burst);
+		}
+		return burst;
+	}
+
+	function appendVisibleThinking(text: string): void {
+		const content = text.trim();
+		if (!content) return;
+		const previous = segments[segments.length - 1];
+		if (previous?.kind === "thinking") {
+			previous.text = `${previous.text}\n\n${content}`;
+			return;
+		}
+		segments.push({ kind: "thinking", text: content });
+	}
+
 	for (const item of items) {
 		if (item.kind === "text") {
 			if (!is_live_text_boundary(item.text)) continue;
-			burst = null;
-			segments.push({ kind: "text", text: item.text });
-		} else {
-			if (burst === null) {
-				burst = [];
-				segments.push({ kind: "work", rows: burst });
-			}
-			burst.push(item.row);
+			closeBurst();
+			flushTodo();
+			if (showText) segments.push({ kind: "text", text: item.text });
+			continue;
 		}
-	}
-	return segments;
-}
 
-/**
- * Visible child wave inside a work burst: same-name calls append without
- * folding; a different tool name folds the prior wave once every prior member
- * has completed (the compact renderer's "genuinely new tool wave" rule), so
- * stale `Reading`/`Searching` rows never linger past the next tool family.
- */
-function currentWaveRows(rows: SubagentLiveToolRow[]): SubagentLiveToolRow[] {
-	let visibleStart = 0;
-	for (let i = 1; i < rows.length; i++) {
-		const prior_complete = rows.slice(visibleStart, i).every((r) => r.completed);
-		if (prior_complete && rows[i].name !== rows[i - 1].name) {
-			visibleStart = i;
+		if (item.kind === "thinking") {
+			if (showText) {
+				if (!item.text.trim()) continue;
+				closeBurst();
+				flushTodo();
+				appendVisibleThinking(item.text);
+			} else {
+				flushTodo();
+				ensureBurst();
+			}
+			continue;
 		}
+
+		if (item.row.name === "todo") {
+			closeBurst();
+			pendingTodo = item.row;
+			continue;
+		}
+
+		flushTodo();
+		ensureBurst().rows.push(item.row);
 	}
-	return rows.slice(visibleStart);
+	flushTodo();
+	return segments;
 }
 
 /** Pseudo CompactCall view over a live tool row for the SSOT formatters. */
@@ -234,73 +244,93 @@ function liveRowToCall(row: SubagentLiveToolRow, index: number): CompactCall {
 }
 
 /**
- * Unified work-bundle header text for a burst — the exact
- * `Edited N files, … +N -N` line the main agent renders
- * (`formatUnifiedWorkHeader` SSOT). Nested inside the subagent tray the
- * header deliberately carries NO `•` bullet: the tray's own outer `└` branch
- * already marks the row, and a second bullet would double-mark the nested
- * group. The main agent's compact groups keep their bullet via `formatGroup`
- * (`groupBulletColor` + header) — suppression is explicit at this subagent
- * seam only. Completed work summarizes into the past-tense segments; while
- * everything is still running the present-tense label (Exploring/Editing/…)
- * is used, matching the main compact group header.
+ * Build a live work group whose visible children are the current wave only.
+ * Same-name calls append without folding; a different tool name folds the
+ * prior wave once every prior member has completed (the compact renderer's
+ * "genuinely new tool wave" rule). The canonical `childAbsorbBefore` index
+ * feeds `buildGroupStaticText`, so header + child formatting is SSOT.
  */
-function renderLiveWorkHeader(rows: SubagentLiveToolRow[], theme: ThemeLike): string {
-	const calls = rows.map(liveRowToCall);
-	const group = {
-		records: calls,
+function buildLiveGroup(rows: SubagentLiveToolRow[]): DiscoveryGroup {
+	const records = rows.map(liveRowToCall);
+	let childAbsorbBefore = 0;
+	for (let i = 1; i < records.length; i++) {
+		const priorComplete = records.slice(childAbsorbBefore, i).every((r) => r._completed);
+		const current = records[i];
+		const previous = records[i - 1];
+		if (priorComplete && current && previous && current.name !== previous.name) {
+			childAbsorbBefore = i;
+		}
+	}
+	return {
+		records,
 		key: WORK_GROUP_KEY,
 		type: "work",
-		childAbsorbBefore: 0,
+		childAbsorbBefore,
 	} as DiscoveryGroup;
-	return formatUnifiedWorkHeader(group, theme);
 }
 
 /**
- * Current-wave child rows (merged same-file calls, accumulated +N -N) with
- * the flush subagent tray branch prefixes — the same row shape as main-agent
- * groups. Running members animate with the shared gradient verbs. When the
- * in-group `└ Thinking` lane follows the burst, the last child branches `├`
- * (continuous tree) instead of closing the branch too early; the Thinking
- * lane itself carries the terminal `└`.
+ * In-group Thinking lane row body — shared by the single-tool and grouped
+ * burst paths so the lane is identical whether the burst has one or many rows.
  */
-function renderLiveWorkChildren(
-	rows: SubagentLiveToolRow[],
-	theme: ThemeLike,
-	thinkingFollows = false,
-): string[] {
-	const calls = currentWaveRows(rows).map(liveRowToCall);
-	const merged = merge_group_child_rows(calls);
-	const bodies = merged.map((records) => formatGroupChildRows(records, theme));
-	return bodies.map((body, index) => {
-		const isLast = index === bodies.length - 1;
-		const branch =
-			!isLast || thinkingFollows ? SUBAGENT_TRAY_INNER_TEE : SUBAGENT_TRAY_INNER_LAST;
-		return theme.fg(SUBAGENT_TREE_COLOR, branch) + body;
-	});
+function renderLiveThinkingLane(theme: ThemeLike, toolCallId?: string): string {
+	const elapsed = format_subagent_thinking_elapsed_suffix(theme, toolCallId);
+	return (
+		theme.fg(SUBAGENT_TREE_COLOR, format_compact_group_child_prefix("last", "")) +
+		format_in_group_thinking_row(elapsed)
+	);
+}
+
+/** Render streamed child text without inventing visible content for blank rows. */
+function renderLiveTextContent(text: string, theme: ThemeLike): string[] {
+	const lines = text.split("\n");
+	const shown = lines
+		.slice(0, LIVE_TEXT_MAX_LINES)
+		.map((line) => (line.trim().length > 0 ? theme.fg("text", line) : ""));
+	if (lines.length > LIVE_TEXT_MAX_LINES) shown.push(theme.fg("dim", "…"));
+	return shown;
 }
 
 /**
- * Multi-line live output tray for a running subagent (thinking blocks
- * visible). Renders the child session's chronological `liveItems` as a
- * compact work-bundle mirroring the main agent's `pi-compact-tools` groups:
- * one bullet-free header per burst (past-tense summary while any member
- * completed, present-tense while everything is running), current-wave
- * children as compact rows with gradient verbs and flush `├`/`└` inner tree
- * branches, streamed assistant text blocks as plain lines, and an in-group
- * `└ Thinking` lane while the child reasons after a tool wave. The outer
- * agent branch runs `│` through the tray and terminates `└` at the latest
- * tool-call block header; trailing Thinking/status rows stay visible below
- * without extending the outer pipe. Prior waves fold into the header summary
- * on a genuinely new tool family or visible text — stale Reading/Searching
- * rows never stay open. Reuses the SSOT formatters; no duplicate tool-row
- * logic.
+ * Width-safe wrapper for child reasoning. It delegates Markdown parsing,
+ * default thinking style, live heading binding, and theme-generation caching to
+ * pi-ember-ui. Rendering returns a fresh row array; the tray prefixes only
+ * rows with visible content so Markdown paragraph spacing never becomes a
+ * branch-only tree row.
+ */
+class SubagentThinkingMarkdown implements Component {
+	private readonly markdown: Component;
+
+	constructor(text: string) {
+		this.markdown = create_live_thinking_markdown(text);
+	}
+
+	invalidate(): void {
+		this.markdown.invalidate();
+	}
+
+	render(width: number): string[] {
+		return [...this.markdown.render(width)];
+	}
+
+	renderForGutter(width: number, gutterWidth: number): string[] {
+		return this.render(Math.max(1, width - gutterWidth));
+	}
+}
+
+/**
+ * Multi-line live output tray for a running subagent. Visible child reasoning
+ * uses canonical shared Markdown as a chronological sibling of compact tool
+ * bursts. Hidden reasoning stays raw-content-free and uses only the compact
+ * in-group Thinking lane after its current work burst.
  */
 export class SubagentLiveOutputText implements Component {
 	items: SubagentLiveItem[] = [];
 	treePrefix = "";
 	running = true;
 	isThinking = false;
+	isFinishing = false;
+	showText = true;
 	theme: ThemeLike | undefined;
 	toolCallId?: string;
 
@@ -311,6 +341,8 @@ export class SubagentLiveOutputText implements Component {
 		theme?: ThemeLike,
 		isThinking = false,
 		toolCallId?: string,
+		showText = true,
+		isFinishing = false,
 	) {
 		this.items = items;
 		this.treePrefix = treePrefix;
@@ -318,6 +350,8 @@ export class SubagentLiveOutputText implements Component {
 		this.theme = theme;
 		this.isThinking = isThinking;
 		this.toolCallId = toolCallId;
+		this.showText = showText;
+		this.isFinishing = isFinishing;
 	}
 
 	setItems(items: SubagentLiveItem[]): void {
@@ -330,6 +364,10 @@ export class SubagentLiveOutputText implements Component {
 
 	setIsThinking(isThinking: boolean): void {
 		this.isThinking = isThinking;
+	}
+
+	setIsFinishing(isFinishing: boolean): void {
+		this.isFinishing = isFinishing;
 	}
 
 	setTreePrefix(treePrefix: string): void {
@@ -346,101 +384,118 @@ export class SubagentLiveOutputText implements Component {
 		const theme = this.theme;
 		if (!theme) return [];
 		const fg = theme.fg.bind(theme);
-		const segments = buildLiveSegments(this.items);
+		const show_finishing = this.isFinishing && !this.showText;
+
+		// Finalization is a transient status. In hidden-thinking mode it owns the
+		// complete tray so stale retained tool, text, and raw-reasoning content
+		// cannot leak beside the terminal Finishing row.
+		if (show_finishing) {
+			const prefix = this.treePrefix + SUBAGENT_TRAY_GAP;
+			const row = renderLiveFinishingRow(theme);
+			return [truncateToWidth(`${prefix}${row}`, Math.max(1, width))];
+		}
+
+		const segments = buildLiveSegments(this.items, this.showText);
 		if (segments.length === 0) return [];
 
-		const segmentLines: string[][] = segments.map((seg, segIndex) => {
-			if (seg.kind === "text") {
-				const lines: string[] = [];
-				const textLines = seg.text.split("\n");
-				const shown = textLines.slice(0, LIVE_TEXT_MAX_LINES);
-				for (const line of shown) {
-					lines.push(fg("text", line.length > 0 ? line : " "));
+		const gutterWidth = visibleWidth(this.treePrefix + SUBAGENT_TRAY_PIPE);
+		const segmentRows: Array<{ kind: LiveSegment["kind"]; rows: TrayRow[] }> = [];
+		for (let i = 0; i < segments.length; i++) {
+			const segment = segments[i];
+			const rows: TrayRow[] = [];
+			if (segment.kind === "text") {
+				for (const body of renderLiveTextContent(segment.text, theme)) {
+					rows.push({ body, header: false });
 				}
-				if (textLines.length > LIVE_TEXT_MAX_LINES) {
-					lines.push(fg("dim", "…"));
+				if (i < segments.length - 1) rows.push({ body: "", header: false, pad: true });
+			} else if (segment.kind === "thinking") {
+				const markdown = new SubagentThinkingMarkdown(segment.text);
+				for (const body of markdown.renderForGutter(width, gutterWidth)) {
+					rows.push({ body, header: false });
 				}
-				return lines;
+				if (i < segments.length - 1) rows.push({ body: "", header: false, pad: true });
+			} else if (segment.kind === "todo") {
+				const tasks = this.showText ? extract_todo_tasks(segment.row) : [];
+				const error =
+					typeof segment.row.details?.error === "string"
+						? (segment.row.details.error as string)
+						: undefined;
+				for (const body of format_todo_tree(tasks, theme as TodoThemeLike, error, "")) {
+					rows.push({ body, header: rows.length === 0 });
+				}
+			} else if (segment.rows.length > 0) {
+				const group = buildLiveGroup(segment.rows);
+				const block = buildGroupStaticText(group, theme, true, "");
+				const blockLines = block.split("\n");
+				for (let li = 0; li < blockLines.length; li++) {
+					rows.push({ body: blockLines[li] ?? "", header: li === 0 });
+				}
+				const thinking_follows = !this.showText && this.isThinking && i === segments.length - 1;
+				if (thinking_follows) {
+					rows.push({ body: renderLiveThinkingLane(theme, this.toolCallId), header: false });
+				}
 			}
-			const isLastSegment = segIndex === segments.length - 1;
-			const lines = [renderLiveWorkHeader(seg.rows, theme)];
-			if (isLastSegment) {
-				// In-group `└ Thinking` lane while the child reasons after its
-				// latest tool wave — the same slot the main agent's compact
-				// groups paint. It is part of the last work burst, so the
-				// burst's child rows branch `├` into it (continuous tree)
-				// instead of closing with `└` too early.
-				lines.push(...renderLiveWorkChildren(seg.rows, theme, this.isThinking));
-				if (this.isThinking && seg.rows.length > 0) {
-					const elapsed = format_subagent_thinking_elapsed_suffix(theme, this.toolCallId);
-					lines.push(
-						fg(SUBAGENT_TREE_COLOR, SUBAGENT_TRAY_INNER_LAST) + format_in_group_thinking_row(elapsed),
-					);
-				}
+
+			// Empty thinking_start markers and Markdown render results deliberately
+			// have no visible segment. Internal Markdown blank rows survive only
+			// beside actual content, where they remain plain unprefixed blanks.
+			if (rows.some((row) => hasVisibleTrayContent(row.body))) {
+				segmentRows.push({ kind: segment.kind, rows });
 			}
-			return lines;
-		});
+		}
+		if (segmentRows.length === 0) return [];
 
-		// One blank spacer row between segments (tool bursts and agent text
-		// blocks), matching the main transcript's block spacing.
-		const spacer_count = Math.max(0, segmentLines.length - 1);
-
-		// Budget: drop the oldest whole segments until the tray fits
-		// SUBAGENT_LIVE_OUTPUT_MAX_ROWS lines; never the newest burst.
 		let start = 0;
-		let total = segmentLines.reduce((sum, lines) => sum + lines.length, 0) + spacer_count;
-		while (start < segmentLines.length - 1 && total > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
-			total -= segmentLines[start].length + 1;
+		let total = segmentRows.reduce((sum, segment) => sum + segment.rows.length, 0);
+		while (start < segmentRows.length - 1 && total > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
+			total -= segmentRows[start].rows.length;
 			start++;
 		}
 
-		// Flatten with spacers, tracking which line is a work-burst header so
-		// the outer agent branch can terminate at the latest tool-call block.
-		const lines: string[] = [];
-		const isHeader: boolean[] = [];
-		for (let i = start; i < segmentLines.length; i++) {
-			if (i > start) {
-				lines.push("");
-				isHeader.push(false);
-			}
-			const segLines = segmentLines[i];
-			const segIsWork = segments[i].kind === "work";
-			for (let j = 0; j < segLines.length; j++) {
-				lines.push(segLines[j]);
-				isHeader.push(segIsWork && j === 0);
-			}
+		let rows: TrayRow[] = segmentRows.slice(start).flatMap((segment) => segment.rows);
+		if (rows.length > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
+			const header = rows.find((row) => row.header) ?? rows[0];
+			rows = [header, ...rows.slice(-(SUBAGENT_LIVE_OUTPUT_MAX_ROWS - 1))];
 		}
-		if (lines.length > SUBAGENT_LIVE_OUTPUT_MAX_ROWS) {
-			const header = lines[0];
-			const headerFlag = isHeader[0] ?? false;
-			const tail = lines.slice(lines.length - (SUBAGENT_LIVE_OUTPUT_MAX_ROWS - 1));
-			const tailFlags = isHeader.slice(lines.length - (SUBAGENT_LIVE_OUTPUT_MAX_ROWS - 1));
-			lines.length = 0;
-			lines.push(header, ...tail);
-			isHeader.length = 0;
-			isHeader.push(headerFlag, ...tailFlags);
-		}
-
-		// The outer agent branch runs `│` through every line up to the latest
-		// output message and terminates `└` on it: the work-burst header when
-		// the newest segment is a tool call (inner work-group calls render
-		// below with their own tree), or the message's last line when the
-		// newest output is agent text — the branch snaps to the message too,
-		// not only to the last tool call. Trailing in-group Thinking / status
-		// rows keep their inner tree but do not extend the outer pipe (flush
-		// 1-column prefixes, see SUBAGENT_TRAY_*).
+		const lastSegment = segmentRows[segmentRows.length - 1];
 		let lastHeaderIndex = -1;
-		for (let i = 0; i < isHeader.length; i++) {
-			if (isHeader[i]) lastHeaderIndex = i;
+		for (let i = 0; i < rows.length; i++) {
+			if (rows[i].header) lastHeaderIndex = i;
 		}
-		if (segments[segments.length - 1]?.kind === "text") {
-			lastHeaderIndex = lines.length - 1;
+		if (lastSegment.kind === "text" || lastSegment.kind === "thinking") {
+			for (let i = rows.length - 1; i >= 0; i--) {
+				if (hasVisibleTrayContent(rows[i].body)) {
+					lastHeaderIndex = i;
+					break;
+				}
+			}
 		}
-		if (lastHeaderIndex < 0) lastHeaderIndex = lines.length - 1;
+		if (lastHeaderIndex < 0) {
+			for (let i = rows.length - 1; i >= 0; i--) {
+				if (hasVisibleTrayContent(rows[i].body)) {
+					lastHeaderIndex = i;
+					break;
+				}
+			}
+		}
 
 		const out: string[] = [];
-		for (let i = 0; i < lines.length; i++) {
-			const body = lines[i];
+		for (let i = 0; i < rows.length; i++) {
+			if (rows[i].pad) {
+				// One pipe-continuation padding row below an output segment: a
+				// single `│` row of separation before the next tool call keeps
+				// the outer tree continuous without crumbling together. A pad
+				// that would dangle as the final row (cap truncation) is dropped.
+				if (i === rows.length - 1) continue;
+				out.push(
+					truncateToWidth(
+						this.treePrefix + fg(SUBAGENT_TREE_COLOR, SUBAGENT_TRAY_PIPE),
+						Math.max(1, width),
+					),
+				);
+				continue;
+			}
+			const body = rows[i].body;
 			const outer =
 				i < lastHeaderIndex
 					? SUBAGENT_TRAY_PIPE
@@ -448,21 +503,20 @@ export class SubagentLiveOutputText implements Component {
 						? SUBAGENT_TRAY_LAST
 						: SUBAGENT_TRAY_GAP;
 			const outerStyled = outer === SUBAGENT_TRAY_GAP ? outer : fg(SUBAGENT_TREE_COLOR, outer);
-			// Spacer rows keep the vertical branch continuous: render the
-			// outer branch glyph under the outer agent prefix instead of a
-			// fully blank line, preserving the one-row padding gap between
-			// segments. Width-safe so the prefix can never overflow the row.
-			if (body.length === 0) {
-				out.push(truncateToWidth(this.treePrefix + outerStyled, Math.max(1, width)));
-				continue;
-			}
 			const prefix = this.treePrefix + outerStyled;
-			const prefixWidth = visibleWidth(prefix);
-			const contentWidth = Math.max(1, width - prefixWidth);
-			out.push(prefix + truncateToWidth(body, contentWidth));
+			if (hasVisibleTrayContent(body)) {
+				out.push(truncateToWidth(`${prefix}${body}`, Math.max(1, width)));
+			} else if (outer === SUBAGENT_TRAY_GAP) {
+				// Trailing blank rows after the last visible header remain unprefixed.
+				out.push("");
+			} else {
+				// Keep the tree branch through internal blank rows (e.g. Markdown
+				// paragraph breaks in visible text/thinking) so no visual gap appears.
+				out.push(truncateToWidth(prefix, Math.max(1, width)));
+			}
 		}
 		if (!this.running && out.length > 0) {
-			out.push(chatboxBorderColor("\u2500".repeat(width)));
+			out.push(chatboxBorderColor("─".repeat(width)));
 		}
 		return out;
 	}
@@ -484,6 +538,26 @@ function asRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: {};
+}
+
+const TODO_STATUSES = new Set<string>(["pending", "in_progress", "completed", "deleted"]);
+
+function extract_todo_tasks(row: SubagentLiveToolRow): TranscriptTask[] {
+	const tasks = (row.details?.tasks ?? row.args?.tasks) as unknown[] | undefined;
+	if (!Array.isArray(tasks)) return [];
+	return tasks
+		.filter(
+			(t): t is Record<string, unknown> => t !== null && typeof t === "object" && !Array.isArray(t),
+		)
+		.map((t) => ({
+			id: typeof t.id === "number" && Number.isInteger(t.id) ? t.id : 0,
+			subject: typeof t.subject === "string" ? t.subject : "",
+			status: (TODO_STATUSES.has(String(t.status))
+				? String(t.status)
+				: "pending") as TranscriptTask["status"],
+			activeForm: typeof t.activeForm === "string" ? t.activeForm : undefined,
+		}))
+		.filter((t) => t.id > 0 && t.subject.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +659,10 @@ function formatToolCall(
 				themeFg("accent", `/${pattern}/`) +
 				themeFg("dim", ` in ${shortenPath(rawPath)}`)
 			);
+		}
+		case "todo": {
+			const action = asString(args.action);
+			return action ? themeFg("muted", "Todo ") + themeFg("dim", action) : themeFg("muted", "Todo");
 		}
 		default: {
 			const argsStr = JSON.stringify(args);
@@ -743,7 +821,7 @@ export function aggregateUsage(results: SubAgentResult[]) {
 }
 
 // ---------------------------------------------------------------------------
-// Compact grouped layout (Exploring-style)
+// Compact per-agent block layout
 // ---------------------------------------------------------------------------
 
 /**
@@ -770,18 +848,16 @@ function renderAgentLabel(
 	theme: ThemeLike,
 	result?: SubAgentResult,
 	failureMessage?: string,
-	_phaseOffsetMs: number = 0,
-	isSingle = false,
 	elapsedMs?: number,
 ): string {
 	const elapsedSuffix = formatSubagentElapsedSuffix(theme, elapsedMs);
-	// Single-mode rows use the canonical status bullet: muted while running,
-	// success green when completed, error red on failure (SSOT statusBulletColor).
-	const prefix = isSingle
-		? status === "running"
+	// Every per-agent block uses the canonical status bullet: muted while
+	// running, success green when completed, error red on failure (SSOT
+	// statusBulletColor).
+	const prefix =
+		status === "running"
 			? statusBulletColor(false, false, theme)
-			: statusBulletColor(status === "failed", status === "completed", theme)
-		: "";
+			: statusBulletColor(status === "failed", status === "completed", theme);
 	// Running rows never carry an elapsed suffix — call sites pass elapsedMs
 	// only for terminal rows, and this guard keeps it that way.
 	if (status === "running") {
@@ -803,35 +879,16 @@ function renderAgentLabel(
 	);
 }
 
-/**
- * Render a single agent row as a plain string (no background). Terminal
- * rows are wrapped in a plain Text (no background) by `buildSubagentLayout`;
- * running rows and the group header stay transparent.
- */
+/** Render a single agent row as a plain string (no background). */
 function renderAgentRow(
 	status: AgentStatus,
 	agentName: string,
 	theme: ThemeLike,
 	result?: SubAgentResult,
-	prefix = "",
 	failureMessage?: string,
-	phaseOffsetMs: number = 0,
-	isSingle = false,
 	elapsedMs?: number,
 ): string {
-	return (
-		prefix +
-		renderAgentLabel(
-			status,
-			agentName,
-			theme,
-			result,
-			failureMessage,
-			phaseOffsetMs,
-			isSingle,
-			elapsedMs,
-		)
-	);
+	return renderAgentLabel(status, agentName, theme, result, failureMessage, elapsedMs);
 }
 
 type FlatEntry =
@@ -845,11 +902,22 @@ function buildFlatEntries(rows: AgentRowDescriptor[], thinkingBlocksVisible: boo
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i];
 		entries.push({ type: "agent", descriptor: row, agentIndex: i });
+		const live_items = row.result?.liveItems;
+		const has_live_items = Array.isArray(live_items) && live_items.length > 0;
+		const has_live_work_group = has_live_items && live_items.some((item) => item.kind === "tool");
+		// Visible thinking blocks show the full child tray. When blocks are
+		// hidden, a real thinking stream still promotes an existing tool wave
+		// to that compact tray so its `└─ Thinking` lane remains inside the
+		// work group; raw child text stays hidden (see SubagentLiveOutputText).
 		const has_live_output =
 			row.status === "running" &&
-			thinkingBlocksVisible &&
-			Array.isArray(row.result?.liveItems) &&
-			(row.result?.liveItems?.length ?? 0) > 0;
+			((thinkingBlocksVisible && has_live_items) ||
+				(!thinkingBlocksVisible &&
+					(row.result?.isFinishing === true ||
+						(has_live_items &&
+							row.result?.isThinking === true &&
+							row.result.reasoning !== false &&
+							has_live_work_group))));
 		// When the live output tray is active, the compact work-bundle rows
 		// (header + folded child waves + agent text) replace the single
 		// latest-tool/thinking preview row — no duplicate
@@ -873,64 +941,8 @@ function buildFlatEntries(rows: AgentRowDescriptor[], thinkingBlocksVisible: boo
 }
 
 /**
- * Indent for grouped subagent tree branches: one bullet+space wide (`• ` =
- * 2 cells) so the `├`/`└` pipe starts below the first header letter (`D` of
- * `Delegating`, `S` of `Subagents`), not below the bullet point. Mirrors the
- * todo plugin's `TODO_TREE_INDENT` so grouped trees align across the package.
+ * Nested Thinking row while a running subagent waits between tool calls.
  */
-const SUBAGENT_TREE_INDENT = "  ";
-
-/** Agent rows close with └ on the last agent; earlier agents use ├. Branch
- *  glyphs are flush with the agent name (compact group child style): the
- *  pipe sits under the header's first letter and the name starts one column
- *  to its right. */
-function agentTreePrefix(agentIndex: number, agentCount: number): string {
-	return agentIndex < agentCount - 1 ? GROUP_CHILD_TEE : GROUP_CHILD_LAST;
-}
-
-/** Outer tree prefix for the live output tray under an agent (spaces or the
- *  group tree pipe). Flush with the agent-name column: the tray's own
- *  `│`/`└` glyph sits one column right of the group tree pipe, directly
- *  below the agent name's first letter (grouped: `  │└`/`   └`; single:
- *  `  └`), matching `childTreePrefix`. */
-export function outerPrefixForAgent(
-	agentIndex: number,
-	agentCount: number,
-	hasHeader: boolean,
-): string {
-	if (!hasHeader) return "  ";
-	return SUBAGENT_TREE_INDENT + (agentIndex < agentCount - 1 ? "│" : " ");
-}
-
-/** Full tree prefix for a child item (tool, thinking, liveOutput) under an
- *  agent. Flush like the agent rows: the nested └ sits on the agent-name
- *  column (one column right of the tree pipe). Single-mode rows (no header)
- *  use the flush `  └` prefix so the └ hangs below the bare agent name with
- *  no gap before the content (`  └Thinking`). */
-export function childTreePrefix(
-	agentIndex: number,
-	agentCount: number,
-	hasHeader: boolean,
-	isLastChild = true,
-): string {
-	if (!hasHeader) {
-		// Single-mode rows (no header): flush 1-column glyph with no trailing
-		// space so the nested └/│ sits against the content (`  └Thinking`).
-		return `  ${isLastChild ? SUBAGENT_BRANCH_LAST : SUBAGENT_BRANCH_PIPE}`;
-	}
-	const outer = SUBAGENT_TREE_INDENT + (agentIndex < agentCount - 1 ? "│" : " ");
-	const inner = isLastChild ? "└" : "│";
-	return outer + inner;
-}
-
-function treePrefixForEntry(entry: FlatEntry, hasHeader: boolean, agentCount: number): string {
-	if (entry.type === "agent") {
-		return hasHeader ? agentTreePrefix(entry.agentIndex, agentCount) : "";
-	}
-	return childTreePrefix(entry.parentAgentIndex, agentCount, hasHeader, true);
-}
-
-/** Nested Thinking row while a running subagent waits between tool calls. */
 export function renderSubagentThinkingRow(
 	theme: ThemeLike,
 	treePrefix: string,
@@ -1006,30 +1018,8 @@ export function renderDelegatingRow(theme: ThemeLike): string {
 	return bullet + label;
 }
 
-function renderGroupLabel(
-	label: string,
-	hasError: boolean,
-	allDone: boolean,
-	theme: ThemeLike,
-	elapsedMs?: number,
-): string {
-	// Only the bullet carries the batch status color (SSOT
-	// groupBulletColorFromFlags): success green once every member completed,
-	// error red if any member failed, muted while running/delegating. The
-	// label stays dim/bold so the group columns align with a compact group
-	// header (e.g. "• Exploring").
-	const bullet = allDone
-		? groupBulletColorFromFlags(hasError, true, theme)
-		: theme.fg("muted", BULLET);
-	return (
-		bullet +
-		theme.fg("dim", theme.bold(label)) +
-		formatSubagentElapsedSuffix(theme, elapsedMs)
-	);
-}
-
 // ---------------------------------------------------------------------------
-// Compact layout — pure string (tests) + component builder (production)
+// Compact layout — per-agent blocks (pure string + component builder)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1043,264 +1033,158 @@ interface AgentRowDescriptor {
 	name: string;
 	result?: SubAgentResult;
 	failureMessage?: string;
-	isSingle: boolean;
-	toolCallId?: string;
-	/** Frozen final elapsed ms once the member's tool execution finished. */
-	elapsedMs?: number;
-	/** Member is still delegating (args brace open / no results yet). */
-	delegating?: boolean;
-}
-
-export interface SubagentLayoutMember {
-	args: SubagentArgs;
-	results: SubAgentResult[];
-	failureMessage?: string;
-	displayName?: string;
-	/** Tool execution finished — stop Delegating gradient + live elapsed timer. */
-	terminal?: boolean;
 	toolCallId?: string;
 }
 
-function resolve_member_display_name(member: SubagentLayoutMember): string {
-	return member.results[0]?.agent ?? member.displayName ?? asString(member.args.agent, "subagent");
+/** Flush child prefix for the nested latest-tool/Thinking row under an agent. */
+function childPrefix(): string {
+	return `  ${SUBAGENT_BRANCH_LAST}`;
 }
 
 /**
- * Rows for consecutive single-mode subagent tool calls grouped under Subagents.
- * Members with no results yet (args still streaming or awaiting execute) are
- * in the "delegating" phase: they surface the unveiled agent type once it is
- * written and render with the gradient label while current, closing the
- * gradient when the next subagent invocation starts.
+ * Append one per-agent block to a Container: the agent row (bullet + name +
+ * status suffix + frozen elapsed) followed by its nested latest-tool /
+ * Thinking / live-output tray rows. Every subagent — single mode, and each
+ * member of a native parallel/chain call — renders through this one path, so
+ * consecutive blocks look identical and are separated by exactly one blank
+ * row (inserted by the caller between blocks). No duplicate top padding:
+ * Pi's self-shell separator is the single leading blank above the first
+ * block.
  */
-export function memberRecordsToRows(members: SubagentLayoutMember[]): AgentRowDescriptor[] {
-	return members.map((member) => {
-		const displayName = resolve_member_display_name(member);
-		const terminal = member.terminal === true;
-		// Not yet invoked: brace still open or worker not started. Surface the
-		// agent type as soon as it is written; unknown-agent members render as
-		// the gradient header only (spare row) so "Delegating" never repeats.
-		if (!terminal && !member.failureMessage && member.results.length === 0) {
-			const agentType =
-				(typeof member.displayName === "string" && member.displayName.trim() !== ""
-					? member.displayName.trim()
-					: undefined) ??
-				(typeof member.args.agent === "string" && member.args.agent.trim() !== ""
-					? member.args.agent.trim()
-					: undefined);
-			return {
-				status: "running" as const,
-				name: agentType ?? DELEGATING_LABEL,
-				result: undefined,
-				delegating: true,
-				isSingle: false,
-				toolCallId: member.toolCallId,
-			};
-		}
-		return {
-			status: member.failureMessage ? "failed" : agentStatus(member.results[0], terminal),
-			name: displayName,
-			result: member.results[0],
-			failureMessage: member.failureMessage,
-			isSingle: false,
-			toolCallId: member.toolCallId,
-			// Frozen final elapsed only once the member's run is terminal —
-			// running/delegating members never show a live timer.
-			elapsedMs:
-				terminal && member.toolCallId !== undefined
-					? getSubagentElapsedMs(member.toolCallId)
-					: undefined,
-		};
-	});
-}
-
-/**
- * Group header line: while any member is still delegating (no results yet),
- * the header itself is the single gradient `Delegating` row so repeated
- * subagent tool calls never stack redundant labels; otherwise the settled
- * `Subagents` label is used.
- */
-function renderGroupHeaderLine(
-	headerLabel: string,
-	rows: AgentRowDescriptor[],
-	theme: ThemeLike,
-	elapsedMs?: number,
-): string {
-	if (rows.some((r) => r.delegating)) return renderDelegatingRow(theme);
-	const hasError = rows.some((r) => r.status === "failed");
-	const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
-	return renderGroupLabel(headerLabel, hasError, allDone, theme, allDone ? elapsedMs : undefined);
-}
-
-/**
- * Last *visible* row still in the delegating phase — the one that owns the
- * gradient. Unknown-agent placeholder rows (name `Delegating`) are skipped in
- * the render loops, so they must not claim the gradient index.
- */
-function lastDelegatingIndex(rows: AgentRowDescriptor[]): number {
-	for (let i = rows.length - 1; i >= 0; i--) {
-		if (rows[i].delegating && rows[i].name !== DELEGATING_LABEL) return i;
-	}
-	return -1;
-}
-
-/**
- * A member still in the delegating phase: show the unveiled agent type with
- * the gradient label while it is the current invocation, settling to static
- * text once the next subagent is invoked (gradient closed on the prior).
- */
-function renderDelegatingAgentLabel(
-	theme: ThemeLike,
-	name: string,
-	prefix: string,
-	gradient: boolean,
-): string {
-	const label = gradient ? renderLiveGradient(name, "subagent") : theme.fg("text", name);
-	return prefix + label;
-}
-
-function fillSubagentLayoutContainer(
+function addAgentBlockToContainer(
 	container: Container,
-	headerLabel: string | undefined,
-	rows: AgentRowDescriptor[],
+	row: AgentRowDescriptor,
 	theme: ThemeLike,
 	elapsedMs?: number,
 	thinkingBlocksVisible = false,
 ): void {
-	const fg = theme.fg.bind(theme);
-	const hasHeader = headerLabel !== undefined;
-	if (headerLabel) {
-		container.addChild(
-			new Text(renderGroupHeaderLine(headerLabel, rows, theme, elapsedMs), 0, 0),
-		);
-	}
-	const flatEntries = buildFlatEntries(rows, thinkingBlocksVisible);
-	const lastDelegatingIdx = lastDelegatingIndex(rows);
+	const rowElapsed = row.toolCallId ? getSubagentElapsedMs(row.toolCallId) : elapsedMs;
+	container.addChild(
+		new Text(
+			renderAgentRow(
+				row.status,
+				row.name,
+				theme,
+				row.result,
+				row.failureMessage,
+				row.status !== "running" ? rowElapsed : undefined,
+			),
+			0,
+			0,
+		),
+	);
+	const flatEntries = buildFlatEntries([row], thinkingBlocksVisible);
 	for (const entry of flatEntries) {
-		const row = entry.descriptor;
-		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
-		if (entry.type === "agent") {
-			// A still-delegating member whose agent type is unknown: the
-			// gradient header already says "Delegating" — no redundant child.
-			if (row.delegating && row.name === DELEGATING_LABEL) {
-				continue;
-			}
-			const rowText = row.delegating
-				? renderDelegatingAgentLabel(
-						theme,
-						row.name,
-						hasHeader ? fg(SUBAGENT_TREE_COLOR, treePrefix) : "",
-						entry.agentIndex === lastDelegatingIdx,
-					)
-				: renderAgentRow(
-						row.status,
-						row.name,
-						theme,
-						row.result,
-						hasHeader ? fg(SUBAGENT_TREE_COLOR, treePrefix) : "",
-						row.failureMessage,
-						entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
-						row.isSingle,
-						row.status !== "running"
-							? (row.elapsedMs ?? (row.isSingle ? elapsedMs : undefined))
-							: undefined,
-					);
-			container.addChild(new Text(rowText, 0, 0));
-		} else if (entry.type === "liveOutput") {
+		if (entry.type === "agent") continue;
+		if (entry.type === "liveOutput") {
 			const rawLiveItems = row.result?.liveItems;
 			const liveItems = Array.isArray(rawLiveItems) ? rawLiveItems : [];
-			const outerPrefix = outerPrefixForAgent(entry.parentAgentIndex, rows.length, hasHeader);
 			container.addChild(
 				new SubagentLiveOutputText(
 					liveItems,
-					fg(SUBAGENT_TREE_COLOR, outerPrefix),
+					theme.fg(SUBAGENT_TREE_COLOR, "  "),
 					row.status === "running",
 					theme,
 					row.result?.isThinking === true,
 					row.toolCallId,
+					thinkingBlocksVisible,
+					row.result?.isFinishing === true,
 				),
 			);
-		} else {
-			const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
-			if (childRow) container.addChild(new SubagentToolText(childRow));
+			continue;
 		}
+		const childRow = renderSubagentChildRow(entry, row, theme, childPrefix());
+		if (childRow) container.addChild(new SubagentToolText(childRow));
 	}
-	if (container.children.length === 0) {
-		container.addChild(new Text(renderDelegatingRow(theme), 0, 0));
+}
+
+/** Render one per-agent block as a plain string (tests). */
+function renderAgentBlockString(
+	row: AgentRowDescriptor,
+	theme: ThemeLike,
+	elapsedMs?: number,
+): string {
+	const rowElapsed = row.toolCallId ? getSubagentElapsedMs(row.toolCallId) : elapsedMs;
+	const lines = [
+		renderAgentRow(
+			row.status,
+			row.name,
+			theme,
+			row.result,
+			row.failureMessage,
+			row.status !== "running" ? rowElapsed : undefined,
+		),
+	];
+	const flatEntries = buildFlatEntries([row], false);
+	for (const entry of flatEntries) {
+		if (entry.type === "agent" || entry.type === "liveOutput") continue;
+		const childRow = renderSubagentChildRow(entry, row, theme, childPrefix());
+		if (childRow) lines.push(childRow);
 	}
+	return lines.join("\n");
 }
 
 /**
  * Derive the ordered list of visible agent rows from args + results.
  * Single mode: one row. Parallel: all tasks. Chain: only started steps
- * (pending steps hidden until they start). The header label string is
- * returned separately so callers can render it transparently.
+ * (pending steps hidden until they start). Each row renders as its own
+ * direct agent block — there is no group header.
  */
 function deriveAgentRows(
 	args: SubagentArgs,
 	results: SubAgentResult[],
 	terminal = false,
-	toolCallId?: string,
 	failureMessage?: string,
-): {
-	headerLabel: string | undefined;
-	rows: AgentRowDescriptor[];
-} {
+): AgentRowDescriptor[] {
 	if (isSingleModeSubagentArgs(args)) {
-		return {
-			headerLabel: undefined,
-			rows: [
-				{
-					status: failureMessage ? "failed" : agentStatus(results[0], terminal),
-					name: results[0]?.agent ?? args.agent ?? "subagent",
-					result: results[0],
-					failureMessage,
-					isSingle: true,
-					toolCallId,
-				},
-			],
-		};
+		return [
+			{
+				status: failureMessage ? "failed" : agentStatus(results[0], terminal),
+				name: results[0]?.agent ?? args.agent ?? "subagent",
+				result: results[0],
+				failureMessage,
+				toolCallId: results[0]?.toolCallId,
+			},
+		];
 	}
 
 	if (args.tasks && args.tasks.length > 0) {
 		const tasks = args.tasks as Array<{ agent: string }>;
-		const statuses = tasks.map((_, i) => agentStatus(results[i], terminal));
-		const rows: AgentRowDescriptor[] = tasks.map((t, i) => ({
-			status: statuses[i],
+		return tasks.map((t, i) => ({
+			status: agentStatus(results[i], terminal),
 			name: results[i]?.agent ?? t.agent,
 			result: results[i],
-			isSingle: false,
+			toolCallId: results[i]?.toolCallId,
 		}));
-		return { headerLabel: "Subagents", rows };
 	}
 
 	if (args.chain && args.chain.length > 0) {
 		const chain = args.chain as Array<{ agent: string }>;
 		const started = chain.slice(0, results.length);
-		const statuses = started.map((_, i) => agentStatus(results[i], terminal));
-		const rows: AgentRowDescriptor[] = started.map((s, i) => ({
-			status: statuses[i],
+		return started.map((s, i) => ({
+			status: agentStatus(results[i], terminal),
 			name: results[i]?.agent ?? s.agent,
 			result: results[i],
-			isSingle: false,
+			toolCallId: results[i]?.toolCallId,
 		}));
-		return { headerLabel: "Subagents", rows };
 	}
 
-	return { headerLabel: undefined, rows: [] };
+	return [];
 }
 
 /**
- * Render the compact grouped layout for a subagent tool call as a plain
+ * Render the per-agent block layout for a subagent tool call as a plain
  * string (no per-row backgrounds). Used by tests and as the text source
  * for the component builder.
  *
  * - Single mode: running `agentName` uses plain text color; nested tool rows
  *   use the compact-group gradient verbs (Searching, Reading, …).
  *   completed and failed agents use green/red bullets.
- * - Parallel mode: `Subagents` header + `└ agent` children with the same
- *   running/completed/failed treatment.
- * - Chain mode: same grouped structure, but only running + completed steps
- *   appear (pending steps are hidden until they start).
+ * - Parallel mode: every task is its own direct agent block, one below
+ *   another with exactly one blank row between blocks (no `Subagents`
+ *   header).
+ * - Chain mode: each started step is its own block (pending steps are
+ *   hidden until they start).
  *
  * No `⏳`, no `[scope]`, no `parallel (N tasks)` — just bullets and names.
  */
@@ -1309,101 +1193,31 @@ export function renderSubagentLayout(
 	results: SubAgentResult[],
 	theme: ThemeLike,
 	elapsedMs?: number,
-	groupedMembers?: SubagentLayoutMember[],
 	terminal = false,
 	failureMessage?: string,
 ): string {
-	if (groupedMembers && groupedMembers.length > 1) {
-		const rows = memberRecordsToRows(groupedMembers);
-		const lines: string[] = [];
-		const fg = theme.fg.bind(theme);
-		const hasHeader = true;
-		lines.push(renderGroupHeaderLine("Subagents", rows, theme, elapsedMs));
-		const flatEntries = buildFlatEntries(rows, false);
-		const lastDelegatingIdx = lastDelegatingIndex(rows);
-		for (const entry of flatEntries) {
-			const row = entry.descriptor;
-			const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
-			if (entry.type === "agent") {
-				if (row.delegating && row.name === DELEGATING_LABEL) continue;
-				lines.push(
-					row.delegating
-						? renderDelegatingAgentLabel(
-								theme,
-								row.name,
-								fg("dim", treePrefix),
-								entry.agentIndex === lastDelegatingIdx,
-							)
-						: renderAgentRow(
-								row.status,
-								row.name,
-								theme,
-								row.result,
-								fg("dim", treePrefix),
-								row.failureMessage,
-								entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
-								false,
-								row.status !== "running" ? row.elapsedMs : undefined,
-							),
-					);
-			} else {
-				const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
-				if (childRow) lines.push(childRow);
-			}
-		}
-		return lines.join("\n");
-	}
 	if (shouldShowSubagentDelegating(results, terminal)) {
 		if (isSingleModeSubagentArgs(args)) {
 			return renderDelegatingRow(theme);
 		}
 	}
-	const { headerLabel, rows } = deriveAgentRows(args, results, terminal, undefined, failureMessage);
-	const fg = theme.fg.bind(theme);
-	const lines: string[] = [];
-	const hasHeader = headerLabel !== undefined;
-	if (headerLabel) {
-		const hasError = rows.some((r) => r.status === "failed");
-		const allDone = rows.length > 0 && rows.every((r) => r.status !== "running");
-		lines.push(
-			renderGroupLabel(headerLabel, hasError, allDone, theme, allDone ? elapsedMs : undefined),
-		);
-	}
-	const flatEntries = buildFlatEntries(rows, false);
-	for (const entry of flatEntries) {
-		const row = entry.descriptor;
-		const treePrefix = treePrefixForEntry(entry, hasHeader, rows.length);
-		if (entry.type === "agent") {
-			lines.push(
-				renderAgentRow(
-					row.status,
-					row.name,
-					theme,
-					row.result,
-					hasHeader ? fg("dim", treePrefix) : "",
-					row.failureMessage,
-					entry.agentIndex * SUBAGENT_PHASE_OFFSET_MS,
-					row.isSingle,
-					row.isSingle && row.status !== "running" ? elapsedMs : undefined,
-				),
-			);
-		} else {
-			const childRow = renderSubagentChildRow(entry, row, theme, treePrefix);
-			if (childRow) lines.push(childRow);
-		}
-	}
-	if (lines.length === 0) {
+	const rows = deriveAgentRows(args, results, terminal, failureMessage);
+	if (rows.length === 0) {
 		if (terminal) return "";
 		return renderDelegatingRow(theme);
 	}
-	return lines.join("\n");
+	const blocks = rows.map((row) => renderAgentBlockString(row, theme, elapsedMs));
+	return blocks.join("\n\n");
 }
 
 /**
- * Build the compact grouped layout as a Component tree with per-terminal-row
- * `subagentBg` Box backgrounds. All rows (running, completed, failed) and the
- * group header are transparent. Completed agent names render in plain text
- * color (not the live mode accent). No per-row background tint.
+ * Build the per-agent block layout as a Component tree. All rows (running,
+ * completed, failed) are transparent; completed agent names render in plain
+ * text color (not the live mode accent). No per-row background tint, no
+ * group header. Multiple visible members (native parallel/chain) render one
+ * block per agent with exactly one blank row between blocks and no duplicate
+ * top/trailing padding — Pi's self-shell separator supplies the single
+ * leading blank above the first block.
  *
  * The returned Container is rebuilt on every renderCall/renderResult, so
  * it always reflects the latest statuses. The stable tick subscription
@@ -1414,44 +1228,28 @@ export function buildSubagentLayoutComponent(
 	results: SubAgentResult[],
 	theme: ThemeLike,
 	elapsedMs?: number,
-	groupedMembers?: SubagentLayoutMember[],
 	terminal = false,
-	toolCallId?: string,
+	_toolCallId?: string,
 	failureMessage?: string,
 	thinkingBlocksVisible = false,
 ): Container {
 	const container = new Container();
-	if (groupedMembers && groupedMembers.length > 1) {
-		const rows = memberRecordsToRows(groupedMembers);
-		fillSubagentLayoutContainer(
-			container,
-			"Subagents",
-			rows,
-			theme,
-			elapsedMs,
-			thinkingBlocksVisible,
-		);
-		return container;
-	}
 	if (shouldShowSubagentDelegating(results, terminal) && isSingleModeSubagentArgs(args)) {
 		container.addChild(new Text(renderDelegatingRow(theme), 0, 0));
 		return container;
 	}
-	const { headerLabel, rows } = deriveAgentRows(
-		args,
-		results,
-		terminal,
-		toolCallId,
-		failureMessage,
-	);
-	fillSubagentLayoutContainer(
-		container,
-		headerLabel,
-		rows,
-		theme,
-		elapsedMs,
-		thinkingBlocksVisible,
-	);
+	const rows = deriveAgentRows(args, results, terminal, failureMessage);
+	if (rows.length === 0) {
+		// Unrecognized streaming args (`{}` before the mode is written): the
+		// whole call renders its own gradient Delegating row until execute
+		// publishes a placeholder.
+		if (!terminal) container.addChild(new Text(renderDelegatingRow(theme), 0, 0));
+		return container;
+	}
+	rows.forEach((row, index) => {
+		if (index > 0) container.addChild(new Spacer(1));
+		addAgentBlockToContainer(container, row, theme, elapsedMs, thinkingBlocksVisible);
+	});
 	return container;
 }
 

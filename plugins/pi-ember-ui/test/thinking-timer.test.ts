@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { beforeEach } from "bun:test";
 import { CompactRenderer } from "../../pi-compact-tools/renderer.ts";
 import { setThinkingBlocksHidden } from "../mode-colors.ts";
 import {
@@ -6,6 +7,7 @@ import {
 	arm_thinking_stream_status,
 	format_thinking_pass_elapsed_suffix,
 	is_thinking_pass_timer_armed,
+	reset_thinking_header_state_for_tests,
 	reset_thinking_pass_timer,
 	set_thinking_pass_started_at_for_tests,
 	status_can_update_previous_line,
@@ -36,6 +38,12 @@ function makeTheme() {
 }
 
 describe("thinking pass timer", () => {
+	beforeEach(() => {
+		// Each timer test starts from a clean thinking-header state so leaked
+		// stream-active flags from a prior test cannot change arm semantics.
+		reset_thinking_header_state_for_tests();
+	});
+
 	test("thinking_status_terminal_layout renders identical row structures per host", () => {
 		// Widget lives below Pi's widget-container leading spacer, so it must not
 		// add a second blank above (that extra row is the visible 1-row jump on
@@ -94,21 +102,21 @@ describe("thinking pass timer", () => {
 		set_thinking_pass_started_at_for_tests(0);
 	});
 
-	test("arm_thinking_stream_status restarts the pass timer on stream start", () => {
+	test("arm_thinking_stream_status continues an already-armed pass timer", () => {
 		const pinned = 1_000_000;
 		set_thinking_pass_started_at_for_tests(pinned);
 		expect(is_thinking_pass_timer_armed()).toBe(true);
 		try {
 			arm_thinking_stream_status();
-			// The real thinking stream (re)arms the header: the pass timer is
-			// restarted fresh instead of carrying a stale pre-stream value.
+			// A real thinking stream that CONTINUES an armed pre-token wait keeps
+			// the same pass timer — hidden reasoning never restarts the pre-answer
+			// elapsed (the boundary that hid the header already zeroed it).
 			expect(is_thinking_pass_timer_armed()).toBe(true);
 			const theme = makeTheme();
 			const original = performance.now;
-			const armedAt = performance.now();
-			performance.now = () => armedAt + 500;
+			performance.now = () => pinned + 500;
 			expect(format_thinking_pass_elapsed_suffix(theme)).toBe("");
-			performance.now = () => armedAt + 2500;
+			performance.now = () => pinned + 2500;
 			expect(format_thinking_pass_elapsed_suffix(theme)).toBe("[dim: 2s]");
 			performance.now = original;
 		} finally {
@@ -117,15 +125,59 @@ describe("thinking pass timer", () => {
 		}
 	});
 
-	test("arm_pre_token_thinking_status restarts the pass timer fresh on every arm", () => {
+	test("arm_thinking_stream_status starts a fresh timer when no pass is armed", () => {
+		reset_thinking_pass_timer();
+		set_thinking_pass_started_at_for_tests(0);
+		const original = performance.now;
+		const start = 3_000_000;
+		performance.now = () => start;
+		try {
+			expect(is_thinking_pass_timer_armed()).toBe(false);
+			arm_thinking_stream_status();
+			// No live pass exists (post-boundary / post-agent_end re-arm): the
+			// stream start opens a fresh pass.
+			expect(is_thinking_pass_timer_armed()).toBe(true);
+			const theme = makeTheme();
+			performance.now = () => start + 500;
+			expect(format_thinking_pass_elapsed_suffix(theme)).toBe("");
+			performance.now = () => start + 2500;
+			expect(format_thinking_pass_elapsed_suffix(theme)).toBe("[dim: 2s]");
+		} finally {
+			performance.now = original;
+			reset_thinking_pass_timer();
+			set_thinking_pass_started_at_for_tests(0);
+		}
+	});
+
+	test("arm_pre_token_thinking_status preserves an already-armed pass timer", () => {
 		const original = performance.now;
 		const fresh = 2_000_000;
-		set_thinking_pass_started_at_for_tests(fresh - 2_500);
+		const original_start = fresh - 2_500;
+		set_thinking_pass_started_at_for_tests(original_start);
 		performance.now = () => fresh;
 		try {
 			arm_pre_token_thinking_status();
 			expect(is_thinking_pass_timer_armed()).toBe(true);
-			// Elapsed restarts from the new arm — no stale 3s carryover.
+			// The idempotent arm preserves the already-live timestamp — no restart.
+			// The elapsed continues from the original arm (2.5s ago).
+			performance.now = () => fresh + 500;
+			expect(format_thinking_pass_elapsed_suffix(makeTheme())).toBe("[dim: 3s]");
+		} finally {
+			performance.now = original;
+			reset_thinking_pass_timer();
+			set_thinking_pass_started_at_for_tests(0);
+		}
+	});
+
+	test("arm_pre_token_thinking_status starts a fresh timer when no pass is armed", () => {
+		const original = performance.now;
+		const fresh = 2_000_000;
+		set_thinking_pass_started_at_for_tests(0);
+		performance.now = () => fresh;
+		try {
+			arm_pre_token_thinking_status();
+			expect(is_thinking_pass_timer_armed()).toBe(true);
+			// No prior pass: the arm starts fresh from now.
 			performance.now = () => fresh + 500;
 			expect(format_thinking_pass_elapsed_suffix(makeTheme())).toBe("");
 			performance.now = () => fresh + 2500;

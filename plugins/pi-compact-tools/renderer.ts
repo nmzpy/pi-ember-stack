@@ -86,11 +86,42 @@ export const TREE_BRANCH_PIPE = "│ ";
 /** Tee branch for non-terminal subagent rows (vertical continues + opens right). */
 export const TREE_BRANCH_TEE = "├ ";
 export const TREE_BRANCH_LAST = "└ ";
-/** Compact group child rows — flush with the branch glyph (no trailing space).
- *  Exported for nested compact trays (subagent live output) so the child
- *  branch glyphs stay SSOT with the main agent's groups. */
-export const GROUP_CHILD_TEE = "  ├";
-export const GROUP_CHILD_LAST = "  └";
+/** One branch vocabulary for main and nested subagent work-group children. */
+export type CompactGroupChildBranch = "pipe" | "tee" | "last";
+
+const COMPACT_GROUP_CHILD_PIPE = "│";
+const COMPACT_GROUP_CHILD_TEE = "├";
+const COMPACT_GROUP_CHILD_LAST = "└";
+const COMPACT_GROUP_CHILD_LIVE_CONNECTOR = "─";
+const COMPACT_GROUP_CHILD_INDENT = "  ";
+
+/**
+ * Build a compact work-group child prefix from the canonical branch
+ * vocabulary. Completed prior rows use a bare vertical pipe and their body
+ * starts immediately after it; only active rows and the Thinking frontier
+ * carry the horizontal `─` connector.
+ *
+ * `indent` keeps nested subagent trays structurally identical without
+ * duplicating the branch glyph or completed-row spacing policy.
+ */
+export function format_compact_group_child_prefix(
+	branch: CompactGroupChildBranch,
+	indent = COMPACT_GROUP_CHILD_INDENT,
+): string {
+	if (branch === "pipe") return `${indent}${COMPACT_GROUP_CHILD_PIPE}`;
+	if (branch === "tee") {
+		return `${indent}${COMPACT_GROUP_CHILD_TEE}${COMPACT_GROUP_CHILD_LIVE_CONNECTOR}`;
+	}
+	return `${indent}${COMPACT_GROUP_CHILD_LAST}${COMPACT_GROUP_CHILD_LIVE_CONNECTOR}`;
+}
+
+/** Main work-group derived prefixes. Nested trays call the formatter above. */
+export const GROUP_CHILD_TEE = format_compact_group_child_prefix("tee");
+export const GROUP_CHILD_LAST = format_compact_group_child_prefix("last");
+/** Latest/active work-group frontier (running verb or Thinking lane). */
+export const GROUP_CHILD_TEE_LIVE = GROUP_CHILD_LAST;
+/** Completed prior child: no connector-width pad after the vertical pipe. */
+export const GROUP_CHILD_PIPE = format_compact_group_child_prefix("pipe");
 /** Nested subagent tool rows under a grouped (Subagents/Delegating) agent —
  *  flush with the branch glyph so the └ sits on the agent-name column
  *  (`  ├` places the name at column 3; tool └ goes there too). */
@@ -584,7 +615,11 @@ function bulletColor(record: CompactCall, theme: ThemeLike): string {
 	return statusBulletColor(record.isError, record._completed === true, theme);
 }
 
-function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string {
+/** SSOT standalone single-call row (`• Read a.ts`, gradient edit/write verbs,
+ *  apply_patch block). Exported for the subagent live output tray: a
+ *  single-tool burst renders this bare row exactly like the main session's
+ *  standalone tool call instead of a group header + child pair. */
+export function formatStandaloneCallRow(record: CompactCall, theme: ThemeLike): string {
 	const { name, args, result } = record;
 	const completed = record._completed === true;
 	if (name === "apply_patch") {
@@ -694,6 +729,8 @@ function presentTenseVerb(name: string, args: ToolArgs): string {
 			return "Writing";
 		case "apply_patch":
 			return "Patching";
+		case "todo":
+			return "Todo";
 		default:
 			return name;
 	}
@@ -923,6 +960,10 @@ function formatCallBodyDetails(
 			const path = files[0]?.path ?? ".";
 			return paint_compact_tool(theme, ` ${path}`, completed);
 		}
+		case "todo": {
+			const action = textValue(args?.action);
+			return action ? paint_compact_tool(theme, ` ${action}`, completed) : "";
+		}
 		default:
 			return "";
 	}
@@ -982,6 +1023,8 @@ function formatCallBodyVerb(
 			return paint_compact_tool_label(theme, "Write", completed);
 		case "apply_patch":
 			return paint_compact_tool_label(theme, completed ? "Patched" : "Patch", completed);
+		case "todo":
+			return paint_compact_tool_label(theme, "Todo", completed);
 		default:
 			return paint_compact_tool_label(theme, name, completed);
 	}
@@ -1188,7 +1231,10 @@ function format_patch_group(group: DiscoveryGroup, theme: ThemeLike): string {
 			? visible_file_rows
 			: [{ file: { path: ".", additions: 0, removals: 0 }, completed: !any_running }];
 	for (const [index, child] of children.entries()) {
-		const prefix = index === children.length - 1 ? GROUP_CHILD_LAST : GROUP_CHILD_TEE;
+		const is_last_child = index === children.length - 1;
+		const prefix = format_compact_group_child_prefix(
+			is_last_child ? "last" : child.completed ? "pipe" : "tee",
+		);
 		const file_error = file_errors.get(normalize_patch_display_path(child.file.path));
 		lines.push(
 			theme.fg("dim", prefix) +
@@ -1222,8 +1268,9 @@ function groupVisibleChildren(group: DiscoveryGroup): CompactCall[] {
 /** Whether the group still needs the shared 20 FPS gradient tick. */
 export function group_needs_gradient_tick(group: DiscoveryGroup): boolean {
 	if (group.thinkingChild && isThinkingBlocksHidden()) return true;
-	// The tool-lane hold animates the latest child's `-ing` verb at 20 FPS.
-	if (group.holdingToolLane === true && isThinkingBlocksHidden()) return true;
+	// The tool-lane hold animates the children's `-ing` verbs at 20 FPS
+	// (both block-visibility modes).
+	if (group.holdingToolLane === true) return true;
 	const visible = groupVisibleChildren(group);
 	if (visible.some((record) => !record._completed)) return true;
 	if (!group.settled && group.records.some((record) => !record._completed)) return true;
@@ -1260,10 +1307,21 @@ function formatGroup(group: DiscoveryGroup, theme: ThemeLike): string {
 
 /** Header + child rows (NO thinking lane) — cached on the group so the
  *  20 FPS tick rebuilds only the `└ Thinking` lane instead of re-baking
- *  every child row every 50 ms. The last-child `├`/`└` prefix depends on
- *  `thinkingChild`, so arming/clearing the lane (which routes through
- *  formatGroup) refreshes the cache with the new prefix. */
-function buildGroupStaticText(group: DiscoveryGroup, theme: ThemeLike): string {
+ *  every child row every 50 ms. The last-child prefix depends on
+ *  `thinkingChild` and the latest row's live `-ing` state, so arming/clearing
+ *  the lane or a verb change (which routes through formatGroup) refreshes the
+ *  cache with the new prefix.
+ *
+ *  `noBullet` omits the group bullet for nested subagent trays where the
+ *  outer tree branch already marks the block. `childPrefixIndent` overrides
+ *  the default two-space child indent (use "" for nested trays whose outer
+ *  prefix supplies the lateral spacing). */
+export function buildGroupStaticText(
+	group: DiscoveryGroup,
+	theme: ThemeLike,
+	noBullet = false,
+	childPrefixIndent?: string,
+): string {
 	if (
 		is_multi_patch_group(group) ||
 		(!is_work_group(group) && group.type === "patching" && group.records.length >= 2)
@@ -1271,28 +1329,44 @@ function buildGroupStaticText(group: DiscoveryGroup, theme: ThemeLike): string {
 		return format_patch_group(group, theme);
 	}
 	const headerText = groupHeaderLabel(group, theme);
-	const lines = [groupBulletColor(group, theme) + headerText];
+	const lines = [noBullet ? headerText : groupBulletColor(group, theme) + headerText];
 	const children = groupVisibleChildren(group);
 	const show_thinking = group.thinkingChild && isThinkingBlocksHidden();
-	// Agent-pending wait with no thinking stream: the latest visible child keeps
-	// its gradient `-ing` verb until a real thinking stream arms the lane or a
-	// new tool wave reopens the group.
-	const hold_lane = !show_thinking && group.holdingToolLane === true && isThinkingBlocksHidden();
+	// Agent-pending wait with no thinking stream: the visible children of the
+	// current wave keep their gradient `-ing` verbs (Reading/Searching/…)
+	// until a real thinking stream arms the lane or a new tool wave reopens
+	// the group. Mutations snap to past tense (Edited/Wrote/Patched).
+	const hold_lane = !show_thinking && group.holdingToolLane === true;
 	const child_rows = merge_group_child_rows(children);
 	for (const [index, row_records] of child_rows.entries()) {
 		const is_last_child = index === child_rows.length - 1 && !show_thinking;
-		const prefix = is_last_child ? GROUP_CHILD_LAST : GROUP_CHILD_TEE;
+		// A merged row is "completed" for prefix purposes when all source
+		// records are completed AND the hold lane is not active. The hold
+		// lane keeps completed children in their gradient `-ing` verbs, so
+		// they visually read as active and keep the `├─` tee.
+		const row_completed = is_merged_row_completed(row_records) && !(hold_lane && is_last_child);
+		// Completed prior children are bare `│` continuations with no
+		// connector-width padding, so their body sits flush against the pipe.
+		// Active children and the terminal Thinking lane use `├─` / `└─`.
+		const prefix = format_compact_group_child_prefix(
+			is_last_child ? "last" : row_completed ? "pipe" : "tee",
+			childPrefixIndent,
+		);
 		lines.push(
 			theme.fg("dim", prefix) +
-				formatGroupChildRows(row_records, theme, is_last_child && hold_lane),
+				formatGroupChildRows(row_records, theme, hold_lane, is_last_child),
 		);
 	}
 	return lines.join("\n");
 }
 
-/** The single in-group `└ Thinking` lane row — the only per-tick dynamic part. */
+/** The single in-group Thinking lane row — the latest/active entry, so it
+ *  sits as an L-shaped `└─` live lane instead of a plain terminal `└`. */
 function formatGroupThinkingLane(group: DiscoveryGroup, theme: ThemeLike): string {
-	return theme.fg("dim", GROUP_CHILD_LAST) + formatGroupThinkingChildRow(group, theme);
+	return (
+		theme.fg("dim", format_compact_group_child_prefix("last")) +
+		formatGroupThinkingChildRow(group, theme)
+	);
 }
 
 /** Edit/write +N -N suffix for grouped child rows — SSOT for compact + cursor. */
@@ -1439,6 +1513,13 @@ export function merge_group_child_rows(children: readonly CompactCall[]): Compac
 	return rows;
 }
 
+/** Whether a merged row (one or more same-file records) is fully completed.
+ *  A merged row is completed only when ALL source records are completed —
+ *  a still-running member keeps the row in its live `-ing` verb. */
+export function is_merged_row_completed(records: readonly CompactCall[]): boolean {
+	return records.length > 0 && records.every((r) => r._completed === true);
+}
+
 /** Accumulated +N -N across merged same-file diff records. */
 function merged_child_diff_stats(
 	records: readonly CompactCall[],
@@ -1471,13 +1552,15 @@ export function formatGroupChildRows(
 	records: readonly CompactCall[],
 	theme: ThemeLike,
 	hold_lane = false,
+	is_last = false,
 ): string {
 	const last = records[records.length - 1];
 	if (!last) return "";
-	if (records.length === 1) return formatGroupChildRow(last, theme, hold_lane);
+	const effective_hold = hold_lane && is_last;
+	if (records.length === 1) return formatGroupChildRow(last, theme, effective_hold);
 	const completed = last._completed === true;
 	const verb = completed
-		? hold_lane
+		? effective_hold
 			? hold_child_verb(last, theme)
 			: formatCallBodyVerb(last.name, last.args, theme, true, true)
 		: formatGroupChildGradientVerb(last.name, last.args);
@@ -1506,6 +1589,8 @@ export class CompactRenderer {
 	private currentGroup: DiscoveryGroup | undefined;
 	private readonly pendingGroupInvalidations = new Set<DiscoveryGroup>();
 	private pendingGroupRenderRequestTimer: ReturnType<typeof queueMicrotask> | undefined;
+	/** Invalidates queued native render requests across session replacement. */
+	private renderGeneration = 0;
 
 	/** Stable tick callback — updates component state before Pi's native render. */
 	private groupTickCb: (() => void) | undefined;
@@ -1707,14 +1792,15 @@ export class CompactRenderer {
 	}
 
 	/** Keep the tool lane live during an agent-pending wait with NO thinking
-	 *  stream: the latest completed child keeps its gradient `-ing` verb
-	 *  (Reading/Searching/…) until a real thinking stream arms the `└ Thinking`
-	 *  lane or a new tool wave reopens the group. A real thinking stream owns
-	 *  the lane — the hold must never disarm it. The lane's elapsed suffix is
-	 *  driven by the shared turn pass timer, so nothing here starts or resets
-	 *  a timer. */
+	 *  stream: the visible children of the current wave keep their gradient
+	 *  `-ing` verbs (Reading/Searching/…) until a real thinking stream arms
+	 *  the `└ Thinking` lane or a new tool wave reopens the group. Applies in
+	 *  BOTH block-visibility modes — with blocks visible the transcript owns
+	 *  reasoning, but the pre-thinking wait still reads as ongoing work. A
+	 *  real thinking stream owns the lane — the hold must never disarm it.
+	 *  The lane's elapsed suffix is driven by the shared turn pass timer, so
+	 *  nothing here starts or resets a timer. */
 	holdToolLane(): void {
-		if (!isThinkingBlocksHidden()) return;
 		let group = this.resolveLiveGroup();
 		if (!group && this.reopenGroupKey) {
 			group = this.findReopenableGroup(this.reopenGroupKey);
@@ -1748,17 +1834,11 @@ export class CompactRenderer {
 		this.arm_in_group_thinking();
 	}
 
-	/** Arm the in-group `└ Thinking` lane for inter-run planning text
-	 *  (soft boundary — groups stay reopenable, children linger beside the
-	 *  status row). Thinking never folds prior tool children. */
-	armInGroupThinkingForPlanning(): void {
-		if (!isThinkingBlocksHidden()) return;
-		this.arm_in_group_thinking();
-	}
-
-	/** Arm the in-group `└ Thinking` lane and mark the group non-reopenable.
-	 *  Hidden thinking is a real transcript block between tool waves, so the
-	 *  next tool wave must start a fresh work group below the reasoning. */
+	/** Arm the in-group `└ Thinking` lane for hidden reasoning.
+	 *  Hidden reasoning is NOT a separate transcript block — the group stays
+	 *  reopenable so the next tool wave folds prior children (different tool
+	 *  name) and reopens under the same header instead of spawning a fresh
+	 *  Explored/Edited/… row. */
 	noteHiddenThinking(): void {
 		// Hidden reasoning occupies the in-group `└ Thinking` lane but is NOT a
 		// separate transcript block — the group stays reopenable so the next
@@ -1767,13 +1847,25 @@ export class CompactRenderer {
 		this.arm_in_group_thinking();
 	}
 
-	/** Leave the thinking lane when the agent fully settles — header-only,
-	 *  keep currentGroup for a later same-key reopen. */
+	/** Leave the thinking/tool hold lane when the agent fully settles —
+	 *  header-only, keep currentGroup for a later same-key reopen. */
 	clearGroupThinkingChild(): void {
 		const group = this.currentGroup;
-		if (!group?.thinkingChild) return;
+		if (!group || (!group.thinkingChild && !group.holdingToolLane)) return;
+		// A post-tool wait uses holdingToolLane rather than the Thinking child.
+		// It must be cleared at agent_settled too; otherwise
+		// resyncGroupGradientTick would keep the 20 FPS subscriber alive after
+		// the agent is done.
 		this.freezeGroup(group);
 		this.syncGroupTick(group);
+	}
+
+	/** Stop every compact-renderer gradient subscription at a terminal agent
+	 *  boundary. Incomplete standalone edit/write/bash calls may not receive a
+	 *  result callback, so their tick cannot rely on renderResult cleanup. */
+	stopGradientTicks(): void {
+		this.unsubscribeGroupTick();
+		this.unsubscribeStandaloneTick();
 	}
 
 	/** The model announced the next tool call (message_update toolcall_start or
@@ -1814,6 +1906,8 @@ export class CompactRenderer {
 	 *  (/resume, /new, /fork) so stale rows from the previous session do
 	 *  not leak into the new one. */
 	resetForSession(): void {
+		this.renderGeneration += 1;
+		this.pendingGroupRenderRequestTimer = undefined;
 		this.unsubscribeGroupTick();
 		this.unsubscribeStandaloneTick();
 		this.calls.clear();
@@ -1903,7 +1997,9 @@ export class CompactRenderer {
 	/** Coalesce TUI render requests from rapid group state changes. */
 	private debouncedGroupRenderRequest(): void {
 		if (this.pendingGroupRenderRequestTimer) return;
+		const generation = this.renderGeneration;
 		this.pendingGroupRenderRequestTimer = queueMicrotask(() => {
+			if (generation !== this.renderGeneration) return;
 			this.pendingGroupRenderRequestTimer = undefined;
 			requestTuiRender();
 		});
@@ -1941,10 +2037,13 @@ export class CompactRenderer {
 	/** Settle the live group so its label flips to past tense. Called when the
 	 *  agent demonstrably moves on:
 	 *  visible user-facing text, a non-group tool, or a different
-	 *  groupable tool. Idempotent per group via scheduleGroupInvalidation. */
+	 *  groupable tool. Idempotent per group via scheduleGroupInvalidation.
+	 *  The tool-lane hold (post-tool wait) keeps its gradient tick through
+	 *  settle — agent_end flips the label but the `-ing` verbs stay live
+	 *  until a thinking stream or agent_settled takes over. */
 	private settleGroups(): void {
 		this.settleGroup(this.currentGroup);
-		this.unsubscribeGroupTick();
+		if (!this.currentGroup?.holdingToolLane) this.unsubscribeGroupTick();
 	}
 
 	/** Subscribe the group tick so Pi re-renders the live child verb normally. */
@@ -1971,7 +2070,7 @@ export class CompactRenderer {
 		// The hold's gradient `-ing` verb is per-tick dynamic, so bypass the
 		// static-prefix cache and re-bake the whole block (same cost as a
 		// running child wave).
-		const hold_active = group.holdingToolLane === true && isThinkingBlocksHidden();
+		const hold_active = group.holdingToolLane === true;
 		const all_visible_completed =
 			(!lane_active || groupVisibleChildren(group).every((record) => record._completed === true)) &&
 			!hold_active;
@@ -2123,7 +2222,11 @@ export class CompactRenderer {
 	private scheduleRecordShrinkSnap(record: CompactCall): void {
 		if (!record.pendingShrink) return;
 		record.pendingShrink = false;
-		queueMicrotask(() => requestTuiRender());
+		const generation = this.renderGeneration;
+		queueMicrotask(() => {
+			if (generation !== this.renderGeneration) return;
+			requestTuiRender();
+		});
 	}
 
 	private migrate_group_anchor(group: DiscoveryGroup, record: CompactCall): void {

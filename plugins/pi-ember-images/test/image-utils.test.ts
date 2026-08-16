@@ -8,8 +8,24 @@ import {
 	isWindowsDrivePath,
 	isWindowsLikePath,
 	removeImagePlaceholders,
+	replaceImagePlaceholdersWithFallbackLabels,
 	tokenizePathLikeText,
 } from "../image-utils.ts";
+
+function attachment(
+	id: number,
+	dimensions?: { widthPx: number; heightPx: number },
+): import("../types.ts").ImageAttachment {
+	return {
+		id,
+		placeholder: make_image_placeholder(id),
+		originalPath: "fixture",
+		mimeType: "image/png",
+		data: "",
+		dimensions,
+		createdAt: Date.now(),
+	};
+}
 
 describe("pi-ember-images path handling", () => {
 	test("recognizes Windows drive paths", () => {
@@ -52,6 +68,50 @@ describe("pi-ember-images path handling", () => {
 		expect(format_image_fallback_label(3)).toBe("[image 3]");
 		expect(format_image_fallback_label(3, { widthPx: 345, heightPx: 175 })).toBe(
 			"[image 3: 345x175]",
+		);
+	});
+});
+
+describe("replaceImagePlaceholdersWithFallbackLabels", () => {
+	test("replaces each placeholder with its dimensioned label in place", () => {
+		const text = "Review [image 1] and [image 2] please";
+		const attachments = [
+			attachment(1, { widthPx: 2, heightPx: 2 }),
+			attachment(2, { widthPx: 345, heightPx: 175 }),
+		];
+		expect(replaceImagePlaceholdersWithFallbackLabels(text, attachments)).toBe(
+			"Review [image 1: 2x2] and [image 2: 345x175] please",
+		);
+	});
+
+	test("image-only prompt keeps the label as the whole message text", () => {
+		const attachments = [attachment(1, { widthPx: 2, heightPx: 2 })];
+		expect(replaceImagePlaceholdersWithFallbackLabels("[image 1]", attachments)).toBe(
+			"[image 1: 2x2]",
+		);
+	});
+
+	test("keeps bare placeholder when dimensions are unknown", () => {
+		const attachments = [attachment(1)];
+		expect(replaceImagePlaceholdersWithFallbackLabels("see [image 1]", attachments)).toBe(
+			"see [image 1]",
+		);
+	});
+
+	test("preserves submission order and surrounding text", () => {
+		const attachments = [
+			attachment(1, { widthPx: 10, heightPx: 20 }),
+			attachment(2, { widthPx: 30, heightPx: 40 }),
+		];
+		expect(
+			replaceImagePlaceholdersWithFallbackLabels("[image 2] vs [image 1]", attachments),
+		).toBe("[image 2: 30x40] vs [image 1: 10x20]");
+	});
+
+	test("ignores placeholders that are not present in the text", () => {
+		const attachments = [attachment(1, { widthPx: 2, heightPx: 2 })];
+		expect(replaceImagePlaceholdersWithFallbackLabels("plain text", attachments)).toBe(
+			"plain text",
 		);
 	});
 });
