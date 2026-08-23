@@ -31,6 +31,29 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { is_benign_compact_error, should_skip_compact } from "../../auto-continue.ts";
 import { infer_bare_agent_name } from "../../subagent-policy.ts";
+import { strip_think_tags } from "../../../pi-ember-ui/mode-colors.ts";
+import {
+	MAX_TRANSPORT_RETRIES as MAX_SUBAGENT_WEBSOCKET_RETRIES,
+	TRANSPORT_RETRY_BACKOFF_MS as SUBAGENT_WEBSOCKET_RETRY_BACKOFF_MS,
+	extractFailureMessage,
+	isGenericAbortMessage,
+	is_parser_stream_error,
+	is_transient_transport_death,
+	sleep_abortable,
+	transport_retry_backoff_ms as websocket_retry_backoff_ms,
+} from "./transport-policy.ts";
+// Re-export legacy public symbols for compatibility — no duplicate definitions.
+export {
+	MAX_SUBAGENT_WEBSOCKET_RETRIES,
+	SUBAGENT_WEBSOCKET_RETRY_BACKOFF_MS,
+	extractFailureMessage,
+	isGenericAbortMessage,
+	is_parser_stream_error,
+	is_transient_transport_death,
+};
+export {
+	retry_transient_transport_operation,
+} from "./transport-policy.ts";
 import {
 	mark_checkpoint_dir_live,
 	persist_checkpoint_meta,
@@ -60,9 +83,10 @@ export function resolve_subagent_timeout_ms(timeout: unknown): number {
 	return Math.round(timeout);
 }
 
-const SUBAGENT_EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const TODO_EXTENSION_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../../pi-ember-todo/index.ts");
-const COMPACTION_WIRING_PATH = path.resolve(SUBAGENT_EXT_DIR, "../../compaction-wiring.ts");
+const COMPACTION_WIRING_PATH = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../../compaction-wiring.ts",
+);
 
 const PARALLEL_TOOL_CALL_GUIDANCE = `
 
@@ -72,9 +96,6 @@ When multiple independent tool calls are needed (e.g. reading several files,
 searching for different patterns), emit them all in a single response rather
 than one at a time. The runtime executes independent tool calls in parallel,
 so batching saves round-trips and reduces latency.
-
-The Todo tool is session-local: use ids returned by this child session's \`create\`, or an
-exact \`task\` subject. Do not reuse ids from the parent session.
 `;
 
 const CONTEXT_SAFETY_FACTOR = 1.1;
@@ -105,15 +126,12 @@ export function build_subagent_settings(): {
 }
 
 export async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResult> {
-	// The child receives the same task-list tool as the parent. Without loading
-	// this extension, `todo` remains in the agent's allowlist but has no
-	// registration in the isolated AgentSession, which makes checklist updates
-	// fail or silently disappear. The compaction-wiring extension is what makes
-	// native reason=overflow/threshold compaction use Ember's structured stack
-	// summary (session_before_compact hook) instead of Pi's default summarizer.
+	// The compaction-wiring extension is what makes native
+	// reason=overflow/threshold compaction use Ember's structured stack summary
+	// (session_before_compact hook) instead of Pi's default summarizer.
 	// Exported so tests exercise the real loading seam rather than re-deriving
 	// the paths.
-	const paths = [TODO_EXTENSION_PATH, COMPACTION_WIRING_PATH];
+	const paths = [COMPACTION_WIRING_PATH];
 	return discoverAndLoadExtensions(paths, cwd);
 }
 
@@ -162,42 +180,8 @@ function should_compact_before_prompt(
 }
 
 const MAX_SUBAGENT_LENGTH_CONTINUES = 5;
-export const MAX_SUBAGENT_WEBSOCKET_RETRIES = 3;
-export const SUBAGENT_WEBSOCKET_RETRY_BACKOFF_MS = [2000, 5000, 15_000] as const;
-const SUBAGENT_WEBSOCKET_PATTERNS: readonly RegExp[] = [
-	/websocket/i,
-	/socket hang up/i,
-	/ECONNRESET/i,
-	/connection was reset/i,
-];
 
 const SUBAGENT_CONTINUE_PROMPT = "continue from where you left off";
-
-function is_websocket_error(message: string | undefined): boolean {
-	if (!message) return false;
-	return SUBAGENT_WEBSOCKET_PATTERNS.some((pattern) => pattern.test(message));
-}
-
-function websocket_retry_backoff_ms(retry: number): number {
-	return SUBAGENT_WEBSOCKET_RETRY_BACKOFF_MS[retry] ?? 0;
-}
-
-/** Backoff before the next websocket retry, or reject if the run is aborted during the wait. */
-async function sleep_abortable(ms: number, signal?: AbortSignal): Promise<void> {
-	if (ms <= 0) return;
-	return new Promise<void>((resolve, reject) => {
-		const timer = setTimeout(resolve, ms);
-		const onAbort = () => {
-			clearTimeout(timer);
-			reject(new Error("Sub-agent aborted"));
-		};
-		if (signal?.aborted) {
-			onAbort();
-			return;
-		}
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
 
 /** Short abortable backoff before the single pre-response HTTP 500 retry. */
 export const SUBAGENT_HTTP500_RETRY_BACKOFF_MS = 300;
@@ -357,14 +341,17 @@ export function classify_safe_pre_response_failure(options: {
 	const { result, attempt, promptError } = options;
 	if (attempt.sawVisibleOrToolSideEffect) return undefined;
 	if (promptError !== undefined) {
-		return is_websocket_error(extractFailureMessage(promptError)) ? "websocket" : undefined;
+		return is_transient_transport_death(promptError) ? "websocket" : undefined;
 	}
 	if (attempt.resolvedStopReason !== undefined) {
 		if (attempt.resolvedStopReason !== "error") return undefined;
-		return is_websocket_error(attempt.resolvedFailureMessage) ? "websocket" : undefined;
+		return is_transient_transport_death(attempt.resolvedFailureMessage) ? "websocket" : undefined;
 	}
 	if (result.stopReason !== "error") return undefined;
 	const messages = [result.errorMessage, lastAssistantErrorMessage(result.messages)];
+	for (const message of messages) {
+		if (message && is_transient_transport_death(message)) return "websocket";
+	}
 	if (messages.some(is_empty_body_http500_error)) return "http500";
 	return undefined;
 }
@@ -557,6 +544,102 @@ export async function decide_pre_response_websocket_retry(options: {
 	return "retry";
 }
 
+/**
+ * Resolve the WebSocket-class transport failure for the current prompt
+ * attempt, checked in priority order: a thrown prompt error, the attempt's
+ * resolved assistant error, then the result-level / last-assistant error.
+ * When the attempt resolved with a concrete stop reason, ONLY that attempt's
+ * diagnostic counts (stale prior history must never trigger a retry). Returns
+ * undefined when nothing matches the WebSocket-class patterns.
+ */
+function websocket_failure_message(options: {
+	result: SubAgentResult;
+	attempt: SubagentPromptAttempt;
+	promptError?: unknown;
+}): string | undefined {
+	const { result, attempt, promptError } = options;
+	if (promptError !== undefined) {
+		if (!is_transient_transport_death(promptError)) return undefined;
+		return extractFailureMessage(promptError);
+	}
+	if (attempt.resolvedStopReason !== undefined) {
+		return is_transient_transport_death(attempt.resolvedFailureMessage)
+			? attempt.resolvedFailureMessage
+			: undefined;
+	}
+	for (const candidate of [result.errorMessage, lastAssistantErrorMessage(result.messages)]) {
+		if (is_transient_transport_death(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/**
+ * Prepare a mid-stream WebSocket continuation: drop only the dead trailing
+ * failed assistant attempt from the result cache and the persisted session
+ * branch, then resync the live agent transcript from the trimmed branch.
+ * Unlike `rollback_failed_prompt_attempt` this NEVER rewinds the session
+ * anchor or truncates accumulated messages/usage — a mid-stream drop happens
+ * after real work was emitted and persisted, so the continuation resumes from
+ * the current leaf and the caller re-prompts with a short continue directive.
+ */
+export function prepare_midstream_websocket_continuation(
+	result: SubAgentResult,
+	session: SubagentRetrySession,
+): void {
+	while (result.messages.length > 0) {
+		const last = result.messages[result.messages.length - 1];
+		if (last.role === "assistant" && last.stopReason === "error") {
+			result.messages.pop();
+		} else {
+			break;
+		}
+	}
+	trim_trailing_assistant_messages(session.sessionManager);
+	session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
+	result.stopReason = undefined;
+	result.errorMessage = undefined;
+}
+
+/**
+ * Bounded mid-stream WebSocket continuation. The socket died AFTER the child
+ * emitted visible output or ran tools, so the pre-response replay path above
+ * declined (replaying the original task could duplicate emitted work).
+ * Instead: keep every persisted turn, drop only the dead failed assistant
+ * attempt, wait out the same abortable backoff schedule, and re-prompt once
+ * per attempt with `SUBAGENT_CONTINUE_PROMPT` ("continue from where you left
+ * off"). Shares the `MAX_SUBAGENT_WEBSOCKET_RETRIES` budget with the
+ * pre-response path; a successful prompt resets the budget exactly like the
+ * pre-response path does today.
+ */
+export async function decide_midstream_websocket_continuation(options: {
+	result: SubAgentResult;
+	attempt: SubagentPromptAttempt;
+	aborted: boolean;
+	websocketRetries: number;
+	signal?: AbortSignal;
+	session: SubagentRetrySession;
+	promptError?: unknown;
+	backoffMs?: number;
+}): Promise<PreResponseWebSocketRetryDecision> {
+	const { result, attempt, aborted, websocketRetries, signal, session, promptError } = options;
+	if (aborted || websocketRetries >= MAX_SUBAGENT_WEBSOCKET_RETRIES) return "skip";
+	// Pre-response owns the no-output case (full task replay); mid-stream
+	// continuation applies only once the attempt already did observable work.
+	if (!attempt.sawVisibleOrToolSideEffect) return "skip";
+	if (websocket_failure_message({ result, attempt, promptError }) === undefined) return "skip";
+	try {
+		await sleep_abortable(
+			options.backoffMs ?? websocket_retry_backoff_ms(websocketRetries),
+			signal,
+		);
+	} catch {
+		return "aborted";
+	}
+	if (signal?.aborted) return "aborted";
+	prepare_midstream_websocket_continuation(result, session);
+	return "retry";
+}
+
 /** Resume checkpoints may end with a partial/failed assistant turn. Move the leaf
  * to the last non-assistant entry so the next prompt starts from a valid turn.
  * This is resume-checkpoint cleanup only — in-run retries use
@@ -655,6 +738,8 @@ export interface SubAgentResult {
 	latestToolCall?: { name: string; args: Record<string, unknown> };
 	/** Stable member id for this subagent within a parent tool call. */
 	toolCallId?: string;
+	/** Number of transient-transport/http500 retries actually taken. */
+	retryCount?: number;
 	/**
 	 * Bounded chronological live buffer from the child session: the last
 	 * `SUBAGENT_LIVE_OUTPUT_MAX_ROWS` tool calls, thinking blocks, and assistant
@@ -665,8 +750,10 @@ export interface SubAgentResult {
 	 * SSOT formatters. One tool item per child tool call (keyed by
 	 * `toolCallId`), so running rows complete in place instead of stacking
 	 * duplicate Reading/Searching rows. Thinking items retain the child's
-	 * streamed reasoning without splitting the surrounding work burst. Updated
-	 * on every tool/thinking/text event; cleared at session start.
+	 * streamed reasoning; render.ts treats visible thinking as a chronological
+	 * Markdown sibling and hidden thinking as activity inside the work burst.
+	 * The buffer is updated on every tool/thinking/text event; cleared at session
+	 * start.
 	 */
 	liveItems?: SubagentLiveItem[];
 }
@@ -706,45 +793,6 @@ function is_legacy_model_registry(model_registry: ModelRegistry): boolean {
 	return (
 		!(model_registry as unknown as ModelRegistryRuntimeBridge).runtime &&
 		Boolean(legacy.authStorage || legacy.modelsJsonPath !== undefined)
-	);
-}
-
-const GENERIC_ABORT_PHRASES = [
-	"this operation was aborted",
-	"the operation was aborted",
-	"request was aborted",
-	"the signal was aborted",
-	"operation was aborted",
-];
-
-export function isGenericAbortMessage(message: string | undefined): boolean {
-	if (!message) return true;
-	const lower = message.toLowerCase();
-	return (
-		GENERIC_ABORT_PHRASES.some((phrase) => lower.includes(phrase)) ||
-		lower === "aborted" ||
-		lower === "abort"
-	);
-}
-
-/**
- * True when the message is one of pi-ai's generic stream-parser failures
- * ("Stream ended without finish_reason", "<provider> stream ended without a
- * terminal event", "Anthropic stream ended before message_stop", "OpenAI
- * Responses stream ended before a terminal response event"). pi-ai emits
- * these when the provider closes the SSE/event stream CLEANLY before a
- * terminal event: the thrown Error carries no `cause`, status, body, or event
- * data, so no underlying provider detail is recoverable from Ember-owned code
- * (we never patch upstream pi-ai). They are generic like abort messages and
- * must never shadow a specific provider/transport error captured earlier.
- */
-export function is_parser_stream_error(message: string | undefined): boolean {
-	if (!message) return false;
-	return (
-		/stream ended without finish_reason/i.test(message) ||
-		/stream ended without a terminal event/i.test(message) ||
-		/stream ended before message_stop/i.test(message) ||
-		/stream ended before a terminal response event/i.test(message)
 	);
 }
 
@@ -799,46 +847,6 @@ export function merge_failure_message(
 	return incoming;
 }
 
-const MAX_CAUSE_CHAIN_DEPTH = 8;
-
-/** Generic wrappers (aborts and parser-stream failures) add no provider detail. */
-function is_wrapper_generic(message: string | undefined): boolean {
-	return isGenericAbortMessage(message) || is_parser_stream_error(message);
-}
-
-/**
- * Extract the most useful failure message from a thrown error. Walks the full
- * Error.cause chain root-cause-first: a specific (non-generic, non-parser)
- * message anywhere in the chain wins, so a real provider/transport error
- * buried under pi-ai's generic parser wrapper surfaces instead of the
- * wrapper. When the whole chain is generic, keeps the outermost Error text
- * (never degrades to a stringified non-Error cause).
- */
-export function extractFailureMessage(error: unknown): string {
-	if (error === null || error === undefined) return "Unknown error";
-	const chain: unknown[] = [];
-	let current: unknown = error;
-	for (
-		let depth = 0;
-		depth < MAX_CAUSE_CHAIN_DEPTH && current !== null && current !== undefined;
-		depth++
-	) {
-		chain.push(current);
-		current = (current as { cause?: unknown }).cause;
-	}
-	for (let i = chain.length - 1; i >= 0; i--) {
-		const node = chain[i];
-		if (node instanceof Error && node.message && !is_wrapper_generic(node.message)) {
-			return node.message;
-		}
-	}
-	for (const node of chain) {
-		if (node instanceof Error && node.message) return node.message;
-	}
-	if (!(error instanceof Error)) return String(error);
-	return "Unknown error";
-}
-
 /**
  * Pull the last assistant `errorMessage` from the message stream. Providers
  * fold real failure reasons (HTTP status + body, auth errors, etc.) into the
@@ -875,6 +883,10 @@ export function resolve_failure_message(result: SubAgentResult): string | undefi
 	if (!isFailedResult(result)) return undefined;
 	const top = result.errorMessage;
 	const fromMessages = lastAssistantErrorMessage(result.messages);
+	const retry_suffix =
+		result.retryCount && result.retryCount > 0
+			? ` (after retrying for ${result.retryCount} ${result.retryCount === 1 ? "time" : "times"})`
+			: "";
 	let best: string | undefined;
 	if (failure_message_tier(top) === "specific") {
 		best = top;
@@ -884,14 +896,13 @@ export function resolve_failure_message(result: SubAgentResult): string | undefi
 		best = merge_failure_message(top, fromMessages);
 	}
 	if (best && failure_message_tier(best) !== "abort") {
-		return annotate_parser_stream_error(best);
+		return annotate_parser_stream_error(best) + retry_suffix;
 	}
-	if (result.stderr?.trim()) return result.stderr.trim();
+	if (result.stderr?.trim()) return result.stderr.trim() + retry_suffix;
 	const finalOutput = getFinalOutput(result.messages).trim();
-	if (finalOutput) return finalOutput;
+	if (finalOutput) return finalOutput + retry_suffix;
 	return undefined;
 }
-
 export interface SubAgentCheckpoint {
 	parentSessionId: string;
 	originToolCallId: string;
@@ -1043,11 +1054,12 @@ function note_live_text_delta(result: SubAgentResult, delta: string, openBlock =
 }
 
 /**
- * Retain a child reasoning block in the live buffer. Thinking does not create
- * a visible-text boundary: a later tool call stays in the same work burst.
- * `thinking_start` opens a new block, while repeated deltas append to the
- * current block, including after `isThinking` was already true from
- * `turn_start`. Returns true only when the published live buffer changes.
+ * Retain a child reasoning block in the live buffer. The buffer preserves the
+ * event order; render.ts applies the visible-thinking Markdown boundary or the
+ * hidden-thinking in-group work-burst behavior. `thinking_start` opens a new
+ * block, while repeated deltas append to the current block, including after
+ * `isThinking` was already true from `turn_start`. Returns true only when the
+ * published live buffer changes.
  */
 function note_live_thinking_delta(
 	result: SubAgentResult,
@@ -1061,8 +1073,9 @@ function note_live_thinking_delta(
 		trim_live_items(items);
 	}
 	const last = items[items.length - 1];
-	if (last?.kind !== "thinking" || delta.length === 0) return openBlock;
-	const next = last.text + delta;
+	const cleaned = strip_think_tags(delta);
+	if (last?.kind !== "thinking" || cleaned.length === 0) return openBlock;
+	const next = last.text + cleaned;
 	const bounded =
 		next.length > SUBAGENT_LIVE_TEXT_MAX_CHARS ? next.slice(0, SUBAGENT_LIVE_TEXT_MAX_CHARS) : next;
 	if (bounded === last.text) return false;
@@ -1388,16 +1401,17 @@ export async function runSubAgent(options: {
 		throw error;
 	}
 
-	try {
-		const session_options: Record<string, unknown> = {
-			cwd,
-			model,
-			thinkingLevel,
-			resourceLoader,
-			tools,
-			sessionManager,
-			settingsManager,
-		};
+		let total_retries = 0;
+		try {
+			const session_options: Record<string, unknown> = {
+				cwd,
+				model,
+				thinkingLevel,
+				resourceLoader,
+				tools,
+				sessionManager,
+				settingsManager,
+			};
 		// Pi 0.80.10+ exposes the canonical ModelRuntime via the registry facade;
 		// pass it through so child sessions inherit every registered provider,
 		// credential source, and custom models.json entry. Pi 0.80.6 has no
@@ -1489,12 +1503,11 @@ export async function runSubAgent(options: {
 				}
 			}
 		});
-
-		let length_continues = 0;
-		let pending_task = task;
-		let websocket_retries = 0;
-		let http500_retried = false;
-		while (true) {
+			let length_continues = 0;
+			let pending_task = task;
+			let websocket_retries = 0;
+			let http500_retried = false;
+			while (true) {
 			// Re-ensure the checkpoint dir AND refresh the durable live marker
 			// before each prompt so a concurrent prune (session_shutdown of a
 			// foreign parent session) cannot leave the SDK's next run-record write
@@ -1545,9 +1558,32 @@ export async function runSubAgent(options: {
 				});
 				if (websocket_retry === "retry") {
 					websocket_retries++;
+					total_retries++;
 					continue;
 				}
 				if (websocket_retry === "aborted") {
+					aborted = true;
+					break;
+				}
+				// Thrown mid-stream socket death: the run already emitted real
+				// work, so keep it and resume with a continuation prompt instead
+				// of terminating the subagent stream.
+				const midstream_retry = await decide_midstream_websocket_continuation({
+					result,
+					attempt: active_prompt_attempt,
+					aborted,
+					websocketRetries: websocket_retries,
+					signal: combinedSignal,
+					session,
+					promptError: prompt_error,
+				});
+				if (midstream_retry === "retry") {
+					websocket_retries++;
+					total_retries++;
+					pending_task = SUBAGENT_CONTINUE_PROMPT;
+					continue;
+				}
+				if (midstream_retry === "aborted") {
 					aborted = true;
 					break;
 				}
@@ -1564,9 +1600,30 @@ export async function runSubAgent(options: {
 			});
 			if (websocket_retry === "retry") {
 				websocket_retries++;
+				total_retries++;
 				continue;
 			}
 			if (websocket_retry === "aborted") {
+				aborted = true;
+				break;
+			}
+			// Resolved mid-stream socket death (failed assistant error after real
+			// work): same bounded continuation policy as the thrown case above.
+			const midstream_retry = await decide_midstream_websocket_continuation({
+				result,
+				attempt: active_prompt_attempt,
+				aborted,
+				websocketRetries: websocket_retries,
+				signal: combinedSignal,
+				session,
+			});
+			if (midstream_retry === "retry") {
+				websocket_retries++;
+				total_retries++;
+				pending_task = SUBAGENT_CONTINUE_PROMPT;
+				continue;
+			}
+			if (midstream_retry === "aborted") {
 				aborted = true;
 				break;
 			}
@@ -1588,6 +1645,7 @@ export async function runSubAgent(options: {
 			});
 			if (http500_retry === "retry") {
 				http500_retried = true;
+				total_retries++;
 				continue;
 			}
 			if (http500_retry === "aborted") {
@@ -1685,6 +1743,7 @@ export async function runSubAgent(options: {
 	// "This operation was aborted" / "Request was aborted" string. Only run
 	// when the run actually failed — a successful stop with no errorMessage
 	// must not be force-marked failed.
+	result.retryCount = total_retries;
 	if (timeoutController?.signal.aborted && !parentSignal?.aborted) {
 		const has_real_error =
 			Boolean(result.errorMessage && !isGenericAbortMessage(result.errorMessage)) ||

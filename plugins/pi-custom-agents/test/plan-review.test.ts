@@ -42,12 +42,35 @@ describe("should_show_plan_review", () => {
 		expect(should_show_plan_review("## Task\n\nAdd caching.")).toBe(true);
 	});
 
+	test("accepts natural markdown plan sections the ARCHITECT_PROMPT produces", () => {
+		// The plan prompt no longer forces labeled-line templates; the model
+		// emits natural markdown sections. The detector must recognize them so
+		// the Plan Review fires after a quiz-then-plan turn.
+		expect(should_show_plan_review("## Summary\n\nShip the guard.")).toBe(true);
+		expect(should_show_plan_review("## Problems\n\n- X is broken")).toBe(true);
+		expect(should_show_plan_review("## Behavior\n\nNew flow.")).toBe(true);
+		expect(should_show_plan_review("## Modules\n\n- Module 1\n- Module 2")).toBe(true);
+		expect(should_show_plan_review("### Module 1: caching\n\nAdd cache.")).toBe(true);
+		expect(should_show_plan_review("## Investigation\n\nFound X at file:line.")).toBe(true);
+		expect(should_show_plan_review("## Test Plan\n\nRun t.gate.sh.")).toBe(true);
+		expect(should_show_plan_review("## Working Tree\n\nClean.")).toBe(true);
+		expect(should_show_plan_review("## Acceptance Criteria\n\n- Guard fires")).toBe(true);
+		expect(should_show_plan_review("## Plan\n\nDo the thing.")).toBe(true);
+		expect(should_show_plan_review("Module 1: caching\n\nAdd cache.")).toBe(true);
+	});
+
 	test("rejects greetings and empty plan text", () => {
 		expect(should_show_plan_review("")).toBe(false);
 		expect(should_show_plan_review("Hi — what would you like to work on?")).toBe(false);
 		expect(
 			should_show_plan_review(
 				"The user sent a simple greeting.\n\nHi — what would you like to work on?",
+			),
+		).toBe(false);
+		// A plain prose answer with no plan structure must not trigger the review.
+		expect(
+			should_show_plan_review(
+				"I looked at the code. The function is fine as-is, no changes needed.",
 			),
 		).toBe(false);
 	});

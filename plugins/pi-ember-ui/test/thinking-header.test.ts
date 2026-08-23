@@ -30,10 +30,10 @@ import {
 	dispatch_gradient_tick,
 	gradient_clock_is_idle,
 	gradient_reason_active,
-	set_gradient_render_request,
 	shutdown_gradient_clock,
 	stop_all_gradient_animation,
 } from "../gradient.ts";
+import { bind_render_intent, reset_render_intent } from "../render-intent.ts";
 import { getSharedRenderer } from "../../pi-compact-tools/shared-renderer.ts";
 import { sync_compact_group_flags } from "../../pi-compact-tools/group-flags.ts";
 import {
@@ -422,7 +422,7 @@ describe("thinking header visibility", () => {
 	test("gradient tick schedules render through thinking host invalidate", () => {
 		const render_calls: number[] = [];
 		const mock_tui = { requestRender: () => render_calls.push(1) };
-		set_gradient_render_request(() => mock_tui.requestRender());
+		bind_render_intent(() => mock_tui.requestRender());
 		bind_thinking_status_tick_host_resolver(() => "widget");
 		bind_thinking_status_tick_should_paint(() => thinking_status_should_show() || isGroupThinkingChildActive());
 		// The host invalidate only marks the clock dirty; dispatch_gradient_tick
@@ -433,11 +433,15 @@ describe("thinking header visibility", () => {
 		arm_pre_token_thinking_status();
 		try {
 			expect(thinking_status_should_show()).toBe(true);
+			// arm_pre_token_thinking_status already fired one render via
+			// refresh_thinking_status → request_render(). Clear the counter;
+			// the gradient tick dispatch must fire exactly one more.
+			render_calls.length = 0;
 			dispatch_gradient_tick();
 			expect(render_calls.length).toBe(1);
 		} finally {
 			unbind_thinking_status_hosts();
-			set_gradient_render_request(undefined);
+			reset_render_intent();
 			setAgentRunPending(false);
 			setUserTurnCommitted(false);
 		}
@@ -801,6 +805,13 @@ describe("thinking header visibility", () => {
 			state: owner_state,
 		};
 		try {
+			const child_ctx = {
+				args: {},
+				toolCallId: "settled-child",
+				invalidate: () => {},
+				state: {} as Record<string, any>,
+			};
+			// Two calls form a real compact group; a single call is a standalone row.
 			renderer.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
 			renderer.renderResult(
 				"bash",
@@ -809,6 +820,15 @@ describe("thinking header visibility", () => {
 				{ expanded: false, isPartial: false },
 				theme,
 				{ ...owner_ctx, isError: false },
+			);
+			renderer.renderCall("bash", { command: "npm run build" }, theme, child_ctx);
+			renderer.renderResult(
+				"bash",
+				{ command: "npm run build" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...child_ctx, isError: false },
 			);
 			renderer.settleAllGroups();
 			arm_pre_token_thinking_status();
@@ -819,7 +839,7 @@ describe("thinking header visibility", () => {
 			expect(resolve_thinking_status_host()).toBe(null);
 			let row = owner_state.callText?.text?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
 			expect(row).not.toContain("Thinking");
-			expect(row).toContain("npm test");
+			expect(row).toContain("npm");
 			// A real thinking stream arms the in-group lane as the ONE surface.
 			renderer.noteThinking();
 			sync_compact_group_flags(renderer);
@@ -1092,7 +1112,10 @@ describe("reconcile_thinking_wait_ui", () => {
 		const theme = { fg: (t: string, s: string) => `[${t}:${s}]`, bold: (s: string) => s };
 		const owner_state: Record<string, any> = {};
 		const owner_ctx = makeContext("aw-owner", owner_state);
+		const child_state: Record<string, any> = {};
+		const child_ctx = makeContext("aw-child", child_state);
 		try {
+			// Two calls form a real compact group; one call never arms an in-group lane.
 			renderer.renderCall("bash", { command: "git tag" }, theme, owner_ctx);
 			renderer.renderResult(
 				"bash",
@@ -1101,6 +1124,15 @@ describe("reconcile_thinking_wait_ui", () => {
 				{ expanded: false, isPartial: false },
 				theme,
 				{ ...owner_ctx, isError: false },
+			);
+			renderer.renderCall("bash", { command: "git push" }, theme, child_ctx);
+			renderer.renderResult(
+				"bash",
+				{ command: "git push" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...child_ctx, isError: false },
 			);
 			renderer.settleAllGroups();
 			renderer.armInGroupThinking();
@@ -1139,7 +1171,10 @@ describe("reconcile_thinking_wait_ui", () => {
 		const theme = { fg: (t: string, s: string) => `[${t}:${s}]`, bold: (s: string) => s };
 		const owner_state: Record<string, any> = {};
 		const owner_ctx = makeContext("div-owner", owner_state);
+		const child_state: Record<string, any> = {};
+		const child_ctx = makeContext("div-child", child_state);
 		try {
+			// Two calls form a real compact group so the in-group lane can paint.
 			renderer.renderCall("bash", { command: "git tag" }, theme, owner_ctx);
 			renderer.renderResult(
 				"bash",
@@ -1148,6 +1183,15 @@ describe("reconcile_thinking_wait_ui", () => {
 				{ expanded: false, isPartial: false },
 				theme,
 				{ ...owner_ctx, isError: false },
+			);
+			renderer.renderCall("bash", { command: "git push" }, theme, child_ctx);
+			renderer.renderResult(
+				"bash",
+				{ command: "git push" },
+				{ content: [{ type: "text", text: "ok" }] },
+				{ expanded: false, isPartial: false },
+				theme,
+				{ ...child_ctx, isError: false },
 			);
 			renderer.settleAllGroups();
 			renderer.armInGroupThinking();

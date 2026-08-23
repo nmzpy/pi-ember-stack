@@ -8,6 +8,7 @@ import { extractGitHub } from "./github-extract.ts";
 import { extractPDFToMarkdown, isPDF } from "./pdf-extract.ts";
 import { extractRSCContent } from "./rsc-extract.ts";
 import { fetchRemoteUrl, type Lookup, validateRemoteUrl } from "./ssrf-protection.ts";
+import { retry_transient_transport_operation } from "../pi-custom-agents/subagent/extensions/transport-policy.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
 import {
 	extractVideo,
@@ -135,13 +136,21 @@ async function extractWithJinaReader(
 
 	try {
 		await validateRemoteUrl(url, { allowRanges: loadSsrfAllowRanges(), lookup });
-		const res = await fetch(jinaUrl, {
-			headers: {
-				Accept: "text/markdown",
-				"X-No-Cache": "true",
-			},
-			signal: AbortSignal.any([AbortSignal.timeout(JINA_TIMEOUT_MS), ...(signal ? [signal] : [])]),
-		});
+		const jinaSignal = AbortSignal.any([
+			AbortSignal.timeout(JINA_TIMEOUT_MS),
+			...(signal ? [signal] : []),
+		]);
+		const res = await retry_transient_transport_operation(
+			() =>
+				fetch(jinaUrl, {
+					headers: {
+						Accept: "text/markdown",
+						"X-No-Cache": "true",
+					},
+					signal: jinaSignal,
+				}),
+			{ signal: jinaSignal },
+		);
 
 		if (!res.ok) {
 			activityMonitor.logComplete(activityId, res.status);

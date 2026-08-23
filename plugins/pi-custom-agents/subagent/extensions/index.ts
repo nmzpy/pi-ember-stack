@@ -77,12 +77,12 @@ interface CustomUi {
 
 import { getSharedRenderer } from "../../../pi-compact-tools/index.ts";
 import {
-	requestGradientRender,
-	requestTuiRender,
-	subscribeGradientTick,
-	syncThinkingGradientClock,
-	unsubscribeGradientTick,
-} from "../../../pi-ember-ui/index.ts";
+	request_gradient_render as requestGradientRender,
+	subscribe_gradient_tick as subscribeGradientTick,
+	unsubscribe_gradient_tick as unsubscribeGradientTick,
+} from "../../../pi-ember-ui/gradient.ts";
+import { request_render } from "../../../pi-ember-ui/render-intent.ts";
+import { sync_thinking_gradient_clock as syncThinkingGradientClock } from "../../../pi-ember-ui/index.ts";
 import {
 	isThinkingBlocksHidden,
 	setGroupReopenableActive,
@@ -763,7 +763,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		promptGuidelines: [
 			"Use subagent to delegate work that would flood the main context with search results or file contents.",
 			"Modes: single {agent, task}, parallel {tasks: [...]} (max 8, 4 concurrent), chain {chain: [...]} (sequential with {previous}).",
-			"Bundled agents: Scout (fast recon), Coder (implementation). Coder's `Todo` list is child-session-local: use ids from its own `create`, or an exact `task` subject; call `list` only when needed.",
+			"Bundled agents: Scout (fast recon), Coder (implementation).",
 			"Agent names are case-insensitive and surrounding whitespace is ignored.",
 			"Use /subagent to list all available agents or /subagent <name> for agent details.",
 		],
@@ -1704,7 +1704,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					invalidate: () => container.invalidate(),
 					handleInput: (data: string) => {
 						selectList.handleInput(data);
-						requestTuiRender();
+						request_render();
 					},
 				};
 			},
@@ -1758,7 +1758,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							if (currentIndex > 0) {
 								currentIndex--;
 								viewer.setThread(current[currentIndex], makeCallbacks());
-								requestTuiRender();
+								request_render();
 							}
 						},
 						onNext: () => {
@@ -1766,7 +1766,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							if (currentIndex < current.length - 1) {
 								currentIndex++;
 								viewer.setThread(current[currentIndex], makeCallbacks());
-								requestTuiRender();
+								request_render();
 							}
 						},
 						hasPrev: currentIndex > 0,
@@ -1801,7 +1801,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					}
 					currentIndex = Math.min(currentIndex, current.length - 1);
 					viewer.setThread(current[currentIndex], makeCallbacks());
-					requestTuiRender();
+					request_render();
 				});
 
 				return {
@@ -1819,7 +1819,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							return;
 						}
 						viewer.handleInput(data);
-						requestTuiRender();
+						request_render();
 					},
 					dispose: () => {
 						cleanup();
@@ -1841,7 +1841,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					if (idx >= 0) {
 						currentIndex = idx;
 						viewer.setThread(getThreads()[currentIndex], makeCallbacks());
-						requestTuiRender();
+						request_render();
 					}
 				}
 			},

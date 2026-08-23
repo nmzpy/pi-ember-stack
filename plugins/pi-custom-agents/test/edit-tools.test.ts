@@ -1,13 +1,22 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
 	build_full_tools,
 	DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS,
+	is_hashedit_editing_owner,
 	OPENAI_CODEX_PROVIDER,
+	resolve_parent_editing_tool_name,
 	resolve_patch_tool_name,
+	set_hashedit_owns_editing,
 	SUBAGENT_RESUME_TOOL_NAME,
 	uses_apply_patch_provider,
 	with_provider_patch_tool,
 } from "../edit-tools.ts";
+
+afterEach(() => {
+	// The hashedit ownership flag lives on globalThis (jiti-safe) — reset it so
+	// tests never leak state into each other.
+	set_hashedit_owns_editing(false);
+});
 
 describe("edit-tools provider resolution", () => {
 	test("openai-codex uses apply_patch", () => {
@@ -108,5 +117,45 @@ describe("edit-tools provider resolution", () => {
 				OPENAI_CODEX_PROVIDER,
 			),
 		).not.toContain("edit");
+	});
+});
+
+describe("hashedit parent editing-tool ownership", () => {
+	test("flag defaults to false and round-trips", () => {
+		expect(is_hashedit_editing_owner()).toBe(false);
+		set_hashedit_owns_editing(true);
+		expect(is_hashedit_editing_owner()).toBe(true);
+	});
+
+	test("build_full_tools exposes replace instead of edit when hashedit owns editing", () => {
+		set_hashedit_owns_editing(true);
+		const devin = build_full_tools("devin");
+		expect(devin).toContain("replace");
+		expect(devin).not.toContain("edit");
+		expect(devin).not.toContain("apply_patch");
+		// undo_last_replace is registered by the plugin, not advertised in mode lists.
+		expect(devin).not.toContain("undo_last_replace");
+	});
+
+	test("codex keeps apply_patch even when hashedit owns editing", () => {
+		set_hashedit_owns_editing(true);
+		const codex = build_full_tools(OPENAI_CODEX_PROVIDER);
+		expect(codex).toContain("apply_patch");
+		expect(codex).not.toContain("edit");
+		expect(codex).not.toContain("replace");
+		expect(resolve_parent_editing_tool_name(OPENAI_CODEX_PROVIDER)).toBe("apply_patch");
+	});
+
+	test("subagent child lists keep native edit regardless of the flag", () => {
+		set_hashedit_owns_editing(true);
+		// Child sessions never load pi-ember-hashedit, so with_provider_patch_tool
+		// must stay on resolve_patch_tool_name — a `replace` name would not resolve
+		// in the child registry.
+		const tools = with_provider_patch_tool(
+			[...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS],
+			"opencode-go",
+		);
+		expect(tools).toContain("edit");
+		expect(tools).not.toContain("replace");
 	});
 });

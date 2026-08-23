@@ -3,10 +3,11 @@
  *
  * Pi natively loads the project-root AGENTS.md into the system prompt. This
  * module discovers nested AGENTS.md files under the session cwd (project
- * root) as tools touch their directories, and injects their instructions
- * into every LLM request as ONE virtual custom message so instructions
- * discovered mid-turn (after a tool call) are available to the very next
- * LLM request — without persisting repeated copies in the session.
+ * root) as tools touch their directories, and appends their instructions
+ * to the model's context EXACTLY ONCE at discovery time via a persisted
+ * hidden `sendMessage` (`customType: "pi-agents-md-instructions"`,
+ * `display: false`). The message participates in session history and LLM
+ * context without re-injection on subsequent user messages or requests.
  *
  * Activation is shallow -> deep for each directory walk: when a tool targets
  * `root/a/b/file.ts`, the loader walks `root`, `root/a`, `root/a/b` and
@@ -32,7 +33,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parse_patch } from "../pi-ember-applypatch/parse.ts";
 
@@ -49,15 +49,6 @@ type AgentsMdRecord = {
 	contentHash: string;
 	content: string;
 	order: number;
-};
-
-/** Structural mirror of pi-coding-agent's CustomMessage (not package-exported). */
-type AgentsMdContextMessage = {
-	role: "custom";
-	customType: string;
-	content: string;
-	display: boolean;
-	timestamp: number;
 };
 
 function isWindows(): boolean {
@@ -301,14 +292,21 @@ export function deriveToolPaths(toolName: string, input: Record<string, unknown>
 	}
 }
 
+/** Make the path-escape regex in `isConcretePathOperand` testable. */
+export { isConcretePathOperand as _isConcretePathOperand };
+
 export class AgentsMdLoader {
 	private root: string | undefined;
 	private records = new Map<string, AgentsMdRecord>();
 	private order: string[] = [];
 	private nextOrder = 0;
 	private pendingScans = new Map<string, Set<string>>();
-	/** Only ever inject the AGENTS.md context message once per session. */
-	private hasDeliveredContext = false;
+	/** Canonical posix-rel path → contentHash of the last delivered block. */
+	private delivered = new Map<string, string>();
+	/** Per-path content hash of delivered session history (resume seeding). */
+	private deliveredFromHistory = new Map<string, string>();
+	/** Callback to send a hidden message into session history. */
+	deliverFn: ((msg: { customType: string; content: string; display: boolean }) => void) | undefined;
 
 	get active(): boolean {
 		return this.root !== undefined;
@@ -328,7 +326,27 @@ export class AgentsMdLoader {
 	startSession(cwd: string): void {
 		this.shutdown();
 		this.root = canonicalRoot(cwd);
+		// Resume seeding: pre-populate delivered set from session history
+		// so previously-delivered files are not re-sent.
+		if (this.seedFn) {
+			const entries = this.seedFn();
+			for (const entry of entries) {
+				if (entry.role !== "custom" || entry.customType !== CONTEXT_CUSTOM_TYPE) continue;
+				const content = entry.content;
+				const pathMatch = /path="([^"]+)"/.exec(content);
+				if (!pathMatch) continue;
+				const posixPath = pathMatch[1];
+				// Hash the inner content (between the tags) to match the contentHash
+				// computed from the raw file by activateCandidate/refreshRecord.
+				const innerMatch = /^<agents_md path="[^"]+">\n(.*)\n<\/agents_md>$/s.exec(content);
+				const innerContent = innerMatch?.[1] ?? content;
+				this.deliveredFromHistory.set(posixPath, hashContent(innerContent));
+			}
+		}
 	}
+
+	/** Set the session-entry scan function for resume seeding (called by installAgentsMdHooks). */
+	seedFn: (() => Array<{ role: string; customType: string; content: string }>) | undefined;
 
 	shutdown(): void {
 		this.root = undefined;
@@ -336,7 +354,8 @@ export class AgentsMdLoader {
 		this.order = [];
 		this.nextOrder = 0;
 		this.pendingScans.clear();
-		this.hasDeliveredContext = false;
+		this.delivered.clear();
+		this.deliveredFromHistory.clear();
 	}
 
 	noteToolCall(toolCallId: string, toolName: string, input: Record<string, unknown>): void {
@@ -364,47 +383,32 @@ export class AgentsMdLoader {
 			this.pendingScans.delete(toolCallId);
 		}
 		this.pruneMissing();
+		this.deliverNewFiles();
 	}
 
 	/**
-	 * Build the single virtual context message representing all active nested
-	 * AGENTS.md files, or undefined when none are active, the message has
-	 * already been delivered this session, or the incoming messages already
-	 * carry the marker.
+	 * Deliver new or changed files to the model context via persisted
+	 * sendMessage. One sendMessage per file, in activation order (shallow→deep).
+	 * A file is delivered when its contentHash differs from the last delivered
+	 * hash for that path — including files pre-seeded from a resumed session.
 	 */
-	buildContextMessage(messages: AgentMessage[]): AgentMessage | undefined {
-		if (!this.root || this.hasDeliveredContext || this.order.length === 0) return undefined;
-		const sections: string[] = [];
+	deliverNewFiles(): void {
+		if (!this.root || !this.deliverFn) return;
 		for (const p of this.order) {
 			const record = this.records.get(p);
 			if (!record) continue;
-			sections.push(`<agents_md path="${record.relativePosixPath}">\n${record.content}\n</agents_md>`);
+			// Skip if already delivered this session or pre-seeded from resume history.
+			const prev = this.delivered.get(record.relativePosixPath);
+			const historical = this.deliveredFromHistory.get(record.relativePosixPath);
+			if (prev === record.contentHash || historical === record.contentHash) continue;
+			const block = `<agents_md path="${record.relativePosixPath}">\n${record.content}\n</agents_md>`;
+			this.deliverFn({
+				customType: CONTEXT_CUSTOM_TYPE,
+				content: block,
+				display: false,
+			});
+			this.delivered.set(record.relativePosixPath, record.contentHash);
 		}
-		const freshContent = sections.length > 0 ? sections.join("\n\n") : undefined;
-		if (freshContent === undefined) return undefined;
-		// If an existing marker message is already in the conversation (e.g.
-		// from a resumed session), do not re-inject and do not re-paste the
-		// instructions on later user re-queries. The AGENTS.md instructions are
-		// delivered exactly once per session.
-		for (const message of messages) {
-			if (
-				message.role === "custom" &&
-				"customType" in message &&
-				message.customType === CONTEXT_CUSTOM_TYPE
-			) {
-				this.hasDeliveredContext = true;
-				return undefined;
-			}
-		}
-		this.hasDeliveredContext = true;
-		const message: AgentsMdContextMessage = {
-			role: "custom",
-			customType: CONTEXT_CUSTOM_TYPE,
-			content: freshContent,
-			display: false,
-			timestamp: Date.now(),
-		};
-		return message as AgentMessage;
 	}
 
 	/** Bash operands resolve against the extracted cd base (itself root-resolved). */
@@ -497,6 +501,8 @@ export class AgentsMdLoader {
 	}
 
 	private dropRecord(candidate: string): void {
+		const record = this.records.get(candidate);
+		if (record) this.delivered.delete(record.relativePosixPath);
 		this.records.delete(candidate);
 		const index = this.order.indexOf(candidate);
 		if (index >= 0) this.order.splice(index, 1);
@@ -513,16 +519,46 @@ export class AgentsMdLoader {
 const loader = new AgentsMdLoader();
 
 /**
- * Register the session/tool/context hooks on the given ExtensionAPI. The
- * loader is session-scoped: `session_start` captures the project root from
- * `ctx.cwd`; `session_shutdown` clears all state. Pi invokes the cached
- * extension factory with a FRESH ExtensionAPI after /resume, /new, and /fork,
- * and handlers registered on the prior API are disposed with it — so hooks
- * must be registered on every factory invocation (never guarded by a
- * module-global once flag). The singleton loader remains safe because
- * `session_start` resets it and `session_shutdown` clears it.
+ * Register the session/tool hooks on the given ExtensionAPI. The loader is
+ * session-scoped: `session_start` captures the project root from `ctx.cwd`
+ * and seeds the delivered-set from session history; `session_shutdown` clears
+ * all state. Pi invokes the cached extension factory with a FRESH
+ * ExtensionAPI after /resume, /new, and /fork, and handlers registered on
+ * the prior API are disposed with it — so hooks must be registered on every
+ * factory invocation (never guarded by a module-global once flag). The
+ * singleton loader remains safe because `session_start` resets it and
+ * `session_shutdown` clears it.
  */
 export function installAgentsMdHooks(pi: ExtensionAPI): void {
+	// Store the sendMessage callback for discovery-time delivery.
+	loader.deliverFn = (msg) => {
+		pi.sendMessage(msg);
+	};
+
+	// Seed function: scan session history for previously-delivered AGENTS.md
+	// custom messages so a resumed session does not re-deliver them.
+	loader.seedFn = () => {
+		try {
+			const entries = (pi as unknown as { ctx?: { sessionManager?: { getEntries: () => unknown[] } } })
+				.ctx?.sessionManager?.getEntries();
+			if (!entries) return [];
+			const result: Array<{ role: string; customType: string; content: string }> = [];
+			for (const entry of entries) {
+				const e = entry as { type?: string; customType?: string; content?: string; role?: string };
+				if (e.type === "custom_message" && e.customType === CONTEXT_CUSTOM_TYPE) {
+					result.push({
+						role: "custom",
+						customType: CONTEXT_CUSTOM_TYPE,
+						content: e.content ?? "",
+					});
+				}
+			}
+			return result;
+		} catch {
+			return [];
+		}
+	};
+
 	pi.on("session_start", (_event, ctx) => {
 		loader.startSession(ctx.cwd);
 	});
@@ -539,12 +575,5 @@ export function installAgentsMdHooks(pi: ExtensionAPI): void {
 	pi.on("tool_execution_end", (event) => {
 		if (!loader.active) return;
 		loader.noteToolExecutionEnd(event.toolCallId);
-	});
-
-	pi.on("context", (event) => {
-		if (!loader.active) return undefined;
-		const message = loader.buildContextMessage(event.messages);
-		if (!message) return undefined;
-		return { messages: [...event.messages, message] };
 	});
 }

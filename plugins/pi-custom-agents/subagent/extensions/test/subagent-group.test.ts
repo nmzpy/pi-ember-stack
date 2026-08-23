@@ -113,6 +113,29 @@ describe("SubagentGroupRenderer", () => {
 		expect(should_keep_existing_subagent_results(live, stale)).toBe(true);
 	});
 
+	test("register preserves a current partial over a stale shared-buffer snapshot", () => {
+		const renderer = getSubagentGroupRenderer();
+		renderer.resetForSession();
+
+		const liveItems = [{ kind: "tool", row: { name: "read", args: {}, completed: false } }] as any;
+		const current = {
+			...makeResult("Coder A", -1),
+			liveItems,
+			latestToolCall: { name: "grep", args: { pattern: "flow" } },
+		};
+		const stale = {
+			...makeResult("Coder A", -1),
+			liveItems,
+			latestToolCall: { name: "read", args: { path: "old.ts" } },
+		};
+
+		renderer.register("call", { agent: "Coder", task: "one" }, [current]);
+		renderer.register("call", { agent: "Coder", task: "one" }, [stale]);
+
+		expect(renderer.getRecord("call")?.results).toEqual([current]);
+		expect(should_keep_existing_subagent_results([current], [stale])).toBe(true);
+	});
+
 	test("rebuild preserves finishing over an empty live snapshot", () => {
 		const renderer = getSubagentGroupRenderer();
 		renderer.resetForSession();

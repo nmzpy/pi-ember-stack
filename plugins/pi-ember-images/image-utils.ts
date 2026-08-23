@@ -2,10 +2,11 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { getCapabilities, getImageDimensions } from "@earendil-works/pi-tui";
+import { MUTED_MESSAGE_BG } from "../pi-ember-ui/mode-colors.ts";
 import { compressAttachment } from "./compress.ts";
 import type { AttachmentStore } from "./store.ts";
 import {
-	format_image_fallback_label,
+	format_image_styled_fallback_label,
 	IMAGE_PLACEHOLDER_PATTERN,
 	type ImageAttachment,
 	type ImageContent,
@@ -341,7 +342,7 @@ export function replaceImagePlaceholdersWithFallbackLabels(
 	for (const attachment of attachments) {
 		output = output
 			.split(attachment.placeholder)
-			.join(format_image_fallback_label(attachment.id, attachment.dimensions));
+			.join(format_image_styled_fallback_label(attachment.id, attachment.dimensions, MUTED_MESSAGE_BG));
 	}
 	return output;
 }

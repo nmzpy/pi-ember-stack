@@ -1,5 +1,6 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { retry_transient_transport_operation } from "../pi-custom-agents/subagent/extensions/transport-policy.ts";
 
 const DEFAULT_MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -28,6 +29,8 @@ interface ParsedCidr {
 interface FetchRemoteOptions extends ValidationOptions {
 	fetch?: Fetch;
 	maxRedirects?: number;
+	/** Override the canonical retry backoff (test seam); canonical schedule when omitted. */
+	retryBackoffMs?: number;
 }
 
 async function defaultLookup(hostname: string): Promise<LookupAddress[]> {
@@ -83,7 +86,13 @@ export async function fetchRemoteUrl(
 	let requestInit = init;
 
 	for (let redirects = 0; redirects <= maxRedirects; redirects++) {
-		const response = await fetchImpl(current, { ...requestInit, redirect: "manual" });
+		const response = await retry_transient_transport_operation(
+			() => fetchImpl(current, { ...requestInit, redirect: "manual" }),
+			{
+				signal: init.signal instanceof AbortSignal ? init.signal : undefined,
+				backoffMs: options.retryBackoffMs,
+			},
+		);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 
 		const location = response.headers.get("location");

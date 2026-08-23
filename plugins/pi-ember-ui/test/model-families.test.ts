@@ -269,6 +269,21 @@ describe("build_model_families", () => {
 		expect(families[0].efforts).toEqual(["low", "medium", "high", "xhigh"]);
 	});
 
+	test("promotes Google Vertex reasoning model without thinkingLevelMap to kind thinking", () => {
+		const families = build_model_families([
+			{
+				provider: "google-vertex",
+				id: "gemini-3.7-flash",
+				name: "Gemini 3.7 Flash",
+				reasoning: true,
+			},
+		]);
+		expect(families).toHaveLength(1);
+		expect(families[0].kind).toBe("thinking");
+		expect(families[0].displayName).toBe("Gemini 3.7 Flash");
+		expect(families[0].efforts).toEqual(["minimal", "low", "medium", "high"]);
+	});
+
 	test("baked-variant singleton with reasoning does not become thinking family", () => {
 		const families = build_model_families(
 			[

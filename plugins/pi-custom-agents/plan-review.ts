@@ -10,10 +10,21 @@
 
 import type { QuizQuestion } from "./quiz-tool.ts";
 
-/** Labeled `Goal:` / `Task:` lines or the plan-mode `## Task` section header. */
+/** Labeled `Goal:` / `Task:` lines (legacy labeled-line plans). */
 const PLAN_GOAL_LABEL = /^\s*Goal\s*:/im;
 const PLAN_TASK_LABEL = /^\s*Task\s*:/im;
-const PLAN_TASK_SECTION = /^\s*##\s+Task\b/im;
+/** Labeled `Module N:` line (no markdown header). */
+const PLAN_MODULE_LABEL = /^\s*Module\s+\d\s*:/im;
+/**
+ * Markdown section headers the ARCHITECT_PROMPT plan structure produces.
+ * The plan prompt no longer forces labeled-line templates (AGENTS.md), so the
+ * model emits natural markdown sections: Task, Plan, Modules, Module N,
+ * Summary, Problems, Behavior, Investigation, Test Plan, Working Tree,
+ * Acceptance Criteria. Any one of these marks structured plan output, not
+ * casual chat. Gated to plan mode by the caller, so false positives are low.
+ */
+const PLAN_SECTION_HEADER =
+	/^\s*#{1,3}\s+(?:Task|Plan|Modules|Module\s+\d|Summary|Problems|Behavior|Investigation|Test\s+Plan|Working\s+Tree|Acceptance\s+Criteria)\b/im;
 
 export type PlanReviewAction =
 	| "implement"
@@ -94,7 +105,8 @@ export function should_show_plan_review(plan_text: string): boolean {
 	return (
 		PLAN_GOAL_LABEL.test(text) ||
 		PLAN_TASK_LABEL.test(text) ||
-		PLAN_TASK_SECTION.test(text)
+		PLAN_MODULE_LABEL.test(text) ||
+		PLAN_SECTION_HEADER.test(text)
 	);
 }
 

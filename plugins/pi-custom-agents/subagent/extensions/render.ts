@@ -21,6 +21,7 @@ import {
 import {
 	buildGroupStaticText,
 	formatCompactChildRow,
+	formatStandaloneCallRow,
 	format_compact_group_child_prefix,
 	groupBulletColorFromFlags,
 	statusBulletColor,
@@ -39,11 +40,6 @@ import {
 	THINKING_GRADIENT_PRESET,
 } from "../../../pi-ember-ui/thinking-status-render.ts";
 import {
-	format_todo_tree,
-	type TranscriptTask,
-	type TodoThemeLike,
-} from "../../../pi-ember-todo/render.ts";
-import {
 	getResultOutput,
 	isFailedResult,
 	resolve_failure_message,
@@ -60,7 +56,10 @@ import {
 
 export type { SubagentArgs };
 
-interface ThemeLike extends TodoThemeLike {}
+interface ThemeLike {
+	fg(tag: string, text: string): string;
+	bold(text: string): string;
+}
 
 /**
  * Width-aware truncating text for the latest-tool-call row under a running
@@ -78,10 +77,7 @@ export class SubagentToolText implements Component {
 		this.text = text;
 	}
 
-	setText(text: string): void {
-		this.text = text;
-	}
-
+	/** Required by Pi's public Component seam; the row has no render cache. */
 	invalidate(): void {}
 
 	render(width: number): string[] {
@@ -122,9 +118,9 @@ const SUBAGENT_TRAY_GAP = " "; // outer-branch slot for trailing Thinking/status
 const SUBAGENT_BRANCH_LAST = "\u2514"; // └
 
 /** Render the transient hidden-mode finalization row with Thinking's gradient. */
-function renderLiveFinishingRow(theme: ThemeLike): string {
+function renderLiveFinishingRow(theme: ThemeLike, treePrefix = `  ${SUBAGENT_BRANCH_LAST}`): string {
 	return (
-		theme.fg(SUBAGENT_TREE_COLOR, format_compact_group_child_prefix("last", "")) +
+		theme.fg(SUBAGENT_TREE_COLOR, treePrefix) +
 		renderLiveGradient("Finishing", THINKING_GRADIENT_PRESET)
 	);
 }
@@ -132,14 +128,15 @@ function renderLiveFinishingRow(theme: ThemeLike): string {
 type LiveSegment =
 	| { kind: "text"; text: string }
 	| { kind: "thinking"; text: string }
-	| { kind: "work"; rows: SubagentLiveToolRow[] }
-	| { kind: "todo"; row: SubagentLiveToolRow };
+	| { kind: "work"; rows: SubagentLiveToolRow[] };
 
 type TrayRow = {
 	body: string;
 	header: boolean;
-	/** Pipe-continuation padding row below an output segment (one row of separation). */
-	pad?: boolean;
+	/** Explicit outer-tree separator between two chronological segments. */
+	separator?: boolean;
+	/** Force the outer tray branch glyph instead of deriving it from the header index. */
+	outer?: typeof SUBAGENT_TRAY_PIPE | typeof SUBAGENT_TRAY_LAST | typeof SUBAGENT_TRAY_GAP;
 };
 
 /**
@@ -164,17 +161,9 @@ export function is_live_text_boundary(text: string): boolean {
 function buildLiveSegments(items: SubagentLiveItem[], showText = true): LiveSegment[] {
 	const segments: LiveSegment[] = [];
 	let burst: Extract<LiveSegment, { kind: "work" }> | null = null;
-	let pendingTodo: SubagentLiveToolRow | undefined;
 
 	function closeBurst(): void {
 		burst = null;
-	}
-
-	function flushTodo(): void {
-		if (pendingTodo) {
-			segments.push({ kind: "todo", row: pendingTodo });
-			pendingTodo = undefined;
-		}
 	}
 
 	function ensureBurst(): Extract<LiveSegment, { kind: "work" }> {
@@ -200,7 +189,6 @@ function buildLiveSegments(items: SubagentLiveItem[], showText = true): LiveSegm
 		if (item.kind === "text") {
 			if (!is_live_text_boundary(item.text)) continue;
 			closeBurst();
-			flushTodo();
 			if (showText) segments.push({ kind: "text", text: item.text });
 			continue;
 		}
@@ -209,25 +197,15 @@ function buildLiveSegments(items: SubagentLiveItem[], showText = true): LiveSegm
 			if (showText) {
 				if (!item.text.trim()) continue;
 				closeBurst();
-				flushTodo();
 				appendVisibleThinking(item.text);
 			} else {
-				flushTodo();
 				ensureBurst();
 			}
 			continue;
 		}
 
-		if (item.row.name === "todo") {
-			closeBurst();
-			pendingTodo = item.row;
-			continue;
-		}
-
-		flushTodo();
 		ensureBurst().rows.push(item.row);
 	}
-	flushTodo();
 	return segments;
 }
 
@@ -244,28 +222,18 @@ function liveRowToCall(row: SubagentLiveToolRow, index: number): CompactCall {
 }
 
 /**
- * Build a live work group whose visible children are the current wave only.
- * Same-name calls append without folding; a different tool name folds the
- * prior wave once every prior member has completed (the compact renderer's
- * "genuinely new tool wave" rule). The canonical `childAbsorbBefore` index
- * feeds `buildGroupStaticText`, so header + child formatting is SSOT.
+ * Build a live work group whose aggregate retains every record but whose
+ * visible child is always the latest tool call. This mirrors the main compact
+ * renderer's `appendToGroup` rule: every new call advances the canonical
+ * `childAbsorbBefore` boundary, including same-name and parallel calls.
  */
 function buildLiveGroup(rows: SubagentLiveToolRow[]): DiscoveryGroup {
 	const records = rows.map(liveRowToCall);
-	let childAbsorbBefore = 0;
-	for (let i = 1; i < records.length; i++) {
-		const priorComplete = records.slice(childAbsorbBefore, i).every((r) => r._completed);
-		const current = records[i];
-		const previous = records[i - 1];
-		if (priorComplete && current && previous && current.name !== previous.name) {
-			childAbsorbBefore = i;
-		}
-	}
 	return {
 		records,
 		key: WORK_GROUP_KEY,
 		type: "work",
-		childAbsorbBefore,
+		childAbsorbBefore: Math.max(0, records.length - 1),
 	} as DiscoveryGroup;
 }
 
@@ -354,30 +322,7 @@ export class SubagentLiveOutputText implements Component {
 		this.isFinishing = isFinishing;
 	}
 
-	setItems(items: SubagentLiveItem[]): void {
-		this.items = items;
-	}
-
-	setRunning(running: boolean): void {
-		this.running = running;
-	}
-
-	setIsThinking(isThinking: boolean): void {
-		this.isThinking = isThinking;
-	}
-
-	setIsFinishing(isFinishing: boolean): void {
-		this.isFinishing = isFinishing;
-	}
-
-	setTreePrefix(treePrefix: string): void {
-		this.treePrefix = treePrefix;
-	}
-
-	setTheme(theme: ThemeLike): void {
-		this.theme = theme;
-	}
-
+	/** Required by Pi's public Component seam; the row has no render cache. */
 	invalidate(): void {}
 
 	render(width: number): string[] {
@@ -407,43 +352,83 @@ export class SubagentLiveOutputText implements Component {
 				for (const body of renderLiveTextContent(segment.text, theme)) {
 					rows.push({ body, header: false });
 				}
-				if (i < segments.length - 1) rows.push({ body: "", header: false, pad: true });
 			} else if (segment.kind === "thinking") {
 				const markdown = new SubagentThinkingMarkdown(segment.text);
 				for (const body of markdown.renderForGutter(width, gutterWidth)) {
 					rows.push({ body, header: false });
 				}
-				if (i < segments.length - 1) rows.push({ body: "", header: false, pad: true });
-			} else if (segment.kind === "todo") {
-				const tasks = this.showText ? extract_todo_tasks(segment.row) : [];
-				const error =
-					typeof segment.row.details?.error === "string"
-						? (segment.row.details.error as string)
-						: undefined;
-				for (const body of format_todo_tree(tasks, theme as TodoThemeLike, error, "")) {
-					rows.push({ body, header: rows.length === 0 });
-				}
-			} else if (segment.rows.length > 0) {
-				const group = buildLiveGroup(segment.rows);
-				const block = buildGroupStaticText(group, theme, true, "");
-				const blockLines = block.split("\n");
-				for (let li = 0; li < blockLines.length; li++) {
-					rows.push({ body: blockLines[li] ?? "", header: li === 0 });
-				}
+			} else if (segment.kind === "work") {
+				// In-group `└ Thinking` owns the slot only when this burst is the
+				// tray's last segment and the child agent is actively reasoning
+				// with parent thinking blocks hidden.
 				const thinking_follows = !this.showText && this.isThinking && i === segments.length - 1;
+				if (segment.rows.length === 1) {
+					// A single-tool burst is a bare standalone compact row — no
+					// `Explored 1 file` header. Same `records.length > 1` threshold
+					// as the main conversation's renderCallInner. The SSOT formatter
+					// owns verb + path + stats; only the leading `•` bullet is
+					// stripped because the outer tray branch already marks the block.
+					const record = liveRowToCall(segment.rows[0], 0);
+					const standalone = formatStandaloneCallRow(record, theme);
+					const bullet = statusBulletColor(
+						record.isError,
+						record._completed === true,
+						theme,
+					);
+					const body = standalone.startsWith(bullet)
+						? standalone.slice(bullet.length)
+						: standalone;
+					rows.push({ body, header: false });
+				} else if (segment.rows.length > 1) {
+					const group = buildLiveGroup(segment.rows);
+					// With a hidden-thinking lane below, the prior tool child collapses
+					// (the in-group `└ Thinking` lane replaces it) via buildGroupStaticText's
+					// show_thinking path (same SSOT as the main renderer). Production call
+					// sites pass thinkingBlocksVisible = !isThinkingBlocksHidden(), so the
+					// global flag is true whenever this tray is in hidden mode (showText === false).
+					if (thinking_follows) group.thinkingChild = true;
+					const block = buildGroupStaticText(group, theme, true, "");
+					const blockLines = block.split("\n");
+					for (let li = 0; li < blockLines.length; li++) {
+						rows.push({ body: blockLines[li] ?? "", header: li === 0 });
+					}
+				}
 				if (thinking_follows) {
-					rows.push({ body: renderLiveThinkingLane(theme, this.toolCallId), header: false });
+					// The thinking lane renders below the work block with only its
+					// own `└` prefix: the outer tray branch must not add a second
+					// terminal `└`, so force the gap outer slot.
+					rows.push({
+						body: renderLiveThinkingLane(theme, this.toolCallId),
+						header: false,
+						// The gap slot keeps the inner `└` the only terminal marker.
+						outer: SUBAGENT_TRAY_GAP,
+					});
 				}
 			}
 
 			// Empty thinking_start markers and Markdown render results deliberately
 			// have no visible segment. Internal Markdown blank rows survive only
-			// beside actual content, where they remain plain unprefixed blanks.
+			// beside actual content; the prefix loop below paints them as pipe
+			// continuation rows so the branch never visually breaks.
 			if (rows.some((row) => hasVisibleTrayContent(row.body))) {
 				segmentRows.push({ kind: segment.kind, rows });
 			}
 		}
 		if (segmentRows.length === 0) return [];
+
+		// Visible work/thinking segments have one explicit separator before the
+		// next chronological segment. This is segment-level state, not Markdown
+		// row state: adjacent transport deltas have already been coalesced into
+		// one visual thinking segment by buildLiveSegments(). Markdown continuation
+		// rows remain content rows and never create additional separators.
+		if (this.showText) {
+			for (let i = 0; i < segmentRows.length - 1; i++) {
+				const segment_kind = segmentRows[i].kind;
+				if (segment_kind === "work" || segment_kind === "thinking") {
+					segmentRows[i].rows.push({ body: "", header: false, separator: true });
+				}
+			}
+		}
 
 		let start = 0;
 		let total = segmentRows.reduce((sum, segment) => sum + segment.rows.length, 0);
@@ -481,12 +466,14 @@ export class SubagentLiveOutputText implements Component {
 
 		const out: string[] = [];
 		for (let i = 0; i < rows.length; i++) {
-			if (rows[i].pad) {
-				// One pipe-continuation padding row below an output segment: a
-				// single `│` row of separation before the next tool call keeps
-				// the outer tree continuous without crumbling together. A pad
-				// that would dangle as the final row (cap truncation) is dropped.
-				if (i === rows.length - 1) continue;
+			if (rows[i].separator) {
+				// An explicit separator must lead to later rendered content. This
+				// check is applied after the row cap so a retained pipe can never
+				// dangle when the next segment was trimmed.
+				const has_following_content = rows
+					.slice(i + 1)
+					.some((row) => !row.separator && hasVisibleTrayContent(row.body));
+				if (!has_following_content) continue;
 				out.push(
 					truncateToWidth(
 						this.treePrefix + fg(SUBAGENT_TREE_COLOR, SUBAGENT_TRAY_PIPE),
@@ -497,11 +484,12 @@ export class SubagentLiveOutputText implements Component {
 			}
 			const body = rows[i].body;
 			const outer =
-				i < lastHeaderIndex
+				rows[i].outer ??
+				(i < lastHeaderIndex
 					? SUBAGENT_TRAY_PIPE
 					: i === lastHeaderIndex
 						? SUBAGENT_TRAY_LAST
-						: SUBAGENT_TRAY_GAP;
+						: SUBAGENT_TRAY_GAP);
 			const outerStyled = outer === SUBAGENT_TRAY_GAP ? outer : fg(SUBAGENT_TREE_COLOR, outer);
 			const prefix = this.treePrefix + outerStyled;
 			if (hasVisibleTrayContent(body)) {
@@ -510,9 +498,16 @@ export class SubagentLiveOutputText implements Component {
 				// Trailing blank rows after the last visible header remain unprefixed.
 				out.push("");
 			} else {
-				// Keep the tree branch through internal blank rows (e.g. Markdown
-				// paragraph breaks in visible text/thinking) so no visual gap appears.
-				out.push(truncateToWidth(prefix, Math.max(1, width)));
+				// Interior blank rows emitted by Markdown or text stay on the tree:
+				// repeat the pipe so the vertical branch never visually breaks
+				// mid-segment. Only trailing blanks (outer GAP, past the last
+				// visible header) remain unprefixed.
+				out.push(
+					truncateToWidth(
+						this.treePrefix + fg(SUBAGENT_TREE_COLOR, SUBAGENT_TRAY_PIPE),
+						Math.max(1, width),
+					),
+				);
 			}
 		}
 		if (!this.running && out.length > 0) {
@@ -538,26 +533,6 @@ function asRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: {};
-}
-
-const TODO_STATUSES = new Set<string>(["pending", "in_progress", "completed", "deleted"]);
-
-function extract_todo_tasks(row: SubagentLiveToolRow): TranscriptTask[] {
-	const tasks = (row.details?.tasks ?? row.args?.tasks) as unknown[] | undefined;
-	if (!Array.isArray(tasks)) return [];
-	return tasks
-		.filter(
-			(t): t is Record<string, unknown> => t !== null && typeof t === "object" && !Array.isArray(t),
-		)
-		.map((t) => ({
-			id: typeof t.id === "number" && Number.isInteger(t.id) ? t.id : 0,
-			subject: typeof t.subject === "string" ? t.subject : "",
-			status: (TODO_STATUSES.has(String(t.status))
-				? String(t.status)
-				: "pending") as TranscriptTask["status"],
-			activeForm: typeof t.activeForm === "string" ? t.activeForm : undefined,
-		}))
-		.filter((t) => t.id > 0 && t.subject.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -659,10 +634,6 @@ function formatToolCall(
 				themeFg("accent", `/${pattern}/`) +
 				themeFg("dim", ` in ${shortenPath(rawPath)}`)
 			);
-		}
-		case "todo": {
-			const action = asString(args.action);
-			return action ? themeFg("muted", "Todo ") + themeFg("dim", action) : themeFg("muted", "Todo");
 		}
 		default: {
 			const argsStr = JSON.stringify(args);
@@ -895,6 +866,7 @@ type FlatEntry =
 	| { type: "agent"; descriptor: AgentRowDescriptor; agentIndex: number }
 	| { type: "tool"; descriptor: AgentRowDescriptor; parentAgentIndex: number }
 	| { type: "thinking"; descriptor: AgentRowDescriptor; parentAgentIndex: number }
+	| { type: "finishing"; descriptor: AgentRowDescriptor; parentAgentIndex: number }
 	| { type: "liveOutput"; descriptor: AgentRowDescriptor; parentAgentIndex: number };
 
 function buildFlatEntries(rows: AgentRowDescriptor[], thinkingBlocksVisible: boolean): FlatEntry[] {
@@ -904,36 +876,27 @@ function buildFlatEntries(rows: AgentRowDescriptor[], thinkingBlocksVisible: boo
 		entries.push({ type: "agent", descriptor: row, agentIndex: i });
 		const live_items = row.result?.liveItems;
 		const has_live_items = Array.isArray(live_items) && live_items.length > 0;
-		const has_live_work_group = has_live_items && live_items.some((item) => item.kind === "tool");
-		// Visible thinking blocks show the full child tray. When blocks are
-		// hidden, a real thinking stream still promotes an existing tool wave
-		// to that compact tray so its `└─ Thinking` lane remains inside the
-		// work group; raw child text stays hidden (see SubagentLiveOutputText).
+
+		// Visible thinking blocks show the full child live output tray.
+		// When thinking blocks are hidden, show only ONE single row below the agent header
+		// (the latest tool call, thinking status, or finishing status).
 		const has_live_output =
-			row.status === "running" &&
-			((thinkingBlocksVisible && has_live_items) ||
-				(!thinkingBlocksVisible &&
-					(row.result?.isFinishing === true ||
-						(has_live_items &&
-							row.result?.isThinking === true &&
-							row.result.reasoning !== false &&
-							has_live_work_group))));
-		// When the live output tray is active, the compact work-bundle rows
-		// (header + folded child waves + agent text) replace the single
-		// latest-tool/thinking preview row — no duplicate
-		// `└ Searching` line above the tray.
+			row.status === "running" && thinkingBlocksVisible && has_live_items;
+
 		if (!has_live_output) {
-			if (row.status === "running" && row.result?.latestToolCall) {
-				entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });
-			} else if (
-				row.status === "running" &&
-				row.result?.isThinking &&
-				row.result.reasoning !== false
-			) {
-				entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });
+			if (row.status === "running") {
+				if (row.result?.isFinishing) {
+					entries.push({ type: "finishing", descriptor: row, parentAgentIndex: i });
+				} else if (
+					row.result?.isThinking &&
+					row.result.reasoning !== false
+				) {
+					entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });
+				} else if (row.result?.latestToolCall) {
+					entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });
+				}
 			}
-		}
-		if (has_live_output) {
+		} else {
 			entries.push({ type: "liveOutput", descriptor: row, parentAgentIndex: i });
 		}
 	}
@@ -959,6 +922,9 @@ function renderSubagentChildRow(
 	theme: ThemeLike,
 	treePrefix: string,
 ): string | undefined {
+	if (entry.type === "finishing") {
+		return renderLiveFinishingRow(theme, treePrefix);
+	}
 	if (entry.type === "thinking") {
 		return renderSubagentThinkingRow(theme, treePrefix, row.toolCallId);
 	}

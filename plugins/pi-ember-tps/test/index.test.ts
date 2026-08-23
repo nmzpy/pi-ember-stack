@@ -1,29 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import {
-	calculate_tps_fade_opacity,
-	format_live_tps,
-	TPS_FADE_DURATION_MS,
-	TPS_IDLE_FADE_DELAY_MS,
-} from "../index.ts";
+import { format_live_tps, getLiveTpsOpacity } from "../index.ts";
 
-describe("TPS fade", () => {
-	test("stays opaque through the idle delay and fades to zero", () => {
-		expect(TPS_FADE_DURATION_MS).toBe(250);
-		expect(calculate_tps_fade_opacity(0)).toBe(1);
-		expect(calculate_tps_fade_opacity(TPS_IDLE_FADE_DELAY_MS)).toBe(1);
-		expect(
-			calculate_tps_fade_opacity(
-				TPS_IDLE_FADE_DELAY_MS + TPS_FADE_DURATION_MS / 4,
-			),
-		).toBeCloseTo(0.8535533906, 8);
-		expect(
-			calculate_tps_fade_opacity(
-				TPS_IDLE_FADE_DELAY_MS + TPS_FADE_DURATION_MS / 2,
-			),
-		).toBe(0.5);
-		expect(
-			calculate_tps_fade_opacity(TPS_IDLE_FADE_DELAY_MS + TPS_FADE_DURATION_MS),
-		).toBe(0);
+describe("TPS meter", () => {
+	test("opacity is fully visible while streaming and hidden when idle", () => {
+		// The meter is read-only by the footer on natural Pi renders. There is
+		// no fade animation and no periodic render clock — a fade would
+		// require a 50ms timer that fights terminal scrollback/selection.
+		// While idle the opacity is 0 so the footer omits the segment.
+		expect(getLiveTpsOpacity()).toBe(0);
 	});
 
 	test("formats the displayed TPS value", () => {

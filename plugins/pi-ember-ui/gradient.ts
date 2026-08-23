@@ -13,6 +13,7 @@ import {
 	hexToRgbTriplet,
 	TEXT_COLOR,
 } from "./mode-colors.ts";
+import { request_render } from "./render-intent.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,8 +57,7 @@ export const EXTERNAL_THINKING_RENDER_INTERVAL_MS = GRADIENT_TICK_MS;
 /** Sweep cycle duration: 1.6 s (faster sweep feels more responsive). */
 export const GRADIENT_DURATION_MS = 1600;
 
-/** Logo sweep round-trip duration: 3.2 s (1.6 s right, 1.6 s left). */
-export const LOGO_DURATION_MS = 3200;
+
 
 /** Gaussian sigma in character-cell units. Wider bright region for smoother sweep. */
 export const GRADIENT_SIGMA = 3.0;
@@ -121,14 +121,12 @@ function sample_palette(palette: GradientPalette, t: number): Rgb {
 // ---------------------------------------------------------------------------
 
 let cached_thinking_palette: GradientPalette | undefined;
-let cached_neutral_pulse_palette: GradientPalette | undefined;
 let cached_accent_palette: GradientPalette | undefined;
 let cached_muted_text_palette: GradientPalette | undefined;
 
 /** Clear cached palettes — call when the live theme/accent changes. */
 export function invalidate_gradient_cache(): void {
 	cached_thinking_palette = undefined;
-	cached_neutral_pulse_palette = undefined;
 	cached_accent_palette = undefined;
 	cached_muted_text_palette = undefined;
 }
@@ -153,31 +151,11 @@ function get_thinking_palette(): GradientPalette {
 	return cached_thinking_palette;
 }
 
-/**
- * Neutral pulse palette: dim → muted → text (no live accent).
- * Used by the startup header bullet while the logo animates.
- */
-function get_neutral_pulse_palette(): GradientPalette {
-	if (!cached_neutral_pulse_palette) {
-		cached_neutral_pulse_palette = {
-			stops: [
-				{ rgb: hexToRgbTriplet(DIM_COLOR), position: 0 },
-				{ rgb: hexToRgbTriplet(MUTED_COLOR), position: 0.5 },
-				{ rgb: hexToRgbTriplet(TEXT_COLOR), position: 1 },
-			],
-		};
-	}
-	return cached_neutral_pulse_palette;
-}
-
 function rgb_to_hex(rgb: Rgb): string {
 	return `#${rgb[0].toString(16).padStart(2, "0")}${rgb[1].toString(16).padStart(2, "0")}${rgb[2].toString(16).padStart(2, "0")}`;
 }
 
-/** Header-bullet pulse color at logo phase (dim→muted→text). */
-export function neutral_pulse_hex(phase: number): string {
-	return rgb_to_hex(sample_palette(get_neutral_pulse_palette(), phase));
-}
+
 
 /**
  * Accent palette: dim→accent glow for working/subagent labels.
@@ -281,31 +259,22 @@ export function render_gradient(text: string, preset: GradientPreset, phase: num
 const active_reasons = new Set<string>();
 const tick_subscribers = new Set<() => void>();
 let gradient_timer: ReturnType<typeof setTimeout> | undefined;
-let _render_request: (() => void) | undefined;
 
 /**
  * Whether a subscriber staged visible state this dispatch and therefore needs
  * exactly one native render. The clock owns the single per-tick render:
  * subscribers call `request_gradient_render()` instead of requesting Pi
  * renders independently, and `dispatch_gradient_tick()` clears the flag and
- * issues `_render_request` once after every subscriber has run.
+ * issues `request_render()` once after every subscriber has run.
  */
 let dirty = false;
-
-/**
- * Bind the one public Pi render request used by animated component state.
- * The gradient clock never writes to the terminal or touches TUI diff state.
- */
-export function set_gradient_render_request(cb: (() => void) | undefined): void {
-	_render_request = cb;
-}
 
 /**
  * Mark the gradient clock dirty so the next tick issues exactly one native
  * render. Subscribers stage their component text (CompactGroupText cache,
  * Text.setText, component invalidate) and then call this instead of calling
  * `requestTuiRender()` themselves — the clock coalesces every animated
- * subscriber into one `_render_request` per 50 ms dispatch.
+ * subscriber into one `request_render()` per 50 ms dispatch.
  */
 export function request_gradient_render(): void {
 	dirty = true;
@@ -328,14 +297,7 @@ export function get_gradient_phase_with_offset(offsetMs: number): number {
 	return (elapsed % GRADIENT_DURATION_MS) / GRADIENT_DURATION_MS;
 }
 
-/** Logo phase: ping-pong triangle wave over LOGO_DURATION_MS.
- *  0 → 1 (sweep right) → 0 (sweep left) → repeat. No snap-back. */
-export function get_logo_phase(): number {
-	if (clock_start === 0) return 0;
-	const elapsed = performance.now() - clock_start;
-	const t = (elapsed % LOGO_DURATION_MS) / LOGO_DURATION_MS;
-	return t < 0.5 ? t * 2 : 2 - t * 2;
-}
+
 
 /**
  * Dispatch one tick to all current subscribers. Exposed for deterministic
@@ -368,7 +330,7 @@ export function dispatch_gradient_tick(): void {
 	// subscriber changed anything (identical-text skip), no render is queued.
 	if (dirty) {
 		dirty = false;
-		_render_request?.();
+		request_render();
 	}
 }
 
@@ -466,6 +428,5 @@ export function shutdown_gradient_clock(): void {
 	next_tick_deadline = 0;
 	clock_start = 0;
 	dirty = false;
-	_render_request = undefined;
 	invalidate_gradient_cache();
 }

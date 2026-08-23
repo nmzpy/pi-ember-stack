@@ -1,28 +1,33 @@
 import { type Component, Image, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isImageFallbackMode } from "./image-utils.ts";
-import { format_image_fallback_label, type ImageAttachment } from "./types.ts";
+import {
+	format_image_fallback_label,
+	format_image_styled_fallback_label,
+	IMAGE_PLACEHOLDER_PATTERN,
+	type ImageAttachment,
+} from "./types.ts";
 
 export class ImagePreviewMessage implements Component {
 	private readonly images: Image[];
 
-	constructor(
-		private readonly attachments: ImageAttachment[],
-		private readonly fallbackColor: (text: string) => string,
-	) {
-		this.images = attachments.map(
-			(attachment) =>
-				new Image(
-					attachment.data,
-					attachment.mimeType,
-					{ fallbackColor },
-					{
-						maxWidthCells: 48,
-						maxHeightCells: 12,
-						filename: attachment.placeholder,
-					},
-					attachment.dimensions,
-				),
-		);
+	constructor(private readonly attachments: ImageAttachment[]) {
+		this.images = attachments.map((attachment) => {
+			const styledFallback = (text: string) =>
+				text.replace(IMAGE_PLACEHOLDER_PATTERN, () =>
+					format_image_styled_fallback_label(attachment.id, attachment.dimensions),
+				);
+			return new Image(
+				attachment.data,
+				attachment.mimeType,
+				{ fallbackColor: styledFallback },
+				{
+					maxWidthCells: 48,
+					maxHeightCells: 12,
+					filename: attachment.placeholder,
+				},
+				attachment.dimensions,
+			);
+		});
 	}
 
 	invalidate(): void {
@@ -44,7 +49,7 @@ export class ImagePreviewMessage implements Component {
 				lines.push(
 					visibleWidth(label) > safeWidth
 						? truncateToWidth(label, safeWidth, "")
-						: this.fallbackColor(label),
+						: format_image_styled_fallback_label(attachment.id, attachment.dimensions),
 				);
 			}
 			if (index < this.attachments.length - 1) lines.push("");

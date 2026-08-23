@@ -44,10 +44,13 @@ export function apply_assistant_stream_boundary(
 			// Hidden reasoning occupies the in-group Thinking lane.
 			renderer.noteHiddenThinking();
 		} else {
-			// A visible reasoning block is a chronological transcript boundary.
-			// It must hard-exit even during an inter-run gap, otherwise the next
-			// tool wave mutates a header above the visible reasoning block.
-			renderer.noteVisibleThinking();
+			// A visible reasoning block is a chronological transcript boundary ONLY
+			// when it carries actual non-empty reasoning content. Bare thinking_start
+			// or empty delta without reasoning output must not hard-split the work group.
+			const delta = ev.delta;
+			if (typeof delta === "string" && delta.trim().length > 0) {
+				renderer.noteVisibleThinking();
+			}
 		}
 		return;
 	}

@@ -49,26 +49,22 @@ import {
 	activate_gradient,
 	clamp_lerp,
 	deactivate_gradient,
-	EDGE_PADDING,
-	GRADIENT_SIGMA,
 	type GradientPreset,
-	gaussian_intensity,
 	get_gradient_phase,
 	get_gradient_phase_with_offset,
-	get_logo_phase,
 	gradient_reason_active,
 	invalidate_gradient_cache,
 	MUTED_GROUP_GRADIENT_PRESET,
-	neutral_pulse_hex,
 	render_gradient,
 	request_gradient_render,
-	set_gradient_render_request,
 	shutdown_gradient_clock,
 	stop_all_gradient_animation,
 	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "./gradient.ts";
 import { request_live_tui_render, reset_slash_command_tracking } from "./layout.ts";
+import { bind_render_intent, request_render, reset_render_intent } from "./render-intent.ts";
+import { is_transient_provider_error } from "./error-utils.ts";
 import {
 	begin_work_group_boundary_suppression,
 	buildThemeBgColors,
@@ -93,6 +89,7 @@ import {
 	isUserTurnCommitted,
 	MUTED_COLOR,
 	MUTED_MESSAGE_BG,
+	SUCCESS_GREEN,
 	markSubagentDelegationEnded,
 	markSubagentDelegationStarted,
 	markToolCallAnnounced,
@@ -115,6 +112,7 @@ import {
 	setUserBashRunning,
 	setUserTurnAnchorTimestamp,
 	setUserTurnCommitted,
+	strip_think_tags,
 	TEXT_COLOR,
 } from "./mode-colors.ts";
 import {
@@ -128,6 +126,11 @@ import {
 	is_model_picker_active,
 	render_model_picker_rows,
 } from "./model-selector.ts";
+import {
+	clear_bash_queued_messages,
+	install_bash_queue_input_listener,
+	install_bash_queue_patch,
+} from "./bash-queue.ts";
 import {
 	bind_select_list_theme_resolver,
 	install_select_list_theme_patches,
@@ -308,10 +311,6 @@ function placeBoxShadow(
 }
 
 let thinkingActive = false;
-let logoAnimating = false;
-let logoStatic = true;
-/** Cleared on session_start; set when the user sends their first visible message. */
-let logo_settled_by_user_message = false;
 const EMBER_PATCH_MARKER = Symbol.for("pi-ember-ui:patched");
 
 /** Component-tree node shape used by the trailing-blank-row scan. */
@@ -338,8 +337,10 @@ type AssistantMessagePatchHost = {
 	_emberRenderBodyCacheKey?: string;
 	_emberMarkdownThemeBase?: MarkdownTheme;
 	_emberMarkdownTheme?: MarkdownTheme;
+	_emberTransientProviderError?: boolean;
+	_emberHasVisibleContent?: boolean;
 	message?: { timestamp?: number };
-	lastMessage?: { timestamp?: number };
+	lastMessage?: { timestamp?: number; stopReason?: string; errorMessage?: string };
 	hideThinkingBlock: boolean;
 	outputPad: number;
 	markdownTheme: MarkdownTheme;
@@ -752,12 +753,8 @@ function refresh_thinking_status(force_render = false): void {
 	sync_thinking_gradient_clock();
 	if (!force_render && should_paint === thinking_status_last_painted) return;
 	thinking_status_last_painted = should_paint;
-	if (requestRender) {
-		thinking_status_render_pending = false;
-		requestRender();
-	} else {
-		thinking_status_render_pending = force_render || should_paint;
-	}
+	request_render();
+	thinking_status_render_pending = false;
 }
 
 /** Hide the gradient Thinking header while tools or visible assistant text run.
@@ -815,27 +812,31 @@ export function render_thinking_status_lines_for_tests(width: number): string[] 
 	return render_thinking_status_lines(width);
 }
 
-/** Wraps a child Component and prepends a U+276D prompt glyph (cyan-green
- *  `success` foreground) to the first rendered row. Used by UserMessageComponent
- *  to replace the old chatbox horizontal rules with a flush, prompt-led layout.
- *  The glyph is read from the live Theme at render time so mode switches
- *  recolor it — never close over a Theme from construction. The background
- *  comes from the outer Box, not from the glyph itself. */
+/** Wraps a child Component and prepends a U+276D prompt glyph (success-green
+ *  foreground) to the first rendered row, then indents every continuation row
+ *  by the same one-column width. Used by UserMessageComponent to replace the
+ *  old chatbox horizontal rules with a flush, prompt-led layout. The glyph is
+ *  read from the live SSOT success color at render time so mode switches
+ *  recolor it. The background comes from the outer Box, not from the glyph
+ *  itself. */
 export class PromptGlyphContent implements Component {
 	private child: Component;
-	private themeRef: Theme;
-	constructor(child: Component, theme: Theme) {
+	constructor(child: Component, _theme: Theme) {
 		this.child = child;
-		this.themeRef = theme;
 	}
 	render(width: number): string[] {
-		const glyph = this.themeRef.fg("success", "\u276d ");
+		const glyph = `${fgAnsi(SUCCESS_GREEN)}\u276d\x1b[39m`;
 		const glyphWidth = visibleWidth(glyph);
 		const rows = this.child.render(Math.max(1, width - glyphWidth));
 		if (rows.length === 0) return rows;
 		const firstRow = `${glyph}${rows[0]}`;
 		const fitted = visibleWidth(firstRow) > width ? truncateToWidth(firstRow, width) : firstRow;
-		return [fitted, ...rows.slice(1)];
+		const result: string[] = [fitted];
+		const indent = " ".repeat(glyphWidth);
+		for (let index = 1; index < rows.length; index++) {
+			result.push(`${indent}${rows[index]}`);
+		}
+		return result;
 	}
 	invalidate(): void {
 		const childInvalidate = (this.child as { invalidate?: () => void }).invalidate;
@@ -858,19 +859,19 @@ class ThinkingStatusComponent implements Component {
 	}
 }
 
-let requestRender: (() => void) | undefined;
 
-/** Bind Pi's public TUI render request — ctx.ui has no requestRender API. */
+/** Bind Pi's public TUI render request through the canonical render-intent
+ *  entry point. The callback is stored on globalThis via Symbol.for so jiti
+ *  module duplication cannot desync the live callback from callers. */
 function bind_live_tui_render(
 	tui: { requestRender?: (force?: boolean) => void } | undefined,
 ): void {
 	if (!tui?.requestRender) return;
 	tuiRef = tui;
 	const schedule_render = (): void => {
-		request_live_tui_render(tui);
+		tui.requestRender?.();
 	};
-	requestRender = schedule_render;
-	set_gradient_render_request(schedule_render);
+	bind_render_intent(schedule_render);
 	if (thinking_status_render_pending) {
 		thinking_status_render_pending = false;
 		schedule_render();
@@ -895,6 +896,7 @@ type LiveTuiLike = {
 
 let sessionCtx: (ExtensionContext & { session?: AgentSession }) | undefined;
 let shellInputUnsubscribe: (() => void) | undefined;
+let bashQueueInputUnsubscribe: (() => void) | undefined;
 let getShellEditor: (() => ShellModeEditor | undefined) | undefined;
 let bashCancelUnsubscribe: (() => void) | undefined;
 
@@ -997,23 +999,22 @@ export {
 
 export { sync_thinking_gradient_clock as syncThinkingGradientClock };
 
-/** Request a normal render through Pi's public UI API. */
+/** Request a normal render through the canonical render-intent entry point. */
 export function requestTuiRender(): void {
-	requestRender?.();
+	request_render();
 }
 
 /**
- * Request a render starting from a live editor instance. Use this when the
- * editor is known (e.g. inside a handleInput wrapper) and module-level
- * requestRender might be stale due to jiti module duplication. Falls back to
- * the module-level scheduler if the editor has no live TUI.
+ * Request a render from a known editor instance. The canonical render-intent
+ * is the sole entry point; if the editor has its own TUI reference, bind it
+ * first so the render actually fires. If no TUI is available, falls back to
+ * the existing render-intent (which no-ops if unbound).
  */
 export function requestTuiRenderFromEditor(editor: { tui?: { requestRender?: () => void } }): void {
-	if (editor?.tui) {
-		request_live_tui_render(editor.tui);
-		return;
+	if (editor?.tui?.requestRender) {
+		bind_render_intent(() => editor.tui!.requestRender!());
 	}
-	requestRender?.();
+	request_render();
 }
 
 /** Request a non-forced render of the live editor and refresh the footer so
@@ -1429,8 +1430,9 @@ class CachedMarkdown {
  */
 export function create_live_thinking_markdown(text: string): Component {
 	const markdown_theme = bind_live_markdown_theme({ ...getMarkdownTheme() });
+	const cleaned = strip_think_tags(text);
 	return new CachedMarkdown(
-		text,
+		cleaned,
 		0,
 		0,
 		markdown_theme,
@@ -1496,14 +1498,13 @@ function applyDynamicTheme(options: { invalidate?: boolean; render?: boolean } =
 		// our live Theme (with subagentBg) now and after the watcher debounce.
 		reassertLiveTheme();
 		scheduleThemeReassert();
-		if (options.invalidate !== false) tuiRef?.invalidate?.();
-		if (options.render !== false) requestRender?.();
+		if (options.render !== false) request_render();
 		return;
 	}
 	installProxiedTheme(fgColors, bgColors, codeBg);
 	if (liveTheme) notify_theme_refresh(liveTheme);
 	scheduleThemeReassert();
-	if (options.render !== false) requestRender?.();
+	if (options.render !== false) request_render();
 }
 
 function updateLiveThemeColors(
@@ -1703,10 +1704,10 @@ function render_shell_aware_editor(
 
 	const pad = " ".repeat(INSET);
 	const innerPadStr = " ".repeat(innerPad);
-	// The prompt glyph stays `❭ ` in shell mode — the footer "shell" label is
-	// the mode indicator. Only while a user `!` bash command is actually
-	// running does the glyph flip to `! `.
-	const promptGlyph = isUserBashRunning() ? "!" : "\u276d";
+	// The prompt glyph stays `❭ ` in the chatbox. The footer "shell" label
+	// and muted border indicate the active input mode; once a `!` command is
+	// committed, the chatbox reverts to the normal prompt immediately.
+	const promptGlyph = "\u276d";
 	const promptStr = border(promptGlyph);
 	const gutter = "  ";
 	const fit = (s: string): string => fit_terminal_content_line(s, width);
@@ -1881,6 +1882,9 @@ function installAssistantMessagePatch(): void {
 		};
 
 		const hasVisibleContent = message.content.some(isVisibleBlock);
+		this._emberHasVisibleContent = hasVisibleContent;
+		this._emberTransientProviderError =
+			message.stopReason === "error" && is_transient_provider_error(message.errorMessage);
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
 		}
@@ -1907,10 +1911,12 @@ function installAssistantMessagePatch(): void {
 				);
 			} else if (content.type === "thinking" && content.thinking?.trim()) {
 				if (hide) continue;
+				const cleanedThinking = strip_think_tags(content.thinking).trim();
+				if (!cleanedThinking) continue;
 				const hasVisibleContentAfter = message.content.slice(i + 1).some(isVisibleBlock);
 				this.contentContainer.addChild(
 					new CachedMarkdown(
-						content.thinking.trim(),
+						cleanedThinking,
 						this.outputPad,
 						0,
 						mdTheme,
@@ -1963,10 +1969,17 @@ function installAssistantMessagePatch(): void {
 				}
 			} else if (message.stopReason === "error") {
 				const errorMsg = message.errorMessage || "Unknown error";
-				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(
-					new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0),
-				);
+				const is_stale_transient_error =
+					this._emberTransientProviderError === true &&
+					typeof msgTimestamp === "number" &&
+					typeof latestAssistantMessageTimestamp === "number" &&
+					msgTimestamp < latestAssistantMessageTimestamp;
+				if (!is_stale_transient_error) {
+					this.contentContainer.addChild(new Spacer(1));
+					this.contentContainer.addChild(
+						new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0),
+					);
+				}
 			}
 		}
 
@@ -1987,6 +2000,16 @@ function installAssistantMessagePatch(): void {
 			this: AssistantMessagePatchHost,
 			width: number,
 		): string[] {
+			const messageTimestamp =
+				typeof this.lastMessage?.timestamp === "number" ? this.lastMessage.timestamp : undefined;
+			const is_stale_transient_error =
+				this._emberTransientProviderError === true &&
+				this._emberHasVisibleContent !== true &&
+				!this.hasToolCalls &&
+				typeof messageTimestamp === "number" &&
+				typeof latestAssistantMessageTimestamp === "number" &&
+				messageTimestamp < latestAssistantMessageTimestamp;
+			if (is_stale_transient_error) return [];
 			const cacheKey = `${this._emberContentKey ?? ""}|${width}`;
 			if (!this._emberRenderBodyCache || this._emberRenderBodyCacheKey !== cacheKey) {
 				this._emberRenderBodyCache = originalRender.call(this, width) as string[];
@@ -2108,7 +2131,7 @@ function installUpdateNotificationPatch(): void {
 			)
 		) {
 			this.lastStatusText?.setText(theme.fg("dim", message));
-			this.ui?.requestRender();
+			request_render();
 			return;
 		}
 
@@ -2131,7 +2154,7 @@ function installUpdateNotificationPatch(): void {
 		const text = new Text(theme.fg("dim", message), 1, 0);
 		this.chatContainer.addChild(text);
 		this.lastStatusText = text;
-		this.ui?.requestRender();
+		request_render();
 	};
 
 	// Suppress version and package update notices entirely. The startup screen
@@ -2321,7 +2344,7 @@ function installBashExecutionPatch(): void {
 			originalSetComplete.apply(this, args);
 		}
 		setUserBashRunning(false);
-		requestRender?.();
+		request_render();
 	};
 
 	function renderBashHeader(this: BashExecutionPatchHost): string {
@@ -2349,7 +2372,7 @@ function installBashExecutionPatch(): void {
 		const running = this.status === "running";
 		if (isUserBashRunning() !== running) {
 			setUserBashRunning(running);
-			requestRender?.();
+			request_render();
 		}
 		originalUpdateDisplay?.call(this);
 		const theme = resolve_live_theme();
@@ -2657,154 +2680,51 @@ function setWelcomeUpdates(enabled: boolean): void {
 	fs.writeFileSync(file, `${JSON.stringify(config, null, "\t")}\n`);
 }
 
-type RadialPoint = { x: number; y: number; r: number; g: number; b: number; falloff: number };
-
-function radialColorForCell(x: number, y: number, points: RadialPoint[]): [number, number, number] {
-	let totalWeight = 0;
-	let r = 0,
-		g = 0,
-		b = 0;
-	for (const p of points) {
-		const dx = x - p.x;
-		const dy = y - p.y;
-		const dist = Math.sqrt(dx * dx + dy * dy);
-		const weight = Math.exp(-(dist * dist) / (p.falloff * p.falloff));
-		r += p.r * weight;
-		g += p.g * weight;
-		b += p.b * weight;
-		totalWeight += weight;
-	}
-	return [Math.round(r / totalWeight), Math.round(g / totalWeight), Math.round(b / totalWeight)];
-}
-
-let logo_tick_cb: (() => void) | undefined;
-
-function drop_logo_tick(): void {
-	if (!logo_tick_cb) return;
-	unsubscribe_gradient_tick(logo_tick_cb);
-	logo_tick_cb = undefined;
-}
-
-function startLogoAnimation(): void {
-	logo_settled_by_user_message = false;
-	logoAnimating = true;
-	logoStatic = false;
-	drop_logo_tick();
-	logo_tick_cb = () => request_gradient_render();
-	subscribe_gradient_tick(logo_tick_cb);
-}
-
-function stopLogoAnimation(): void {
-	if (!logoAnimating && logoStatic) return;
-	logoAnimating = false;
-	logoStatic = true;
-	drop_logo_tick();
-	requestRender?.();
-}
-
-/** Stop the startup logo when the user commits their first visible message. */
-function stopLogoOnFirstUserMessage(): void {
-	if (logo_settled_by_user_message) return;
-	logo_settled_by_user_message = true;
-	stopLogoAnimation();
-}
-
 /**
- * SSOT: the startup logo animates ONLY on the empty first startup screen.
- *
- * The logo lives at line 0 of the TUI buffer (the top of the transcript).
- * Animating it at the shared 20 FPS cadence changes line 0 every tick, and
+ * SSOT: the startup logo is always static. The logo lives at line 0 of the
+ * TUI buffer; animating it at any cadence changes line 0 every tick, and
  * pi-tui's differential renderer issues a scrollback-clearing full redraw
- * (`[2J` + `[H` + `[3J` — jump-to-top + scroll lock) whenever
- * the first changed line sits above the previous viewport top. On a resumed/
- * reloaded/forked long session the viewport is far below line 0, so every
- * logo tick snaps the terminal to the top and wipes the user's scrollback —
- * exactly the reported bug: one scroll-wheel tick or selecting text snaps
- * the Pi TUI to the top. Ember never owns scroll, so the fix is to never
- * animate line 0 while a transcript exists below the live viewport.
+ * whenever the first changed line sits above the previous viewport top. On
+ * a long session the viewport is far below line 0, so every logo tick snaps
+ * the terminal to the top and wipes the user's scrollback. Ember never owns
+ * scroll, so the logo is always a stable static header.
  */
 export function startup_logo_should_animate(
-	reason: string | undefined,
-	has_session_entries: boolean,
+	_reason: string | undefined,
+	_has_session_entries: boolean,
 ): boolean {
-	return reason === "startup" && !has_session_entries;
+	return false;
 }
 
-function renderLogoWithGradient(): string[] {
+/** Render the static Pi logo: 2-stop vertical gradient (top = muted,
+ *  bottom = text) with a box-drawing drop-shadow contour. The output is
+ *  byte-identical on every frame so Pi's differential renderer never sees a
+ *  change at line 0 and never issues a scrollback-clearing full redraw. */
+function renderStaticLogo(): string[] {
 	const logoRows = LOGO.length;
 	const logoCols = LOGO[0].length;
 	const gridCols = logoCols + SHADOW_OFFSET_X + 1;
 	const gridRows = logoRows + SHADOW_OFFSET_Y;
 
-	// Static state: 2-stop vertical gradient (top = muted, bottom = text).
-	// No radial points, no per-frame sweep.
-	if (!logoAnimating && logoStatic) {
-		const mutedRgb = hexToRgbTriplet(MUTED_COLOR);
-		const textRgb = hexToRgbTriplet(TEXT_COLOR);
-		const grid: Grid = [];
-		for (let row = 0; row < gridRows; row++) {
-			grid.push(new Array(gridCols).fill(null).map(() => ({ ch: " " })));
-		}
-		const colorForRow = (row: number): [number, number, number] => {
-			const t = logoRows > 1 ? row / (logoRows - 1) : 0;
-			return clamp_lerp(mutedRgb, textRgb, t);
-		};
-		for (let row = 0; row < logoRows; row++) {
-			const rgb = colorForRow(row);
-			for (let col = 0; col < LOGO[row].length; col++) {
-				if (LOGO[row][col] === "\u2588") {
-					grid[row][col] = { ch: "\u2588", rgb };
-				}
-			}
-		}
-		placeBoxShadow(grid, gridRows, gridCols, colorForRow);
-		return gridToLines(grid);
-	}
-
-	const dimRgb = hexToRgbTriplet(DIM_COLOR);
 	const mutedRgb = hexToRgbTriplet(MUTED_COLOR);
 	const textRgb = hexToRgbTriplet(TEXT_COLOR);
-	const points: RadialPoint[] = [
-		{ x: 2, y: 0, r: dimRgb[0], g: dimRgb[1], b: dimRgb[2], falloff: 3 },
-		{ x: 10, y: 1, r: mutedRgb[0], g: mutedRgb[1], b: mutedRgb[2], falloff: 4 },
-		{ x: 5, y: 3, r: textRgb[0], g: textRgb[1], b: textRgb[2], falloff: 3.5 },
-		{ x: 11, y: 5, r: mutedRgb[0], g: mutedRgb[1], b: mutedRgb[2], falloff: 2.5 },
-		{ x: 0, y: 4, r: dimRgb[0], g: dimRgb[1], b: dimRgb[2], falloff: 2 },
-	];
-
 	const grid: Grid = [];
 	for (let row = 0; row < gridRows; row++) {
 		grid.push(new Array(gridCols).fill(null).map(() => ({ ch: " " })));
 	}
-
-	// Logo-specific ping-pong phase so the sweep travels right then left
-	// smoothly instead of snapping back to the start.
-	const phase = get_logo_phase();
-	const sweep_center = -EDGE_PADDING + phase * (Math.max(0, logoCols - 1) + 2 * EDGE_PADDING);
-
+	const colorForRow = (row: number): [number, number, number] => {
+		const t = logoRows > 1 ? row / (logoRows - 1) : 0;
+		return clamp_lerp(mutedRgb, textRgb, t);
+	};
 	for (let row = 0; row < logoRows; row++) {
+		const rgb = colorForRow(row);
 		for (let col = 0; col < LOGO[row].length; col++) {
-			const ch = LOGO[row][col];
-			if (ch === "\u2588") {
-				let [r, g, b] = radialColorForCell(col, row, points);
-				if (logoAnimating) {
-					const dist = col - sweep_center;
-					const intensity = gaussian_intensity(dist, GRADIENT_SIGMA);
-					r = Math.round(r + (textRgb[0] - r) * intensity);
-					g = Math.round(g + (textRgb[1] - g) * intensity);
-					b = Math.round(b + (textRgb[2] - b) * intensity);
-				}
-				grid[row][col] = { ch: "\u2588", rgb: [r, g, b] };
+			if (LOGO[row][col] === "█") {
+				grid[row][col] = { ch: "█", rgb };
 			}
 		}
 	}
-
-	const centerCol = logoCols / 2;
-	const animatingColorForRow = (row: number): [number, number, number] => {
-		const [r, g, b] = radialColorForCell(centerCol, row, points);
-		return [r, g, b];
-	};
-	placeBoxShadow(grid, gridRows, gridCols, animatingColorForRow);
+	placeBoxShadow(grid, gridRows, gridCols, colorForRow);
 	return gridToLines(grid);
 }
 
@@ -2851,19 +2771,13 @@ function installStartupHeader(ctx: ExtensionContext): void {
 			const dir = headerSnapshot?.dir ?? folderNameFromCwd(process.cwd());
 			const modelName = headerSnapshot?.modelName ?? "no model";
 
-			// The animated startup logo and header bullet pulse through a
-			// dim→muted→text gradient. After the user sends their first message
-			// the logo goes static gray and the bullet goes dim.
-			// mdListBullet is muted (list "1." / "-" markers); do not reuse it here.
-			const logoLines = renderLogoWithGradient();
+			// The logo is always static: a stable 2-stop vertical gradient with
+			// a dim header bullet. No animation, no per-frame mutation.
+			const logoLines = renderStaticLogo();
 			const logoWidth = visibleWidth(logoLines[0] ?? "");
 			const leftPad = Math.max(0, Math.floor((width - logoWidth) / 2));
 			const padStr = " ".repeat(leftPad);
-			// Once the logo turns static/gray (after the first user message
-			// or at shutdown), the header bullet goes dim to match the model/dir.
-			const headerBullet = logoStatic
-				? live_theme.fg("dim", "\u2022")
-				: colorize("\u2022", neutral_pulse_hex(get_logo_phase()));
+			const headerBullet = live_theme.fg("dim", "\u2022");
 
 			const infoLine = `${live_theme.fg("text", modelName)} ${headerBullet} ${live_theme.fg("dim", dir)}`;
 			const infoPad = Math.max(0, Math.floor((width - visibleWidth(infoLine)) / 2));
@@ -3002,6 +2916,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	installAssistantMessagePatch();
 	installExpandableTextPatch();
 	installBashExecutionPatch();
+	install_bash_queue_patch();
 	installUserMessagePatch();
 	installCompactionSummaryPatch();
 	installCompactionTranscriptPatch();
@@ -3013,14 +2928,13 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	pi.on("session_start", (event, ctx) => {
 		sessionCtx = ctx;
 		tuiRef = undefined;
-		requestRender = undefined;
+		reset_render_intent();
 		thinking_status_render_pending = false;
 		liveTheme = undefined;
 		reset_thinking_header_session_state();
 		if (ctx.mode === "tui") {
 			bind_model_picker_session(ctx, pi);
-			requestRender = undefined;
-			set_gradient_render_request(undefined);
+			reset_render_intent();
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHiddenThinkingLabel("");
 			setShellSyncCallback(() => {
@@ -3033,31 +2947,17 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		applyDynamicTheme();
 		if (ctx.mode === "tui") {
 			sync_thinking_blocks_hidden_from_ctx(ctx);
-			// The logo is at the top of the TUI buffer. Animating it while a
-			// resumed/reloaded session has transcript rows below the viewport
-			// changes line 0 every 50 ms; Pi must then full-redraw because that
-			// line is above its live viewport, which clears terminal scrollback.
-			// Animate only the empty first startup screen. Off-screen startup
-			// visuals remain static; Pi remains the sole renderer.
-			let has_session_entries = false;
-			try {
-				has_session_entries = ctx.sessionManager.getEntries().length > 0;
-			} catch {
-				// A partially initialized session is safer rendered statically:
-				// a missed logo animation cannot damage scrollback.
-				has_session_entries = true;
-			}
-			if (startup_logo_should_animate(event.reason, has_session_entries)) {
-				startLogoAnimation();
-			} else {
-				stopLogoAnimation();
-			}
+			// The logo is always static — no animation, no tick subscriber.
 			installStartupHeader(ctx);
 			installThinkingWidget(ctx);
 			installEmberFooter(ctx);
 			init_footer_thinking_level(pi, ctx);
 			recompute_footer_stats(ctx);
 			installShellModeInputListener(ctx);
+			bashQueueInputUnsubscribe = install_bash_queue_input_listener(
+				() => tuiRef ?? (ctx?.ui as unknown as LiveTuiLike | undefined),
+				(message: string) => ctx.ui.notify(message),
+			);
 			install_model_picker_input_listener(
 				() => tuiRef ?? (ctx?.ui as unknown as LiveTuiLike | undefined),
 			);
@@ -3071,7 +2971,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			init_footer_thinking_level(pi, ctx);
 			set_footer_model_snapshot(ctx.model, ctx.modelRegistry?.getAvailable?.() ?? []);
 			refresh_footer(ctx);
-			requestRender?.();
+			request_render();
 		}
 	});
 
@@ -3079,7 +2979,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// pi-custom-agents (and any other extension) via the shared event bus.
 	pi.events.on("pi-ember-ui:mode-change", (_event) => {
 		// Mode switches only need a new frame; the live theme is static.
-		requestRender?.();
+		request_render();
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
@@ -3163,7 +3063,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		if (event.message?.role === "user") {
 			const display = (event.message as { display?: boolean }).display;
 			if (display !== false) {
-				stopLogoOnFirstUserMessage();
+				// Logo is always static; no settle transition needed.
 			}
 			turnStartedAt = performance.now();
 			// SSOT: the pre-answer Thinking pass timer is started by
@@ -3219,7 +3119,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			clear_blockers: true,
 			force_arm: isUserTurnCommitted() || isAgentRunPending(),
 		});
-		requestRender?.();
+		request_render();
 	});
 
 	pi.on("thinking_level_select", (event, ctx) => {
@@ -3262,7 +3162,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setTurnToolTranscriptActive(false);
 		resetToolExecutionInFlight();
 		resetSubagentDelegation();
-		stopLogoAnimation();
 		stopThinkingAnimation();
 		stop_all_gradient_animation();
 		sync_thinking_status_tick(false);
@@ -3364,13 +3263,12 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 	// /resume (which re-runs the factory against a fresh runtime but keeps
 	// the cached module) does not call into the dead session's TUI/ctx via
 	// stale closures. The factory body calls applyDynamicTheme() on load,
-	// which would otherwise invoke the old requestRender/tuiRef.
+	// which would otherwise invoke the old render-intent/tuiRef.
 	pi.on("session_shutdown", (_event, ctx) => {
 		reset_model_picker_session();
 		reset_slash_command_tracking();
 		sessionCtx = undefined;
-		requestRender = undefined;
-		set_gradient_render_request(undefined);
+		reset_render_intent();
 		tuiRef = undefined;
 		liveTheme = undefined;
 		liveCodeBgAnsi = "";
@@ -3380,9 +3278,6 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		}
 		markdownThemeGeneration = 0;
 		clearMarkdownRenderCache();
-		logo_settled_by_user_message = false;
-		stopLogoAnimation();
-		drop_logo_tick();
 		unbind_compaction_status_indicator();
 		shutdown_gradient_clock();
 		unbind_thinking_status_hosts();
@@ -3396,6 +3291,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		setTurnToolTranscriptActive(false);
 		setPlanAutoContinuing(false);
 		setUserBashRunning(false);
+		clear_bash_queued_messages();
 		setShellSyncCallback(undefined);
 		reset_footer_state();
 		if (ctx.hasUI) {
@@ -3410,6 +3306,10 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 		if (shellInputUnsubscribe) {
 			shellInputUnsubscribe();
 			shellInputUnsubscribe = undefined;
+		}
+		if (bashQueueInputUnsubscribe) {
+			bashQueueInputUnsubscribe();
+			bashQueueInputUnsubscribe = undefined;
 		}
 		if (bashCancelUnsubscribe) {
 			bashCancelUnsubscribe();

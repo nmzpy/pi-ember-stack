@@ -81,29 +81,6 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
-export const TURN_PREFIX_SUMMARIZATION_PROMPT = `This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
-
-Summarize the prefix to provide context for the retained suffix:
-
-## Original Request
-[What did the user ask for in this turn?]
-
-## Early Progress
-- [Key decisions and work done in the prefix]
-
-## Context for Suffix
-- [Information needed to understand the retained recent work]
-
-Be concise. Focus on what's needed to understand the kept suffix.`;
-
-export const SPLIT_TURN_HEADER = "**Turn Context (split turn):**";
-
 export function select_summarization_prompt(previousSummary?: string): string {
 	return previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
-}
-
-export function merge_split_turn_summaries(historyResult: string, turnPrefixResult: string): string {
-	const history = historyResult.trim();
-	if (!history) return turnPrefixResult;
-	return `${historyResult}\n\n---\n\n${SPLIT_TURN_HEADER}\n\n${turnPrefixResult}`;
 }

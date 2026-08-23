@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
 import {
 	format_image_fallback_label,
+	format_image_styled_editor_placeholder,
 	make_image_placeholder,
 } from "../types.ts";
 import {
@@ -70,32 +74,37 @@ describe("pi-ember-images path handling", () => {
 			"[image 3: 345x175]",
 		);
 	});
+
+	test("editor placeholder does not leak a background across the input row", () => {
+		const result = format_image_styled_editor_placeholder(3);
+		const resetIndex = result.indexOf("\x1b[39;49m");
+		expect(resetIndex).toBeGreaterThan(-1);
+		expect(result.slice(resetIndex)).not.toContain("\x1b[48;2;");
+		expect(`${result}typed text`).toContain("\x1b[39;49m");
+	});
 });
 
 describe("replaceImagePlaceholdersWithFallbackLabels", () => {
-	test("replaces each placeholder with its dimensioned label in place", () => {
+	test("replaces each placeholder with its styled, dimensioned label in place", () => {
 		const text = "Review [image 1] and [image 2] please";
 		const attachments = [
 			attachment(1, { widthPx: 2, heightPx: 2 }),
 			attachment(2, { widthPx: 345, heightPx: 175 }),
 		];
-		expect(replaceImagePlaceholdersWithFallbackLabels(text, attachments)).toBe(
-			"Review [image 1: 2x2] and [image 2: 345x175] please",
-		);
+		const result = replaceImagePlaceholdersWithFallbackLabels(text, attachments);
+		expect(stripAnsi(result)).toBe("Review [image 1: 2x2] and [image 2: 345x175] please");
 	});
 
-	test("image-only prompt keeps the label as the whole message text", () => {
+	test("image-only prompt keeps the visible label as the whole message text", () => {
 		const attachments = [attachment(1, { widthPx: 2, heightPx: 2 })];
-		expect(replaceImagePlaceholdersWithFallbackLabels("[image 1]", attachments)).toBe(
-			"[image 1: 2x2]",
-		);
+		const result = replaceImagePlaceholdersWithFallbackLabels("[image 1]", attachments);
+		expect(stripAnsi(result)).toBe("[image 1: 2x2]");
 	});
 
 	test("keeps bare placeholder when dimensions are unknown", () => {
 		const attachments = [attachment(1)];
-		expect(replaceImagePlaceholdersWithFallbackLabels("see [image 1]", attachments)).toBe(
-			"see [image 1]",
-		);
+		const result = replaceImagePlaceholdersWithFallbackLabels("see [image 1]", attachments);
+		expect(stripAnsi(result)).toBe("see [image 1]");
 	});
 
 	test("preserves submission order and surrounding text", () => {
@@ -103,15 +112,16 @@ describe("replaceImagePlaceholdersWithFallbackLabels", () => {
 			attachment(1, { widthPx: 10, heightPx: 20 }),
 			attachment(2, { widthPx: 30, heightPx: 40 }),
 		];
-		expect(
-			replaceImagePlaceholdersWithFallbackLabels("[image 2] vs [image 1]", attachments),
-		).toBe("[image 2: 30x40] vs [image 1: 10x20]");
+		const result = replaceImagePlaceholdersWithFallbackLabels(
+			"[image 2] vs [image 1]",
+			attachments,
+		);
+		expect(stripAnsi(result)).toBe("[image 2: 30x40] vs [image 1: 10x20]");
 	});
 
 	test("ignores placeholders that are not present in the text", () => {
 		const attachments = [attachment(1, { widthPx: 2, heightPx: 2 })];
-		expect(replaceImagePlaceholdersWithFallbackLabels("plain text", attachments)).toBe(
-			"plain text",
-		);
+		const result = replaceImagePlaceholdersWithFallbackLabels("plain text", attachments);
+		expect(stripAnsi(result)).toBe("plain text");
 	});
 });

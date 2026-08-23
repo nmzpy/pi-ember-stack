@@ -277,6 +277,58 @@ describe("effort helpers", () => {
 				"high",
 			),
 		).toBe("high");
+		expect(
+			resolve_model_effort_level(
+				{
+					provider: "google-vertex",
+					id: "gemini-3.7-flash",
+					name: "Gemini 3.7 Flash",
+					reasoning: true,
+				},
+				"high",
+			),
+		).toBe("high");
+		expect(
+			resolve_model_effort_level(
+				{
+					provider: "google-vertex",
+					id: "gemini-3.7-flash",
+					name: "Gemini 3.7 Flash",
+					reasoning: true,
+				},
+				"minimal",
+			),
+		).toBe("minimal");
+		expect(
+			resolve_model_effort_level(
+				{
+					provider: "google-vertex",
+					id: "gemini-3.7-flash",
+					name: "Gemini 3.7 Flash",
+					reasoning: true,
+				},
+				"off",
+			),
+		).toBe("off");
+		expect(
+			resolve_model_effort_level(
+				{
+					provider: "google-vertex",
+					id: "gemini-3.7-flash",
+					name: "Gemini 3.7 Flash",
+					reasoning: true,
+				},
+				"high",
+				[
+					{
+						provider: "google-vertex",
+						id: "gemini-3.7-flash",
+						name: "Gemini 3.7 Flash",
+						reasoning: true,
+					},
+				],
+			),
+		).toBe("high");
 	});
 
 	test("get_baked_thinking_variant still finds max/minimal", () => {

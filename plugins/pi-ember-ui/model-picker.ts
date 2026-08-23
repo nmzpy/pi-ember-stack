@@ -50,6 +50,7 @@ import {
 	resolve_switch_session_fn,
 } from "./command-context-capture.ts";
 import { find_exact_model_reference } from "./model-reference.ts";
+import { request_render } from "./render-intent.ts";
 
 export { find_exact_model_reference } from "./model-reference.ts";
 export {
@@ -73,12 +74,12 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT = {
  */
 let resume_render_width = 0;
 
-/** SSOT: the resume title/header column occupies exactly the middle of the
- *  available content width (mirrors the subagent `TOOL_ROW_WIDTH_FRACTION`
- *  = 0.5 compact-row threshold). Descriptions start right after this
- *  midpoint. Never duplicate this fraction in other files.
+/** SSOT: the resume title/header column occupies 75% of the available content
+ *  width on the left, positioning the last-used date/message description column
+ *  at 75% across the available content width on the right. Never duplicate this
+ *  fraction in other files.
  */
-const RESUME_PRIMARY_COLUMN_FRACTION = 0.5;
+const RESUME_PRIMARY_COLUMN_FRACTION = 0.75;
 
 /** Structural view of pi-tui's SelectList primary-column hook. The installed
  *  pi-tui typings declare `getPrimaryColumnWidth` private, so the override is
@@ -97,11 +98,10 @@ const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
 const select_list_proto = SelectList.prototype as unknown as Partial<ResumeListPrimaryColumnSeam>;
 const base_get_primary_column_width = select_list_proto.getPrimaryColumnWidth;
 
-/** Cap a resume title at half the terminal content width (mirrors the subagent
- *  `TOOL_ROW_WIDTH_FRACTION` = 0.5 compact-row threshold). `contentWidth` is the
+/** Cap a resume title at 75% of the terminal content width. `contentWidth` is the
  *  real list width captured by `ResumeSelectList.render`; `columnWidth` is the
  *  fallback when unset. `maxWidth` is pi-tui's primary-column bound, so titles
- *  shorter than half the screen are never truncated below their natural width.
+ *  shorter than 75% of the screen are never truncated below their natural width.
  */
 export function resume_truncate_text(
 	text: string,
@@ -111,7 +111,10 @@ export function resume_truncate_text(
 ): string {
 	return truncateToWidth(
 		text,
-		Math.max(1, Math.min(maxWidth, Math.floor((contentWidth || columnWidth) * 0.5))),
+		Math.max(
+			1,
+			Math.min(maxWidth, Math.floor((contentWidth || columnWidth) * RESUME_PRIMARY_COLUMN_FRACTION)),
+		),
 	);
 }
 
@@ -165,7 +168,6 @@ export const AUTOCOMPLETE_MAX_VISIBLE = 7;
 const MODEL_PREFIX = "/model";
 const RESUME_PREFIX = "/resume";
 const SESSION_CACHE_TTL_MS = 5_000;
-const FIRST_MESSAGE_PREVIEW_LEN = 48;
 
 export type ModelPickResult =
 	| {
@@ -253,8 +255,8 @@ function editor_is_showing_autocomplete(editor: ModelPickerEditor): boolean {
 	return editor.isShowingAutocomplete?.() === true;
 }
 
-function request_editor_render(editor: ModelPickerEditor): void {
-	editor?.tui?.requestRender?.();
+function request_editor_render(_editor: ModelPickerEditor): void {
+	request_render();
 }
 
 /** Request slash-command argument completions (e.g. /model provider/id). */
@@ -870,9 +872,7 @@ function session_label(session: SessionInfo): string {
 	if (named) return named;
 	const first = session.firstMessage?.replace(/\s+/g, " ").trim() ?? "";
 	if (first) {
-		return first.length > FIRST_MESSAGE_PREVIEW_LEN
-			? `${first.slice(0, FIRST_MESSAGE_PREVIEW_LEN - 1)}…`
-			: first;
+		return first.replace(/\x1b\[48;2;38;38;38m/g, "");
 	}
 	return session.id;
 }

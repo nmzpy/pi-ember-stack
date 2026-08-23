@@ -18,12 +18,7 @@ import {
 	convertToLlm,
 	serializeConversation,
 } from "@earendil-works/pi-coding-agent";
-import {
-	merge_split_turn_summaries,
-	select_summarization_prompt,
-	SUMMARIZATION_SYSTEM_PROMPT,
-	TURN_PREFIX_SUMMARIZATION_PROMPT,
-} from "./compaction-prompts.ts";
+import { select_summarization_prompt, SUMMARIZATION_SYSTEM_PROMPT } from "./compaction-prompts.ts";
 import { count_tokens, trim_to_token_budget } from "./stack-compaction-tokens.ts";
 
 const PROMPT_SAFETY_TOKENS = 200;
@@ -49,10 +44,10 @@ function compute_file_lists(fileOps: FileOperations): {
 function format_file_operations(readFiles: string[], modifiedFiles: string[]): string {
 	const sections: string[] = [];
 	if (readFiles.length > 0) {
-		sections.push(`<read-files>\n${readFiles.join("\n")}\n</read-files>`);
+		sections.push(`### Read files\n${readFiles.map((f) => `- ${f}`).join("\n")}`);
 	}
 	if (modifiedFiles.length > 0) {
-		sections.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
+		sections.push(`### Modified files\n${modifiedFiles.map((f) => `- ${f}`).join("\n")}`);
 	}
 	if (sections.length === 0) return "";
 	return `\n\n${sections.join("\n\n")}`;
@@ -180,46 +175,6 @@ async function generate_history_summary(
 	return extract_text_content(response);
 }
 
-async function generate_turn_prefix_summary(
-	messages: AgentMessage[],
-	model: Model<Api>,
-	reserveTokens: number,
-	auth: StackCompactionAuth,
-	signal: AbortSignal | undefined,
-	thinkingLevel: AgentThinkingLevel | undefined,
-	streamFn?: StreamFn,
-): Promise<string> {
-	const maxTokens = Math.min(
-		Math.floor(0.5 * reserveTokens),
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	);
-	const llmMessages = trim_llm_messages_for_summary(
-		messages,
-		reserveTokens,
-		maxTokens,
-		`<conversation>\n\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`,
-	);
-	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
-	const summarizationMessages: Message[] = [
-		{
-			role: "user",
-			content: [{ type: "text", text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
-	const response = await complete_summarization(
-		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		create_summarization_options(model, maxTokens, auth, signal, thinkingLevel),
-		streamFn,
-	);
-	if (response.stopReason === "error") {
-		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-	return extract_text_content(response);
-}
-
 export async function run_stack_compaction(
 	preparation: CompactionPreparation,
 	model: Model<Api>,
@@ -239,43 +194,26 @@ export async function run_stack_compaction(
 		settings,
 	} = preparation;
 
-	let summary: string;
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
-		const historyResult =
-			messagesToSummarize.length > 0
-				? await generate_history_summary(
-						messagesToSummarize,
-						model,
-						settings.reserveTokens,
-						auth,
-						signal,
-						previousSummary,
-						thinkingLevel,
-						streamFn,
-					)
-				: (previousSummary ?? "");
-		const turnPrefixResult = await generate_turn_prefix_summary(
-			turnPrefixMessages,
-			model,
-			settings.reserveTokens,
-			auth,
-			signal,
-			thinkingLevel,
-			streamFn,
-		);
-		summary = merge_split_turn_summaries(historyResult, turnPrefixResult);
-	} else {
-		summary = await generate_history_summary(
-			messagesToSummarize,
-			model,
-			settings.reserveTokens,
-			auth,
-			signal,
-			previousSummary,
-			thinkingLevel,
-			streamFn,
-		);
-	}
+	// Single summary pass. Pi's native split-turn concept (a second LLM call
+	// producing a "Turn Context (split turn) / Original Request" block) adds no
+	// value: our structured checkpoint's ## Progress / ## Next Steps already
+	// tells the model what's left to do. Fold any turn-prefix messages into
+	// the main pass so one Ember summary covers everything — no duplicate
+	// call, no split-turn block, never fall back to Pi's compact().
+	const summaryMessages = isSplitTurn && turnPrefixMessages.length > 0
+		? [...messagesToSummarize, ...turnPrefixMessages]
+		: messagesToSummarize;
+
+	let summary = await generate_history_summary(
+		summaryMessages,
+		model,
+		settings.reserveTokens,
+		auth,
+		signal,
+		previousSummary,
+		thinkingLevel,
+		streamFn,
+	);
 
 	const { readFiles, modifiedFiles } = compute_file_lists(fileOps);
 	summary += format_file_operations(readFiles, modifiedFiles);

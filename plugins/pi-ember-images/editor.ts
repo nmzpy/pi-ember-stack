@@ -4,6 +4,12 @@ import { compressAttachment } from "./compress.ts";
 import { readClipboardImage } from "./clipboard.ts";
 import { describeReject, replaceImagePathsInText } from "./image-utils.ts";
 import type { AttachmentStore } from "./store.ts";
+import {
+	format_image_styled_editor_placeholder,
+	IMAGE_PLACEHOLDER_PATTERN,
+	IMAGE_PLACEHOLDER_PREFIX,
+} from "./types.ts";
+import { request_render } from "../pi-ember-ui/render-intent.ts";
 
 export const PASTE_START = "\x1b[200~";
 export const PASTE_END = "\x1b[201~";
@@ -43,7 +49,7 @@ export class EmberImagesEditor extends CustomEditor {
 		const transformed = this.transform(text);
 		if (transformed.replaced === 0 || transformed.text === text) return;
 		super.setText(transformed.text);
-		this.tui.requestRender();
+		request_render();
 	}
 
 	private pasteClipboardImage(): void {
@@ -57,7 +63,21 @@ export class EmberImagesEditor extends CustomEditor {
 		const attachment = this.options.store.add(result.image);
 		void compressAttachment(attachment);
 		super.insertTextAtCursor(attachment.placeholder);
-		this.tui.requestRender();
+		request_render();
+	}
+
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		const pattern = new RegExp(IMAGE_PLACEHOLDER_PATTERN.source, IMAGE_PLACEHOLDER_PATTERN.flags);
+		for (let index = 0; index < lines.length; index++) {
+			const line = lines[index];
+			if (!line?.includes(IMAGE_PLACEHOLDER_PREFIX)) continue;
+			lines[index] = line.replace(pattern, (match) => {
+				const id = Number.parseInt(match.match(/\d+/)?.[0] ?? "0", 10);
+				return format_image_styled_editor_placeholder(id);
+			});
+		}
+		return lines;
 	}
 
 	private transform(text: string): { text: string; replaced: number } {

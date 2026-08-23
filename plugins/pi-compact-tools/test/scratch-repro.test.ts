@@ -49,6 +49,9 @@ describe("scratch: real event sequence", () => {
 		const owner_ctx = makeContext("s1", owner_state) as any;
 		const child_ctx = makeContext("s2", {}) as any;
 
+		// A real in-group `└ Thinking` lane requires a multi-record compact
+		// group. One-member groups are standalone rows, so `armInGroupThinking`
+		// on a single completed read leaves the row unchanged.
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		r.renderResult(
 			"read",
@@ -61,6 +64,21 @@ describe("scratch: real event sequence", () => {
 		r.settleAllGroups();
 		r.armInGroupThinking();
 		let row = stripAnsi((owner_state.callText as any).text);
+		expect(row).not.toContain("Thinking");
+		expect(r.hasGroupThinkingChild()).toBe(false);
+
+		// Add a second call so the next thinking stream can arm an in-group lane.
+		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		r.renderResult(
+			"grep",
+			{ pattern: "x", path: "b.ts" },
+			{ content: [{ type: "text", text: "hit" }], details: { totalMatched: 1 } },
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...child_ctx, isError: false },
+		);
+		r.armInGroupThinking();
+		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Thinking");
 		expect(r.hasGroupThinkingChild()).toBe(true);
 
@@ -72,11 +90,11 @@ describe("scratch: real event sequence", () => {
 		expect(r.hasGroupThinkingChild()).toBe(false);
 		expect(row).not.toContain("Thinking");
 
-		// New tool joins the same work group — one header, not a second bullet row.
-		r.renderCall("grep", { pattern: "x", path: "b.ts" }, theme, child_ctx);
+		// A third tool joins the same work group — one header, not a second bullet row.
+		r.renderCall("grep", { pattern: "y", path: "c.ts" }, theme, child_ctx);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("Searching");
+		expect(row).toContain("Search");
 		expect(row).not.toMatch(/Explored[\s\S]*Explored/);
 		expect(row.toLowerCase()).toContain("explored");
 	});

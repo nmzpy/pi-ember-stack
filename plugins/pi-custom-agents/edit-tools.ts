@@ -39,13 +39,41 @@ export function resolve_patch_tool_name(provider: string | undefined): PatchTool
 	return uses_apply_patch_provider(provider) ? "apply_patch" : "edit";
 }
 
+/**
+ * Hashedit ownership flag — jiti-safe via Symbol.for so module duplication
+ * across importer chains never splits the writer (pi-ember-hashedit factory)
+ * from the readers (mode tool-set builders below). Set once at hashedit
+ * factory load; subagent child sessions do not load hashedit and never see a
+ * swap because `with_provider_patch_tool` deliberately stays on
+ * `resolve_patch_tool_name` (children keep native edit/apply_patch).
+ */
+const HASHEDIT_OWNS_EDITING = Symbol.for("pi-ember-stack:hashedit-owns-editing");
+
+export function set_hashedit_owns_editing(active: boolean): void {
+	(globalThis as unknown as Record<symbol, unknown>)[HASHEDIT_OWNS_EDITING] = active;
+}
+
+export function is_hashedit_editing_owner(): boolean {
+	return (globalThis as unknown as Record<symbol, unknown>)[HASHEDIT_OWNS_EDITING] === true;
+}
+
+/**
+ * Editing tool for PARENT mode tool sets: `replace` when pi-ember-hashedit is
+ * loaded, otherwise the provider patch tool. Subagent child lists must use
+ * `resolve_patch_tool_name` instead — child registries have no `replace`.
+ */
+export function resolve_parent_editing_tool_name(provider: string | undefined): string {
+	if (!uses_apply_patch_provider(provider) && is_hashedit_editing_owner()) return "replace";
+	return resolve_patch_tool_name(provider);
+}
+
 export function model_provider_of(model: { provider?: string } | undefined): string | undefined {
 	return typeof model?.provider === "string" ? model.provider : undefined;
 }
 
 /** Full code-mode tool set with the correct patch/edit tool for the provider. */
 export function build_full_tools(provider: string | undefined): string[] {
-	const patch_tool = resolve_patch_tool_name(provider);
+	const patch_tool = resolve_parent_editing_tool_name(provider);
 	return [
 		"read",
 		"bash",
@@ -55,7 +83,6 @@ export function build_full_tools(provider: string | undefined): string[] {
 		"find",
 		"ls",
 		"quiz",
-		"todo",
 		...WEB_ACCESS_TOOLS,
 	];
 }
@@ -79,5 +106,4 @@ export const DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS = [
 	"grep",
 	"find",
 	"ls",
-	"todo",
 ] as const;

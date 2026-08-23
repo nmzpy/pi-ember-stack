@@ -30,13 +30,13 @@ export default function piEmberImagesPlugin(pi: ExtensionAPI): void {
 
 	pi.registerMessageRenderer<ImagePreviewDetails>(
 		PREVIEW_MESSAGE_TYPE,
-		(message, _options, theme) => {
+		(message, _options, _theme) => {
 			const placeholders = message.details?.placeholders ?? [];
 			const attachments = placeholders
 				.map((placeholder) => store.get(placeholder))
 				.filter((attachment): attachment is ImageAttachment => attachment !== undefined);
 			if (attachments.length === 0) return undefined;
-			return new ImagePreviewMessage(attachments, (text) => theme.fg("text", text));
+			return new ImagePreviewMessage(attachments);
 		},
 	);
 

@@ -18,6 +18,7 @@ import {
 	type SubagentRetrySession,
 	MAX_SUBAGENT_WEBSOCKET_RETRIES,
 	classify_safe_pre_response_failure,
+	decide_midstream_websocket_continuation,
 	decide_pre_response_websocket_retry,
 	DEFAULT_SUBAGENT_TIMEOUT_MS,
 	annotate_parser_stream_error,
@@ -33,6 +34,7 @@ import {
 	is_parser_stream_error,
 	merge_failure_message,
 	note_subagent_prompt_attempt_event,
+	prepare_midstream_websocket_continuation,
 	PARSER_STREAM_ERROR_LIMITATION_SUFFIX,
 	resolve_failure_message,
 	resolve_subagent_timeout_ms,
@@ -41,6 +43,12 @@ import {
 	runSubAgent,
 	SUBAGENT_HTTP500_RETRY_BACKOFF_MS,
 } from "../runner.ts";
+import {
+	is_transient_transport_death,
+	MAX_TRANSPORT_RETRIES,
+	TRANSPORT_RETRY_BACKOFF_MS,
+	retry_transient_transport_operation,
+} from "../transport-policy.ts";
 
 function makeResult(overrides: Partial<SubAgentResult> = {}): SubAgentResult {
 	return {
@@ -94,7 +102,10 @@ class MiniSessionManager {
 	entries: Array<{
 		id: string;
 		parentId: string | null;
-		role: "user" | "assistant";
+		type: "message";
+		message: { role: "user" | "assistant" | "toolResult"; stopReason?: string };
+		role: "user" | "assistant" | "toolResult";
+		stopReason?: string;
 		text: string;
 	}> = [];
 	leafId: string | null = null;
@@ -104,9 +115,30 @@ class MiniSessionManager {
 		return this.leafId;
 	}
 
-	appendMessage(role: "user" | "assistant", text: string): string {
+	appendMessage(
+		role: "user" | "assistant",
+		text: string,
+		options: { stopReason?: string } = {},
+	): string {
 		const id = `entry-${++this.seq}`;
-		this.entries.push({ id, parentId: this.leafId, role, text });
+		this.entries.push({
+			id,
+			parentId: this.leafId,
+			type: "message",
+			message: { role, stopReason: options.stopReason },
+			role,
+			stopReason: options.stopReason,
+			text,
+		});
+		this.leafId = id;
+		return id;
+	}
+
+	/** Non-assistant turn separator so trailing-assistant trims stop here. */
+	appendToolResult(text = ""): string {
+		const id = `entry-${++this.seq}`;
+		const role = "toolResult" as const;
+		this.entries.push({ id, parentId: this.leafId, type: "message", message: { role }, role, text });
 		this.leafId = id;
 		return id;
 	}
@@ -136,7 +168,15 @@ class MiniSessionManager {
 			messages: this.getBranch().map((entry) =>
 				entry.role === "user"
 					? userMessage(entry.text)
-					: assistantMessage({ content: [{ type: "text", text: entry.text }] }),
+					: entry.role === "toolResult"
+						? ({
+								role: "toolResult",
+								content: [{ type: "text", text: entry.text }],
+							}) as unknown as Message
+						: assistantMessage({
+								content: [{ type: "text", text: entry.text }],
+								...(entry.stopReason ? { stopReason: entry.stopReason } : {}),
+							}),
 			),
 		};
 	}
@@ -193,14 +233,17 @@ function runner_assistant_message(options: {
 	};
 }
 
-async function run_resolved_websocket_retry_fixture(options: { firstResponseText?: string } = {}): Promise<{
+async function run_resolved_websocket_retry_fixture(options: {
+	firstResponseText?: string;
+	firstResponseErrorMessage?: string;
+} = {}): Promise<{
 	result: SubAgentResult;
 	streamCalls: number;
 }> {
 	const outcomes = [
 		runner_assistant_message({
 			stopReason: "error",
-			errorMessage: "WebSocket error",
+			errorMessage: options.firstResponseErrorMessage ?? "WebSocket error",
 			text: options.firstResponseText,
 		}),
 		runner_assistant_message({ stopReason: "stop", text: "Recovered." }),
@@ -267,15 +310,51 @@ describe("runSubAgent resolved WebSocket retry", () => {
 		expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 	});
 
-	test("does not replay a resolved WebSocket failure after child text", async () => {
+	test("continues a resolved WebSocket failure after child text instead of terminating", async () => {
 		const { result, streamCalls } = await run_resolved_websocket_retry_fixture({
 			firstResponseText: "Partial output.",
 		});
-		expect(streamCalls).toBe(1);
-		expect(result.exitCode).toBe(1);
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("WebSocket error");
-		expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		// Mid-stream drop AFTER emitted output: never replay the original task
+		// (that could duplicate work) and never terminate the stream — resume
+		// once via the bounded continuation prompt.
+		expect(streamCalls).toBe(2);
+		expect(result.exitCode).toBe(0);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(getFinalOutput(result.messages)).toBe("Recovered.");
+	});
+
+	test("retries a resolved parser-stream closure through the full runner", async () => {
+		const { result, streamCalls } = await run_resolved_websocket_retry_fixture({
+			firstResponseErrorMessage: "Stream ended without finish_reason",
+		});
+		expect(streamCalls).toBe(2);
+		expect(result.exitCode).toBe(0);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(getFinalOutput(result.messages)).toBe("Recovered.");
+	});
+
+	test("retries a resolved transport abort through the full runner", async () => {
+		const { result, streamCalls } = await run_resolved_websocket_retry_fixture({
+			firstResponseErrorMessage: "Request aborted",
+		});
+		expect(streamCalls).toBe(2);
+		expect(result.exitCode).toBe(0);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(getFinalOutput(result.messages)).toBe("Recovered.");
+	});
+
+	test("retries a resolved provider internal error through the full runner", async () => {
+		const { result, streamCalls } = await run_resolved_websocket_retry_fixture({
+			firstResponseErrorMessage: "an internal error occurred (trace ID: f8eeb71366068e51e84)",
+		});
+		expect(streamCalls).toBe(2);
+		expect(result.exitCode).toBe(0);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(getFinalOutput(result.messages)).toBe("Recovered.");
 	});
 });
 
@@ -364,7 +443,6 @@ describe("resolve_failure_message", () => {
 		});
 		expect(resolve_failure_message(result)).toBe("I could not complete the task");
 	});
-
 	test("returns undefined when no useful text exists (caller falls back to short label)", () => {
 		const result = makeResult({
 			exitCode: 1,
@@ -373,6 +451,28 @@ describe("resolve_failure_message", () => {
 			messages: [],
 		});
 		expect(resolve_failure_message(result)).toBeUndefined();
+	});
+
+	test("appends retry suffix when retryCount is set and a failure reason exists", () => {
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "503 status code (no body)",
+			retryCount: 5,
+		});
+		expect(resolve_failure_message(result)).toBe(
+			"503 status code (no body) (after retrying for 5 times)",
+		);
+	});
+
+	test("appends singular retry suffix", () => {
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "fetch failed",
+			retryCount: 1,
+		});
+		expect(resolve_failure_message(result)).toBe("fetch failed (after retrying for 1 time)");
 	});
 
 	test("skips generic abort messages in assistant history", () => {
@@ -847,21 +947,24 @@ describe("retryable_pre_response_http500_failure", () => {
 });
 
 describe("pre-response retry decisions", () => {
-	function makeRetrySession(options: { contextMessages?: Message[] } = {}): {
+	function makeRetrySession(options: {
+		contextMessages?: Message[];
+		branchEntries?: Array<{ id: string; role: "user" | "assistant" }>;
+	} = {}): {
 		session: SubagentRetrySession;
 		calls: string[];
 		agentMessages: AgentMessage[];
 	} {
 		const calls: string[] = [];
 		const agentMessages: AgentMessage[] = [...(options.contextMessages ?? [])];
+		const branch_entries = options.branchEntries ?? [{ id: "root", role: "assistant" as const }];
 		const sessionManager = {
-			getBranch: () => [
-				{
-					id: "root",
-					type: "message",
-					message: { role: "assistant" },
-				},
-			],
+			getBranch: () =>
+				branch_entries.map((entry) => ({
+					id: entry.id,
+					type: "message" as const,
+					message: { role: entry.role },
+				})),
 			branch: (id: string) => {
 				calls.push(`branch:${id}`);
 			},
@@ -1249,6 +1352,588 @@ describe("pre-response retry decisions", () => {
 		expect(calls).toEqual([]);
 		expect(result.errorMessage).toBe("WebSocket error");
 	});
+
+	test("retries a resolved parser-stream closure (Stream ended without finish_reason)", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "Stream ended without finish_reason",
+			messages: [assistantMessage({ errorMessage: "Stream ended without finish_reason" })],
+		});
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "Stream ended without finish_reason",
+		};
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBe("websocket");
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("retry");
+		expect(calls).toEqual(["branch:pre-attempt-leaf"]);
+	});
+
+	test("retries a resolved transport abort (Request aborted) when the parent did not abort", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "Request aborted",
+			messages: [assistantMessage({ errorMessage: "Request aborted" })],
+		});
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "Request aborted",
+		};
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBe("websocket");
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("retry");
+		expect(calls).toEqual(["branch:pre-attempt-leaf"]);
+	});
+
+	test("never retries a transport abort when the parent actually aborted", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "Request aborted",
+		});
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "Request aborted",
+		};
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: true,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("skip");
+		expect(calls).toEqual([]);
+		expect(result.errorMessage).toBe("Request aborted");
+	});
+
+	test("retries a resolved provider internal error (an internal error occurred)", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "an internal error occurred (trace ID: f8eeb71366068e51e84)",
+			messages: [
+				assistantMessage({ errorMessage: "an internal error occurred (trace ID: f8eeb71366068e51e84)" }),
+			],
+		});
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: "an internal error occurred (trace ID: f8eeb71366068e51e84)",
+		};
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBe("websocket");
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("retry");
+		expect(calls).toEqual(["branch:pre-attempt-leaf"]);
+	});
+
+	test("does not retry the enriched Cognition permission-denied form", async () => {
+		const { session, calls } = makeRetrySession();
+		const enriched =
+			'Cognition denied this request for model "glm-5-2" with the opaque "an internal error occurred" message.';
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: enriched,
+			messages: [assistantMessage({ errorMessage: enriched })],
+		});
+		const attempt: SubagentPromptAttempt = {
+			sawVisibleOrToolSideEffect: false,
+			resolvedStopReason: "error",
+			resolvedFailureMessage: enriched,
+		};
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBeUndefined();
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("skip");
+		expect(calls).toEqual([]);
+		expect(result.errorMessage).toBe(enriched);
+	});
+
+	test("classifies a resolved empty-body 503 as websocket for 5-attempt retry", () => {
+		const result = makeResult({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "503 status code (no body)",
+			messages: [assistantMessage({ errorMessage: "503 status code (no body)" })],
+		});
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		expect(classify_safe_pre_response_failure({ result, attempt })).toBe("websocket");
+	});
+
+	test("classify_safe_pre_response_failure does NOT classify 401 as websocket", () => {
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		expect(
+			classify_safe_pre_response_failure({
+				result,
+				attempt,
+				promptError: new Error("401 Unauthorized: invalid api key"),
+			}),
+		).toBeUndefined();
+	});
+
+	describe("mid-stream WebSocket continuation", () => {
+
+		test("continues a resolved mid-stream WebSocket error without rolling back persisted work", async () => {
+			const { session, calls } = makeRetrySession({
+				contextMessages: [
+					userMessage("implement camera fix"),
+					assistantMessage({ content: [{ type: "text", text: "worked so far" }] }),
+				],
+				branchEntries: [
+					{ id: "u-task", role: "user" },
+					{ id: "a-progress", role: "assistant" },
+					{ id: "a-failed", role: "assistant" },
+				],
+			});
+			const result = makeResult({
+				exitCode: -1,
+				stopReason: "error",
+				errorMessage: "WebSocket error",
+				messages: [
+					userMessage("implement camera fix"),
+					assistantMessage({ content: [{ type: "text", text: "worked so far" }] }),
+					assistantMessage({ stopReason: "error", errorMessage: "WebSocket error" }),
+				],
+			});
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "WebSocket error",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("retry");
+			// Dead failed assistant dropped from the result cache; completed work kept.
+			expect(result.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+			expect(result.stopReason).toBeUndefined();
+			expect(result.errorMessage).toBeUndefined();
+			// Session trimmed only back to the last non-assistant entry — the
+			// full pre-attempt rollback never ran.
+			expect(calls).toEqual(["branch:u-task"]);
+			expect(session.agent.state.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+		});
+
+		test("continues a thrown mid-stream WebSocket error", async () => {
+			const { session, calls } = makeRetrySession({
+				contextMessages: [userMessage("task"), assistantMessage()],
+				branchEntries: [
+					{ id: "u-task", role: "user" },
+					{ id: "a-failed", role: "assistant" },
+				],
+			});
+			const result = makeResult();
+			const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: true };
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 1,
+				session,
+				promptError: new Error("WebSocket error"),
+				backoffMs: 0,
+			});
+			expect(decision).toBe("retry");
+			expect(calls).toEqual(["branch:u-task"]);
+		});
+
+		test("shares the WebSocket retry budget with the pre-response path", async () => {
+			const { session, calls } = makeRetrySession();
+			const result = makeResult({ stopReason: "error", errorMessage: "WebSocket error" });
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "WebSocket error",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: MAX_SUBAGENT_WEBSOCKET_RETRIES,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("skip");
+			expect(calls).toEqual([]);
+			expect(result.errorMessage).toBe("WebSocket error");
+		});
+
+		test("stops a mid-stream continuation when the parent aborts during backoff", async () => {
+			const controller = new AbortController();
+			const { session, calls } = makeRetrySession();
+			const result = makeResult({ stopReason: "error", errorMessage: "WebSocket error" });
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "WebSocket error",
+			};
+			const decisionPromise = decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				signal: controller.signal,
+				session,
+				backoffMs: 100,
+			});
+			setTimeout(() => controller.abort(), 5);
+			expect(await decisionPromise).toBe("aborted");
+			expect(calls).toEqual([]);
+			expect(result.errorMessage).toBe("WebSocket error");
+		});
+
+		test("skips non-WebSocket failures even after visible activity", async () => {
+			const { session, calls } = makeRetrySession();
+			const result = makeResult({ stopReason: "error", errorMessage: "429 rate limit exceeded" });
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "429 rate limit exceeded",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("skip");
+			expect(calls).toEqual([]);
+			expect(result.errorMessage).toBe("429 rate limit exceeded");
+		});
+
+		test("defers to the pre-response replay path when nothing was emitted yet", async () => {
+			const { session, calls } = makeRetrySession();
+			const result = makeResult({ stopReason: "error", errorMessage: "WebSocket error" });
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: false,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "WebSocket error",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("skip");
+			expect(calls).toEqual([]);
+		});
+
+		test("keeps completed turns on the persisted branch and drops only the dead assistant", () => {
+			const sm = new MiniSessionManager();
+			sm.appendMessage("user", "original task");
+			sm.appendMessage("assistant", "step 1 done");
+			sm.appendToolResult();
+			// The persisted failed assistant carries stopReason "error" in real runs.
+			sm.appendMessage("assistant", "", { stopReason: "error" });
+			const agent = { state: { messages: [...sm.buildSessionContext().messages] } };
+			const result = makeResult({
+				messages: [...sm.buildSessionContext().messages],
+				stopReason: "error",
+				errorMessage: "WebSocket error",
+			});
+			prepare_midstream_websocket_continuation(
+				result,
+				{ sessionManager: sm, agent } as unknown as SubagentRetrySession,
+			);
+			expect(sm.getBranch().map((e) => e.text)).toEqual(["original task", "step 1 done", ""]);
+			expect(agent.state.messages.map((m) => m.role)).toEqual(["user", "assistant", "toolResult"]);
+			expect(result.messages.map((m) => m.role)).toEqual(["user", "assistant", "toolResult"]);
+			expect(result.stopReason).toBeUndefined();
+			expect(result.errorMessage).toBeUndefined();
+		});
+
+		test("continues a mid-stream parser-stream closure (Stream ended without finish_reason)", async () => {
+			const { session, calls } = makeRetrySession({
+				contextMessages: [userMessage("task"), assistantMessage()],
+				branchEntries: [
+					{ id: "u-task", role: "user" },
+					{ id: "a-failed", role: "assistant" },
+				],
+			});
+			const result = makeResult({
+				stopReason: "error",
+				errorMessage: "Stream ended without finish_reason",
+			});
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "Stream ended without finish_reason",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("retry");
+			expect(calls).toEqual(["branch:u-task"]);
+		});
+
+		test("continues a mid-stream transport abort (Request aborted) when the parent did not abort", async () => {
+			const { session, calls } = makeRetrySession({
+				contextMessages: [userMessage("task"), assistantMessage()],
+				branchEntries: [
+					{ id: "u-task", role: "user" },
+					{ id: "a-failed", role: "assistant" },
+				],
+			});
+			const result = makeResult({
+				stopReason: "error",
+				errorMessage: "Request aborted",
+			});
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "Request aborted",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("retry");
+			expect(calls).toEqual(["branch:u-task"]);
+		});
+
+		test("never continues a mid-stream transport abort when the parent actually aborted", async () => {
+			const { session, calls } = makeRetrySession();
+			const result = makeResult({
+				stopReason: "error",
+				errorMessage: "Request aborted",
+			});
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "Request aborted",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: true,
+				websocketRetries: 0,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("skip");
+			expect(calls).toEqual([]);
+			expect(result.errorMessage).toBe("Request aborted");
+		});
+
+		test("continues a mid-stream provider internal error", async () => {
+			const { session, calls } = makeRetrySession({
+				contextMessages: [userMessage("task"), assistantMessage()],
+				branchEntries: [
+					{ id: "u-task", role: "user" },
+					{ id: "a-failed", role: "assistant" },
+				],
+			});
+			const result = makeResult({
+				stopReason: "error",
+				errorMessage: "an internal error occurred (trace ID: abc123)",
+			});
+			const attempt: SubagentPromptAttempt = {
+				sawVisibleOrToolSideEffect: true,
+				resolvedStopReason: "error",
+				resolvedFailureMessage: "an internal error occurred (trace ID: abc123)",
+			};
+			const decision = await decide_midstream_websocket_continuation({
+				result,
+				attempt,
+				aborted: false,
+				websocketRetries: 0,
+				session,
+				backoffMs: 0,
+			});
+			expect(decision).toBe("retry");
+			expect(calls).toEqual(["branch:u-task"]);
+		});
+	});
+
+	test("classify_safe_pre_response_failure classifies a thrown 'fetch failed' as websocket", () => {
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		expect(
+			classify_safe_pre_response_failure({
+				result,
+				attempt,
+				promptError: new TypeError("fetch failed"),
+			}),
+		).toBe("websocket");
+	});
+
+	test("classify_safe_pre_response_failure classifies a thrown 'Terminated' as websocket", () => {
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		expect(
+			classify_safe_pre_response_failure({
+				result,
+				attempt,
+				promptError: new Error("Terminated"),
+			}),
+		).toBe("websocket");
+	});
+
+	test("classify_safe_pre_response_failure classifies a nested-cause network code as websocket", () => {
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		const inner = new Error("connect failed");
+		(inner as { code?: string }).code = "ECONNREFUSED";
+		const outer = new TypeError("fetch failed", { cause: inner });
+		expect(
+			classify_safe_pre_response_failure({
+				result,
+				attempt,
+				promptError: outer,
+			}),
+		).toBe("websocket");
+	});
+
+	test("classify_safe_pre_response_failure does NOT classify 401 as websocket", () => {
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		expect(
+			classify_safe_pre_response_failure({
+				result,
+				attempt,
+				promptError: new Error("401 Unauthorized: invalid api key"),
+			}),
+		).toBeUndefined();
+	});
+
+	test("decide_pre_response_websocket_retry retries a thrown 'fetch failed'", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			promptError: new TypeError("fetch failed"),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("retry");
+		expect(calls).toEqual(["branch:pre-attempt-leaf"]);
+	});
+
+	test("decide_pre_response_websocket_retry does NOT retry when parent aborted (even for 'fetch failed')", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: false };
+		const decision = await decide_pre_response_websocket_retry({
+			result,
+			attempt,
+			aborted: true,
+			websocketRetries: 0,
+			session,
+			rollback: makeRollback(),
+			promptError: new TypeError("fetch failed"),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("skip");
+		expect(calls).toEqual([]);
+	});
+
+	test("decide_midstream_websocket_continuation retries a thrown 'fetch failed' after visible activity", async () => {
+		const { session, calls } = makeRetrySession({
+			contextMessages: [userMessage("task"), assistantMessage()],
+			branchEntries: [
+				{ id: "u-task", role: "user" },
+				{ id: "a-failed", role: "assistant" },
+			],
+		});
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: true };
+		const decision = await decide_midstream_websocket_continuation({
+			result,
+			attempt,
+			aborted: false,
+			websocketRetries: 0,
+			session,
+			promptError: new TypeError("fetch failed"),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("retry");
+		expect(calls).toEqual(["branch:u-task"]);
+	});
+
+	test("decide_midstream_websocket_continuation does NOT retry when parent aborted (even for 'fetch failed')", async () => {
+		const { session, calls } = makeRetrySession();
+		const result = makeResult();
+		const attempt: SubagentPromptAttempt = { sawVisibleOrToolSideEffect: true };
+		const decision = await decide_midstream_websocket_continuation({
+			result,
+			attempt,
+			aborted: true,
+			websocketRetries: 0,
+			session,
+			promptError: new TypeError("fetch failed"),
+			backoffMs: 0,
+		});
+		expect(decision).toBe("skip");
+		expect(calls).toEqual([]);
+	});
 });
 
 describe("rollback_failed_prompt_attempt", () => {
@@ -1374,5 +2059,310 @@ describe("retry regression: no duplicate user prompt or failed assistant context
 			"prior task",
 			"original task",
 		]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Transport-policy SSOT tests
+// ---------------------------------------------------------------------------
+
+describe("is_transient_transport_death (transport-policy SSOT)", () => {
+	test("matches raw 'fetch failed' (case-insensitive)", () => {
+		expect(is_transient_transport_death("fetch failed")).toBe(true);
+		expect(is_transient_transport_death("Fetch Failed")).toBe(true);
+		expect(is_transient_transport_death(new TypeError("fetch failed"))).toBe(true);
+	});
+
+	test("matches bare 'Terminated'", () => {
+		expect(is_transient_transport_death("Terminated")).toBe(true);
+		expect(is_transient_transport_death(new Error("Terminated"))).toBe(true);
+		expect(is_transient_transport_death("terminated")).toBe(true);
+	});
+
+	test("matches SIGTERM/SIGKILL process-exit wording", () => {
+		expect(is_transient_transport_death("process terminated by SIGTERM")).toBe(true);
+		expect(is_transient_transport_death("SIGKILL received")).toBe(true);
+		expect(is_transient_transport_death("process exited with code 137")).toBe(true);
+	});
+
+	test("matches common Node/Bun network error codes via Error.code", () => {
+		for (const code of ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN"]) {
+			const err = new Error("connect failed");
+			(err as { code?: string }).code = code;
+			expect(is_transient_transport_death(err)).toBe(true);
+		}
+	});
+
+	test("matches network error messages", () => {
+		expect(is_transient_transport_death("socket hang up")).toBe(true);
+		expect(is_transient_transport_death("connection refused")).toBe(true);
+		expect(is_transient_transport_death("connection timed out")).toBe(true);
+		expect(is_transient_transport_death("network request failed")).toBe(true);
+		expect(is_transient_transport_death("network error")).toBe(true);
+	});
+
+	test("traverses Error.cause chain for hidden network codes", () => {
+		const inner = new Error("connect failed");
+		(inner as { code?: string }).code = "ECONNRESET";
+		const outer = new TypeError("fetch failed", { cause: inner });
+		expect(is_transient_transport_death(outer)).toBe(true);
+	});
+
+	test("traverses Error.cause chain for hidden transient messages", () => {
+		const inner = new Error("socket hang up");
+		const outer = new TypeError("fetch failed", { cause: inner });
+		expect(is_transient_transport_death(outer)).toBe(true);
+	});
+
+	test("matches WebSocket-class errors", () => {
+		expect(is_transient_transport_death("WebSocket error")).toBe(true);
+		expect(is_transient_transport_death("ECONNRESET")).toBe(true);
+		expect(is_transient_transport_death("connection was reset")).toBe(true);
+	});
+
+	test("matches parser stream closures", () => {
+		expect(is_transient_transport_death("Stream ended without finish_reason")).toBe(true);
+		expect(is_transient_transport_death("devin stream ended without a terminal event")).toBe(true);
+	});
+
+	test("matches provider internal errors", () => {
+		expect(is_transient_transport_death("an internal error occurred (trace ID: abc123)")).toBe(true);
+	});
+
+	test("matches empty-body 503 (service unavailable)", () => {
+		expect(is_transient_transport_death("503 status code (no body)")).toBe(true);
+		expect(is_transient_transport_death("GetChatMessage HTTP 503:")).toBe(true);
+		expect(is_transient_transport_death("  503 status code (no body)  ")).toBe(true);
+	});
+
+	test("matches pi-ai's resolved OpenAI-compat finish_reason network_error", () => {
+		expect(is_transient_transport_death("Provider finish_reason: network_error")).toBe(true);
+	});
+
+	test("matches aggregator upstream-outage server_error envelopes", () => {
+		const body =
+			'Error: 400: {"type":"server_error","message":"Error from provider ' +
+			'(Console Go): Upstream request failed: [1210] Invalid API parameter, please check the documentation."}';
+		expect(is_transient_transport_death(body)).toBe(true);
+	});
+
+	test("does NOT match ordinary client-side 400 validation bodies", () => {
+		expect(
+			is_transient_transport_death(
+				'Error: 400: {"type":"invalid_request_error","message":"Invalid API parameter"}',
+			),
+		).toBe(false);
+	});
+
+	test("does NOT match 503 with a useful body", () => {
+		expect(is_transient_transport_death("503 Service Unavailable")).toBe(false);
+	});
+
+	test("matches transport abort phrases (safe — decision functions gate first)", () => {
+		expect(is_transient_transport_death("Request aborted")).toBe(true);
+		expect(is_transient_transport_death("operation was aborted")).toBe(true);
+	});
+
+	test("does NOT match ordinary provider/model errors", () => {
+		expect(is_transient_transport_death("401 Unauthorized: invalid api key")).toBe(false);
+		expect(is_transient_transport_death("403 Forbidden")).toBe(false);
+		expect(is_transient_transport_death("429 rate limit exceeded")).toBe(false);
+		expect(is_transient_transport_death("503 Service Unavailable")).toBe(false);
+		expect(is_transient_transport_death("billing: insufficient credits")).toBe(false);
+		expect(is_transient_transport_death("invalid model id")).toBe(false);
+		expect(is_transient_transport_death("Cognition denied this request for model \"glm-5-2\"")).toBe(false);
+	});
+	test("does NOT match empty/null/undefined", () => {
+		expect(is_transient_transport_death("")).toBe(false);
+		expect(is_transient_transport_death(null)).toBe(false);
+		expect(is_transient_transport_death(undefined)).toBe(false);
+	});
+});
+
+describe("retry_transient_transport_operation", () => {
+	test("retries a transient 'fetch failed' and succeeds on the second attempt", async () => {
+		let calls = 0;
+		const result = await retry_transient_transport_operation(async () => {
+			calls++;
+			if (calls < 2) throw new TypeError("fetch failed");
+			return "ok";
+		}, {});
+		expect(result).toBe("ok");
+		expect(calls).toBe(2);
+	});
+
+	test("retries a bare 'Terminated' error", async () => {
+		let calls = 0;
+		const result = await retry_transient_transport_operation(async () => {
+			calls++;
+			if (calls < 2) throw new Error("Terminated");
+			return "done";
+		}, {});
+		expect(result).toBe("done");
+		expect(calls).toBe(2);
+	});
+
+	test("retries a nested-cause network code (TypeError fetch failed → ECONNRESET)", async () => {
+		let calls = 0;
+		const result = await retry_transient_transport_operation(async () => {
+			calls++;
+			if (calls < 2) {
+				const inner = new Error("connect failed");
+				(inner as { code?: string }).code = "ECONNRESET";
+				throw new TypeError("fetch failed", { cause: inner });
+			}
+			return "recovered";
+		}, {});
+		expect(result).toBe("recovered");
+		expect(calls).toBe(2);
+	});
+
+	test("does NOT retry permanent authentication errors", async () => {
+		let calls = 0;
+		try {
+			await retry_transient_transport_operation(async () => {
+				calls++;
+				throw new Error("401 Unauthorized: invalid api key");
+			}, {});
+			expect.unreachable();
+		} catch (err) {
+			expect((err as Error).message).toBe("401 Unauthorized: invalid api key");
+		}
+		expect(calls).toBe(1);
+	});
+
+	test("does NOT retry permanent validation errors", async () => {
+		let calls = 0;
+		try {
+			await retry_transient_transport_operation(async () => {
+				calls++;
+				throw new Error("invalid model id");
+			}, {});
+			expect.unreachable();
+		} catch (err) {
+			expect((err as Error).message).toBe("invalid model id");
+		}
+		expect(calls).toBe(1);
+	});
+
+	test("aborts immediately when signal is already aborted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		let calls = 0;
+		try {
+			await retry_transient_transport_operation(async () => {
+				calls++;
+				return "should not reach";
+			}, { signal: controller.signal });
+			expect.unreachable();
+		} catch {
+			// expected
+		}
+		expect(calls).toBe(0);
+	});
+
+	test("aborts during backoff without consuming all retries", async () => {
+		const controller = new AbortController();
+		let calls = 0;
+		const promise = retry_transient_transport_operation(async () => {
+			calls++;
+			throw new Error("fetch failed");
+		}, { signal: controller.signal });
+		setTimeout(() => controller.abort(), 5);
+		try {
+			await promise;
+			expect.unreachable();
+		} catch (err) {
+			expect((err as Error).message).toBe("fetch failed");
+		}
+		expect(calls).toBe(1);
+	});
+
+	test("honors MAX_TRANSPORT_RETRIES budget", async () => {
+		let calls = 0;
+		try {
+			await retry_transient_transport_operation(async () => {
+				calls++;
+				throw new TypeError("fetch failed");
+			}, { backoffMs: 0 });
+			expect.unreachable();
+		} catch (err) {
+			expect((err as Error).message).toBe("fetch failed");
+		}
+		expect(calls).toBe(MAX_TRANSPORT_RETRIES + 1);
+	});
+
+	test("shouldRetry gate can prevent retry for a transient error", async () => {
+		let calls = 0;
+		try {
+			await retry_transient_transport_operation(async () => {
+				calls++;
+				throw new Error("Terminated");
+			}, { shouldRetry: () => false });
+			expect.unreachable();
+		} catch (err) {
+			expect((err as Error).message).toBe("Terminated");
+		}
+		expect(calls).toBe(1);
+	});
+
+test("TRANSPORT_RETRY_BACKOFF_MS matches the canonical [2s, 5s, 10s, 30s, 60s] schedule", () => {
+	expect(TRANSPORT_RETRY_BACKOFF_MS[0]).toBe(2000);
+	expect(TRANSPORT_RETRY_BACKOFF_MS[1]).toBe(5000);
+	expect(TRANSPORT_RETRY_BACKOFF_MS[2]).toBe(10_000);
+	expect(TRANSPORT_RETRY_BACKOFF_MS[3]).toBe(30_000);
+	expect(TRANSPORT_RETRY_BACKOFF_MS[4]).toBe(60_000);
+});
+
+	test("MAX_TRANSPORT_RETRIES is 5", () => {
+		expect(MAX_TRANSPORT_RETRIES).toBe(5);
+	});
+
+	test("parent abort is terminal — no retry even for a transient 'fetch failed'", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		let calls = 0;
+		try {
+			await retry_transient_transport_operation(async () => {
+				calls++;
+				throw new TypeError("fetch failed");
+			}, { signal: controller.signal, backoffMs: 0 });
+			expect.unreachable();
+		} catch {
+			// expected — abort propagates immediately
+		}
+		expect(calls).toBe(0);
+	});
+
+	test("idle timeout (non-transient error) is terminal — no retry", async () => {
+		let calls = 0;
+		try {
+			await retry_transient_transport_operation(async () => {
+				calls++;
+				throw new Error("Subagent timed out after 120s");
+			}, { backoffMs: 0 });
+			expect.unreachable();
+		} catch (err) {
+			expect((err as Error).message).toBe("Subagent timed out after 120s");
+		}
+		expect(calls).toBe(1);
+	});
+});
+
+describe("extractFailureMessage preserves concrete external cause after retries exhaust", () => {
+	test("does not collapse a network code to bare 'Terminated'", () => {
+		const inner = new Error("connect failed");
+		(inner as { code?: string }).code = "ECONNRESET";
+		const outer = new TypeError("fetch failed", { cause: inner });
+		const message = extractFailureMessage(outer);
+		expect(message).toBe("connect failed");
+		expect(message).not.toBe("Terminated");
+		expect(message).not.toBe("fetch failed");
+	});
+
+	test("preserves 'socket hang up' from cause chain over outer 'fetch failed'", () => {
+		const inner = new Error("socket hang up");
+		const outer = new TypeError("fetch failed", { cause: inner });
+		expect(extractFailureMessage(outer)).toBe("socket hang up");
 	});
 });

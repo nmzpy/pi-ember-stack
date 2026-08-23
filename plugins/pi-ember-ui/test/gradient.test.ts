@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { bind_render_intent, reset_render_intent } from "../render-intent.ts";
 import {
 	clamp_lerp,
 	compute_sweep_center,
@@ -11,11 +12,9 @@ import {
 	gaussian_intensity,
 	get_gradient_phase,
 	invalidate_gradient_cache,
-	neutral_pulse_hex,
 	render_gradient,
 	request_gradient_render,
 	reset_gradient_colorizer,
-	set_gradient_render_request,
 	set_gradient_colorizer,
 	shutdown_gradient_clock,
 	activate_gradient,
@@ -168,12 +167,6 @@ describe("gradient engine", () => {
 		const working = render_gradient(text, "working", 0.3);
 		expect(thinking).not.toBe(working);
 		reset_gradient_colorizer();
-	});
-
-	test("neutral_pulse_hex sweeps dim→muted→text", () => {
-		expect(neutral_pulse_hex(0).toLowerCase()).toBe("#666666");
-		expect(neutral_pulse_hex(0.5).toLowerCase()).toBe("#808080");
-		expect(neutral_pulse_hex(1).toLowerCase()).toBe("#d4d4d4");
 	});
 
 	test("muted-text presets (exploringGroup/actionGroup) produce identical output", () => {
@@ -364,7 +357,7 @@ describe("gradient engine", () => {
 	test("dispatch: does not render when only active_reasons are set", () => {
 		shutdown_gradient_clock();
 		let render_calls = 0;
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_calls++;
 		});
 		activate_gradient("thinking");
@@ -373,12 +366,13 @@ describe("gradient engine", () => {
 		expect(render_calls).toBe(0);
 		deactivate_gradient("thinking");
 		shutdown_gradient_clock();
+		reset_render_intent();
 	});
 
 	test("dispatch: subscriber that marks dirty triggers exactly one render_request", () => {
 		shutdown_gradient_clock();
 		let render_calls = 0;
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_calls++;
 		});
 		let tick_calls = 0;
@@ -394,12 +388,13 @@ describe("gradient engine", () => {
 		expect(render_calls).toBe(1);
 		unsubscribe_gradient_tick(cb);
 		shutdown_gradient_clock();
+		reset_render_intent();
 	});
 
 	test("dispatch: subscriber that stages no change does not request a render", () => {
 		shutdown_gradient_clock();
 		let render_calls = 0;
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_calls++;
 		});
 		let tick_calls = 0;
@@ -414,5 +409,6 @@ describe("gradient engine", () => {
 		expect(render_calls).toBe(0);
 		unsubscribe_gradient_tick(cb);
 		shutdown_gradient_clock();
+		reset_render_intent();
 	});
 });

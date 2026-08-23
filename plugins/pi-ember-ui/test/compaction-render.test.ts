@@ -15,11 +15,11 @@ import {
 	render_gradient,
 	reset_gradient_colorizer,
 	set_gradient_colorizer,
-	set_gradient_render_request,
 	shutdown_gradient_clock,
 	subscribe_gradient_tick,
 	unsubscribe_gradient_tick,
 } from "../gradient.ts";
+import { bind_render_intent, reset_render_intent } from "../render-intent.ts";
 
 const theme = {
 	fg: (_tag: string, text: string) => text,
@@ -54,7 +54,7 @@ describe("compaction render rows", () => {
 		shutdown_gradient_clock();
 		let invalidations = 0;
 		let render_requests = 0;
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_requests += 1;
 		});
 		bind_compaction_status_indicator({
@@ -72,7 +72,7 @@ describe("compaction render rows", () => {
 		dispatch_gradient_tick();
 		expect(invalidations).toBe(1);
 		expect(render_requests).toBe(1);
-		set_gradient_render_request(undefined);
+		reset_render_intent();
 		shutdown_gradient_clock();
 	});
 
@@ -88,7 +88,7 @@ describe("compaction render rows", () => {
 		shutdown_gradient_clock();
 		let invalidations = 0;
 		let render_requests = 0;
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_requests += 1;
 		});
 		// First compaction: bind + tick live.
@@ -102,7 +102,7 @@ describe("compaction render rows", () => {
 		// shutdown path normally unbinds first, but a fresh extension load / double
 		// factory run can leave the stale cb behind).
 		shutdown_gradient_clock();
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_requests += 1;
 		});
 		dispatch_gradient_tick();
@@ -119,7 +119,7 @@ describe("compaction render rows", () => {
 		deactivate_gradient("compaction");
 		dispatch_gradient_tick();
 		expect(invalidations).toBe(after_clear + 1);
-		set_gradient_render_request(undefined);
+		reset_render_intent();
 		shutdown_gradient_clock();
 	});
 
@@ -127,7 +127,7 @@ describe("compaction render rows", () => {
 		shutdown_gradient_clock();
 		let invalidations = 0;
 		let render_requests = 0;
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_requests += 1;
 		});
 		const first = { invalidate: () => (invalidations += 1) };
@@ -148,7 +148,7 @@ describe("compaction render rows", () => {
 		dispatch_gradient_tick();
 		expect(invalidations).toBe(1);
 		expect(render_requests).toBe(1);
-		set_gradient_render_request(undefined);
+		reset_render_intent();
 		shutdown_gradient_clock();
 	});
 
@@ -156,7 +156,7 @@ describe("compaction render rows", () => {
 		shutdown_gradient_clock();
 		let invalidations = 0;
 		let render_requests = 0;
-		set_gradient_render_request(() => {
+		bind_render_intent(() => {
 			render_requests += 1;
 		});
 		const indicator = { invalidate: () => (invalidations += 1) };
@@ -167,7 +167,7 @@ describe("compaction render rows", () => {
 		dispatch_gradient_tick();
 		expect(invalidations).toBe(0);
 		expect(render_requests).toBe(0);
-		set_gradient_render_request(undefined);
+		reset_render_intent();
 		shutdown_gradient_clock();
 	});
 });

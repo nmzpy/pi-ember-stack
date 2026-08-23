@@ -265,14 +265,19 @@ describe("hidden Thinking continuity (real handler event order)", () => {
 			fire(handlers, "message_start", { message: { role: "user", timestamp: 100 } }, ctx);
 			fire(handlers, "before_agent_start", { prompt: "hello" }, ctx);
 			fire(handlers, "agent_start", {}, ctx);
-			// One tool wave forms a settled work group.
+			// Two tool calls form a real compact work group; one call stays a
+			// standalone row and never gets an in-group `└ Thinking` lane.
 			fire(handlers, "tool_call", { toolName: "bash", toolCallId: "t1" }, ctx);
 			fire(handlers, "tool_execution_start", { toolCallId: "t1" }, ctx);
 			renderToolRow("bash", "t1", {});
 			fire(handlers, "tool_execution_end", { toolCallId: "t1", toolName: "bash" }, ctx);
+			fire(handlers, "tool_call", { toolName: "read", toolCallId: "t2" }, ctx);
+			fire(handlers, "tool_execution_start", { toolCallId: "t2" }, ctx);
+			renderToolRow("read", "t2", {});
+			fire(handlers, "tool_execution_end", { toolCallId: "t2", toolName: "read" }, ctx);
 			fire(handlers, "agent_end", {}, ctx);
 
-			// Hidden reasoning: the group arms the ONE in-group `└ Thinking`
+			// Hidden reasoning: the multi-member group arms the ONE in-group `└ Thinking`
 			// lane; the external hosts must not duplicate it.
 			fire(
 				handlers,

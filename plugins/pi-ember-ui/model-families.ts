@@ -3,6 +3,7 @@
  * Switch Model overlay. Pure helpers — no TUI.
  */
 
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import {
 	type EffortSliderPoint,
 	EFFORT_SLIDER_POINTS,
@@ -269,7 +270,17 @@ export function build_model_families(
 					: bakedVariant
 						? []
 						: model.reasoning && !has_standalone_model_class(model)
-							? efforts_from_available_levels(options?.availableThinkingLevels)
+							? (options?.availableThinkingLevels
+									? efforts_from_available_levels(options.availableThinkingLevels)
+									: efforts_from_available_levels(
+											(() => {
+												try {
+													return getSupportedThinkingLevels(model as any);
+												} catch {
+													return [];
+												}
+											})(),
+										))
 							: [];
 
 			if (thinkingEfforts.length >= 2) {
@@ -468,6 +479,16 @@ export function resolve_model_effort_level(
 		if (mapEfforts.includes(normalized)) return normalized;
 		if (mapEfforts.length > 0) {
 			return nearest_effort(mapEfforts, normalized) ?? "off";
+		}
+		if (model.reasoning && !has_standalone_model_class(model)) {
+			try {
+				const supported = efforts_from_available_levels(
+					options?.availableThinkingLevels ?? getSupportedThinkingLevels(model as any),
+				);
+				if (supported.includes(normalized)) return normalized;
+			} catch {
+				// fallback safe
+			}
 		}
 	}
 

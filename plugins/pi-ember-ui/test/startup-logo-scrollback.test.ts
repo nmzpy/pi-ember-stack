@@ -3,6 +3,7 @@ import { Container, Text, TUI } from "@earendil-works/pi-tui";
 import piEmberUiPlugin, { startup_logo_should_animate } from "../index.ts";
 import { getSharedRenderer } from "../../pi-compact-tools/shared-renderer.ts";
 import { gradient_clock_is_idle, shutdown_gradient_clock } from "../gradient.ts";
+import { reset_render_intent } from "../render-intent.ts";
 
 /**
  * Scrollback-safety regression tests for the startup logo.
@@ -16,20 +17,18 @@ import { gradient_clock_is_idle, shutdown_gradient_clock } from "../gradient.ts"
  * the viewport is far below line 0, so every logo tick snaps the terminal to
  * the top and wipes the user's scrollback.
  *
- * Ember never owns scroll. The fix is to animate line 0 ONLY on the empty
- * first startup screen; every resumed/non-empty session renders the header
- * statically, so no plugin-owned render loop can ever touch a line above the
- * live viewport. These tests pin the decision, the subscription lifecycle,
- * and the TUI-level mechanism.
+ * Ember never owns scroll. The logo is now ALWAYS static — no animation on
+ * any session type, no logo tick subscriber, no settle-trigger render. These
+ * tests pin that the logo never animates, the gradient clock stays idle on
+ * all session starts, and the TUI-level mechanism still demonstrates the
+ * scrollback safety invariant.
  */
 
 describe("startup logo decision (SSOT helper)", () => {
-	test("animates only on the empty first startup screen", () => {
-		expect(startup_logo_should_animate("startup", false)).toBe(true);
-		// Startup that restored a session (crash recovery): static.
+	test("logo never animates on any session type", () => {
+		// The logo is always static — no animation on any session type.
+		expect(startup_logo_should_animate("startup", false)).toBe(false);
 		expect(startup_logo_should_animate("startup", true)).toBe(false);
-		// Resumed/reloaded/forked/new sessions are never animated, even when
-		// the transcript is empty.
 		for (const reason of ["resume", "new", "fork", "reload"] as const) {
 			expect(startup_logo_should_animate(reason, false)).toBe(false);
 			expect(startup_logo_should_animate(reason, true)).toBe(false);
@@ -134,6 +133,7 @@ function fire(handlers: Record<string, Handler[]>, name: string, event: any, ctx
 afterEach(() => {
 	shutdown_gradient_clock();
 	getSharedRenderer().resetForSession();
+	reset_render_intent();
 });
 
 describe("startup logo subscription lifecycle (real session_start handler)", () => {
@@ -159,9 +159,7 @@ describe("startup logo subscription lifecycle (real session_start handler)", () 
 		});
 		expect(gradient_clock_is_idle()).toBe(true);
 		fire(handlers, "session_start", { reason: "resume" }, ctx);
-		// No logo tick, no thinking reasons: the shared clock stays idle. A
-		// live clock over a long transcript would repaint line 0 at 20 FPS and
-		// force scrollback-clearing full redraws.
+		// No logo tick, no thinking reasons: the shared clock stays idle.
 		expect(gradient_clock_is_idle()).toBe(true);
 	});
 
@@ -180,17 +178,15 @@ describe("startup logo subscription lifecycle (real session_start handler)", () 
 		expect(gradient_clock_is_idle()).toBe(true);
 	});
 
-	test("empty startup screen only: logo subscribes, then agent_settled stops it", () => {
+	test("empty startup screen: logo stays static, clock stays idle", () => {
 		const { handlers } = installPlugins();
 		const ctx = makeCtx();
 		fire(handlers, "session_start", { reason: "startup" }, ctx);
-		// The empty first screen is the one legitimate animated state; the
-		// logo tick keeps the shared clock live until a boundary stops it.
-		expect(gradient_clock_is_idle()).toBe(false);
+		// The logo is always static — no tick subscriber, no animation reason.
+		// The shared clock must stay idle even on the empty first screen.
+		expect(gradient_clock_is_idle()).toBe(true);
 
 		fire(handlers, "agent_settled", {}, ctx);
-		// agent_settled drops the logo tick and all animation reasons: no
-		// plugin-owned render loop survives a settled agent.
 		expect(gradient_clock_is_idle()).toBe(true);
 	});
 
@@ -198,7 +194,7 @@ describe("startup logo subscription lifecycle (real session_start handler)", () 
 		const { handlers } = installPlugins();
 		const ctx = makeCtx();
 		fire(handlers, "session_start", { reason: "startup" }, ctx);
-		expect(gradient_clock_is_idle()).toBe(false);
+		expect(gradient_clock_is_idle()).toBe(true);
 		fire(handlers, "session_shutdown", { reason: "quit" }, ctx);
 		expect(gradient_clock_is_idle()).toBe(true);
 	});
@@ -253,7 +249,7 @@ describe("TUI-level scrollback safety", () => {
 		const { term, tui } = make_tui(
 			{
 				render(): string[] {
-					// Simulates the animated logo: line 0 changes every frame.
+					// Simulates an animated logo: line 0 changes every frame.
 					return [`frame ${frame++}`, "logo 1", "logo 2", "logo 3"];
 				},
 			},
@@ -274,7 +270,7 @@ describe("TUI-level scrollback safety", () => {
 		const { term, tui } = make_tui(
 			{
 				render(): string[] {
-					// Byte-identical rows every frame — the resumed/static logo.
+					// Byte-identical rows every frame — the always-static logo.
 					return ["logo 0", "logo 1", "logo 2", "logo 3"];
 				},
 			},

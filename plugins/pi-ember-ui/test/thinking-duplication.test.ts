@@ -420,9 +420,14 @@ describe("full event sequence: duplicate Thinking hunt", () => {
 
 		// The tick wrote through the static-prefix cache; the row must still be
 		// byte-identical to a full formatGroup rebuild (cache is faithful).
+		// The aggregate header retains all commands; the prior tool child
+		// collapses when the in-group Thinking lane arms, so only the header
+		// and the `└ Thinking` lane remain.
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Ran 15 commands");
 		expect(row).toContain("Thinking");
-		expect(row.split("\n")).toHaveLength(17); // header + 15 children + lane
+		expect(row).not.toContain("f15.py");
+		expect(row).not.toContain("f1.py");
+		expect(row.split("\n")).toHaveLength(2); // header + lane
 	});
 });

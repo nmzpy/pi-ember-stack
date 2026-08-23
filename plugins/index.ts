@@ -9,11 +9,12 @@ import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 import piEmberApplypatchPlugin from "./pi-ember-applypatch/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
+import piEmberHasheditPlugin from "./pi-ember-hashedit/index.ts";
 import piEmberImagesPlugin from "./pi-ember-images/index.ts";
-import piEmberTodoPlugin from "./pi-ember-todo/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 import piEmberWebtoolsPlugin from "./pi-ember-webtools/extensions/index.ts";
+import piNovitaAuthPlugin from "./pi-novita-auth/extensions/index.ts";
 
 export { getSharedRenderer };
 
@@ -24,9 +25,10 @@ type PluginId =
 	| "devin-auth"
 	| "pi-crof-auth"
 	| "pi-cursor-auth"
+	| "pi-novita-auth"
 	| "pi-ember-fff"
+	| "pi-ember-hashedit"
 	| "pi-ember-images"
-	| "pi-ember-todo"
 	| "pi-ember-ui"
 	| "pi-ember-tps"
 	| "pi-ember-webtools";
@@ -43,10 +45,11 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"devin-auth",
 	"pi-crof-auth",
 	"pi-cursor-auth",
+	"pi-novita-auth",
 	"pi-ember-images",
 	"pi-custom-agents",
 	"pi-ember-fff",
-	"pi-ember-todo",
+	"pi-ember-hashedit",
 	"pi-ember-ui",
 	"pi-ember-tps",
 	"pi-ember-webtools",
@@ -79,6 +82,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		extension: piCursorAuthPlugin,
 	},
 	{
+		id: "pi-novita-auth",
+		description: "Novita OpenAI-compatible provider, API-key login, and model catalog",
+		extension: piNovitaAuthPlugin,
+	},
+	{
 		id: "pi-ember-images",
 		description: "Windows/macOS clipboard images with compact chat previews",
 		extension: piEmberImagesPlugin,
@@ -94,9 +102,9 @@ const PLUGINS: readonly StackPlugin[] = [
 		extension: piEmberFffPlugin,
 	},
 	{
-		id: "pi-ember-todo",
-		description: "Task list with blockedBy DAG, /todos command, and above-editor overlay",
-		extension: piEmberTodoPlugin,
+		id: "pi-ember-hashedit",
+		description: "Hash-anchored read/replace/undo tools with stable line anchors",
+		extension: piEmberHasheditPlugin,
 	},
 	{
 		id: "pi-ember-ui",

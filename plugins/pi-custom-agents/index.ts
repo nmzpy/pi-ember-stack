@@ -36,6 +36,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { resolve_switch_session_fn } from "../pi-ember-ui/command-context-capture.ts";
+import { request_render } from "../pi-ember-ui/render-intent.ts";
 import {
 	cancelPendingModelPick,
 	consumePendingShellSubmitEnter,
@@ -46,7 +47,6 @@ import {
 	processShellInput,
 	refresh_footer,
 	requestShellModeVisualRefresh,
-	requestTuiRender,
 	resetSlashCommandTracking,
 	scheduleFooterStats,
 	setFooterThinkingLevel,
@@ -621,8 +621,6 @@ function getLastModeFromSession(ctx: { sessionManager: SessionManagerReference }
 	return null;
 }
 
-const MODE_LIVE_RENDER_STATUS = "pi-agents-mode-live-render";
-
 export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<void> {
 	install_new_session_capture();
 	install_bash_rules(pi);
@@ -649,11 +647,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 	}
 
 	function request_live_mode_render(ctx: ExtensionContext): void {
-		if (ctx.mode === "tui") {
-			// setStatus only invalidates the footer/editor frame. Do not append a
-			// transcript notification or invalidate the resumed chat history.
-			ctx.ui.setStatus(MODE_LIVE_RENDER_STATUS, undefined);
-		}
+		if (ctx.mode === "tui") request_render();
 	}
 
 	const persistedAtLoad = readPersistedState();
@@ -1061,7 +1055,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					editor as unknown as Parameters<typeof finalizeEditorInputAfter>[0],
 				);
 				if (is_thinking_toggle) {
-					queueMicrotask(() => requestTuiRender());
+					request_render();
 				}
 			};
 			wrapModelPickerEditor(

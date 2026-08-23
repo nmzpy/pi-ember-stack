@@ -198,9 +198,8 @@ describe("Cursor tool serialization", () => {
 		});
 	});
 
-	test("resolve_pi_tool_name maps Cursor web and todo aliases", () => {
+	test("resolve_pi_tool_name maps Cursor web and quiz aliases", () => {
 		expect(resolve_pi_tool_name("webSearchToolCall", [])).toBe("web_search");
-		expect(resolve_pi_tool_name("updateTodosToolCall", [])).toBe("todo");
 		expect(resolve_pi_tool_name("askQuestionToolCall", [])).toBe("quiz");
 	});
 });

@@ -25,6 +25,8 @@ const TINY_PNG_BASE64 =
 
 const tempDirs: string[] = [];
 
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
 afterEach(() => {
 	// Restore the global terminal-capability state so other test files in the
 	// same process observe the same environment pi-tui would detect.
@@ -103,7 +105,7 @@ describe("pi-ember-images fallback preview placement", () => {
 		const result = await runInput(handlers, `Review ${file} please`, ctx);
 		expect(result?.action).toBe("transform");
 		if (result?.action !== "transform") return;
-		expect(result.text).toBe("Review [image 1: 2x2] please");
+		expect(stripAnsi(result.text)).toBe("Review [image 1: 2x2] please");
 		expect(result.images).toHaveLength(1);
 		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
 		expect(sentMessages).toHaveLength(0);
@@ -119,7 +121,7 @@ describe("pi-ember-images fallback preview placement", () => {
 		const result = await runInput(handlers, file, makeFakeCtx(tmpdir()));
 		expect(result?.action).toBe("transform");
 		if (result?.action !== "transform") return;
-		expect(result.text).toBe("[image 1: 2x2]");
+		expect(stripAnsi(result.text)).toBe("[image 1: 2x2]");
 		expect(result.images).toHaveLength(1);
 	});
 
@@ -133,7 +135,7 @@ describe("pi-ember-images fallback preview placement", () => {
 		const result = await runInput(handlers, `${fileA} then ${fileB}`, makeFakeCtx(tmpdir()));
 		expect(result?.action).toBe("transform");
 		if (result?.action !== "transform") return;
-		expect(result.text).toBe("[image 1: 2x2] then [image 2: 2x2]");
+		expect(stripAnsi(result.text)).toBe("[image 1: 2x2] then [image 2: 2x2]");
 		expect(result.images).toHaveLength(2);
 		expect(result.images?.[0]).toMatchObject({ mimeType: "image/png" });
 		expect(result.images?.[1]).toMatchObject({ mimeType: "image/png" });

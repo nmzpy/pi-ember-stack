@@ -73,28 +73,28 @@ const RESUME_ITEMS: SelectItem[] = [
 
 const strip_ansi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
 
-describe("resume list midpoint primary column", () => {
-	test("description column starts at the midpoint of the live content width", () => {
+describe("resume list 75% primary column", () => {
+	test("description column starts at 75% of the live content width", () => {
 		const list = create_resume_select_list_for_tests(RESUME_ITEMS, plain_theme());
 		const lines = list.render(120);
 		expect(lines.length).toBe(RESUME_ITEMS.length);
 		for (const line of lines) {
 			const plain = strip_ansi(line);
-			// prefix (2) + primary column floor(120/2)=60 -> description starts at 62.
+			// prefix (2) + primary column floor(120 * 0.75)=90 -> description starts at 92.
 			// The " \u00b7 " separator pattern includes its leading space, so the
 			// description start is indexOf(" \u00b7 ") - 2.
-			expect(plain.indexOf(" \u00b7 ") - 2).toBe(62);
+			expect(plain.indexOf(" \u00b7 ") - 2).toBe(92);
 		}
 	});
 
-	test("primary column tracks the live render width (floor(width/2))", () => {
+	test("primary column tracks the live render width (floor(width * 0.75))", () => {
 		const list = create_resume_select_list_for_tests(RESUME_ITEMS, plain_theme());
 		const wide = list.render(120);
 		const narrow = list.render(80);
-		// floor(120/2)=60 -> description starts at 62; floor(80/2)=40 -> at 42.
+		// floor(120 * 0.75)=90 -> description starts at 92; floor(80 * 0.75)=60 -> at 62.
 		// "2h \u00b7 5 msgs" puts the " \u00b7 " separator at description offset 2.
-		expect(strip_ansi(wide[0]!).indexOf(" \u00b7 ") - 2).toBe(62);
-		expect(strip_ansi(narrow[0]!).indexOf(" \u00b7 ") - 2).toBe(42);
+		expect(strip_ansi(wide[0]!).indexOf(" \u00b7 ") - 2).toBe(92);
+		expect(strip_ansi(narrow[0]!).indexOf(" \u00b7 ") - 2).toBe(62);
 	});
 
 	test("long titles stay single-line and never push the description off-screen", () => {
@@ -133,22 +133,21 @@ describe("resume_truncate_text", () => {
 		"This is a really long session title that keeps going and going well past the middle of the screen for the resume menu";
 	const strip_ansi = (s: string) => s.replace(/\u001b\[0m/g, "");
 
-	test("caps the title at half the terminal content width", () => {
-		// contentWidth 120 -> half is 60 visible columns, well past the old
-		// data-driven (narrow) primary column of 40.
+	test("caps the title at 75% of the terminal content width", () => {
+		// contentWidth 120 -> 75% is 90 visible columns.
 		const out = resume_truncate_text(long_title, 120, 40, 118);
 		const plain = strip_ansi(out);
 		expect(plain.endsWith("...")).toBe(true);
 		const visible = plain.slice(0, -3);
 		expect(visible.length).toBeGreaterThan(40);
-		expect(visible.length).toBeLessThanOrEqual(60);
+		expect(visible.length).toBeLessThanOrEqual(90);
 	});
 
-	test("falls back to the (narrow) column-width half when content width is unset", () => {
+	test("falls back to the (narrow) column-width 75% when content width is unset", () => {
 		const out = resume_truncate_text(long_title, 0, 40, 118);
 		const plain = strip_ansi(out);
 		expect(plain.endsWith("...")).toBe(true);
-		expect(plain.slice(0, -3).length).toBeLessThanOrEqual(20);
+		expect(plain.slice(0, -3).length).toBeLessThanOrEqual(30);
 	});
 
 	test("never truncates a title shorter than half the screen", () => {

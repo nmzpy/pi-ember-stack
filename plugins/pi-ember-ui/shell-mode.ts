@@ -7,6 +7,7 @@ import {
 	Editor,
 } from "@earendil-works/pi-tui";
 import { isShellMode, setShellMode } from "./mode-colors.ts";
+import { request_render } from "./render-intent.ts";
 
 export type ShellModeEditor = {
 	getText?: () => string;
@@ -50,7 +51,7 @@ export function submit_shell_command_from_editor(editor: ShellModeEditor): boole
 	if (typeof editor.submitValue !== "function") return false;
 	editor.submitValue();
 	with_suppressed_shell_history_sync(() => editor.setText?.(""));
-	editor.tui?.requestRender?.();
+	request_render();
 	return true;
 }
 
@@ -249,7 +250,7 @@ export function process_shell_input(
 export function intercept_shell_input(data: string, editor: ShellModeEditor): boolean {
 	const result = process_shell_input(data, editor);
 	if (result?.consume) {
-	editor.tui?.requestRender?.();
+	request_render();
 		return true;
 	}
 	return false;

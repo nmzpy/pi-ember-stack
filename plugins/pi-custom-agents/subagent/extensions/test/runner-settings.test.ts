@@ -24,9 +24,9 @@ describe("subagent session settings", () => {
 
 	test("child session extension set wires the real session_before_compact compaction hook", async () => {
 		// Load the actual extension set every subagent child session receives
-		// (task-list tool + Ember compaction wiring) through the runner's own
-		// loading seam, then prove the compaction-wiring extension really
-		// registers a session_before_compact handler. This is what makes native
+		// (Ember compaction wiring) through the runner's own loading seam, then
+		// prove the compaction-wiring extension really registers a
+		// session_before_compact handler. This is what makes native
 		// reason=overflow compaction use Ember's structured stack summary.
 		const tmp = mkdtempSync(join(tmpdir(), "pi-ember-wiring-"));
 		const result = await load_subagent_extensions(tmp);
@@ -37,12 +37,6 @@ describe("subagent session settings", () => {
 		);
 		expect(wiring).toBeDefined();
 		expect(wiring?.handlers.has("session_before_compact")).toBe(true);
-
-		const todo = result.extensions.find((extension) =>
-			extension.path.replace(/\\/g, "/").endsWith("pi-ember-todo/index.ts"),
-		);
-		expect(todo).toBeDefined();
-		expect(todo?.tools.has("todo")).toBe(true);
 	});
 
 	test("compaction-enabled settings open Pi's native overflow recovery gate", () => {

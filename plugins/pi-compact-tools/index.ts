@@ -16,7 +16,6 @@ import { sync_compact_group_flags } from "./group-flags.ts";
 import {
 	type CompactRenderer,
 	GROUPABLE_TOOLS,
-	WORK_GROUP_SOFT_BOUNDARY_TOOLS,
 } from "./renderer.ts";
 import { getSharedRenderer } from "./shared-renderer.ts";
 import {
@@ -149,8 +148,6 @@ export default function piCompactToolsPlugin(
 		if (is_groupable) {
 			setTurnToolTranscriptActive(true);
 			renderer.registerCall(event.toolName, event.toolCallId, event.input);
-		} else if (WORK_GROUP_SOFT_BOUNDARY_TOOLS.has(event.toolName)) {
-			renderer.noteSoftInterveningToolCall();
 		} else {
 			renderer.noteInterveningToolCall();
 		}

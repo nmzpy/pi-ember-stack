@@ -3,6 +3,7 @@ import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
 import type { SearchOptions, SearchResponse } from "./search-types.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { retry_transient_transport_operation } from "../pi-custom-agents/subagent/extensions/transport-policy.ts";
 
 const EXA_ANSWER_URL = "https://api.exa.ai/answer";
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
@@ -175,23 +176,28 @@ export async function callExaMcp(
 	args: Record<string, unknown>,
 	signal?: AbortSignal,
 ): Promise<string> {
-	const response = await fetch(EXA_MCP_URL, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Accept: "application/json, text/event-stream",
-		},
-		body: JSON.stringify({
-			jsonrpc: "2.0",
-			id: 1,
-			method: "tools/call",
-			params: {
-				name: toolName,
-				arguments: args,
-			},
-		}),
-		signal: requestSignal(signal),
-	});
+	const mcpSignal = requestSignal(signal);
+	const response = await retry_transient_transport_operation(
+		() =>
+			fetch(EXA_MCP_URL, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Accept: "application/json, text/event-stream",
+				},
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: 1,
+					method: "tools/call",
+					params: {
+						name: toolName,
+						arguments: args,
+					},
+				}),
+				signal: mcpSignal,
+			}),
+		{ signal: mcpSignal },
+	);
 
 	if (!response.ok) {
 		const errorText = await response.text();
@@ -402,18 +408,23 @@ export async function searchWithExa(
 
 	try {
 		if (!useSearch) {
-			const response = await fetch(EXA_ANSWER_URL, {
-				method: "POST",
-				headers: {
-					"x-api-key": apiKey,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					query,
-					text: true,
-				}),
-				signal: requestSignal(options.signal),
-			});
+			const answerSignal = requestSignal(options.signal);
+			const response = await retry_transient_transport_operation(
+				() =>
+					fetch(EXA_ANSWER_URL, {
+						method: "POST",
+						headers: {
+							"x-api-key": apiKey,
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({
+							query,
+							text: true,
+						}),
+						signal: answerSignal,
+					}),
+				{ signal: answerSignal },
+			);
 
 			if (!response.ok) {
 				const errorText = await response.text();
@@ -430,25 +441,30 @@ export async function searchWithExa(
 
 		const startDate = options.recencyFilter ? recencyToStartDate(options.recencyFilter) : null;
 		const domainFilters = mapDomainFilter(options.domainFilter);
-		const response = await fetch(EXA_SEARCH_URL, {
-			method: "POST",
-			headers: {
-				"x-api-key": apiKey,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({
-				query,
-				type: "auto",
-				numResults: options.numResults ?? 5,
-				...domainFilters,
-				...(startDate ? { startPublishedDate: startDate } : {}),
-				contents: {
-					text: options.includeContent ? true : { maxCharacters: 3000 },
-					highlights: true,
-				},
-			}),
-			signal: requestSignal(options.signal),
-		});
+		const searchSignal = requestSignal(options.signal);
+		const response = await retry_transient_transport_operation(
+			() =>
+				fetch(EXA_SEARCH_URL, {
+					method: "POST",
+					headers: {
+						"x-api-key": apiKey,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({
+						query,
+						type: "auto",
+						numResults: options.numResults ?? 5,
+						...domainFilters,
+						...(startDate ? { startPublishedDate: startDate } : {}),
+						contents: {
+							text: options.includeContent ? true : { maxCharacters: 3000 },
+							highlights: true,
+						},
+					}),
+					signal: searchSignal,
+				}),
+			{ signal: searchSignal },
+		);
 
 		if (!response.ok) {
 			const errorText = await response.text();

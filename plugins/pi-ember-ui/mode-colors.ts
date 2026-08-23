@@ -8,6 +8,11 @@ export const TEXT_COLOR = "#d4d4d4";
 /** SSOT success/markdown green (mirrored in ember.json as `green`). */
 export const SUCCESS_GREEN = "#2af0a8";
 
+/** SSOT neon cyan accent used for image fallback pills and other bright
+ *  terminal highlights. Lives in `mode-colors.ts` so the live theme and
+ *  renderers share one canonical value. */
+export const NEON_CYAN = "#00d7ff";
+
 /** Tokens-per-second color thresholds used by the footer meter. */
 export const TPS_TEXT_THRESHOLD = 50;
 export const TPS_ACCENT_THRESHOLD = 100;
@@ -615,6 +620,7 @@ export function buildThemeFgColors(accentHex: string): Record<string, string> {
 		syntaxOperator: TEXT_COLOR,
 		syntaxPunctuation: TEXT_COLOR,
 		bashMode: SUCCESS_GREEN,
+		cyan: NEON_CYAN,
 	};
 }
 
@@ -653,6 +659,18 @@ export function buildThemeBgColors(_accentHex: string): Record<string, string> {
  * - Bare `Thinking` on its own line
  */
 const THINKING_HEADER_RE = /^(?:#{1,6}\s+)?(?:\*{1,2}|_{1,2})?\s*thinking\s*(?:\*{1,2}|_{1,2})?\s*:?\s*$/i;
+
+/**
+ * SSOT: strip `<think>`, `</think>`, `<thought>`, `</thought>`, `<reasoning>`,
+ * `</reasoning>` tags from thinking streams/deltas and thinking blocks so
+ * raw tag markers are never exposed to the user as text.
+ */
+const THINK_TAGS_PATTERN = /<\/?(?:think|thought|reasoning)(?:\s+[^>]*)?>/gi;
+
+export function strip_think_tags(text: string): string {
+	if (!text) return "";
+	return text.replace(THINK_TAGS_PATTERN, "");
+}
 
 export function is_non_conventional_thinking_header(delta: string): boolean {
 	const trimmed = delta.trim();

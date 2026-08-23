@@ -39,6 +39,7 @@ import {
 	rank_families_by_recents,
 	recent_identities_from_mode_models,
 } from "./model-recent.ts";
+import { request_render } from "./render-intent.ts";
 
 export const MODEL_COMMAND_PREFIX = "/model";
 
@@ -459,7 +460,7 @@ export function open_model_picker_in_editor(
 	setQuizActive(true);
 	editor.cancelAutocomplete?.();
 	editor.setText?.(open_state.editor_filter);
-	editor.tui?.requestRender?.();
+	request_render();
 }
 
 function push_line(lines: string[], text: string, width: number): void {
@@ -586,8 +587,8 @@ function confirm_selection(editor: { setText?: (t: string) => void }): void {
 	});
 }
 
-function request_picker_render(editor: { tui?: { requestRender?: () => void } }): void {
-	editor.tui?.requestRender?.();
+function request_picker_render(_editor: { tui?: { requestRender?: () => void } }): void {
+	request_render();
 }
 
 /** Call after editor text changes so the filter list stays in sync. */

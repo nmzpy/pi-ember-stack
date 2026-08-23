@@ -37,6 +37,31 @@ export function has_live_nested_preview(results: SubAgentResult[]): boolean {
 }
 
 /**
+ * Pi can replay the previous renderCall snapshot immediately after a live
+ * partial invalidates the owner. The runner deliberately keeps one mutable
+ * liveItems buffer, so a shared buffer plus the same running status identifies
+ * that replay; the current result object remains authoritative for top-level
+ * flags such as latestToolCall and isThinking.
+ */
+function has_shared_live_items_buffer(
+	existing: SubAgentResult[],
+	incoming: SubAgentResult[],
+): boolean {
+	if (existing.length === 0 || existing.length !== incoming.length) return false;
+	return existing.every((old_result, old_index) => {
+		const next_result = old_result.toolCallId
+			? incoming.find((candidate) => candidate.toolCallId === old_result.toolCallId)
+			: incoming[old_index];
+		return Boolean(
+			next_result &&
+			old_result.exitCode === next_result.exitCode &&
+			old_result.liveItems &&
+			old_result.liveItems === next_result.liveItems,
+		);
+	});
+}
+
+/**
  * An explicit false from agent_settled is authoritative. Do not let the
  * stale-preview guard retain a transient Finishing row after the child has
  * reached its terminal lifecycle event.
@@ -65,6 +90,7 @@ export function should_keep_existing_subagent_results(
 	if (existing.length === 0) return false;
 	if (incoming.length === 0) return true;
 	if (has_authoritative_finishing_clear(existing, incoming)) return false;
+	if (has_shared_live_items_buffer(existing, incoming)) return true;
 	if (has_live_nested_preview(existing) && !has_live_nested_preview(incoming)) return true;
 	return false;
 }

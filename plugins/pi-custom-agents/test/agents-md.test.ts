@@ -23,7 +23,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	AgentsMdLoader,
 	AGENTS_FILE_NAME,
@@ -62,19 +61,6 @@ function makeLoader(root: string): AgentsMdLoader {
 	return loader;
 }
 
-function contextMessage(
-	loader: AgentsMdLoader,
-	existing: AgentMessage[] = [],
-): AgentMessage | undefined {
-	return loader.buildContextMessage(existing);
-}
-
-function contextContent(loader: AgentsMdLoader): string {
-	const message = contextMessage(loader);
-	expect(message).toBeDefined();
-	return String((message as { content: string }).content);
-}
-
 function touch(loader: AgentsMdLoader, id: string, toolName: string, input: Record<string, unknown>): void {
 	loader.noteToolCall(id, toolName, input);
 	loader.noteToolExecutionEnd(id);
@@ -104,12 +90,102 @@ function symlinkSafe(target: string, linkPath: string, type: "file" | "dir"): bo
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Fake API helpers for installAgentsMdHooks tests
+// ---------------------------------------------------------------------------
+
+type SendMessageCapture = { customType: string; content: string; display: boolean };
+
+interface FakeApi {
+	handlers: Map<string, Array<(event: unknown, ctx: unknown) => unknown>>;
+	sendMessageCalls: SendMessageCapture[];
+	historyEntries: Array<{ type: string; customType: string; content: string; role: string }>;
+	/** Matches the path pi casts: pi.ctx.sessionManager.getEntries() */
+	ctx: {
+		sessionManager: {
+			getEntries(): Array<{ type: string; customType: string; content: string; role: string }>;
+		};
+	};
+	on(event: string, handler: (event: unknown, ctx: unknown) => unknown): void;
+	sendMessage(msg: unknown): void;
+}
+
+function makeFakeApi(): FakeApi {
+	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+	const sendMessageCalls: SendMessageCapture[] = [];
+	const historyEntries: Array<{ type: string; customType: string; content: string; role: string }> = [];
+	const ctx = {
+		sessionManager: {
+			getEntries() {
+				return historyEntries;
+			},
+		},
+	};
+	return {
+		handlers,
+		sendMessageCalls,
+		historyEntries,
+		ctx,
+		on(event, handler) {
+			let list = handlers.get(event);
+			if (!list) {
+				list = [];
+				handlers.set(event, list);
+			}
+			list.push(handler);
+		},
+		sendMessage(msg) {
+			const m = msg as SendMessageCapture;
+			sendMessageCalls.push({ ...m });
+			// Simulate Pi persisting the message into session history.
+			historyEntries.push({
+				type: "custom_message",
+				customType: m.customType,
+				content: m.content,
+				role: "custom",
+			});
+		},
+	};
+}
+
+/** Run through a fake API's session_start, tool_call, and tool_execution_end. */
+function exerciseTools(
+	api: FakeApi,
+	root: string,
+	calls: Array<{ id: string; toolName: string; input: Record<string, unknown> }>,
+): void {
+	const sessionStart = api.handlers.get("session_start")![0];
+	sessionStart({ type: "session_start", reason: "startup" }, { cwd: root });
+
+	for (const call of calls) {
+		const toolCall = api.handlers.get("tool_call")![0];
+		toolCall(
+			{ type: "tool_call", toolCallId: call.id, toolName: call.toolName, input: call.input },
+			{},
+		);
+		const toolEnd = api.handlers.get("tool_execution_end")![0];
+		toolEnd(
+			{ type: "tool_execution_end", toolCallId: call.id, toolName: call.toolName, result: {}, isError: false },
+			{},
+		);
+	}
+}
+
+/** Get all sendMessage content blocks. */
+function allSendContent(api: FakeApi): string[] {
+	return api.sendMessageCalls.map((m) => m.content);
+}
+
 describe("root boundary and exclusion", () => {
 	test("root AGENTS.md is never auto-loaded", () => {
 		const loader = makeLoader(fixture!.root);
 		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
 		expect(loader.activeFiles()).toEqual(["a/AGENTS.md"]);
-		expect(contextContent(loader)).not.toContain("root instructions");
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		const content = allSendContent(api).join("\n\n");
+		expect(content).not.toContain("root instructions");
 	});
 
 	test("targeting the root itself activates nothing", () => {
@@ -124,8 +200,12 @@ describe("root boundary and exclusion", () => {
 		touch(loader, "t1", "read", { path: "a/file.ts" });
 		touch(loader, "t2", "read", { path: "sub/x.txt" });
 		expect(loader.activeFiles()).toEqual(["a/AGENTS.md", "sub/AGENTS.md"]);
-		expect(contextContent(loader)).toContain("a instructions");
-		expect(contextContent(loader)).toContain("sub instructions");
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		const content = allSendContent(api).join("\n\n");
+		expect(content).toContain("a instructions");
+		expect(content).toContain("sub instructions");
 	});
 });
 
@@ -134,11 +214,15 @@ describe("hierarchy shallow -> deep", () => {
 		const loader = makeLoader(fixture!.root);
 		loader.noteToolCall("t1", "read", { path: "a/b/deep.ts" });
 		expect(loader.activeFiles()).toEqual(["a/AGENTS.md", "a/b/AGENTS.md"]);
-		const content = contextContent(loader);
-		expect(content.indexOf("a instructions")).toBeLessThan(content.indexOf("b instructions"));
-		expect(content).toBe(
-			`<agents_md path="a/AGENTS.md">\na instructions\n</agents_md>\n\n<agents_md path="a/b/AGENTS.md">\nb instructions\n</agents_md>`,
-		);
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(api.sendMessageCalls.length).toBe(2);
+		expect(api.sendMessageCalls[0].content).toContain("a instructions");
+		expect(api.sendMessageCalls[1].content).toContain("b instructions");
+		// Blocks are per-file, not a single merged block.
+		expect(api.sendMessageCalls[0].content).toMatch(/^<agents_md path="a\/AGENTS\.md">/);
+		expect(api.sendMessageCalls[1].content).toMatch(/^<agents_md path="a\/b\/AGENTS\.md">/);
 	});
 
 	test("re-activation preserves first-activation order", () => {
@@ -207,13 +291,22 @@ describe("path safety", () => {
 describe("content reload after execution", () => {
 	test("edited AGENTS.md is rescanned after tool_execution_end", () => {
 		const loader = makeLoader(fixture!.root);
+		// Call noteToolCall only — noteToolExecutionEnd comes after the file change.
 		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
-		expect(contextContent(loader)).toContain("a instructions");
+		const api1 = makeFakeApi();
+		loader.deliverFn = (msg) => api1.sendMessage(msg);
+		loader.noteToolExecutionEnd("t1");
+		expect(allSendContent(api1).join("\n\n")).toContain("a instructions");
 
 		fs.writeFileSync(path.join(fixture!.root, "a", AGENTS_FILE_NAME), "a revised instructions");
-		loader.noteToolExecutionEnd("t1");
-		expect(contextContent(loader)).toContain("a revised instructions");
-		expect(contextContent(loader)).not.toContain("a instructions");
+		// Re-trigger: a second tool call to the same dir, then execution end.
+		loader.noteToolCall("t2", "read", { path: "a/file.ts" });
+		const api2 = makeFakeApi();
+		loader.deliverFn = (msg) => api2.sendMessage(msg);
+		loader.noteToolExecutionEnd("t2");
+		const content = allSendContent(api2).join("\n\n");
+		expect(content).toContain("a revised instructions");
+		expect(content).not.toContain("a instructions");
 	});
 
 	test("deleted AGENTS.md is dropped after tool_execution_end", () => {
@@ -224,7 +317,11 @@ describe("content reload after execution", () => {
 		fs.rmSync(path.join(fixture!.root, "a", AGENTS_FILE_NAME));
 		loader.noteToolExecutionEnd("t1");
 		expect(loader.activeCount).toBe(0);
-		expect(contextMessage(loader)).toBeUndefined();
+		// No active files means no delivery.
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(api.sendMessageCalls.length).toBe(0);
 	});
 
 	test("AGENTS.md created by a write is activated after execution", () => {
@@ -236,52 +333,110 @@ describe("content reload after execution", () => {
 		fs.writeFileSync(path.join(fixture!.root, "plain", AGENTS_FILE_NAME), "plain final");
 		loader.noteToolExecutionEnd("t1");
 		expect(loader.activeFiles()).toEqual(["plain/AGENTS.md"]);
-		expect(contextContent(loader)).toContain("plain final");
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(allSendContent(api).join("\n\n")).toContain("plain final");
 	});
 });
 
-describe("context message", () => {
-	test("is a single hidden custom message in canonical order", () => {
+describe("append-once-at-discovery delivery", () => {
+	test("file discovered by a tool call is delivered exactly once via sendMessage", () => {
+		const loader = makeLoader(fixture!.root);
+		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
+		loader.noteToolExecutionEnd("t1");
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(api.sendMessageCalls.length).toBe(1);
+		expect(api.sendMessageCalls[0].customType).toBe(CONTEXT_CUSTOM_TYPE);
+		expect(api.sendMessageCalls[0].display).toBe(false);
+		expect(api.sendMessageCalls[0].content).toContain("<agents_md path=");
+		expect(api.sendMessageCalls[0].content).toContain("a instructions");
+	});
+
+	test("repeated touches of the same directory deliver nothing new", () => {
+		const loader = makeLoader(fixture!.root);
+		// First touch: deliver a/AGENTS.md.
+		touch(loader, "t1", "read", { path: "a/file.ts" });
+		const api1 = makeFakeApi();
+		loader.deliverFn = (msg) => api1.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(api1.sendMessageCalls.length).toBe(1);
+
+		// Second touch: same directory, same content — no new sendMessage.
+		const api2 = makeFakeApi();
+		loader.deliverFn = (msg) => api2.sendMessage(msg);
+		touch(loader, "t2", "read", { path: "a/file.ts" });
+		// noteToolExecutionEnd already called inside touch; deliverNewFiles checks hash.
+		loader.deliverNewFiles();
+		expect(api2.sendMessageCalls.length).toBe(0);
+	});
+
+	test("no delivery without new discovery (no context handler)", () => {
+		const loader = makeLoader(fixture!.root);
+		// Activate a file, deliver it, then do a tool call to a different dir.
+		touch(loader, "t1", "read", { path: "a/file.ts" });
+		const api1 = makeFakeApi();
+		loader.deliverFn = (msg) => api1.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(api1.sendMessageCalls.length).toBe(1);
+
+		// Touch a new directory — only sub/AGENTS.md should be delivered, not a/.
+		const api2 = makeFakeApi();
+		loader.deliverFn = (msg) => api2.sendMessage(msg);
+		touch(loader, "t2", "read", { path: "sub/x.txt" });
+		loader.deliverNewFiles();
+		expect(api2.sendMessageCalls.length).toBe(1);
+		expect(api2.sendMessageCalls[0].content).toContain("sub/AGENTS.md");
+	});
+
+	test("content change after tool_execution_end re-delivers exactly once with new content", () => {
+		const loader = makeLoader(fixture!.root);
+		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
+		const api1 = makeFakeApi();
+		loader.deliverFn = (msg) => api1.sendMessage(msg);
+		loader.noteToolExecutionEnd("t1");
+		expect(api1.sendMessageCalls.length).toBe(1);
+		expect(api1.sendMessageCalls[0].content).toContain("a instructions");
+
+		// Modify the file and re-scan via a fresh tool call.
+		fs.writeFileSync(path.join(fixture!.root, "a", AGENTS_FILE_NAME), "a new instructions");
+		loader.noteToolCall("t2", "read", { path: "a/file.ts" });
+		const api2 = makeFakeApi();
+		loader.deliverFn = (msg) => api2.sendMessage(msg);
+		loader.noteToolExecutionEnd("t2");
+		expect(api2.sendMessageCalls.length).toBe(1);
+		expect(api2.sendMessageCalls[0].content).toContain("a new instructions");
+		expect(api2.sendMessageCalls[0].content).not.toContain("a instructions");
+	});
+
+	test("deleted AGENTS.md: record dropped, no delivery", () => {
+		const loader = makeLoader(fixture!.root);
+		touch(loader, "t1", "read", { path: "a/file.ts" });
+		expect(loader.activeCount).toBe(1);
+
+		fs.rmSync(path.join(fixture!.root, "a", AGENTS_FILE_NAME));
+		loader.noteToolExecutionEnd("t1");
+		expect(loader.activeCount).toBe(0);
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(api.sendMessageCalls.length).toBe(0);
+	});
+
+	test("hierarchy: a deep read delivers shallow ancestors before deeper files", () => {
 		const loader = makeLoader(fixture!.root);
 		loader.noteToolCall("t1", "read", { path: "a/b/deep.ts" });
-		const message = contextMessage(loader);
-		expect(message).toBeDefined();
-		expect((message as { role: string }).role).toBe("custom");
-		expect((message as { customType: string }).customType).toBe(CONTEXT_CUSTOM_TYPE);
-		expect((message as { display: boolean }).display).toBe(false);
-		expect((message as { content: string }).content).toContain("<agents_md path=");
-	});
-
-	test("does not mutate the incoming message array", () => {
-		const loader = makeLoader(fixture!.root);
-		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
-		const incoming: AgentMessage[] = [
-			{ role: "user", content: "hi" } as unknown as AgentMessage,
-		];
-		const before = incoming.length;
-		const result = loader.buildContextMessage(incoming);
-		expect(incoming.length).toBe(before);
-		expect((result as { content: string }).content).toContain("a instructions");
-	});
-
-	test("skips when the messages already carry the custom marker", () => {
-		const loader = makeLoader(fixture!.root);
-		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
-		const already: AgentMessage[] = [
-			{
-				role: "custom",
-				customType: CONTEXT_CUSTOM_TYPE,
-				content: "persisted copy",
-				display: false,
-				timestamp: 1,
-			} as unknown as AgentMessage,
-		];
-		expect(loader.buildContextMessage(already)).toBeUndefined();
-	});
-
-	test("returns undefined with no active files", () => {
-		const loader = makeLoader(fixture!.root);
-		expect(contextMessage(loader)).toBeUndefined();
+		loader.noteToolExecutionEnd("t1");
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(api.sendMessageCalls.length).toBe(2);
+		expect(api.sendMessageCalls[0].content).toContain("a/AGENTS.md");
+		expect(api.sendMessageCalls[0].content).toContain("a instructions");
+		expect(api.sendMessageCalls[1].content).toContain("a/b/AGENTS.md");
+		expect(api.sendMessageCalls[1].content).toContain("b instructions");
 	});
 });
 
@@ -298,7 +453,10 @@ describe("bash heuristic", () => {
 		const loader = makeLoader(fixture!.root);
 		touch(loader, "t1", "bash", { command: "cd sub && ls" });
 		expect(loader.activeFiles()).toEqual(["sub/AGENTS.md"]);
-		expect(contextContent(loader)).not.toContain("sub/sub instructions");
+		const api = makeFakeApi();
+		loader.deliverFn = (msg) => api.sendMessage(msg);
+		loader.deliverNewFiles();
+		expect(allSendContent(api).join("\n\n")).not.toContain("sub/sub instructions");
 	});
 
 	test("cd -- dir activates its module", () => {
@@ -344,61 +502,28 @@ describe("bash bare relative paths (regression)", () => {
 
 	test("bare relative path edited mid-session refreshes context", () => {
 		const loader = makeLoader(fixture!.root);
-		touch(loader, "t1", "bash", { command: `cd ${fixture!.root} && grep pattern a/AGENTS.md` });
-		expect(contextContent(loader)).toContain("a instructions");
+		// First touch: discover and deliver.
+		loader.noteToolCall("t1", "bash", { command: `cd ${fixture!.root} && grep pattern a/AGENTS.md` });
+		const api1 = makeFakeApi();
+		loader.deliverFn = (msg) => api1.sendMessage(msg);
+		loader.noteToolExecutionEnd("t1");
+		expect(allSendContent(api1).join("\n\n")).toContain("a instructions");
 
+		// Edit the file, then re-touch.
 		fs.writeFileSync(path.join(fixture!.root, "a", AGENTS_FILE_NAME), "a revised instructions");
-		touch(loader, "t2", "bash", { command: `cd ${fixture!.root} && grep pattern a/AGENTS.md` });
-		expect(contextContent(loader)).toContain("a revised instructions");
-		expect(contextContent(loader)).not.toContain("a instructions");
+		loader.noteToolCall("t2", "bash", { command: `cd ${fixture!.root} && grep pattern a/AGENTS.md` });
+		const api2 = makeFakeApi();
+		loader.deliverFn = (msg) => api2.sendMessage(msg);
+		loader.noteToolExecutionEnd("t2");
+		const content = allSendContent(api2).join("\n\n");
+		expect(content).toContain("a revised instructions");
+		expect(content).not.toContain("a instructions");
 	});
 
 	test("bare tokens without a separator stay rejected", () => {
 		const loader = makeLoader(fixture!.root);
 		touch(loader, "t1", "bash", { command: "grep -rn pattern" });
 		expect(loader.activeCount).toBe(0);
-	});
-});
-
-describe("context message refresh (regression)", () => {
-	test("existing marker message is updated in place with fresh content", () => {
-		const loader = makeLoader(fixture!.root);
-		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
-		const already: AgentMessage[] = [
-			{
-				role: "custom",
-				customType: CONTEXT_CUSTOM_TYPE,
-				content: "persisted copy",
-				display: false,
-				timestamp: 1,
-			} as unknown as AgentMessage,
-		];
-		expect(loader.buildContextMessage(already)).toBeUndefined();
-		expect((already[0] as { content: string }).content).toContain("a instructions");
-		expect((already[0] as { content: string }).content).not.toContain("persisted copy");
-	});
-
-	test("refreshed cache replaces stale marker content without duplicating", () => {
-		const loader = makeLoader(fixture!.root);
-		loader.noteToolCall("t1", "read", { path: "a/file.ts" });
-		const already: AgentMessage[] = [
-			{
-				role: "custom",
-				customType: CONTEXT_CUSTOM_TYPE,
-				content: "stale",
-				display: false,
-				timestamp: 1,
-			} as unknown as AgentMessage,
-		];
-		expect(loader.buildContextMessage(already)).toBeUndefined();
-		expect(already.length).toBe(1);
-
-		fs.writeFileSync(path.join(fixture!.root, "a", AGENTS_FILE_NAME), "a revised instructions");
-		loader.noteToolExecutionEnd("t1");
-		expect(loader.buildContextMessage(already)).toBeUndefined();
-		expect((already[0] as { content: string }).content).toContain("a revised instructions");
-		expect((already[0] as { content: string }).content).not.toContain("a instructions");
-		expect(already.length).toBe(1);
 	});
 });
 
@@ -425,12 +550,11 @@ describe("apply_patch and aliases", () => {
 		expect(deriveToolPaths("edit", { file_path: "a/x.ts", edits: [] })).toEqual(["a/x.ts"]);
 		expect(deriveToolPaths("write", { filePath: "a/x.ts", content: "x" })).toEqual(["a/x.ts"]);
 		expect(deriveToolPaths("grep", { pattern: "foo" })).toEqual([]);
-		expect(deriveToolPaths("todo", { action: "create" })).toEqual([]);
 	});
 });
 
 describe("session replacement", () => {
-	test("re-registers all hooks on a fresh API and keeps replacement sessions functional", () => {
+	test("re-registers hooks on a fresh API with sendMessage capture", () => {
 		const api1 = makeFakeApi();
 		const api2 = makeFakeApi();
 		installAgentsMdHooks(api1 as unknown as ExtensionAPI);
@@ -439,12 +563,12 @@ describe("session replacement", () => {
 		// Both registries must receive every handler — Pi disposes handlers on
 		// the old API after /resume, /new, /fork and re-invokes the factory with
 		// a fresh API, so a module-global once guard would leave it bare.
+		// The context handler is gone — delivery is via sendMessage in tool_execution_end.
 		const expectedEvents = [
 			"session_start",
 			"session_shutdown",
 			"tool_call",
 			"tool_execution_end",
-			"context",
 		];
 		for (const api of [api1, api2]) {
 			for (const event of expectedEvents) {
@@ -456,7 +580,6 @@ describe("session replacement", () => {
 		const sessionStart = api2.handlers.get("session_start")![0];
 		const toolCall = api2.handlers.get("tool_call")![0];
 		const toolEnd = api2.handlers.get("tool_execution_end")![0];
-		const context = api2.handlers.get("context")![0];
 		const shutdown = api2.handlers.get("session_shutdown")![0];
 
 		sessionStart({ type: "session_start", reason: "startup" }, { cwd: fixture!.root });
@@ -465,37 +588,99 @@ describe("session replacement", () => {
 			{},
 		);
 		toolEnd({ type: "tool_execution_end", toolCallId: "repl-1", toolName: "read", result: {}, isError: false }, {});
-		const result = context({ type: "context", messages: [] }, {});
-		expect(result).toBeDefined();
-		const messages = (result as { messages: AgentMessage[] }).messages;
-		expect(messages.length).toBe(1);
-		expect((messages[0] as { customType: string }).customType).toBe(CONTEXT_CUSTOM_TYPE);
-		expect((messages[0] as { content: string }).content).toContain("a instructions");
+		// After tool_execution_end + rescan + prune, deliverNewFiles should fire.
+		// The installAgentsMdHooks wires deliverFn, but the handler does NOT call
+		// deliverNewFiles directly — it's called by noteToolExecutionEnd. However,
+		// the handler calls noteToolExecutionEnd which calls deliverNewFiles.
+		// Check if the API captured any sendMessage calls.
+		// Note: the handler calls loader.noteToolExecutionEnd which calls
+		// this.deliverNewFiles(). So sendMessage should have been called.
+		expect(api2.sendMessageCalls.length).toBeGreaterThanOrEqual(1);
+		const lastMsg = api2.sendMessageCalls[api2.sendMessageCalls.length - 1]!;
+		expect(lastMsg.customType).toBe(CONTEXT_CUSTOM_TYPE);
+		expect(lastMsg.display).toBe(false);
+		expect(lastMsg.content).toContain("a instructions");
 
 		// The shared loader is cleared by the replacement session's shutdown,
 		// so the module singleton cannot leak instructions into later tests.
 		shutdown({ type: "session_shutdown", reason: "resume" }, {});
-		expect(context({ type: "context", messages: [] }, {})).toBeUndefined();
+		// After shutdown, no further delivery should occur on the API.
+		expect(api2.sendMessageCalls.filter((m) => m.customType === CONTEXT_CUSTOM_TYPE).length).toBe(1);
 	});
 });
 
-function makeFakeApi(): {
-	handlers: Map<string, Array<(event: unknown, ctx: unknown) => unknown>>;
-	on(event: string, handler: (event: unknown, ctx: unknown) => unknown): void;
-} {
-	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
-	return {
-		handlers,
-		on(event, handler) {
-			let list = handlers.get(event);
-			if (!list) {
-				list = [];
-				handlers.set(event, list);
-			}
-			list.push(handler);
-		},
-	};
-}
+describe("resume seeding", () => {
+	test("history marker pre-seeds delivered set so no re-delivery", () => {
+		const api = makeFakeApi();
+		// Seed the history with an existing AGENTS.md custom message.
+		const path1 = "a/AGENTS.md";
+		const content1 = `<agents_md path="${path1}">\na instructions\n</agents_md>`;
+		api.historyEntries.push({
+			type: "custom_message",
+			customType: CONTEXT_CUSTOM_TYPE,
+			content: content1,
+			role: "custom",
+		});
+
+		installAgentsMdHooks(api as unknown as ExtensionAPI);
+		const sessionStart = api.handlers.get("session_start")![0];
+		sessionStart({ type: "session_start", reason: "resume" }, { cwd: fixture!.root });
+
+		// Now touch the same directory.
+		const toolCall = api.handlers.get("tool_call")![0];
+		const toolEnd = api.handlers.get("tool_execution_end")![0];
+		toolCall(
+			{ type: "tool_call", toolCallId: "rs-1", toolName: "read", input: { path: "a/file.ts" } },
+			{},
+		);
+		toolEnd({ type: "tool_execution_end", toolCallId: "rs-1", toolName: "read", result: {}, isError: false }, {});
+
+		// The file was already delivered in the history — no new sendMessage.
+		// Only the handler registrations appear, not sendMessage from deliverNewFiles.
+		const deliveryCalls = api.sendMessageCalls.filter((m) => m.customType === CONTEXT_CUSTOM_TYPE);
+		expect(deliveryCalls.length).toBe(0);
+	});
+
+	test("content change after resume re-delivers with new hash", () => {
+		const api = makeFakeApi();
+		const path1 = "a/AGENTS.md";
+		const content1 = `<agents_md path="${path1}">\na instructions\n</agents_md>`;
+		api.historyEntries.push({
+			type: "custom_message",
+			customType: CONTEXT_CUSTOM_TYPE,
+			content: content1,
+			role: "custom",
+		});
+
+		installAgentsMdHooks(api as unknown as ExtensionAPI);
+		const sessionStart = api.handlers.get("session_start")![0];
+		sessionStart({ type: "session_start", reason: "resume" }, { cwd: fixture!.root });
+
+		// Change the file content.
+		fs.writeFileSync(path.join(fixture!.root, "a", AGENTS_FILE_NAME), "a revised instructions");
+
+		const toolCall = api.handlers.get("tool_call")![0];
+		const toolEnd = api.handlers.get("tool_execution_end")![0];
+		toolCall(
+			{ type: "tool_call", toolCallId: "rs-2", toolName: "read", input: { path: "a/file.ts" } },
+			{},
+		);
+		toolEnd({ type: "tool_execution_end", toolCallId: "rs-2", toolName: "read", result: {}, isError: false }, {});
+
+		// Content changed — should re-deliver.
+		const deliveryCalls = api.sendMessageCalls.filter((m) => m.customType === CONTEXT_CUSTOM_TYPE);
+		expect(deliveryCalls.length).toBe(1);
+		expect(deliveryCalls[0].content).toContain("a revised instructions");
+	});
+});
+
+describe("no context handler", () => {
+	test("there is no context event registered (append-once, not per-request)", () => {
+		const api = makeFakeApi();
+		installAgentsMdHooks(api as unknown as ExtensionAPI);
+		expect(api.handlers.has("context")).toBe(false);
+	});
+});
 
 describe("path helpers", () => {
 	test("toPosixRelative always uses forward slashes", () => {

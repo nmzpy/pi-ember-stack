@@ -1,18 +1,6 @@
-GNU Affero General Public License v3.0 or later
-
-Copyright (c) 2026 nmzpy (pi-ember-stack contributors)
-
-Adapted from `@xaccefy/pi-xtodo` (MIT License, Copyright (c) 2025 x4cc3),
-source: https://github.com/xaccefy/pi-xpi/tree/main/packages/pi-xtodo.
-The upstream MIT license and attribution are retained below in full, as
-required by the MIT license terms. The pi-ember-todo adaptation is
-distributed under AGPL-3.0-or-later as part of pi-ember-stack.
-
-----------------------------------------------------------------------
-
 MIT License
 
-Copyright (c) 2025 x4cc3
+Copyright (c) 2026 RimuruW and Yugimob
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

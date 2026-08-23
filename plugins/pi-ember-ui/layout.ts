@@ -1,4 +1,5 @@
 import { Spacer, type TUI } from "@earendil-works/pi-tui";
+import { request_render } from "./render-intent.ts";
 
 /** Blank rows above the chatbox, or above Thinking when that widget is visible. */
 export const CHATBOX_LEADING_ROWS = 1;
@@ -14,18 +15,18 @@ export function reset_slash_command_tracking(): void {}
 /** No-op — kept for model-picker programmatic `/model ` writes. */
 export function sync_slash_command_active(_editor: { getText?: () => string }): void {}
 
-export type LiveTuiRenderTarget = { requestRender?: (force?: boolean) => void };
-
-/** SSOT: schedule a live Pi render through the public TUI API. */
-export function request_live_tui_render(tui?: LiveTuiRenderTarget): void {
-	tui?.requestRender?.();
+/**
+ * Compatibility seam for callers that used to pass a TUI target. All live
+ * render requests now use the session-safe render-intent singleton.
+ */
+export function request_live_tui_render(_tui?: unknown): void {
+	request_render();
 }
 
 /** No-op — editor input must not force layout re-anchors (trackpad scrollback). */
 export function finalize_editor_input_after(_editor: {
 	getText?: () => string;
 	isShowingAutocomplete?: () => boolean;
-	tui?: { requestRender?: () => void };
 }): void {}
 
 function is_editor_component(value: RenderableChild): boolean {

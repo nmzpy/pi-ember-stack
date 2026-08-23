@@ -93,7 +93,8 @@ of this repository.
 The package entrypoint is `plugins/index.ts`. Compact tools are under
 `plugins/pi-compact-tools/`, while quiz, primary modes, plans,
 subagents, and bundled agents are under `plugins/pi-custom-agents/`. Provider
-plugins are under `plugins/devin-auth/` and `plugins/pi-cursor-auth/`.
+plugins are under `plugins/devin-auth/`, `plugins/pi-crof-auth/`, `plugins/pi-cursor-auth/`, and
+`plugins/pi-novita-auth/`.
 
 Run the package typecheck with:
 

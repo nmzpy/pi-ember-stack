@@ -1,5 +1,4 @@
 import type { Context, Message, Tool } from "@earendil-works/pi-ai";
-import { prepare_todo_arguments } from "../../pi-ember-todo/normalize.ts";
 
 function is_record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -18,7 +17,6 @@ const PI_TO_CURSOR_TOOL_NAME = new Map<string, string>([
 	["ls", "pi_ember_ls"],
 	["grep", "pi_ember_grep"],
 	["find", "pi_ember_glob"],
-	["todo", "pi_ember_todo"],
 	["apply_patch", "pi_ember_apply_patch"],
 	["subagent", "pi_ember_subagent"],
 	["subagent_resume", "pi_ember_subagent_resume"],
@@ -43,7 +41,7 @@ const PI_TO_CURSOR_ARG_NAMES: Record<string, Record<string, string>> = {
 };
 
 const MODE_DIRECTIVES: Record<string, string> = {
-	plan: "You are in plan mode. Design your approach before coding. Reply in labeled lines: Task:, Investigation:, Module N:, Acceptance Criteria:. Do not write code until the plan is approved.",
+	plan: "You are in plan mode. Design your approach before coding. Do not write code until the plan is approved.",
 	code: "You are in code mode. Implement the task directly. Prefer parallel read and edit calls for independent files. Explain briefly after changes.",
 	orchestrate: "You are in orchestrate mode. Break the task into independent subtasks, delegate where possible, and synthesize results. Prefer parallel tool calls.",
 };
@@ -208,8 +206,6 @@ const TOOL_ALIASES = new Map<string, string>([
 	["globfilesearch", "find"],
 	["applypatch", "apply_patch"],
 	["edittoreplace", "edit"],
-	["updatetodos", "todo"],
-	["readtodos", "todo"],
 	["websearch", "web_search"],
 	["websearchtoolcall", "web_search"],
 	["fetchtoolcall", "fetch_content"],
@@ -229,7 +225,6 @@ const CURSOR_TO_PI_TOOL_NAME = new Map<string, string>([
 	["pi_ember_ls", "ls"],
 	["pi_ember_grep", "grep"],
 	["pi_ember_glob", "find"],
-	["pi_ember_todo", "todo"],
 	["pi_ember_apply_patch", "apply_patch"],
 	["pi_ember_subagent", "subagent"],
 	["pi_ember_subagent_resume", "subagent_resume"],
@@ -246,7 +241,6 @@ const CURSOR_TO_PI_TOOL_NAME = new Map<string, string>([
 	["LS", "ls"],
 	["Grep", "grep"],
 	["Glob", "find"],
-	["todo", "todo"],
 	["apply_patch", "apply_patch"],
 	["subagent", "subagent"],
 	["subagent_resume", "subagent_resume"],
@@ -271,7 +265,6 @@ const CANONICAL_PI_TOOLS = new Set([
 	"task",
 	"subagent",
 	"subagent_resume",
-	"todo",
 ]);
 
 export function resolve_pi_tool_name(raw_name: string, tools: readonly Tool[] = []): string | undefined {
@@ -406,11 +399,6 @@ export function normalize_tool_arguments(
 		if (input.exclude !== undefined) output.exclude = input.exclude;
 		if (input.limit !== undefined) output.limit = input.limit;
 		return output;
-	}
-	if (tool_name === "todo") {
-		// Provider-native batch shapes (Cursor UpdateTodos, etc.) must be flattened
-		// before Pi's schema validation strips unknown keys like `todos`.
-		return prepare_todo_arguments(input) as Record<string, unknown>;
 	}
 	if (tool_name === "web_search") {
 		// Inbound inverse of PI_TO_CURSOR_ARG_NAMES (query -> search_term).

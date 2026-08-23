@@ -21,12 +21,11 @@ import {
 	chatboxBorderColor,
 	MUTED_GROUP_GRADIENT_PRESET,
 	renderLiveGradient,
-	requestLiveTuiRender,
-	requestTuiRender,
 	subscribeGradientTick,
 	unsubscribeGradientTick,
 } from "../pi-ember-ui/index.ts";
 import { setQuizActive } from "../pi-ember-ui/mode-colors.ts";
+import { request_render } from "../pi-ember-ui/render-intent.ts";
 import { BULLET, statusBulletColor } from "../pi-compact-tools/renderer.ts";
 
 export interface QuizOption {
@@ -328,10 +327,10 @@ export async function askQuiz(
 	const result = await ctx.ui.custom(
 		(_tui: TUI, theme: Theme, _keybindings: KeybindingsManager, done: (result: QuizResult) => void) => {
 			setQuizActive(true);
-			requestTuiRender();
+			request_render();
 			const finish = (r: QuizResult): void => {
 				setQuizActive(false);
-				requestTuiRender();
+				request_render();
 				done(r);
 			};
 			let questionIndex = 0;
@@ -380,7 +379,7 @@ export async function askQuiz(
 			function refresh(): void {
 				cachedLines = undefined;
 				cachedWidth = undefined;
-				requestLiveTuiRender(_tui);
+				request_render();
 			}
 
 			function addWrapped(lines: string[], text: string, width: number): void {
@@ -622,12 +621,12 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 
 			awaiting_quiz_tool_call_id = toolCallId;
 			unsubscribe_quiz_tick(toolCallId);
-			requestTuiRender();
+			request_render();
 			let answers: QuizAnswer[] | undefined;
 			try {
 				answers = await askQuiz(ctx, "Quiz", params.questions);
 			} finally {
-				requestTuiRender();
+				request_render();
 			}
 			return {
 				content: [
@@ -670,7 +669,7 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 			}
 			context.state.quizAnswers = details?.answers ?? [];
 			finalize_quiz_tool_render(context.toolCallId, context.state, context.invalidate);
-			// Answers render on the call row (todo-style); avoid a second result row.
+			// Answers render on the call row; avoid a second result row.
 			return new Text("", 0, 0);
 		},
 	});

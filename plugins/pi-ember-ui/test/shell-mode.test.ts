@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
 	consume_pending_shell_submit_enter,
 	intercept_shell_input,
@@ -7,6 +7,10 @@ import {
 	with_suppressed_shell_history_sync,
 } from "../shell-mode.ts";
 import { isShellMode, setShellMode } from "../mode-colors.ts";
+import {
+	bind_render_intent,
+	reset_render_intent,
+} from "../render-intent.ts";
 
 function makeEditorWithTui(initialText: string): {
 	getText: () => string;
@@ -34,6 +38,20 @@ function makeEditorWithTui(initialText: string): {
 		},
 		tui,
 	};
+}
+
+/** Render calls now route through the canonical render-intent module.
+ *  Bind a counting callback so tests can verify the render was dispatched. */
+let render_call_count = 0;
+
+function bind_test_render_intent(): void {
+	render_call_count = 0;
+	bind_render_intent(() => { render_call_count++; });
+}
+
+function reset_test_render_intent(): void {
+	reset_render_intent();
+	render_call_count = 0;
 }
 
 function makeEditor(initialText: string): { getText: () => string; setText: (t: string) => void } {
@@ -70,6 +88,12 @@ const BANG_ENCODINGS: Array<[string, string]> = [
 ];
 
 describe("shell mode", () => {
+	beforeEach(() => {
+		bind_test_render_intent();
+	});
+	afterEach(() => {
+		reset_test_render_intent();
+	});
 	for (const [label, data] of BANG_ENCODINGS) {
 		test(`'!' (${label}) on empty input enters shell mode and eats the '!'`, () => {
 			setShellMode(false);
@@ -78,8 +102,8 @@ describe("shell mode", () => {
 			expect(consumed).toBe(true);
 			expect(isShellMode()).toBe(true);
 			expect(editor.getText()).toBe("");
-			expect(editor.tui.requestRenderCalls.length).toBeGreaterThanOrEqual(1);
-			expect(editor.tui.requestRenderCalls.every((f) => f === false)).toBe(true);
+			expect(editor.tui.requestRenderCalls.length).toBe(0);
+			expect(render_call_count).toBeGreaterThanOrEqual(1);
 		});
 	}
 
@@ -104,8 +128,8 @@ describe("shell mode", () => {
 		setShellMode(true);
 		const editor = makeEditorWithTui("ls -la");
 		intercept_shell_input(ESCAPE, editor);
-		expect(editor.tui.requestRenderCalls.length).toBeGreaterThanOrEqual(1);
-		expect(editor.tui.requestRenderCalls.every((f) => f === false)).toBe(true);
+		expect(editor.tui.requestRenderCalls.length).toBe(0);
+		expect(render_call_count).toBeGreaterThanOrEqual(1);
 	});
 
 	test("backspace on empty in shell mode exits", () => {
@@ -120,8 +144,8 @@ describe("shell mode", () => {
 		setShellMode(true);
 		const editor = makeEditorWithTui("");
 		intercept_shell_input(BACKSPACE, editor);
-		expect(editor.tui.requestRenderCalls.length).toBeGreaterThanOrEqual(1);
-		expect(editor.tui.requestRenderCalls.every((f) => f === false)).toBe(true);
+		expect(editor.tui.requestRenderCalls.length).toBe(0);
+		expect(render_call_count).toBeGreaterThanOrEqual(1);
 	});
 
 	test("backspace on non-empty in shell mode falls through", () => {
@@ -155,8 +179,8 @@ describe("shell mode", () => {
 		setShellMode(true);
 		const editor = makeEditorWithTui("   ");
 		intercept_shell_input(ENTER, editor);
-		expect(editor.tui.requestRenderCalls.length).toBeGreaterThanOrEqual(1);
-		expect(editor.tui.requestRenderCalls.every((f) => f === false)).toBe(true);
+		expect(editor.tui.requestRenderCalls.length).toBe(0);
+		expect(render_call_count).toBeGreaterThanOrEqual(1);
 	});
 
 	test("regular key in shell mode falls through", () => {
