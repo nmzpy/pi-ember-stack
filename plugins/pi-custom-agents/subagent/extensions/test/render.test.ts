@@ -681,7 +681,7 @@ describe("nested tray tree composition (regression)", () => {
 			.map(stripAnsi);
 		const text_index = rows.findIndex((line) => line.includes("Let me check the launch window."));
 
-		expect(rows[text_index]).toContain("[dim:└][text:Let me check the launch window.]");
+		expect(rows[text_index]).toContain("[dim:└]Let me check the launch window.");
 		expect(rows[text_index - 1]).toBe("  [dim:│]");
 		expect(rows.filter((line) => line === "  [dim:│]")).toHaveLength(1);
 	});

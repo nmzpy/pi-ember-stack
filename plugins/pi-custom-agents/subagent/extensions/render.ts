@@ -8,11 +8,9 @@
 
 import * as os from "node:os";
 import type { Message } from "@earendil-works/pi-ai";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
 	Container,
-	Markdown,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -31,6 +29,7 @@ import {
 } from "../../../pi-compact-tools/renderer.ts";
 import {
 	chatboxBorderColor,
+	create_live_markdown,
 	create_live_thinking_markdown,
 	formatElapsed,
 	renderLiveGradient,
@@ -85,9 +84,6 @@ export class SubagentToolText implements Component {
 		return [truncateToWidth(this.text, maxToolWidth)];
 	}
 }
-
-/** Cap on visible text lines per live agent text block (before truncation). */
-const LIVE_TEXT_MAX_LINES = 6;
 
 /** Single source for subagent tree branch color — must always be `dim`. */
 const SUBAGENT_TREE_COLOR = "dim";
@@ -249,14 +245,30 @@ function renderLiveThinkingLane(theme: ThemeLike, toolCallId?: string): string {
 	);
 }
 
-/** Render streamed child text without inventing visible content for blank rows. */
-function renderLiveTextContent(text: string, theme: ThemeLike): string[] {
-	const lines = text.split("\n");
-	const shown = lines
-		.slice(0, LIVE_TEXT_MAX_LINES)
-		.map((line) => (line.trim().length > 0 ? theme.fg("text", line) : ""));
-	if (lines.length > LIVE_TEXT_MAX_LINES) shown.push(theme.fg("dim", "…"));
-	return shown;
+/**
+ * Width-safe wrapper for streamed child text. Uses the SSOT
+ * `create_live_markdown` pipeline so subagent text renders through the same
+ * live heading binding, theme-generation cache, and Markdown lexing as
+ * assistant text blocks — never raw `theme.fg("text", line)` lines.
+ */
+class SubagentLiveTextMarkdown implements Component {
+	private readonly markdown: Component;
+
+	constructor(text: string) {
+		this.markdown = create_live_markdown(text);
+	}
+
+	invalidate(): void {
+		this.markdown.invalidate();
+	}
+
+	render(width: number): string[] {
+		return [...this.markdown.render(width)];
+	}
+
+	renderForGutter(width: number, gutterWidth: number): string[] {
+		return this.render(Math.max(1, width - gutterWidth));
+	}
 }
 
 /**
@@ -349,7 +361,8 @@ export class SubagentLiveOutputText implements Component {
 			const segment = segments[i];
 			const rows: TrayRow[] = [];
 			if (segment.kind === "text") {
-				for (const body of renderLiveTextContent(segment.text, theme)) {
+				const textMd = new SubagentLiveTextMarkdown(segment.text);
+				for (const body of textMd.renderForGutter(width, gutterWidth)) {
 					rows.push({ body, header: false });
 				}
 			} else if (segment.kind === "thinking") {
@@ -709,7 +722,6 @@ export function renderSingleResult(
 	const failureMessage = isError ? resolve_failure_message(result) : undefined;
 
 	if (expanded) {
-		const mdTheme = getMarkdownTheme();
 		const container = new Container();
 		let header = `${icon} ${theme.fg("dim", theme.bold(result.agent))}`;
 		if (isError && result.stopReason) {
@@ -742,7 +754,7 @@ export function renderSingleResult(
 			}
 			if (finalOutput) {
 				container.addChild(new Spacer(1));
-				container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+				container.addChild(create_live_markdown(finalOutput.trim()));
 			}
 		}
 		const usageStr = formatUsageStats(result.usage, result.model);
@@ -1262,7 +1274,6 @@ export function renderSubagentExpanded(
 	theme: ThemeLike,
 ): Component | undefined {
 	const fg = theme.fg.bind(theme);
-	const mdTheme = getMarkdownTheme();
 
 	if (details.mode === "single" && details.results.length === 1) {
 		return renderSingleResult(details.results[0], true, theme);
@@ -1280,7 +1291,7 @@ export function renderSubagentExpanded(
 		const finalOutput = getResultOutput(r);
 		if (finalOutput) {
 			rowContent.addChild(new Spacer(1));
-			rowContent.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
+			rowContent.addChild(create_live_markdown(finalOutput.trim()));
 		}
 		const usageStr = formatUsageStats(r.usage, r.model);
 		if (usageStr) rowContent.addChild(new Text(fg("dim", usageStr), 0, 0));

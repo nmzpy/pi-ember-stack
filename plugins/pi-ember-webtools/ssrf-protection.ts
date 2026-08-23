@@ -1,6 +1,9 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { retry_transient_transport_operation } from "../pi-custom-agents/subagent/extensions/transport-policy.ts";
+import {
+	MAX_TRANSPORT_RETRIES,
+	retry_transient_transport_operation,
+} from "../pi-custom-agents/subagent/extensions/transport-policy.ts";
 
 const DEFAULT_MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -85,12 +88,25 @@ export async function fetchRemoteUrl(
 	let current = await validateRemoteUrl(url, options);
 	let requestInit = init;
 
+	// Shared retry budget across all redirect hops so the total transient-transport
+	// retry attempts never exceed MAX_TRANSPORT_RETRIES, regardless of how many
+	// redirects are followed. Without this, each hop gets its own full budget,
+	// producing up to (maxRedirects+1) * (MAX_TRANSPORT_RETRIES+1) total attempts.
+	let remaining_retries = MAX_TRANSPORT_RETRIES;
+
 	for (let redirects = 0; redirects <= maxRedirects; redirects++) {
+		const hop_retry_budget = remaining_retries;
 		const response = await retry_transient_transport_operation(
 			() => fetchImpl(current, { ...requestInit, redirect: "manual" }),
 			{
 				signal: init.signal instanceof AbortSignal ? init.signal : undefined,
 				backoffMs: options.retryBackoffMs,
+				shouldRetry: (_error, attempt) => {
+					// Gate retry on the shared cross-hop budget.
+					if (attempt >= hop_retry_budget) return false;
+					remaining_retries--;
+					return true;
+				},
 			},
 		);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;

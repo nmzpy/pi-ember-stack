@@ -1444,6 +1444,19 @@ export function create_live_thinking_markdown(text: string): Component {
 	);
 }
 
+/**
+ * Build a cached Markdown component for regular (non-thinking) text — the
+ * companion to `create_live_thinking_markdown`. Subagent expanded views and
+ * live text trays use this so their Markdown flows through the same live
+ * heading binding, theme-generation cache, and render-intent pipeline as
+ * assistant text blocks, instead of constructing a raw `Markdown` with a
+ * stale `getMarkdownTheme()` snapshot.
+ */
+export function create_live_markdown(text: string): Component {
+	const markdown_theme = bind_live_markdown_theme({ ...getMarkdownTheme() });
+	return new CachedMarkdown(text, 0, 0, markdown_theme, undefined, "text");
+}
+
 /** Pi's theme file watcher reloads ember.json 100ms after any disk write
  *  (ensureThemeInstalled / updateInstalledThemeExport). That reload goes
  *  through createTheme(), which only knows the built-in ThemeBg keys and

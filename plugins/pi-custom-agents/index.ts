@@ -115,6 +115,15 @@ import { askQuiz, type QuizQuestion, registerQuizTool } from "./quiz-tool.ts";
 import subagentPlugin from "./subagent/extensions/index.ts";
 import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
 import { validate_plan_mode_subagent } from "./subagent-policy.ts";
+import {
+	create_loop_guard_state,
+	evaluate_tool_call,
+	reset_run_state,
+	reset_session_state,
+	resolve_settled_action,
+	apply_quiz_outcome,
+	type LoopGuardState,
+} from "./loop-guard.ts";
 
 /**
  * Promisify ctx.compact() into a result discriminated union.
@@ -137,24 +146,6 @@ function compact_async(
 			resolve({ ok: false, error });
 		}
 	});
-}
-
-function stable_serialize(value: unknown): string {
-	if (value === null || typeof value !== "object") {
-		const serialized = JSON.stringify(value);
-		return serialized === undefined ? String(value) : serialized;
-	}
-	if (Array.isArray(value)) return `[${value.map(stable_serialize).join(",")}]`;
-	const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
-		a.localeCompare(b),
-	);
-	return `{${entries
-		.map(([key, entry]) => `${JSON.stringify(key)}:${stable_serialize(entry)}`)
-		.join(",")}}`;
-}
-
-function tool_call_signature(tool_name: string, input: unknown): string {
-	return `${tool_name}:${stable_serialize(input)}`;
 }
 
 function is_non_generic_error(message: string | undefined): boolean {
@@ -439,7 +430,7 @@ ${style}`;
 }
 
 const ARCHITECT_PROMPT =
-	compose_plan_prompt(`Plan mode is active. You are read-only. Do not edit, write, or run mutating shell commands. You may run non-mutating shell commands (e.g. git log, find, grep) to inform the plan.
+	compose_plan_prompt(`Plan mode is active. You are now in Plan mode. You are read-only. Do not edit, write, or run mutating shell commands. You may run non-mutating shell commands (e.g. git log, find, grep) to inform the plan.
 
 ${mode_intro(
 	"plan",
@@ -472,7 +463,7 @@ decorative bullets. Keep code fences only for multi-line code blocks.
  * SSOT with the allowlist.
  */
 export const ORCHESTRATOR_PROMPT =
-	compose_mode_prompt(`Orchestrate mode is active. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.
+	compose_mode_prompt(`Orchestrate mode is active. You are now in Orchestrate mode. You are read-only. Decompose work into self-contained modules and delegate implementation to the Coder subagent. Do not edit, write, or run mutating shell commands yourself.
 
 ${mode_intro(
 	"orchestrate",
@@ -495,13 +486,13 @@ const HEALTH_CHECK_PROMPT_APPENDIX = `If the user's request is a health-check or
 Focus areas: ownership conflicts, hidden coupling, duplicated state or mirrored config, SSOT violations, fail-fast behavior, and high-change-entropy files.`;
 
 function coder_prompt(provider: string | undefined): string {
-	return compose_mode_prompt(`Code mode is active. You have full tool access. Implement, test, and verify code with autonomy.
+	return compose_mode_prompt(`Code mode is active. You are now in Code mode. You have full tool access. Implement, test, and verify code with autonomy.
 
 ${mode_intro("code", build_full_tools(provider), QUIZ_UNCERTAINTY_GUIDANCE)}`);
 }
 
 function exit_to_coder_prompt(provider: string | undefined): string {
-	return compose_mode_prompt(`You have switched from {mode} mode to code mode. You now have full tool access.
+	return compose_mode_prompt(`You are now in Code mode. You have switched from {mode} mode to code mode. You now have full tool access.
 
 ${mode_intro("code", build_full_tools(provider))}`);
 }
@@ -585,6 +576,8 @@ const MODES: Record<string, ModeConfig> = {
 
 const MODE_IDS = Object.keys(MODES);
 const DEFAULT_MODE = "code";
+/** Sentinel so the next before_agent_start sees a mismatch and emits the full enter prompt. */
+const MODE_CHANGED_SENTINEL = "__mode_changed__";
 const CYCLE_ORDER = ["code", "plan", "orchestrate"];
 type SessionManagerReference = Pick<SessionManager, "getEntries">;
 
@@ -852,6 +845,13 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		pi.setActiveTools(mode_tools_for_provider(modeId, provider));
 		pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
 		updateStatus(ctx);
+
+		// Reset lastMessagedMode so the next before_agent_start emits the full
+		// enter prompt for the new mode rather than skipping it due to stale
+		// state. Do not break deferred mode switch or persisted state logic.
+		if (prevModeId !== modeId) {
+			lastMessagedMode = MODE_CHANGED_SENTINEL;
+		}
 
 		// Remind the model which tools it lost and which it now has whenever the
 		// mode (and therefore the tool set) actually changes. Hidden so it steers
@@ -1366,21 +1366,29 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 			waitingForPlan = true;
 			if (plan_arm.clear_plan_text) latest_plan_text = "";
 		}
-		if (currentMode !== DEFAULT_MODE && lastMessagedMode !== currentMode) {
-			const mode = MODES[currentMode];
-			lastMessagedMode = currentMode;
+
+		// Always emit an explicit mode announcement so the model cannot
+		// mistakenly believe it is in a different mode. The enter path fires
+		// when lastMessagedMode !== currentMode (mode switch or first run);
+		// the exit path fires when returning to code from a non-code mode.
+		// Same-mode continuation still appends the mode reminder so the model
+		// always sees its current mode identity.
+		const effectiveMode = currentMode in MODES ? currentMode : DEFAULT_MODE;
+		if (effectiveMode !== DEFAULT_MODE && lastMessagedMode !== effectiveMode) {
+			const mode = MODES[effectiveMode];
+			lastMessagedMode = effectiveMode;
 			return {
-				systemPrompt: build_system_prompt(event, mode_reminder(currentMode, provider)),
+				systemPrompt: build_system_prompt(event, mode_reminder(effectiveMode, provider)),
 				message: {
-					customType: `pi-agents-enter-${currentMode}`,
+					customType: `pi-agents-enter-${effectiveMode}`,
 					content: `Entered ${mode.label} mode.`,
 					display: false,
 				},
 			};
 		}
-		if (currentMode === DEFAULT_MODE && lastMessagedMode && lastMessagedMode !== DEFAULT_MODE) {
+		if (effectiveMode === DEFAULT_MODE && lastMessagedMode && lastMessagedMode !== DEFAULT_MODE) {
 			const prevModeId = lastMessagedMode;
-			const prevMode = MODES[prevModeId];
+			const prevMode = MODES[prevModeId] ?? { label: prevModeId };
 			lastMessagedMode = DEFAULT_MODE;
 			return {
 				systemPrompt: build_system_prompt(
@@ -1394,8 +1402,11 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 				},
 			};
 		}
+		// Same-mode continuation: still append the mode reminder so the model
+		// always receives an explicit mode identity announcement.
+		lastMessagedMode = effectiveMode;
 		return {
-			systemPrompt: build_system_prompt(event, mode_reminder(currentMode, provider)),
+			systemPrompt: build_system_prompt(event, mode_reminder(effectiveMode, provider)),
 		};
 	});
 
@@ -1405,11 +1416,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 	/** Max consecutive auto-continues before giving up and surfacing the error. */
 	const PLAN_AUTO_CONTINUE_MAX = 5;
 	let planAutoContinueCount = 0;
-	const LOOP_TOOL_CALL_LIMIT = 3;
-	let loop_tool_call_signature: string | undefined;
-	let loop_tool_call_count = 0;
-	let loop_detected = false;
-	let loop_prompt_active = false;
+	const loop_guard: LoopGuardState = create_loop_guard_state();
 
 	/**
 	 * Single-path output-limit recovery. Compact is best-effort: if the
@@ -1451,15 +1458,8 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		setPlanAutoContinuing(false);
 	}
 
-	function reset_tool_loop_tracking(): void {
-		loop_tool_call_signature = undefined;
-		loop_tool_call_count = 0;
-		loop_detected = false;
-	}
-
 	pi.on("agent_start", () => {
-		reset_tool_loop_tracking();
-		loop_prompt_active = false;
+		reset_run_state(loop_guard);
 	});
 
 	pi.on("tool_call", (event: ToolCallEvent, ctx: ExtensionContext) => {
@@ -1488,26 +1488,12 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 				reason: "edit is not available with openai-codex models. Use apply_patch instead.",
 			};
 		}
-		if (loop_detected || loop_prompt_active) {
-			return {
-				block: true,
-				reason: "Tool loop detected; blocking further tool calls.",
-			};
-		}
-		const signature = tool_call_signature(event.toolName, event.input);
-		if (signature === loop_tool_call_signature) {
-			loop_tool_call_count++;
-		} else {
-			loop_tool_call_signature = signature;
-			loop_tool_call_count = 1;
-		}
-		if (loop_tool_call_count >= LOOP_TOOL_CALL_LIMIT) {
-			loop_detected = true;
-			ctx.abort();
-			return {
-				block: true,
-				reason: `Tool '${event.toolName}' has been called ${LOOP_TOOL_CALL_LIMIT} times with identical arguments.`,
-			};
+		const result = evaluate_tool_call(loop_guard, event.toolName, event.input);
+		if (result.block) {
+			if (result.tripped) {
+				ctx.abort();
+			}
+			return { block: true, reason: result.reason };
 		}
 	});
 
@@ -1532,19 +1518,41 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 
 	pi.on("agent_settled", async (_event: AgentSettledEvent, ctx: ExtensionContext) => {
 		try {
-			if (loop_detected && !loop_prompt_active) {
-				loop_prompt_active = true;
+			const settled_action = resolve_settled_action(loop_guard);
+			if (settled_action.type === "auto_retry") {
+				// First detection: auto-inject the hidden retry message.
+				// No user quiz — the model gets one automatic nudge.
+				lastTurnAborted = false;
+				lastTurnLengthStopped = false;
+				lastTurnError = false;
+				setPlanAutoContinuing(false);
+				pi.sendMessage(
+					{
+						customType: "pi-agents-loop-retry",
+						content:
+							"Stop looping. Call a different tool and continue.",
+						display: false,
+					},
+					{ triggerTurn: true },
+				);
+				return;
+			}
+			if (settled_action.type === "show_quiz") {
+				loop_guard.prompt_active = true;
 				const model = ctx.model as Model<Api> | undefined;
 				const model_name = model?.name ?? model?.id ?? "The model";
 				if (ctx.hasUI) {
 					ctx.ui.notify(
-						`${model_name} has been looping for ${LOOP_TOOL_CALL_LIMIT} toolcalls`,
+						`${model_name} has been looping despite a retry. Choose how to handle it.`,
 						"warning",
 					);
 				}
 				const choice = ctx.hasUI ? await showLoopRecovery(ctx) : undefined;
-				loop_prompt_active = false;
-				reset_tool_loop_tracking();
+				apply_quiz_outcome(
+					loop_guard,
+					choice?.action ?? "end",
+					settled_action.signature,
+				);
 				lastTurnAborted = false;
 				lastTurnLengthStopped = false;
 				lastTurnError = false;
@@ -1553,7 +1561,8 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					pi.sendMessage(
 						{
 							customType: "pi-agents-loop-retry",
-							content: "You have been looping, back off and continue with a different tool.",
+							content:
+								"You have been looping, back off and continue with a different tool.",
 							display: false,
 						},
 						{ triggerTurn: true },
@@ -1779,8 +1788,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		planAutoContinueCount = 0;
 		lastTurnLengthStopped = false;
 		lastTurnError = false;
-		reset_tool_loop_tracking();
-		loop_prompt_active = false;
+		reset_session_state(loop_guard);
 		latest_plan_text = "";
 		resetSlashCommandTracking();
 		thinking_editor_installed = false;

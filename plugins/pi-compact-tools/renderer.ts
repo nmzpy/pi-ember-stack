@@ -203,6 +203,10 @@ export type DiscoveryGroup = {
 	settled?: boolean;
 	/** Set when a hard boundary splits the group — never reopen across this row. */
 	hardExited?: boolean;
+	/** When `hardExited` is true, records the cause so a visible→hidden
+	 *  thinking-block toggle can revert a `"visible_thinking"` hard exit and
+	 *  restore the in-group Thinking lane + reopenable grouping. */
+	hardExitCause?: "visible_thinking" | undefined;
 	/**
 	 * Index into `records` before which members are folded into the header
 	 * summary. Child rows only show `records.slice(childAbsorbBefore)`.
@@ -1729,7 +1733,35 @@ export class CompactRenderer {
 			if (group) this.currentGroup = group;
 		}
 		if (!group || group.records.length < 1) return;
+		// Tag the hard exit so a visible→hidden thinking-block toggle can revert
+		// it and restore the in-group Thinking lane + reopenable grouping.
+		group.hardExitCause = "visible_thinking";
 		this.hardExitGroup();
+	}
+
+	/** Revert a hard exit caused only by visible thinking so the group becomes
+	 *  reopenable again and the in-group `└ Thinking` lane can be restored.
+	 *  Called during a visible→hidden thinking-block toggle. */
+	revertVisibleThinkingHardExit(): boolean {
+		if (!isThinkingBlocksHidden()) return false;
+		// Find the most recent hard-exited group whose cause was visible thinking.
+		let target: DiscoveryGroup | undefined;
+		const seen = new Set<DiscoveryGroup>();
+		for (const record of this.calls.values()) {
+			const group = record.group;
+			if (!group || seen.has(group)) continue;
+			seen.add(group);
+			if (group.hardExited && group.hardExitCause === "visible_thinking") {
+				target = group;
+			}
+		}
+		if (!target || target.records.length < 1) return false;
+		// Revert the hard exit: the group is reopenable again.
+		target.hardExited = false;
+		target.hardExitCause = undefined;
+		this.currentGroup = target;
+		this.reopenGroupKey = target.key;
+		return true;
 	}
 
 	/** Core implementation for arming the in-group `└ Thinking` lane. */
@@ -2148,8 +2180,13 @@ export class CompactRenderer {
 				if (!group.settled) group.settled = true;
 			}
 		}
-		if (blocks_hidden && restore_thinking_lane) {
-			this.restoreInGroupThinkingLaneIfSettled(true);
+		if (blocks_hidden) {
+			// Revert any hard exit caused only by visible thinking so the group
+			// becomes reopenable and the in-group Thinking lane can be restored.
+			this.revertVisibleThinkingHardExit();
+			if (restore_thinking_lane) {
+				this.restoreInGroupThinkingLaneIfSettled(true);
+			}
 		}
 		this.repaintAllGroupVisuals();
 		this.resyncGroupGradientTick();
