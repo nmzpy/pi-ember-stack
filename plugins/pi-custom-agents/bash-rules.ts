@@ -195,6 +195,7 @@ export function install_bash_rules(pi: ExtensionAPI): void {
 				reason: `Blocked by user (${rule.pattern}: ask): ${decision.instruction}`,
 			};
 		}
+		ctx.abort();
 		return { block: true, reason: `Blocked by user (${rule.pattern}: deny)` };
 	});
 }

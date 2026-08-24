@@ -579,20 +579,24 @@
 - **User-message / quiz / compaction / bash border style:**
   `UserMessageComponent` renders as prompt-glyph-led markdown: the patched
   `rebuild` builds a `Markdown` wrapped by `PromptGlyphContent` (exported
-  from `pi-ember-ui/index.ts`), which prepends a live-accent `❭ ` glyph to
-  the first rendered row. `PromptGlyphContent` renders its child at
-  `width - visibleWidth(glyph)` and re-truncates the glyph row as a safety
-  net, so the prefixed first row never exceeds the terminal width (Pi's
-  TUI throws on any rendered line wider than the terminal — 2026-08-09
-  crash: the glyph was prepended to a row already at the Box content width,
-  making it 122 wide at a 121-col terminal). It ALWAYS returns a fresh
-  array (`[fitted, ...rows.slice(1)]`) and never mutates the child's
-  output: pi-tui components (Markdown, Box) cache their render result and
-  return the same array reference every call, so writing `rows[0]` in
-  place made the `❭ ` accumulate by one glyph per TUI frame into an
-  infinite spam line. Never mutate a child's cached render output in a
-  wrapping component — build a new array instead. OSC133 zone markers are
-  preserved by `UserMessageComponent.render` wrapping the rendered block.
+  from `pi-ember-ui/index.ts`), which prepends a live-accent `❭` glyph to
+  the first rendered row with exactly 1 col of space after it
+  (`PROMPT_GLYPH_LEFT_PAD`), so the glyph + left pad occupy 2 visible
+  columns total. `PromptGlyphContent` renders its child at
+  `width - 2 - USER_MESSAGE_RIGHT_PAD(2)` so there are always 2 cols of
+  right padding on every user-message row, and re-truncates the glyph row
+  as a safety net, so the prefixed first row never exceeds the terminal
+  width (Pi's TUI throws on any rendered line wider than the terminal —
+  2026-08-09 crash: the glyph was prepended to a row already at the Box
+  content width, making it 122 wide at a 121-col terminal). It ALWAYS
+  returns a fresh array (`[fitted, ...rows.slice(1)]`) and never mutates
+  the child's output: pi-tui components (Markdown, Box) cache their render
+  result and return the same array reference every call, so writing
+  `rows[0]` in place made the `❭ ` accumulate by one glyph per TUI frame
+  into an infinite spam line. Never mutate a child's cached render output
+  in a wrapping component — build a new array instead. OSC133 zone markers
+  are preserved by `UserMessageComponent.render` wrapping the rendered
+  block.
   The quiz `renderCall`/`renderResult`,
   `CompactionSummaryMessageComponent`, the finished-bash transcript rules
   (`format_ember_bash_transcript_lines`), and the slash-command / model-picker

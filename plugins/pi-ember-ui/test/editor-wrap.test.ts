@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { Box, Editor, Markdown, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, Editor, Markdown, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { PromptGlyphContent, wrapEditorRenderForShell, type EditorWithBorder } from "../index.ts";
 import { setUserBashRunning } from "../mode-colors.ts";
 
@@ -131,5 +131,46 @@ describe("prompt-glyph user message (regression: 122 > 121 crash)", () => {
 			expect(rows.length).toBeGreaterThan(0);
 			expect(glyphCount(rows[0] ?? ""), `render #${i + 1}`).toBe(1);
 		}
+	});
+});
+
+describe("prompt-glyph spacing (SSOT left pad + right pad)", () => {
+	const theme = { fg: (_color: string, text: string) => text };
+
+	test("first row always has exactly 1 col space between glyph and content", () => {
+		// A child that returns content starting with a non-space character.
+		const staticChild: Component = {
+			render(_width: number): string[] {
+				return ["Hello world"];
+			},
+			invalidate(): void {},
+		};
+		const glyphContent = new PromptGlyphContent(staticChild, theme);
+		const rows = glyphContent.render(80);
+		expect(rows.length).toBeGreaterThan(0);
+		// The glyph `\u276d` is 1 visible col, plus 1 col left pad = 2 visible
+		// cols before the content starts.
+		const firstRow = rows[0]!;
+		// Strip ANSI codes to measure visible layout.
+		const stripped = firstRow.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped.startsWith("\u276d ")).toBe(true);
+		expect(stripped.charAt(1)).toBe(" ");
+		expect(stripped.charAt(2)).not.toBe(" ");
+	});
+
+	test("child is rendered at width - 4 (glyphWidth 2 + right pad 2)", () => {
+		let capturedWidth = 0;
+		const widthCapturingChild: Component = {
+			render(width: number): string[] {
+				capturedWidth = width;
+				return ["x".repeat(width)];
+			},
+			invalidate(): void {},
+		};
+		const glyphContent = new PromptGlyphContent(widthCapturingChild, theme);
+		glyphContent.render(80);
+		// glyphWidth = visibleWidth(glyphColored) + PROMPT_GLYPH_LEFT_PAD = 1 + 1 = 2
+		// childWidth = width - glyphWidth - USER_MESSAGE_RIGHT_PAD = 80 - 2 - 2 = 76
+		expect(capturedWidth).toBe(76);
 	});
 });

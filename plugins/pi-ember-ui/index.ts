@@ -504,6 +504,13 @@ export function format_thinking_pass_elapsed_suffix(theme: {
  *  use this inset. */
 const THINKING_STATUS_INSET_COLUMNS = 1;
 
+/** Visible glyph character for the user-message prompt prefix. */
+const PROMPT_GLYPH_CHAR = "\u276d";
+/** Columns of space between the glyph and the message content (left pad). */
+const PROMPT_GLYPH_LEFT_PAD = 1;
+/** Columns of background padding on the right side of every user-message row. */
+const USER_MESSAGE_RIGHT_PAD = 2;
+
 /** SSOT row builder for the external Thinking status row. Called by the
  *  20 FPS gradient tick (via thinking-status-tick.ts) to pre-bake the ANSI
  *  gradient label into the shared cache, and by the render() safety net
@@ -812,24 +819,32 @@ export function render_thinking_status_lines_for_tests(width: number): string[] 
 	return render_thinking_status_lines(width);
 }
 
-/** Wraps a child Component and prepends a U+276D prompt glyph (success-green
+/** Wraps a child Component and prepends a `❭` prompt glyph (success-green
  *  foreground) to the first rendered row, then indents every continuation row
- *  by the same one-column width. Used by UserMessageComponent to replace the
+ *  by the same visible width. Used by UserMessageComponent to replace the
  *  old chatbox horizontal rules with a flush, prompt-led layout. The glyph is
  *  read from the live SSOT success color at render time so mode switches
  *  recolor it. The background comes from the outer Box, not from the glyph
- *  itself. */
+ *  itself.
+ *
+ *  Spacing: the glyph occupies 1 visible column, followed by
+ *  `PROMPT_GLYPH_LEFT_PAD` (1) columns of space, so continuation rows indent
+ *  by 2 columns total. The child renders at `width - 2 - USER_MESSAGE_RIGHT_PAD`
+ *  so there are always `USER_MESSAGE_RIGHT_PAD` (2) columns of right padding
+ *  on every user-message row. */
 export class PromptGlyphContent implements Component {
 	private child: Component;
 	constructor(child: Component, _theme: Theme) {
 		this.child = child;
 	}
 	render(width: number): string[] {
-		const glyph = `${fgAnsi(SUCCESS_GREEN)}\u276d\x1b[39m`;
-		const glyphWidth = visibleWidth(glyph);
-		const rows = this.child.render(Math.max(1, width - glyphWidth));
+		const glyphColored = `${fgAnsi(SUCCESS_GREEN)}${PROMPT_GLYPH_CHAR}\x1b[39m`;
+		const glyphWidth = visibleWidth(glyphColored) + PROMPT_GLYPH_LEFT_PAD;
+		const leftPad = " ".repeat(PROMPT_GLYPH_LEFT_PAD);
+		const childWidth = Math.max(1, width - glyphWidth - USER_MESSAGE_RIGHT_PAD);
+		const rows = this.child.render(childWidth);
 		if (rows.length === 0) return rows;
-		const firstRow = `${glyph}${rows[0]}`;
+		const firstRow = `${glyphColored}${leftPad}${rows[0]}`;
 		const fitted = visibleWidth(firstRow) > width ? truncateToWidth(firstRow, width) : firstRow;
 		const result: string[] = [fitted];
 		const indent = " ".repeat(glyphWidth);
