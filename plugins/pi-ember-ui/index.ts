@@ -1632,9 +1632,10 @@ function is_horizontal_rule_line(line: string): boolean {
  *  rows (the stock component's Spacer) are skipped so the header is never
  *  branch-prefixed; following rows carry `│ ` / `└ ` at column 2, below the
  *  `R` of `Ran` (the `• ` bullet occupies columns 0-1). When a live theme is
- *  supplied every row — plus one blank row above and below — is padded to the
- *  full terminal width and wrapped in the `userMessageBg` background so the
- *  whole bash output reads as one user-message block. */
+ *  supplied every content row — plus one blank row above and below — is padded
+ *  to the full terminal width and wrapped in the `userMessageBg` background so
+ *  the whole bash output reads as one user-message block, with one true dead
+ *  space row above the block separating it from the transcript content above. */
 export function format_ember_bash_transcript_lines(
 	rawLines: string[],
 	width: number,
@@ -1677,6 +1678,10 @@ export function format_ember_bash_transcript_lines(
 	if (bgFn) {
 		result.unshift(bgFn(""));
 		result.push(bgFn(""));
+		// One row of true dead space (no background) above the bash block so it
+		// separates from the transcript content above it. The stock Spacer(1) is
+		// stripped above; this restores a single blank separator row.
+		result.unshift("");
 	}
 	return result;
 }

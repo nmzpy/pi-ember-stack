@@ -93,9 +93,13 @@ describe("user bash integrated UI helpers", () => {
 		);
 		const raw = ["", ruleLine(38), " • Ran foo", ruleLine(38), "output"];
 		const rows = format_ember_bash_transcript_lines(raw, width, false, theme);
-
-		expect(rows.length).toBe(4);
-		for (const row of rows) {
+		// One true dead-space separator row above, then top bg, content rows,
+		// bottom bg = 5 rows total.
+		expect(rows.length).toBe(5);
+		// The first row is true dead space (no background) separating the block
+		// from the transcript content above it.
+		expect(rows[0]).toBe("");
+		for (const row of rows.slice(1)) {
 			// One blank bg row above and below, content rows padded to full width.
 			expect(visibleWidth(row)).toBe(width);
 			expect(row.startsWith("\x1b[48;2;")).toBe(true);
