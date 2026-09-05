@@ -65,6 +65,12 @@ export const editToolSchema = Type.Object(
 		remove_from: removeFromSchema,
 		remove_to: removeToSchema,
 		replacement_lines: replacementLinesSchema,
+		endpoint_only: Type.Optional(
+			Type.Boolean({
+				description:
+					"Trust only the two endpoint hashes and skip interior-line stale checks. Use for large contiguous deletions (e.g. removing a 500-line block) where you have NOT read every interior line — the default served-range check would reject such a delete as stale even when both endpoints are correct. The endpoints are still validated for existence and uniqueness. Do NOT set this for small surgical edits where you have seen the full range.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -73,6 +79,7 @@ export type ReqParams = {
 	remove_from: string;
 	remove_to: string;
 	replacement_lines: string[];
+	endpoint_only?: boolean;
 };
 
 export type ReplaceDetails = {
@@ -100,7 +107,7 @@ interface PipelineResult {
 	totalRemovedLines: number;
 }
 
-const ROOT_KS = new Set(["path", "remove_from", "remove_to", "replacement_lines"]);
+const ROOT_KS = new Set(["path", "remove_from", "remove_to", "replacement_lines", "endpoint_only"]);
 
 export function assertReq(request: unknown): asserts request is ReqParams {
 	if (!isRec(request)) {
@@ -168,6 +175,8 @@ export interface ExecPipelineOptions {
 	signal?: AbortSignal;
 	store?: HashStore;
 	noPersist?: boolean;
+	/** Skip the interior served-range stale check; trust the two endpoint hashes only. */
+	skipRangeServed?: boolean;
 }
 
 function collectRemovedHashes(edit: HEdit, originalHashes: string[]): Set<string> {
@@ -248,6 +257,7 @@ export async function execPipeline(
 			originalHashes,
 			path,
 			served,
+			options?.skipRangeServed === true,
 		);
 	} catch (error) {
 		if (options?.noPersist !== true) {
@@ -387,10 +397,11 @@ export function buildToolDef(): ToolDef {
 					resultHashes,
 					totalAddedLines,
 					totalRemovedLines,
-				} = await execPipeline(normalizedParams, ctx.cwd, {
-					accessMode: constants.R_OK | constants.W_OK,
-					signal,
-				});
+			} = await execPipeline(normalizedParams, ctx.cwd, {
+				accessMode: constants.R_OK | constants.W_OK,
+				signal,
+				skipRangeServed: normalizedParams.endpoint_only === true,
+			});
 
 				if (resolution) {
 					warnings.unshift(resolution.warning);

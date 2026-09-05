@@ -57,17 +57,13 @@ const grepSchema = Type.Object({
 				"Force case-sensitive matching. Default uses smart-case (case-insensitive when pattern is all lowercase).",
 		}),
 	),
-	context: Type.Optional(
-		Type.Number({ description: "Context lines before+after each match" }),
-	),
+	context: Type.Optional(Type.Number({ description: "Context lines before+after each match" })),
 	limit: Type.Optional(
 		Type.Number({
 			description: `Max matches (default ${DEFAULT_GREP_LIMIT})`,
 		}),
 	),
-	cursor: Type.Optional(
-		Type.String({ description: "Pagination cursor from previous result" }),
-	),
+	cursor: Type.Optional(Type.String({ description: "Pagination cursor from previous result" })),
 });
 
 export function registerGrepTool(pi: ExtensionAPI, deps: GrepToolDeps): void {
@@ -128,9 +124,7 @@ export function registerGrepTool(pi: ExtensionAPI, deps: GrepToolDeps): void {
 			const p = params.pattern.trim();
 			const isWildcardOnly =
 				hasRegexSyntax &&
-				/^(?:[.^$]*(?:[.][*+?]|\*|\+)[.^$]*|[.^$\s]*|\.\*\??|\.\*[+?]?|\.\+\??|\.|\*|\?)$/.test(
-					p,
-				);
+				/^(?:[.^$]*(?:[.][*+?]|\*|\+)[.^$]*|[.^$\s]*|\.\*\??|\.\*[+?]?|\.\+\??|\.|\*|\?)$/.test(p);
 
 			if (isWildcardOnly) {
 				return {

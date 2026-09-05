@@ -69,10 +69,7 @@ function normalize_family_key(idOrName: string): string {
 }
 
 /** Label used for family keys and display — preserves model class (e.g. Fast). */
-function grouping_label_for(
-	model: FamilyModel,
-	fastLineIds: ReadonlySet<string>,
-): string {
+function grouping_label_for(model: FamilyModel, fastLineIds: ReadonlySet<string>): string {
 	const name = model.name?.trim();
 	const id = model.id.trim();
 
@@ -122,11 +119,9 @@ function effort_from_model(
 /** Prefer Thinking Fast over plain Thinking when both map to the same effort. */
 function prefer_sibling(existing: FamilyModel, candidate: FamilyModel): FamilyModel {
 	const existingFast =
-		is_thinking_fast_variant(existing.name ?? "") ||
-		is_thinking_fast_variant(existing.id);
+		is_thinking_fast_variant(existing.name ?? "") || is_thinking_fast_variant(existing.id);
 	const candidateFast =
-		is_thinking_fast_variant(candidate.name ?? "") ||
-		is_thinking_fast_variant(candidate.id);
+		is_thinking_fast_variant(candidate.name ?? "") || is_thinking_fast_variant(candidate.id);
 	if (candidateFast && !existingFast) return candidate;
 	return existing;
 }
@@ -270,17 +265,17 @@ export function build_model_families(
 					: bakedVariant
 						? []
 						: model.reasoning && !has_standalone_model_class(model)
-							? (options?.availableThinkingLevels
-									? efforts_from_available_levels(options.availableThinkingLevels)
-									: efforts_from_available_levels(
-											(() => {
-												try {
-													return getSupportedThinkingLevels(model as any);
-												} catch {
-													return [];
-												}
-											})(),
-										))
+							? options?.availableThinkingLevels
+								? efforts_from_available_levels(options.availableThinkingLevels)
+								: efforts_from_available_levels(
+										(() => {
+											try {
+												return getSupportedThinkingLevels(model as any);
+											} catch {
+												return [];
+											}
+										})(),
+									)
 							: [];
 
 			if (thinkingEfforts.length >= 2) {
@@ -338,8 +333,7 @@ export function resolve_family_selection(
 	const selected = nearest_effort(family.efforts, effort);
 
 	if (family.kind === "sibling") {
-		const model =
-			(selected ? family.variants[selected] : undefined) ?? family.baseModel;
+		const model = (selected ? family.variants[selected] : undefined) ?? family.baseModel;
 		return selected ? { model, thinkingLevel: selected } : { model };
 	}
 
@@ -363,10 +357,7 @@ export function family_contains_model(
 	if (!provider || !modelId) return false;
 	const p = provider.toLowerCase();
 	const id = modelId.toLowerCase();
-	if (
-		family.baseModel.provider.toLowerCase() === p &&
-		family.baseModel.id.toLowerCase() === id
-	) {
+	if (family.baseModel.provider.toLowerCase() === p && family.baseModel.id.toLowerCase() === id) {
 		return true;
 	}
 	for (const model of Object.values(family.variants)) {
@@ -391,11 +382,7 @@ export function initial_effort_for_family(
 			const id = current.id?.toLowerCase();
 			for (const point of family.efforts) {
 				const variant = family.variants[point];
-				if (
-					variant &&
-					variant.provider.toLowerCase() === p &&
-					variant.id.toLowerCase() === id
-				) {
+				if (variant && variant.provider.toLowerCase() === p && variant.id.toLowerCase() === id) {
 					return point;
 				}
 			}
@@ -452,9 +439,7 @@ export function resolve_model_effort_level(
 	if (has_baked_effort_variant(model)) return "off";
 
 	const family =
-		catalog && catalog.length > 0
-			? find_family_for_model(catalog, model, options)
-			: undefined;
+		catalog && catalog.length > 0 ? find_family_for_model(catalog, model, options) : undefined;
 
 	if (family && family.efforts.length >= 2) {
 		if (family.kind === "sibling") {

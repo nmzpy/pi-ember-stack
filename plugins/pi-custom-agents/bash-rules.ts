@@ -62,7 +62,10 @@ function parse_bash_rule(entry: string): BashRule | undefined {
 	const colon = trimmed.lastIndexOf(":");
 	if (colon <= 0) return undefined;
 	const pattern = trimmed.slice(0, colon).trim();
-	const action = trimmed.slice(colon + 1).trim().toLowerCase();
+	const action = trimmed
+		.slice(colon + 1)
+		.trim()
+		.toLowerCase();
 	if (!pattern) return undefined;
 	if (action !== "ask" && action !== "allow" && action !== "deny") return undefined;
 	return { pattern, action };
@@ -143,7 +146,7 @@ export async function prompt_bash_rule_approval(
 	return resolve_bash_rule_answer(answers?.[0]);
 }
 
-function allow_pattern_for_session(rules: BashRule[], pattern: string): BashRule[] {
+export function allow_pattern_for_session(rules: BashRule[], pattern: string): BashRule[] {
 	return rules.map((rule) =>
 		rule.pattern === pattern ? { ...rule, action: "allow" as const } : rule,
 	);

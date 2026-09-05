@@ -3,10 +3,7 @@
  * Adapted from ephraimduncan/opencode-cursor models.ts (BSD-3-Clause).
  */
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import {
-	GetUsableModelsRequestSchema,
-	GetUsableModelsResponseSchema,
-} from "./proto/agent_pb.js";
+import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./proto/agent_pb.js";
 import { call_cursor_unary_rpc } from "./transport.js";
 import { decode_connect_unary_body } from "./wire.js";
 import { CURSOR_GET_USABLE_MODELS_PATH } from "./metadata.js";
@@ -25,10 +22,34 @@ export interface DiscoveredCursorModel {
 }
 
 const FALLBACK_MODELS: DiscoveredCursorModel[] = [
-	{ id: "default", name: "Auto", reasoning: true, context_window: CURSOR_DEFAULT_CONTEXT_WINDOW, max_tokens: CURSOR_DEFAULT_MAX_TOKENS },
-	{ id: "composer-2", name: "Composer 2", reasoning: true, context_window: CURSOR_DEFAULT_CONTEXT_WINDOW, max_tokens: CURSOR_DEFAULT_MAX_TOKENS },
-	{ id: "claude-4.6-sonnet-medium", name: "Claude 4.6 Sonnet", reasoning: true, context_window: CURSOR_DEFAULT_CONTEXT_WINDOW, max_tokens: CURSOR_DEFAULT_MAX_TOKENS },
-	{ id: "gpt-5.4-medium", name: "GPT-5.4", reasoning: true, context_window: 272_000, max_tokens: 128_000 },
+	{
+		id: "default",
+		name: "Auto",
+		reasoning: true,
+		context_window: CURSOR_DEFAULT_CONTEXT_WINDOW,
+		max_tokens: CURSOR_DEFAULT_MAX_TOKENS,
+	},
+	{
+		id: "composer-2",
+		name: "Composer 2",
+		reasoning: true,
+		context_window: CURSOR_DEFAULT_CONTEXT_WINDOW,
+		max_tokens: CURSOR_DEFAULT_MAX_TOKENS,
+	},
+	{
+		id: "claude-4.6-sonnet-medium",
+		name: "Claude 4.6 Sonnet",
+		reasoning: true,
+		context_window: CURSOR_DEFAULT_CONTEXT_WINDOW,
+		max_tokens: CURSOR_DEFAULT_MAX_TOKENS,
+	},
+	{
+		id: "gpt-5.4-medium",
+		name: "GPT-5.4",
+		reasoning: true,
+		context_window: 272_000,
+		max_tokens: 128_000,
+	},
 ];
 
 function model_is_reasoning(model_id: string, thinking_details: unknown): boolean {
@@ -56,12 +77,7 @@ function normalize_model_entry(entry: unknown): DiscoveredCursorModel | null {
 	const id = typeof record.modelId === "string" ? record.modelId.trim() : "";
 	if (!id) return null;
 
-	const name_candidates = [
-		record.displayName,
-		record.displayNameShort,
-		record.displayModelId,
-		id,
-	];
+	const name_candidates = [record.displayName, record.displayNameShort, record.displayModelId, id];
 	let name = id;
 	for (const candidate of name_candidates) {
 		if (typeof candidate === "string" && candidate.trim()) {

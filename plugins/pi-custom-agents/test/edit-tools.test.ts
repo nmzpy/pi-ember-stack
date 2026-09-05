@@ -83,7 +83,34 @@ describe("edit-tools provider resolution", () => {
 			"edit",
 			"grep",
 		]);
-	});
+});
+
+	test("with_provider_patch_tool does not inject an editing tool when none was requested", () => {
+		// Scout.md frontmatter: read, bash, grep, find, ls — intentionally read-only.
+		// The swap must not add edit/apply_patch regardless of provider.
+		const scout = ["read", "bash", "grep", "find", "ls"];
+		expect(with_provider_patch_tool(scout, "devin")).toEqual([
+			"read",
+			"bash",
+			"grep",
+			"find",
+			"ls",
+		]);
+		expect(with_provider_patch_tool(scout, OPENAI_CODEX_PROVIDER)).toEqual([
+			"read",
+			"bash",
+			"grep",
+			"find",
+			"ls",
+		]);
+		expect(with_provider_patch_tool(scout, undefined)).toEqual([
+			"read",
+			"bash",
+			"grep",
+			"find",
+			"ls",
+		]);
+});
 
 	test("with_provider_patch_tool dedupes when both patch names are listed", () => {
 		const both = ["read", "edit", "apply_patch", "write", "grep"];

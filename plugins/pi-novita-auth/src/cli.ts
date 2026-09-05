@@ -8,10 +8,7 @@
  */
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
-import {
-	clear_cached_novita_models,
-	discover_novita_models,
-} from "./catalog.js";
+import { clear_cached_novita_models, discover_novita_models } from "./catalog.js";
 import { NOVITA_PROVIDER_ID } from "./constants.js";
 
 export function resolve_novita_api_key(): string | undefined {
@@ -29,7 +26,9 @@ export async function login_novita(callbacks: OAuthLoginCallbacks): Promise<OAut
 		return { access: existing, refresh: existing, expires: 0 };
 	}
 
-	callbacks.onProgress?.("Paste your Novita API key (from https://novita.ai → Settings → API Keys).");
+	callbacks.onProgress?.(
+		"Paste your Novita API key (from https://novita.ai → Settings → API Keys).",
+	);
 	const entered = await callbacks.onPrompt({ message: "Paste your Novita API key:" });
 	const key = entered.trim();
 	if (!key) throw new Error("Novita API key required — /login novita cancelled.");

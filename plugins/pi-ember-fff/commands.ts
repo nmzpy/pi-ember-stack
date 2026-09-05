@@ -1,10 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { FileFinder } from "@ff-labs/fff-node";
 
-export function registerFffCommands(
-	pi: ExtensionAPI,
-	getFinder: () => FileFinder | null,
-): void {
+export function registerFffCommands(pi: ExtensionAPI, getFinder: () => FileFinder | null): void {
 	pi.registerCommand("fff-health", {
 		description: "Show FFF file finder health and status",
 		handler: async (_args, ctx) => {

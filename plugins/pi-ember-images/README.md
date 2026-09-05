@@ -2,8 +2,11 @@
 
 Clipboard and pasted-path image attachments for Pi.
 
-- Windows clipboard images are captured through the STA PowerShell clipboard API.
-- macOS clipboard images use `osascript`.
+- Clipboard images are read through the pi runtime's native clipboard module
+  (in-process, instant, no subprocess — resolved via the shared dist-dir
+  resolver). When that is unavailable (WSL/headless), Windows falls back to
+  an async STA PowerShell read and macOS to `osascript`, both with a hard
+  timeout and process-tree kill so a hung clipboard can never freeze the TUI.
 - Pasted Windows, POSIX, quoted, and relative image paths become `[image N]` placeholders.
 - Submitted placeholders are replaced by native image content parts.
 - The transcript renders compact inline previews through Pi TUI's public `Image` component.

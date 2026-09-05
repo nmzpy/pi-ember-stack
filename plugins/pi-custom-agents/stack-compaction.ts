@@ -2,7 +2,11 @@
  * Ember-owned compaction runner — uses vendored prompts from compaction-prompts.ts.
  * Ported from pi-mono packages/coding-agent/src/core/compaction/compaction.ts.
  */
-import type { AgentMessage, StreamFn, ThinkingLevel as AgentThinkingLevel } from "@earendil-works/pi-agent-core";
+import type {
+	AgentMessage,
+	StreamFn,
+	ThinkingLevel as AgentThinkingLevel,
+} from "@earendil-works/pi-agent-core";
 import {
 	completeSimple,
 	type Api,
@@ -36,7 +40,9 @@ function compute_file_lists(fileOps: FileOperations): {
 	modifiedFiles: string[];
 } {
 	const modified = new Set([...fileOps.edited, ...fileOps.written]);
-	const readOnly = Array.from(fileOps.read).filter((f) => !modified.has(f)).sort();
+	const readOnly = Array.from(fileOps.read)
+		.filter((f) => !modified.has(f))
+		.sort();
 	const modifiedFiles = Array.from(modified).sort();
 	return { readFiles: readOnly, modifiedFiles };
 }
@@ -119,19 +125,35 @@ export function build_history_summarization_prompt(
 	return promptText;
 }
 
-function trim_llm_messages_for_summary(
+export function trim_llm_messages_for_summary(
 	messages: AgentMessage[],
-	reserveTokens: number,
+	model: Model<Api>,
 	responseMaxTokens: number,
 	emptyConversationPromptText: string,
 ): Message[] {
 	const llmMessages = convertToLlm(messages);
 	const systemTokens = count_tokens(SUMMARIZATION_SYSTEM_PROMPT);
-	const promptTokenBudget =
-		reserveTokens - responseMaxTokens - PROMPT_SAFETY_TOKENS - systemTokens;
 	const fixedTokens = count_tokens(emptyConversationPromptText);
-	const conversationBudget = Math.max(1, promptTokenBudget - fixedTokens);
-	return trim_to_token_budget(llmMessages, conversationBudget, serializeConversation);
+
+	// The summarizer must see the ENTIRE history being discarded — that is the
+	// whole point of the checkpoint. Pi's trigger math (compact when
+	// context > window - reserve) guarantees the full history fits the model
+	// window, so the default is to send everything untrimmed, exactly like Pi
+	// native compact(). The trim below is only a last-resort guard for
+	// pathological cases (estimator drift, tiny windows) and keeps the OLDEST
+	// messages — the discarded history — never the recent tail, which is
+	// retained verbatim after the cut point anyway.
+	const contextWindow = model.contextWindow > 0 ? model.contextWindow : Number.POSITIVE_INFINITY;
+	const promptTokenBudget =
+		contextWindow - responseMaxTokens - PROMPT_SAFETY_TOKENS - systemTokens - fixedTokens;
+	if (!Number.isFinite(promptTokenBudget) || promptTokenBudget <= 0) {
+		// Unknown or degenerate window: send everything and let the provider
+		// fail loudly rather than silently produce an empty summary.
+		return llmMessages;
+	}
+	return trim_to_token_budget(llmMessages, promptTokenBudget, serializeConversation, {
+		keepHead: true,
+	});
 }
 
 async function generate_history_summary(
@@ -150,7 +172,7 @@ async function generate_history_summary(
 	);
 	const llmMessages = trim_llm_messages_for_summary(
 		messages,
-		reserveTokens,
+		model,
 		maxTokens,
 		build_history_summarization_prompt("", previousSummary),
 	);
@@ -200,9 +222,10 @@ export async function run_stack_compaction(
 	// tells the model what's left to do. Fold any turn-prefix messages into
 	// the main pass so one Ember summary covers everything — no duplicate
 	// call, no split-turn block, never fall back to Pi's compact().
-	const summaryMessages = isSplitTurn && turnPrefixMessages.length > 0
-		? [...messagesToSummarize, ...turnPrefixMessages]
-		: messagesToSummarize;
+	const summaryMessages =
+		isSplitTurn && turnPrefixMessages.length > 0
+			? [...messagesToSummarize, ...turnPrefixMessages]
+			: messagesToSummarize;
 
 	let summary = await generate_history_summary(
 		summaryMessages,

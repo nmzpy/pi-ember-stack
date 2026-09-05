@@ -88,9 +88,7 @@ export function formatFindOutput(
 	const shown = reordered.slice(0, effective);
 
 	return {
-		output: shown
-			.map((p) => `${p.item.relativePath}${fffFileAnnotation(p.item)}`)
-			.join("\n"),
+		output: shown.map((p) => `${p.item.relativePath}${fffFileAnnotation(p.item)}`).join("\n"),
 		weak,
 		shownCount: shown.length,
 	};

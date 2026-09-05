@@ -13,10 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { bashGrepInfo, rewriteGrepToRg } from "./bash-grep.ts";
 import { sync_compact_group_flags } from "./group-flags.ts";
-import {
-	type CompactRenderer,
-	GROUPABLE_TOOLS,
-} from "./renderer.ts";
+import { type CompactRenderer, GROUPABLE_TOOLS } from "./renderer.ts";
 import { getSharedRenderer } from "./shared-renderer.ts";
 import {
 	setGroupReopenableActive,
@@ -93,10 +90,7 @@ let unsubscribe_theme_refresh: (() => void) | undefined;
 export { bashGrepInfo, rewriteGrepToRg, getSharedRenderer };
 export type CompactToolsOptions = { excludeTools?: readonly string[] };
 
-export default function piCompactToolsPlugin(
-	pi: ExtensionAPI,
-	opts?: CompactToolsOptions,
-): void {
+export default function piCompactToolsPlugin(pi: ExtensionAPI, opts?: CompactToolsOptions): void {
 	const renderer = getSharedRenderer();
 	unsubscribe_theme_refresh?.();
 	unsubscribe_theme_refresh = subscribe_theme_refresh((theme) => {
@@ -143,8 +137,7 @@ export default function piCompactToolsPlugin(
 		// first repaints the shared row text in this same update instead of
 		// waiting on the scheduled microtask invalidation.
 		renderer.announceToolCall();
-		const is_groupable =
-			GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName];
+		const is_groupable = GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName];
 		if (is_groupable) {
 			setTurnToolTranscriptActive(true);
 			renderer.registerCall(event.toolName, event.toolCallId, event.input);

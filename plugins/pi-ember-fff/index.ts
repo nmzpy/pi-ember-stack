@@ -8,11 +8,12 @@
  */
 
 import type { ExtensionAPI, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 import { bashGrepInfo, rewriteGrepToRg } from "../pi-compact-tools/bash-grep.ts";
 import { getSharedRenderer } from "../pi-compact-tools/index.ts";
 import { buildExternalAllowlist } from "./query.ts";
 import { clearCursorStores } from "./cursor-store.ts";
-import { createFinderManager } from "./finder.ts";
+import { createFinderManager, type FinderManager } from "./finder.ts";
 import { createMentionItemsLoader, registerAutocompleteProvider } from "./mention.ts";
 import { registerGrepTool } from "./grep-tool.ts";
 import { registerFindTool } from "./find-tool.ts";
@@ -20,11 +21,46 @@ import { registerFffCommands } from "./commands.ts";
 
 export { fffFileAnnotation } from "./format.ts";
 
-function resolveBoolOpt(
-	pi: ExtensionAPI,
-	flagName: string,
-	envName: string,
-): boolean {
+/** Structural subset of ExtensionContext needed to start an FFF session. */
+interface FffSessionStartCtx {
+	cwd: string;
+	ui: {
+		notify(message: string, type?: "info" | "warning" | "error"): void;
+		addAutocompleteProvider(factory: (current: AutocompleteProvider) => AutocompleteProvider): void;
+	};
+}
+
+/**
+ * Non-blocking session-start setup for FFF.
+ *
+ * Kicks off the background index scan WITHOUT awaiting it, so interactive
+ * startup is never gated on a full project scan (which can take up to
+ * `waitForScan`'s 15s timeout). grep/find and mention autocomplete resolve the
+ * same shared readiness promise via `ensureFinder`, so their first results
+ * remain complete/correct once the scan finishes. Init failures are surfaced
+ * through the UI (fail-fast), never silently swallowed.
+ */
+export function startFffSession(
+	finder: FinderManager,
+	getMentionItems: (query: string, signal: AbortSignal) => Promise<AutocompleteItem[]>,
+	ctx: FffSessionStartCtx,
+): void {
+	const notifyInitError = (e: unknown) => {
+		ctx.ui.notify(`FFF init failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+	};
+	try {
+		finder.setActiveCwd(ctx.cwd);
+		registerAutocompleteProvider(ctx, getMentionItems);
+	} catch (e: unknown) {
+		notifyInitError(e);
+		return;
+	}
+	// Fire-and-forget the scan kickoff; errors are surfaced via notify. The
+	// returned promise is the single shared readiness path for tool execution.
+	void finder.ensureFinder(ctx.cwd).catch(notifyInitError);
+}
+
+function resolveBoolOpt(pi: ExtensionAPI, flagName: string, envName: string): boolean {
 	const flag = pi.getFlag(flagName);
 	if (typeof flag === "boolean") return flag;
 	if (typeof flag === "string") return flag === "true" || flag === "1";
@@ -41,9 +77,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		process.env.FFF_FRECENCY_DB ??
 		undefined;
 	const historyDbPath =
-		(pi.getFlag("fff-history-db") as string | undefined) ??
-		process.env.FFF_HISTORY_DB ??
-		undefined;
+		(pi.getFlag("fff-history-db") as string | undefined) ?? process.env.FFF_HISTORY_DB ?? undefined;
 	const enableFsRootScanning = resolveBoolOpt(pi, "fff-enable-root-scan", "FFF_ENABLE_ROOT_SCAN");
 	const enableExternalAllow = (() => {
 		const flag = pi.getFlag("fff-external-allow");
@@ -62,10 +96,7 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		externalAllowlist,
 	});
 
-	const getMentionItems = createMentionItemsLoader(
-		finder.ensureFinder,
-		finder.getActiveCwd,
-	);
+	const getMentionItems = createMentionItemsLoader(finder.ensureFinder, finder.getActiveCwd);
 
 	pi.registerFlag("fff-frecency-db", {
 		description: "Path to the frecency database (overrides FFF_FRECENCY_DB env)",
@@ -89,17 +120,8 @@ export default function emberFffExtension(pi: ExtensionAPI) {
 		type: "boolean",
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
-		try {
-			finder.setActiveCwd(ctx.cwd);
-			registerAutocompleteProvider(ctx, getMentionItems);
-			await finder.ensureFinder(ctx.cwd);
-		} catch (e: unknown) {
-			ctx.ui.notify(
-				`FFF init failed: ${e instanceof Error ? e.message : String(e)}`,
-				"error",
-			);
-		}
+	pi.on("session_start", (_event, ctx) => {
+		startFffSession(finder, getMentionItems, ctx);
 	});
 
 	pi.on("session_shutdown", async () => {

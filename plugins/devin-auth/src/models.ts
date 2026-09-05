@@ -10,11 +10,11 @@
  * pi shows no models until the live catalog arrives.
  */
 
-import type { ProviderModelConfig } from '@earendil-works/pi-coding-agent';
-import type { CacheEntry } from './cloud-direct/index.js';
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { CacheEntry } from "./cloud-direct/index.js";
 
 /** Default Cognition/Codeium host. */
-const DEFAULT_HOST = 'https://server.codeium.com';
+const DEFAULT_HOST = "https://server.codeium.com";
 
 /**
  * Per-family variant allow-list. If a family prefix is present, only UIDs
@@ -23,29 +23,25 @@ const DEFAULT_HOST = 'https://server.codeium.com';
  *
  * Families not listed here keep all variants.
  */
-const VARIANT_ALLOW: Map<string, Set<string>> = new Map([
-    ['glm-5-2', new Set(['high', 'max'])],
-]);
+const VARIANT_ALLOW: Map<string, Set<string>> = new Map([["glm-5-2", new Set(["high", "max"])]]);
 
 function matchesVariantFilter(uid: string): boolean {
-    let bestPrefix: string | null = null;
-    for (const prefix of VARIANT_ALLOW.keys()) {
-        if (uid === prefix || uid.startsWith(`${prefix}-`) || uid.startsWith(`${prefix}_`)) {
-            if (bestPrefix === null || prefix.length > bestPrefix.length) {
-                bestPrefix = prefix;
-            }
-        }
-    }
-    if (bestPrefix === null) return true;
-    if (uid === bestPrefix) return true;
-    const suffix = uid.slice(bestPrefix.length + 1);
-    return VARIANT_ALLOW.get(bestPrefix)?.has(suffix) ?? false;
+	let bestPrefix: string | null = null;
+	for (const prefix of VARIANT_ALLOW.keys()) {
+		if (uid === prefix || uid.startsWith(`${prefix}-`) || uid.startsWith(`${prefix}_`)) {
+			if (bestPrefix === null || prefix.length > bestPrefix.length) {
+				bestPrefix = prefix;
+			}
+		}
+	}
+	if (bestPrefix === null) return true;
+	if (uid === bestPrefix) return true;
+	const suffix = uid.slice(bestPrefix.length + 1);
+	return VARIANT_ALLOW.get(bestPrefix)?.has(suffix) ?? false;
 }
 
 /** Display-name overrides for catalog UIDs whose live label is undesired. */
-const NAME_OVERRIDES = new Map<string, string>([
-    ['glm-5-2', 'GLM-5.2'],
-]);
+const NAME_OVERRIDES = new Map<string, string>([["glm-5-2", "GLM-5.2"]]);
 
 /**
  * Build the model list from a live catalog response.
@@ -56,27 +52,27 @@ const NAME_OVERRIDES = new Map<string, string>([
  * arrives.
  */
 export function buildLiveModels(catalog: CacheEntry | null): ProviderModelConfig[] {
-    if (!catalog || catalog.byUid.size === 0) {
-        return [];
-    }
+	if (!catalog || catalog.byUid.size === 0) {
+		return [];
+	}
 
-    const models: ProviderModelConfig[] = [];
-    for (const entry of catalog.byUid.values()) {
-        if (entry.disabled) continue;
-        if (!matchesVariantFilter(entry.modelUid)) continue;
-        const name = NAME_OVERRIDES.get(entry.modelUid) ?? entry.label ?? entry.modelUid;
-        models.push({
-            id: entry.modelUid,
-            name,
-            reasoning: true,
-            input: ['text', 'image'],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 256_000,
-            maxTokens: 128_000,
-        });
-    }
+	const models: ProviderModelConfig[] = [];
+	for (const entry of catalog.byUid.values()) {
+		if (entry.disabled) continue;
+		if (!matchesVariantFilter(entry.modelUid)) continue;
+		const name = NAME_OVERRIDES.get(entry.modelUid) ?? entry.label ?? entry.modelUid;
+		models.push({
+			id: entry.modelUid,
+			name,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 256_000,
+			maxTokens: 128_000,
+		});
+	}
 
-    return models;
+	return models;
 }
 
 export { DEFAULT_HOST };

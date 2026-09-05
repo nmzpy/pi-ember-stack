@@ -44,7 +44,10 @@ export type GlobToolResult = Message<"agent.v1.GlobToolResult"> & {
  * Describes the message agent.v1.GlobToolResult.
  * Use `create(GlobToolResultSchema)` to create a new message.
  */
-export const GlobToolResultSchema: GenMessage<GlobToolResult> = /*@__PURE__*/ messageDesc(file_agent, 0);
+export const GlobToolResultSchema: GenMessage<GlobToolResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	0,
+);
 
 /**
  * @generated from message agent.v1.GlobToolError
@@ -60,7 +63,10 @@ export type GlobToolError = Message<"agent.v1.GlobToolError"> & {
  * Describes the message agent.v1.GlobToolError.
  * Use `create(GlobToolErrorSchema)` to create a new message.
  */
-export const GlobToolErrorSchema: GenMessage<GlobToolError> = /*@__PURE__*/ messageDesc(file_agent, 1);
+export const GlobToolErrorSchema: GenMessage<GlobToolError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	1,
+);
 
 /**
  * Only file results are needed for this tool
@@ -103,7 +109,10 @@ export type GlobToolSuccess = Message<"agent.v1.GlobToolSuccess"> & {
  * Describes the message agent.v1.GlobToolSuccess.
  * Use `create(GlobToolSuccessSchema)` to create a new message.
  */
-export const GlobToolSuccessSchema: GenMessage<GlobToolSuccess> = /*@__PURE__*/ messageDesc(file_agent, 2);
+export const GlobToolSuccessSchema: GenMessage<GlobToolSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	2,
+);
 
 /**
  * @generated from message agent.v1.GlobToolCall
@@ -124,7 +133,10 @@ export type GlobToolCall = Message<"agent.v1.GlobToolCall"> & {
  * Describes the message agent.v1.GlobToolCall.
  * Use `create(GlobToolCallSchema)` to create a new message.
  */
-export const GlobToolCallSchema: GenMessage<GlobToolCall> = /*@__PURE__*/ messageDesc(file_agent, 3);
+export const GlobToolCallSchema: GenMessage<GlobToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	3,
+);
 
 /**
  * @generated from message agent.v1.ReadLintsToolCall
@@ -145,7 +157,10 @@ export type ReadLintsToolCall = Message<"agent.v1.ReadLintsToolCall"> & {
  * Describes the message agent.v1.ReadLintsToolCall.
  * Use `create(ReadLintsToolCallSchema)` to create a new message.
  */
-export const ReadLintsToolCallSchema: GenMessage<ReadLintsToolCall> = /*@__PURE__*/ messageDesc(file_agent, 4);
+export const ReadLintsToolCallSchema: GenMessage<ReadLintsToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	4,
+);
 
 /**
  * @generated from message agent.v1.ReadLintsToolArgs
@@ -161,7 +176,10 @@ export type ReadLintsToolArgs = Message<"agent.v1.ReadLintsToolArgs"> & {
  * Describes the message agent.v1.ReadLintsToolArgs.
  * Use `create(ReadLintsToolArgsSchema)` to create a new message.
  */
-export const ReadLintsToolArgsSchema: GenMessage<ReadLintsToolArgs> = /*@__PURE__*/ messageDesc(file_agent, 5);
+export const ReadLintsToolArgsSchema: GenMessage<ReadLintsToolArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	5,
+);
 
 /**
  * @generated from message agent.v1.ReadLintsToolResult
@@ -192,7 +210,10 @@ export type ReadLintsToolResult = Message<"agent.v1.ReadLintsToolResult"> & {
  * Describes the message agent.v1.ReadLintsToolResult.
  * Use `create(ReadLintsToolResultSchema)` to create a new message.
  */
-export const ReadLintsToolResultSchema: GenMessage<ReadLintsToolResult> = /*@__PURE__*/ messageDesc(file_agent, 6);
+export const ReadLintsToolResultSchema: GenMessage<ReadLintsToolResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	6,
+);
 
 /**
  * @generated from message agent.v1.ReadLintsToolSuccess
@@ -218,7 +239,8 @@ export type ReadLintsToolSuccess = Message<"agent.v1.ReadLintsToolSuccess"> & {
  * Describes the message agent.v1.ReadLintsToolSuccess.
  * Use `create(ReadLintsToolSuccessSchema)` to create a new message.
  */
-export const ReadLintsToolSuccessSchema: GenMessage<ReadLintsToolSuccess> = /*@__PURE__*/ messageDesc(file_agent, 7);
+export const ReadLintsToolSuccessSchema: GenMessage<ReadLintsToolSuccess> =
+	/*@__PURE__*/ messageDesc(file_agent, 7);
 
 /**
  * @generated from message agent.v1.FileDiagnostics
@@ -244,7 +266,10 @@ export type FileDiagnostics = Message<"agent.v1.FileDiagnostics"> & {
  * Describes the message agent.v1.FileDiagnostics.
  * Use `create(FileDiagnosticsSchema)` to create a new message.
  */
-export const FileDiagnosticsSchema: GenMessage<FileDiagnostics> = /*@__PURE__*/ messageDesc(file_agent, 8);
+export const FileDiagnosticsSchema: GenMessage<FileDiagnostics> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	8,
+);
 
 /**
  * @generated from message agent.v1.DiagnosticItem
@@ -285,7 +310,10 @@ export type DiagnosticItem = Message<"agent.v1.DiagnosticItem"> & {
  * Describes the message agent.v1.DiagnosticItem.
  * Use `create(DiagnosticItemSchema)` to create a new message.
  */
-export const DiagnosticItemSchema: GenMessage<DiagnosticItem> = /*@__PURE__*/ messageDesc(file_agent, 9);
+export const DiagnosticItemSchema: GenMessage<DiagnosticItem> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	9,
+);
 
 /**
  * @generated from message agent.v1.DiagnosticRange
@@ -306,7 +334,10 @@ export type DiagnosticRange = Message<"agent.v1.DiagnosticRange"> & {
  * Describes the message agent.v1.DiagnosticRange.
  * Use `create(DiagnosticRangeSchema)` to create a new message.
  */
-export const DiagnosticRangeSchema: GenMessage<DiagnosticRange> = /*@__PURE__*/ messageDesc(file_agent, 10);
+export const DiagnosticRangeSchema: GenMessage<DiagnosticRange> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	10,
+);
 
 /**
  * @generated from message agent.v1.ReadLintsToolError
@@ -322,7 +353,10 @@ export type ReadLintsToolError = Message<"agent.v1.ReadLintsToolError"> & {
  * Describes the message agent.v1.ReadLintsToolError.
  * Use `create(ReadLintsToolErrorSchema)` to create a new message.
  */
-export const ReadLintsToolErrorSchema: GenMessage<ReadLintsToolError> = /*@__PURE__*/ messageDesc(file_agent, 11);
+export const ReadLintsToolErrorSchema: GenMessage<ReadLintsToolError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	11,
+);
 
 /**
  * @generated from message agent.v1.McpToolError
@@ -338,7 +372,10 @@ export type McpToolError = Message<"agent.v1.McpToolError"> & {
  * Describes the message agent.v1.McpToolError.
  * Use `create(McpToolErrorSchema)` to create a new message.
  */
-export const McpToolErrorSchema: GenMessage<McpToolError> = /*@__PURE__*/ messageDesc(file_agent, 12);
+export const McpToolErrorSchema: GenMessage<McpToolError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	12,
+);
 
 /**
  * Result for MCP tool calls (separate from exec results)
@@ -385,7 +422,10 @@ export type McpToolResult = Message<"agent.v1.McpToolResult"> & {
  * Describes the message agent.v1.McpToolResult.
  * Use `create(McpToolResultSchema)` to create a new message.
  */
-export const McpToolResultSchema: GenMessage<McpToolResult> = /*@__PURE__*/ messageDesc(file_agent, 13);
+export const McpToolResultSchema: GenMessage<McpToolResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	13,
+);
 
 /**
  * @generated from message agent.v1.McpToolCall
@@ -427,7 +467,10 @@ export type SemSearchToolCall = Message<"agent.v1.SemSearchToolCall"> & {
  * Describes the message agent.v1.SemSearchToolCall.
  * Use `create(SemSearchToolCallSchema)` to create a new message.
  */
-export const SemSearchToolCallSchema: GenMessage<SemSearchToolCall> = /*@__PURE__*/ messageDesc(file_agent, 15);
+export const SemSearchToolCallSchema: GenMessage<SemSearchToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	15,
+);
 
 /**
  * @generated from message agent.v1.SemSearchToolArgs
@@ -453,7 +496,10 @@ export type SemSearchToolArgs = Message<"agent.v1.SemSearchToolArgs"> & {
  * Describes the message agent.v1.SemSearchToolArgs.
  * Use `create(SemSearchToolArgsSchema)` to create a new message.
  */
-export const SemSearchToolArgsSchema: GenMessage<SemSearchToolArgs> = /*@__PURE__*/ messageDesc(file_agent, 16);
+export const SemSearchToolArgsSchema: GenMessage<SemSearchToolArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	16,
+);
 
 /**
  * @generated from message agent.v1.SemSearchToolResult
@@ -484,7 +530,10 @@ export type SemSearchToolResult = Message<"agent.v1.SemSearchToolResult"> & {
  * Describes the message agent.v1.SemSearchToolResult.
  * Use `create(SemSearchToolResultSchema)` to create a new message.
  */
-export const SemSearchToolResultSchema: GenMessage<SemSearchToolResult> = /*@__PURE__*/ messageDesc(file_agent, 17);
+export const SemSearchToolResultSchema: GenMessage<SemSearchToolResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	17,
+);
 
 /**
  * @generated from message agent.v1.SemSearchToolSuccess
@@ -505,7 +554,8 @@ export type SemSearchToolSuccess = Message<"agent.v1.SemSearchToolSuccess"> & {
  * Describes the message agent.v1.SemSearchToolSuccess.
  * Use `create(SemSearchToolSuccessSchema)` to create a new message.
  */
-export const SemSearchToolSuccessSchema: GenMessage<SemSearchToolSuccess> = /*@__PURE__*/ messageDesc(file_agent, 18);
+export const SemSearchToolSuccessSchema: GenMessage<SemSearchToolSuccess> =
+	/*@__PURE__*/ messageDesc(file_agent, 18);
 
 /**
  * @generated from message agent.v1.SemSearchToolError
@@ -521,7 +571,10 @@ export type SemSearchToolError = Message<"agent.v1.SemSearchToolError"> & {
  * Describes the message agent.v1.SemSearchToolError.
  * Use `create(SemSearchToolErrorSchema)` to create a new message.
  */
-export const SemSearchToolErrorSchema: GenMessage<SemSearchToolError> = /*@__PURE__*/ messageDesc(file_agent, 19);
+export const SemSearchToolErrorSchema: GenMessage<SemSearchToolError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	19,
+);
 
 /**
  * @generated from message agent.v1.ListMcpResourcesToolCall
@@ -588,7 +641,10 @@ export type FetchToolCall = Message<"agent.v1.FetchToolCall"> & {
  * Describes the message agent.v1.FetchToolCall.
  * Use `create(FetchToolCallSchema)` to create a new message.
  */
-export const FetchToolCallSchema: GenMessage<FetchToolCall> = /*@__PURE__*/ messageDesc(file_agent, 22);
+export const FetchToolCallSchema: GenMessage<FetchToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	22,
+);
 
 /**
  * @generated from message agent.v1.RecordScreenToolCall
@@ -609,7 +665,8 @@ export type RecordScreenToolCall = Message<"agent.v1.RecordScreenToolCall"> & {
  * Describes the message agent.v1.RecordScreenToolCall.
  * Use `create(RecordScreenToolCallSchema)` to create a new message.
  */
-export const RecordScreenToolCallSchema: GenMessage<RecordScreenToolCall> = /*@__PURE__*/ messageDesc(file_agent, 23);
+export const RecordScreenToolCallSchema: GenMessage<RecordScreenToolCall> =
+	/*@__PURE__*/ messageDesc(file_agent, 23);
 
 /**
  * @generated from message agent.v1.WriteShellStdinToolCall
@@ -704,7 +761,10 @@ export type ReflectResult = Message<"agent.v1.ReflectResult"> & {
  * Describes the message agent.v1.ReflectResult.
  * Use `create(ReflectResultSchema)` to create a new message.
  */
-export const ReflectResultSchema: GenMessage<ReflectResult> = /*@__PURE__*/ messageDesc(file_agent, 26);
+export const ReflectResultSchema: GenMessage<ReflectResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	26,
+);
 
 /**
  * @generated from message agent.v1.ReflectSuccess
@@ -715,7 +775,10 @@ export type ReflectSuccess = Message<"agent.v1.ReflectSuccess"> & {};
  * Describes the message agent.v1.ReflectSuccess.
  * Use `create(ReflectSuccessSchema)` to create a new message.
  */
-export const ReflectSuccessSchema: GenMessage<ReflectSuccess> = /*@__PURE__*/ messageDesc(file_agent, 27);
+export const ReflectSuccessSchema: GenMessage<ReflectSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	27,
+);
 
 /**
  * @generated from message agent.v1.ReflectError
@@ -731,7 +794,10 @@ export type ReflectError = Message<"agent.v1.ReflectError"> & {
  * Describes the message agent.v1.ReflectError.
  * Use `create(ReflectErrorSchema)` to create a new message.
  */
-export const ReflectErrorSchema: GenMessage<ReflectError> = /*@__PURE__*/ messageDesc(file_agent, 28);
+export const ReflectErrorSchema: GenMessage<ReflectError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	28,
+);
 
 /**
  * @generated from message agent.v1.ReflectToolCall
@@ -752,7 +818,10 @@ export type ReflectToolCall = Message<"agent.v1.ReflectToolCall"> & {
  * Describes the message agent.v1.ReflectToolCall.
  * Use `create(ReflectToolCallSchema)` to create a new message.
  */
-export const ReflectToolCallSchema: GenMessage<ReflectToolCall> = /*@__PURE__*/ messageDesc(file_agent, 29);
+export const ReflectToolCallSchema: GenMessage<ReflectToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	29,
+);
 
 /**
  * @generated from message agent.v1.StartGrindExecutionArgs
@@ -1113,7 +1182,10 @@ export type TaskToolCall = Message<"agent.v1.TaskToolCall"> & {
  * Describes the message agent.v1.TaskToolCall.
  * Use `create(TaskToolCallSchema)` to create a new message.
  */
-export const TaskToolCallSchema: GenMessage<TaskToolCall> = /*@__PURE__*/ messageDesc(file_agent, 44);
+export const TaskToolCallSchema: GenMessage<TaskToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	44,
+);
 
 /**
  * @generated from message agent.v1.TaskToolCallDelta
@@ -1129,7 +1201,10 @@ export type TaskToolCallDelta = Message<"agent.v1.TaskToolCallDelta"> & {
  * Describes the message agent.v1.TaskToolCallDelta.
  * Use `create(TaskToolCallDeltaSchema)` to create a new message.
  */
-export const TaskToolCallDeltaSchema: GenMessage<TaskToolCallDelta> = /*@__PURE__*/ messageDesc(file_agent, 45);
+export const TaskToolCallDeltaSchema: GenMessage<TaskToolCallDelta> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	45,
+);
 
 /**
  * Tool messages (from tool.proto)
@@ -1383,7 +1458,8 @@ export type TruncatedToolCallArgs = Message<"agent.v1.TruncatedToolCallArgs"> & 
  * Describes the message agent.v1.TruncatedToolCallArgs.
  * Use `create(TruncatedToolCallArgsSchema)` to create a new message.
  */
-export const TruncatedToolCallArgsSchema: GenMessage<TruncatedToolCallArgs> = /*@__PURE__*/ messageDesc(file_agent, 47);
+export const TruncatedToolCallArgsSchema: GenMessage<TruncatedToolCallArgs> =
+	/*@__PURE__*/ messageDesc(file_agent, 47);
 
 /**
  * @generated from message agent.v1.TruncatedToolCallSuccess
@@ -1477,7 +1553,10 @@ export type TruncatedToolCall = Message<"agent.v1.TruncatedToolCall"> & {
  * Describes the message agent.v1.TruncatedToolCall.
  * Use `create(TruncatedToolCallSchema)` to create a new message.
  */
-export const TruncatedToolCallSchema: GenMessage<TruncatedToolCall> = /*@__PURE__*/ messageDesc(file_agent, 51);
+export const TruncatedToolCallSchema: GenMessage<TruncatedToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	51,
+);
 
 /**
  * @generated from message agent.v1.ToolCallDelta
@@ -1515,7 +1594,10 @@ export type ToolCallDelta = Message<"agent.v1.ToolCallDelta"> & {
  * Describes the message agent.v1.ToolCallDelta.
  * Use `create(ToolCallDeltaSchema)` to create a new message.
  */
-export const ToolCallDeltaSchema: GenMessage<ToolCallDelta> = /*@__PURE__*/ messageDesc(file_agent, 52);
+export const ToolCallDeltaSchema: GenMessage<ToolCallDelta> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	52,
+);
 
 /**
  * @generated from message agent.v1.ConversationStep
@@ -1553,7 +1635,10 @@ export type ConversationStep = Message<"agent.v1.ConversationStep"> & {
  * Describes the message agent.v1.ConversationStep.
  * Use `create(ConversationStepSchema)` to create a new message.
  */
-export const ConversationStepSchema: GenMessage<ConversationStep> = /*@__PURE__*/ messageDesc(file_agent, 53);
+export const ConversationStepSchema: GenMessage<ConversationStep> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	53,
+);
 
 /**
  * @generated from message agent.v1.ConversationAction
@@ -1626,7 +1711,10 @@ export type ConversationAction = Message<"agent.v1.ConversationAction"> & {
  * Describes the message agent.v1.ConversationAction.
  * Use `create(ConversationActionSchema)` to create a new message.
  */
-export const ConversationActionSchema: GenMessage<ConversationAction> = /*@__PURE__*/ messageDesc(file_agent, 54);
+export const ConversationActionSchema: GenMessage<ConversationAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	54,
+);
 
 /**
  * @generated from message agent.v1.UserMessageAction
@@ -1652,7 +1740,10 @@ export type UserMessageAction = Message<"agent.v1.UserMessageAction"> & {
  * Describes the message agent.v1.UserMessageAction.
  * Use `create(UserMessageActionSchema)` to create a new message.
  */
-export const UserMessageActionSchema: GenMessage<UserMessageAction> = /*@__PURE__*/ messageDesc(file_agent, 55);
+export const UserMessageActionSchema: GenMessage<UserMessageAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	55,
+);
 
 /**
  * @generated from message agent.v1.CancelAction
@@ -1663,7 +1754,10 @@ export type CancelAction = Message<"agent.v1.CancelAction"> & {};
  * Describes the message agent.v1.CancelAction.
  * Use `create(CancelActionSchema)` to create a new message.
  */
-export const CancelActionSchema: GenMessage<CancelAction> = /*@__PURE__*/ messageDesc(file_agent, 56);
+export const CancelActionSchema: GenMessage<CancelAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	56,
+);
 
 /**
  * @generated from message agent.v1.ResumeAction
@@ -1679,29 +1773,33 @@ export type ResumeAction = Message<"agent.v1.ResumeAction"> & {
  * Describes the message agent.v1.ResumeAction.
  * Use `create(ResumeActionSchema)` to create a new message.
  */
-export const ResumeActionSchema: GenMessage<ResumeAction> = /*@__PURE__*/ messageDesc(file_agent, 57);
+export const ResumeActionSchema: GenMessage<ResumeAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	57,
+);
 
 /**
  * @generated from message agent.v1.AsyncAskQuestionCompletionAction
  */
-export type AsyncAskQuestionCompletionAction = Message<"agent.v1.AsyncAskQuestionCompletionAction"> & {
-	/**
-	 * Contains the original tool call ID and the result from the user
-	 *
-	 * @generated from field: string original_tool_call_id = 1;
-	 */
-	originalToolCallId: string;
+export type AsyncAskQuestionCompletionAction =
+	Message<"agent.v1.AsyncAskQuestionCompletionAction"> & {
+		/**
+		 * Contains the original tool call ID and the result from the user
+		 *
+		 * @generated from field: string original_tool_call_id = 1;
+		 */
+		originalToolCallId: string;
 
-	/**
-	 * @generated from field: agent.v1.AskQuestionArgs original_args = 2;
-	 */
-	originalArgs?: AskQuestionArgs;
+		/**
+		 * @generated from field: agent.v1.AskQuestionArgs original_args = 2;
+		 */
+		originalArgs?: AskQuestionArgs;
 
-	/**
-	 * @generated from field: agent.v1.AskQuestionResult result = 3;
-	 */
-	result?: AskQuestionResult;
-};
+		/**
+		 * @generated from field: agent.v1.AskQuestionResult result = 3;
+		 */
+		result?: AskQuestionResult;
+	};
 
 /**
  * Describes the message agent.v1.AsyncAskQuestionCompletionAction.
@@ -1720,7 +1818,10 @@ export type SummarizeAction = Message<"agent.v1.SummarizeAction"> & {};
  * Describes the message agent.v1.SummarizeAction.
  * Use `create(SummarizeActionSchema)` to create a new message.
  */
-export const SummarizeActionSchema: GenMessage<SummarizeAction> = /*@__PURE__*/ messageDesc(file_agent, 59);
+export const SummarizeActionSchema: GenMessage<SummarizeAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	59,
+);
 
 /**
  * @generated from message agent.v1.ShellCommandAction
@@ -1743,7 +1844,10 @@ export type ShellCommandAction = Message<"agent.v1.ShellCommandAction"> & {
  * Describes the message agent.v1.ShellCommandAction.
  * Use `create(ShellCommandActionSchema)` to create a new message.
  */
-export const ShellCommandActionSchema: GenMessage<ShellCommandAction> = /*@__PURE__*/ messageDesc(file_agent, 60);
+export const ShellCommandActionSchema: GenMessage<ShellCommandAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	60,
+);
 
 /**
  * @generated from message agent.v1.StartPlanAction
@@ -1769,7 +1873,10 @@ export type StartPlanAction = Message<"agent.v1.StartPlanAction"> & {
  * Describes the message agent.v1.StartPlanAction.
  * Use `create(StartPlanActionSchema)` to create a new message.
  */
-export const StartPlanActionSchema: GenMessage<StartPlanAction> = /*@__PURE__*/ messageDesc(file_agent, 61);
+export const StartPlanActionSchema: GenMessage<StartPlanAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	61,
+);
 
 /**
  * @generated from message agent.v1.ExecutePlanAction
@@ -1804,7 +1911,10 @@ export type ExecutePlanAction = Message<"agent.v1.ExecutePlanAction"> & {
  * Describes the message agent.v1.ExecutePlanAction.
  * Use `create(ExecutePlanActionSchema)` to create a new message.
  */
-export const ExecutePlanActionSchema: GenMessage<ExecutePlanAction> = /*@__PURE__*/ messageDesc(file_agent, 62);
+export const ExecutePlanActionSchema: GenMessage<ExecutePlanAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	62,
+);
 
 /**
  * @generated from message agent.v1.UserMessage
@@ -1871,7 +1981,10 @@ export type AssistantMessage = Message<"agent.v1.AssistantMessage"> & {
  * Describes the message agent.v1.AssistantMessage.
  * Use `create(AssistantMessageSchema)` to create a new message.
  */
-export const AssistantMessageSchema: GenMessage<AssistantMessage> = /*@__PURE__*/ messageDesc(file_agent, 64);
+export const AssistantMessageSchema: GenMessage<AssistantMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	64,
+);
 
 /**
  * @generated from message agent.v1.ThinkingMessage
@@ -1892,7 +2005,10 @@ export type ThinkingMessage = Message<"agent.v1.ThinkingMessage"> & {
  * Describes the message agent.v1.ThinkingMessage.
  * Use `create(ThinkingMessageSchema)` to create a new message.
  */
-export const ThinkingMessageSchema: GenMessage<ThinkingMessage> = /*@__PURE__*/ messageDesc(file_agent, 65);
+export const ThinkingMessageSchema: GenMessage<ThinkingMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	65,
+);
 
 /**
  * @generated from message agent.v1.ShellCommand
@@ -1908,7 +2024,10 @@ export type ShellCommand = Message<"agent.v1.ShellCommand"> & {
  * Describes the message agent.v1.ShellCommand.
  * Use `create(ShellCommandSchema)` to create a new message.
  */
-export const ShellCommandSchema: GenMessage<ShellCommand> = /*@__PURE__*/ messageDesc(file_agent, 66);
+export const ShellCommandSchema: GenMessage<ShellCommand> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	66,
+);
 
 /**
  * @generated from message agent.v1.ShellOutput
@@ -1965,7 +2084,10 @@ export type ConversationTurn = Message<"agent.v1.ConversationTurn"> & {
  * Describes the message agent.v1.ConversationTurn.
  * Use `create(ConversationTurnSchema)` to create a new message.
  */
-export const ConversationTurnSchema: GenMessage<ConversationTurn> = /*@__PURE__*/ messageDesc(file_agent, 68);
+export const ConversationTurnSchema: GenMessage<ConversationTurn> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	68,
+);
 
 /**
  * @generated from message agent.v1.ConversationPlan
@@ -1981,7 +2103,10 @@ export type ConversationPlan = Message<"agent.v1.ConversationPlan"> & {
  * Describes the message agent.v1.ConversationPlan.
  * Use `create(ConversationPlanSchema)` to create a new message.
  */
-export const ConversationPlanSchema: GenMessage<ConversationPlan> = /*@__PURE__*/ messageDesc(file_agent, 69);
+export const ConversationPlanSchema: GenMessage<ConversationPlan> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	69,
+);
 
 /**
  * @generated from message agent.v1.ConversationTurnStructure
@@ -2042,7 +2167,8 @@ export type AgentConversationTurn = Message<"agent.v1.AgentConversationTurn"> & 
  * Describes the message agent.v1.AgentConversationTurn.
  * Use `create(AgentConversationTurnSchema)` to create a new message.
  */
-export const AgentConversationTurnSchema: GenMessage<AgentConversationTurn> = /*@__PURE__*/ messageDesc(file_agent, 71);
+export const AgentConversationTurnSchema: GenMessage<AgentConversationTurn> =
+	/*@__PURE__*/ messageDesc(file_agent, 71);
 
 /**
  * @generated from message agent.v1.AgentConversationTurnStructure
@@ -2093,7 +2219,8 @@ export type ShellConversationTurn = Message<"agent.v1.ShellConversationTurn"> & 
  * Describes the message agent.v1.ShellConversationTurn.
  * Use `create(ShellConversationTurnSchema)` to create a new message.
  */
-export const ShellConversationTurnSchema: GenMessage<ShellConversationTurn> = /*@__PURE__*/ messageDesc(file_agent, 73);
+export const ShellConversationTurnSchema: GenMessage<ShellConversationTurn> =
+	/*@__PURE__*/ messageDesc(file_agent, 73);
 
 /**
  * @generated from message agent.v1.ShellConversationTurnStructure
@@ -2132,7 +2259,10 @@ export type ConversationSummary = Message<"agent.v1.ConversationSummary"> & {
  * Describes the message agent.v1.ConversationSummary.
  * Use `create(ConversationSummarySchema)` to create a new message.
  */
-export const ConversationSummarySchema: GenMessage<ConversationSummary> = /*@__PURE__*/ messageDesc(file_agent, 75);
+export const ConversationSummarySchema: GenMessage<ConversationSummary> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	75,
+);
 
 /**
  * @generated from message agent.v1.ConversationSummaryArchive
@@ -2238,7 +2368,10 @@ export type FileStateStructure = Message<"agent.v1.FileStateStructure"> & {
  * Describes the message agent.v1.FileStateStructure.
  * Use `create(FileStateStructureSchema)` to create a new message.
  */
-export const FileStateStructureSchema: GenMessage<FileStateStructure> = /*@__PURE__*/ messageDesc(file_agent, 79);
+export const FileStateStructureSchema: GenMessage<FileStateStructure> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	79,
+);
 
 /**
  * @generated from message agent.v1.StepTiming
@@ -2326,7 +2459,10 @@ export type ConversationState = Message<"agent.v1.ConversationState"> & {
  * Describes the message agent.v1.ConversationState.
  * Use `create(ConversationStateSchema)` to create a new message.
  */
-export const ConversationStateSchema: GenMessage<ConversationState> = /*@__PURE__*/ messageDesc(file_agent, 81);
+export const ConversationStateSchema: GenMessage<ConversationState> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	81,
+);
 
 /**
  * @generated from message agent.v1.SubagentPersistedState
@@ -2497,7 +2633,10 @@ export type ThinkingDetails = Message<"agent.v1.ThinkingDetails"> & {};
  * Describes the message agent.v1.ThinkingDetails.
  * Use `create(ThinkingDetailsSchema)` to create a new message.
  */
-export const ThinkingDetailsSchema: GenMessage<ThinkingDetails> = /*@__PURE__*/ messageDesc(file_agent, 84);
+export const ThinkingDetailsSchema: GenMessage<ThinkingDetails> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	84,
+);
 
 /**
  * @generated from message agent.v1.ApiKeyCredentials
@@ -2520,7 +2659,10 @@ export type ApiKeyCredentials = Message<"agent.v1.ApiKeyCredentials"> & {
  * Describes the message agent.v1.ApiKeyCredentials.
  * Use `create(ApiKeyCredentialsSchema)` to create a new message.
  */
-export const ApiKeyCredentialsSchema: GenMessage<ApiKeyCredentials> = /*@__PURE__*/ messageDesc(file_agent, 85);
+export const ApiKeyCredentialsSchema: GenMessage<ApiKeyCredentials> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	85,
+);
 
 /**
  * @generated from message agent.v1.AzureCredentials
@@ -2546,7 +2688,10 @@ export type AzureCredentials = Message<"agent.v1.AzureCredentials"> & {
  * Describes the message agent.v1.AzureCredentials.
  * Use `create(AzureCredentialsSchema)` to create a new message.
  */
-export const AzureCredentialsSchema: GenMessage<AzureCredentials> = /*@__PURE__*/ messageDesc(file_agent, 86);
+export const AzureCredentialsSchema: GenMessage<AzureCredentials> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	86,
+);
 
 /**
  * @generated from message agent.v1.BedrockCredentials
@@ -2577,7 +2722,10 @@ export type BedrockCredentials = Message<"agent.v1.BedrockCredentials"> & {
  * Describes the message agent.v1.BedrockCredentials.
  * Use `create(BedrockCredentialsSchema)` to create a new message.
  */
-export const BedrockCredentialsSchema: GenMessage<BedrockCredentials> = /*@__PURE__*/ messageDesc(file_agent, 87);
+export const BedrockCredentialsSchema: GenMessage<BedrockCredentials> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	87,
+);
 
 /**
  * @generated from message agent.v1.ModelDetails
@@ -2650,7 +2798,10 @@ export type ModelDetails = Message<"agent.v1.ModelDetails"> & {
  * Describes the message agent.v1.ModelDetails.
  * Use `create(ModelDetailsSchema)` to create a new message.
  */
-export const ModelDetailsSchema: GenMessage<ModelDetails> = /*@__PURE__*/ messageDesc(file_agent, 88);
+export const ModelDetailsSchema: GenMessage<ModelDetails> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	88,
+);
 
 /**
  * @generated from message agent.v1.RequestedModel
@@ -2703,24 +2854,28 @@ export type RequestedModel = Message<"agent.v1.RequestedModel"> & {
  * Describes the message agent.v1.RequestedModel.
  * Use `create(RequestedModelSchema)` to create a new message.
  */
-export const RequestedModelSchema: GenMessage<RequestedModel> = /*@__PURE__*/ messageDesc(file_agent, 89);
+export const RequestedModelSchema: GenMessage<RequestedModel> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	89,
+);
 
 /**
  * @generated from message agent.v1.RequestedModel_ModelParameterbytes
  */
-export type RequestedModel_ModelParameterbytes = Message<"agent.v1.RequestedModel_ModelParameterbytes"> & {
-	/**
-	 * @generated from field: string id = 1;
-	 */
-	id: string;
+export type RequestedModel_ModelParameterbytes =
+	Message<"agent.v1.RequestedModel_ModelParameterbytes"> & {
+		/**
+		 * @generated from field: string id = 1;
+		 */
+		id: string;
 
-	/**
-	 * All paramters are encoded as strings. For boolean parameters, the value is either "true" or "false". For enum parameters, the value is one of the values in the enum.
-	 *
-	 * @generated from field: string value = 2;
-	 */
-	value: string;
-};
+		/**
+		 * All paramters are encoded as strings. For boolean parameters, the value is either "true" or "false". For enum parameters, the value is one of the values in the enum.
+		 *
+		 * @generated from field: string value = 2;
+		 */
+		value: string;
+	};
 
 /**
  * Describes the message agent.v1.RequestedModel_ModelParameterbytes.
@@ -2790,7 +2945,10 @@ export type AgentRunRequest = Message<"agent.v1.AgentRunRequest"> & {
  * Describes the message agent.v1.AgentRunRequest.
  * Use `create(AgentRunRequestSchema)` to create a new message.
  */
-export const AgentRunRequestSchema: GenMessage<AgentRunRequest> = /*@__PURE__*/ messageDesc(file_agent, 91);
+export const AgentRunRequestSchema: GenMessage<AgentRunRequest> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	91,
+);
 
 /**
  * @generated from message agent.v1.TextDeltaUpdate
@@ -2806,7 +2964,10 @@ export type TextDeltaUpdate = Message<"agent.v1.TextDeltaUpdate"> & {
  * Describes the message agent.v1.TextDeltaUpdate.
  * Use `create(TextDeltaUpdateSchema)` to create a new message.
  */
-export const TextDeltaUpdateSchema: GenMessage<TextDeltaUpdate> = /*@__PURE__*/ messageDesc(file_agent, 92);
+export const TextDeltaUpdateSchema: GenMessage<TextDeltaUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	92,
+);
 
 /**
  * @generated from message agent.v1.ToolCallStartedUpdate
@@ -2834,7 +2995,8 @@ export type ToolCallStartedUpdate = Message<"agent.v1.ToolCallStartedUpdate"> & 
  * Describes the message agent.v1.ToolCallStartedUpdate.
  * Use `create(ToolCallStartedUpdateSchema)` to create a new message.
  */
-export const ToolCallStartedUpdateSchema: GenMessage<ToolCallStartedUpdate> = /*@__PURE__*/ messageDesc(file_agent, 93);
+export const ToolCallStartedUpdateSchema: GenMessage<ToolCallStartedUpdate> =
+	/*@__PURE__*/ messageDesc(file_agent, 93);
 
 /**
  * @generated from message agent.v1.ToolCallCompletedUpdate
@@ -2892,7 +3054,10 @@ export type ToolCallDeltaUpdate = Message<"agent.v1.ToolCallDeltaUpdate"> & {
  * Describes the message agent.v1.ToolCallDeltaUpdate.
  * Use `create(ToolCallDeltaUpdateSchema)` to create a new message.
  */
-export const ToolCallDeltaUpdateSchema: GenMessage<ToolCallDeltaUpdate> = /*@__PURE__*/ messageDesc(file_agent, 95);
+export const ToolCallDeltaUpdateSchema: GenMessage<ToolCallDeltaUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	95,
+);
 
 /**
  * Streaming update for partial tool call arguments
@@ -2929,7 +3094,8 @@ export type PartialToolCallUpdate = Message<"agent.v1.PartialToolCallUpdate"> & 
  * Describes the message agent.v1.PartialToolCallUpdate.
  * Use `create(PartialToolCallUpdateSchema)` to create a new message.
  */
-export const PartialToolCallUpdateSchema: GenMessage<PartialToolCallUpdate> = /*@__PURE__*/ messageDesc(file_agent, 96);
+export const PartialToolCallUpdateSchema: GenMessage<PartialToolCallUpdate> =
+	/*@__PURE__*/ messageDesc(file_agent, 96);
 
 /**
  * @generated from message agent.v1.ThinkingDeltaUpdate
@@ -2945,7 +3111,10 @@ export type ThinkingDeltaUpdate = Message<"agent.v1.ThinkingDeltaUpdate"> & {
  * Describes the message agent.v1.ThinkingDeltaUpdate.
  * Use `create(ThinkingDeltaUpdateSchema)` to create a new message.
  */
-export const ThinkingDeltaUpdateSchema: GenMessage<ThinkingDeltaUpdate> = /*@__PURE__*/ messageDesc(file_agent, 97);
+export const ThinkingDeltaUpdateSchema: GenMessage<ThinkingDeltaUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	97,
+);
 
 /**
  * @generated from message agent.v1.ThinkingCompletedUpdate
@@ -2979,7 +3148,10 @@ export type TokenDeltaUpdate = Message<"agent.v1.TokenDeltaUpdate"> & {
  * Describes the message agent.v1.TokenDeltaUpdate.
  * Use `create(TokenDeltaUpdateSchema)` to create a new message.
  */
-export const TokenDeltaUpdateSchema: GenMessage<TokenDeltaUpdate> = /*@__PURE__*/ messageDesc(file_agent, 99);
+export const TokenDeltaUpdateSchema: GenMessage<TokenDeltaUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	99,
+);
 
 /**
  * @generated from message agent.v1.SummaryUpdate
@@ -2995,7 +3167,10 @@ export type SummaryUpdate = Message<"agent.v1.SummaryUpdate"> & {
  * Describes the message agent.v1.SummaryUpdate.
  * Use `create(SummaryUpdateSchema)` to create a new message.
  */
-export const SummaryUpdateSchema: GenMessage<SummaryUpdate> = /*@__PURE__*/ messageDesc(file_agent, 100);
+export const SummaryUpdateSchema: GenMessage<SummaryUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	100,
+);
 
 /**
  * @generated from message agent.v1.SummaryStartedUpdate
@@ -3006,7 +3181,8 @@ export type SummaryStartedUpdate = Message<"agent.v1.SummaryStartedUpdate"> & {}
  * Describes the message agent.v1.SummaryStartedUpdate.
  * Use `create(SummaryStartedUpdateSchema)` to create a new message.
  */
-export const SummaryStartedUpdateSchema: GenMessage<SummaryStartedUpdate> = /*@__PURE__*/ messageDesc(file_agent, 101);
+export const SummaryStartedUpdateSchema: GenMessage<SummaryStartedUpdate> =
+	/*@__PURE__*/ messageDesc(file_agent, 101);
 
 /**
  * @generated from message agent.v1.HeartbeatUpdate
@@ -3017,7 +3193,10 @@ export type HeartbeatUpdate = Message<"agent.v1.HeartbeatUpdate"> & {};
  * Describes the message agent.v1.HeartbeatUpdate.
  * Use `create(HeartbeatUpdateSchema)` to create a new message.
  */
-export const HeartbeatUpdateSchema: GenMessage<HeartbeatUpdate> = /*@__PURE__*/ messageDesc(file_agent, 102);
+export const HeartbeatUpdateSchema: GenMessage<HeartbeatUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	102,
+);
 
 /**
  * @generated from message agent.v1.SummaryCompletedUpdate
@@ -3088,7 +3267,10 @@ export type TurnEndedUpdate = Message<"agent.v1.TurnEndedUpdate"> & {};
  * Describes the message agent.v1.TurnEndedUpdate.
  * Use `create(TurnEndedUpdateSchema)` to create a new message.
  */
-export const TurnEndedUpdateSchema: GenMessage<TurnEndedUpdate> = /*@__PURE__*/ messageDesc(file_agent, 105);
+export const TurnEndedUpdateSchema: GenMessage<TurnEndedUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	105,
+);
 
 /**
  * Only: user message appended update
@@ -3124,7 +3306,10 @@ export type StepStartedUpdate = Message<"agent.v1.StepStartedUpdate"> & {
  * Describes the message agent.v1.StepStartedUpdate.
  * Use `create(StepStartedUpdateSchema)` to create a new message.
  */
-export const StepStartedUpdateSchema: GenMessage<StepStartedUpdate> = /*@__PURE__*/ messageDesc(file_agent, 107);
+export const StepStartedUpdateSchema: GenMessage<StepStartedUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	107,
+);
 
 /**
  * @generated from message agent.v1.StepCompletedUpdate
@@ -3145,7 +3330,10 @@ export type StepCompletedUpdate = Message<"agent.v1.StepCompletedUpdate"> & {
  * Describes the message agent.v1.StepCompletedUpdate.
  * Use `create(StepCompletedUpdateSchema)` to create a new message.
  */
-export const StepCompletedUpdateSchema: GenMessage<StepCompletedUpdate> = /*@__PURE__*/ messageDesc(file_agent, 108);
+export const StepCompletedUpdateSchema: GenMessage<StepCompletedUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	108,
+);
 
 /**
  * @generated from message agent.v1.InteractionUpdate
@@ -3281,7 +3469,10 @@ export type InteractionUpdate = Message<"agent.v1.InteractionUpdate"> & {
  * Describes the message agent.v1.InteractionUpdate.
  * Use `create(InteractionUpdateSchema)` to create a new message.
  */
-export const InteractionUpdateSchema: GenMessage<InteractionUpdate> = /*@__PURE__*/ messageDesc(file_agent, 109);
+export const InteractionUpdateSchema: GenMessage<InteractionUpdate> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	109,
+);
 
 /**
  * Interaction query messages for bidirectional communication
@@ -3354,7 +3545,10 @@ export type InteractionQuery = Message<"agent.v1.InteractionQuery"> & {
  * Describes the message agent.v1.InteractionQuery.
  * Use `create(InteractionQuerySchema)` to create a new message.
  */
-export const InteractionQuerySchema: GenMessage<InteractionQuery> = /*@__PURE__*/ messageDesc(file_agent, 110);
+export const InteractionQuerySchema: GenMessage<InteractionQuery> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	110,
+);
 
 /**
  * @generated from message agent.v1.InteractionResponse
@@ -3425,7 +3619,10 @@ export type InteractionResponse = Message<"agent.v1.InteractionResponse"> & {
  * Describes the message agent.v1.InteractionResponse.
  * Use `create(InteractionResponseSchema)` to create a new message.
  */
-export const InteractionResponseSchema: GenMessage<InteractionResponse> = /*@__PURE__*/ messageDesc(file_agent, 111);
+export const InteractionResponseSchema: GenMessage<InteractionResponse> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	111,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionInteractionQuery
@@ -3477,7 +3674,10 @@ export type ClientHeartbeat = Message<"agent.v1.ClientHeartbeat"> & {};
  * Describes the message agent.v1.ClientHeartbeat.
  * Use `create(ClientHeartbeatSchema)` to create a new message.
  */
-export const ClientHeartbeatSchema: GenMessage<ClientHeartbeat> = /*@__PURE__*/ messageDesc(file_agent, 114);
+export const ClientHeartbeatSchema: GenMessage<ClientHeartbeat> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	114,
+);
 
 /**
  * Prewarm request - sent before the actual action to prepare the backend Contains all config needed for auth, model routing, and session building The actual ConversationAction is sent separately after prewarming completes
@@ -3539,7 +3739,10 @@ export type PrewarmRequest = Message<"agent.v1.PrewarmRequest"> & {
  * Describes the message agent.v1.PrewarmRequest.
  * Use `create(PrewarmRequestSchema)` to create a new message.
  */
-export const PrewarmRequestSchema: GenMessage<PrewarmRequest> = /*@__PURE__*/ messageDesc(file_agent, 115);
+export const PrewarmRequestSchema: GenMessage<PrewarmRequest> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	115,
+);
 
 /**
  * @generated from message agent.v1.ExecServerAbort
@@ -3555,7 +3758,10 @@ export type ExecServerAbort = Message<"agent.v1.ExecServerAbort"> & {
  * Describes the message agent.v1.ExecServerAbort.
  * Use `create(ExecServerAbortSchema)` to create a new message.
  */
-export const ExecServerAbortSchema: GenMessage<ExecServerAbort> = /*@__PURE__*/ messageDesc(file_agent, 116);
+export const ExecServerAbortSchema: GenMessage<ExecServerAbort> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	116,
+);
 
 /**
  * @generated from message agent.v1.ExecServerControlMessage
@@ -3654,7 +3860,10 @@ export type AgentClientMessage = Message<"agent.v1.AgentClientMessage"> & {
  * Describes the message agent.v1.AgentClientMessage.
  * Use `create(AgentClientMessageSchema)` to create a new message.
  */
-export const AgentClientMessageSchema: GenMessage<AgentClientMessage> = /*@__PURE__*/ messageDesc(file_agent, 118);
+export const AgentClientMessageSchema: GenMessage<AgentClientMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	118,
+);
 
 /**
  * @generated from message agent.v1.AgentServerMessage
@@ -3713,7 +3922,10 @@ export type AgentServerMessage = Message<"agent.v1.AgentServerMessage"> & {
  * Describes the message agent.v1.AgentServerMessage.
  * Use `create(AgentServerMessageSchema)` to create a new message.
  */
-export const AgentServerMessageSchema: GenMessage<AgentServerMessage> = /*@__PURE__*/ messageDesc(file_agent, 119);
+export const AgentServerMessageSchema: GenMessage<AgentServerMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	119,
+);
 
 /**
  * New unary API for naming an agent from a user message
@@ -3731,7 +3943,10 @@ export type NameAgentRequest = Message<"agent.v1.NameAgentRequest"> & {
  * Describes the message agent.v1.NameAgentRequest.
  * Use `create(NameAgentRequestSchema)` to create a new message.
  */
-export const NameAgentRequestSchema: GenMessage<NameAgentRequest> = /*@__PURE__*/ messageDesc(file_agent, 120);
+export const NameAgentRequestSchema: GenMessage<NameAgentRequest> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	120,
+);
 
 /**
  * @generated from message agent.v1.NameAgentResponse
@@ -3747,7 +3962,10 @@ export type NameAgentResponse = Message<"agent.v1.NameAgentResponse"> & {
  * Describes the message agent.v1.NameAgentResponse.
  * Use `create(NameAgentResponseSchema)` to create a new message.
  */
-export const NameAgentResponseSchema: GenMessage<NameAgentResponse> = /*@__PURE__*/ messageDesc(file_agent, 121);
+export const NameAgentResponseSchema: GenMessage<NameAgentResponse> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	121,
+);
 
 /**
  * @generated from message agent.v1.GetUsableModelsRequest
@@ -3892,7 +4110,10 @@ export type IdeEditorsStateFile = Message<"agent.v1.IdeEditorsStateFile"> & {
  * Describes the message agent.v1.IdeEditorsStateFile.
  * Use `create(IdeEditorsStateFileSchema)` to create a new message.
  */
-export const IdeEditorsStateFileSchema: GenMessage<IdeEditorsStateFile> = /*@__PURE__*/ messageDesc(file_agent, 128);
+export const IdeEditorsStateFileSchema: GenMessage<IdeEditorsStateFile> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	128,
+);
 
 /**
  * @generated from message agent.v1.IdeEditorsStateLite
@@ -3908,7 +4129,10 @@ export type IdeEditorsStateLite = Message<"agent.v1.IdeEditorsStateLite"> & {
  * Describes the message agent.v1.IdeEditorsStateLite.
  * Use `create(IdeEditorsStateLiteSchema)` to create a new message.
  */
-export const IdeEditorsStateLiteSchema: GenMessage<IdeEditorsStateLite> = /*@__PURE__*/ messageDesc(file_agent, 129);
+export const IdeEditorsStateLiteSchema: GenMessage<IdeEditorsStateLite> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	129,
+);
 
 /**
  * @generated from message agent.v1.ApplyAgentDiffToolCall
@@ -3947,7 +4171,10 @@ export type ApplyAgentDiffArgs = Message<"agent.v1.ApplyAgentDiffArgs"> & {
  * Describes the message agent.v1.ApplyAgentDiffArgs.
  * Use `create(ApplyAgentDiffArgsSchema)` to create a new message.
  */
-export const ApplyAgentDiffArgsSchema: GenMessage<ApplyAgentDiffArgs> = /*@__PURE__*/ messageDesc(file_agent, 131);
+export const ApplyAgentDiffArgsSchema: GenMessage<ApplyAgentDiffArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	131,
+);
 
 /**
  * @generated from message agent.v1.ApplyAgentDiffResult
@@ -3978,7 +4205,8 @@ export type ApplyAgentDiffResult = Message<"agent.v1.ApplyAgentDiffResult"> & {
  * Describes the message agent.v1.ApplyAgentDiffResult.
  * Use `create(ApplyAgentDiffResultSchema)` to create a new message.
  */
-export const ApplyAgentDiffResultSchema: GenMessage<ApplyAgentDiffResult> = /*@__PURE__*/ messageDesc(file_agent, 132);
+export const ApplyAgentDiffResultSchema: GenMessage<ApplyAgentDiffResult> =
+	/*@__PURE__*/ messageDesc(file_agent, 132);
 
 /**
  * @generated from message agent.v1.ApplyAgentDiffSuccess
@@ -4039,7 +4267,10 @@ export type AppliedAgentChange = Message<"agent.v1.AppliedAgentChange"> & {
  * Describes the message agent.v1.AppliedAgentChange.
  * Use `create(AppliedAgentChangeSchema)` to create a new message.
  */
-export const AppliedAgentChangeSchema: GenMessage<AppliedAgentChange> = /*@__PURE__*/ messageDesc(file_agent, 134);
+export const AppliedAgentChangeSchema: GenMessage<AppliedAgentChange> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	134,
+);
 
 /**
  * @generated from message agent.v1.ApplyAgentDiffError
@@ -4060,7 +4291,10 @@ export type ApplyAgentDiffError = Message<"agent.v1.ApplyAgentDiffError"> & {
  * Describes the message agent.v1.ApplyAgentDiffError.
  * Use `create(ApplyAgentDiffErrorSchema)` to create a new message.
  */
-export const ApplyAgentDiffErrorSchema: GenMessage<ApplyAgentDiffError> = /*@__PURE__*/ messageDesc(file_agent, 135);
+export const ApplyAgentDiffErrorSchema: GenMessage<ApplyAgentDiffError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	135,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionToolCall
@@ -4081,7 +4315,10 @@ export type AskQuestionToolCall = Message<"agent.v1.AskQuestionToolCall"> & {
  * Describes the message agent.v1.AskQuestionToolCall.
  * Use `create(AskQuestionToolCallSchema)` to create a new message.
  */
-export const AskQuestionToolCallSchema: GenMessage<AskQuestionToolCall> = /*@__PURE__*/ messageDesc(file_agent, 136);
+export const AskQuestionToolCallSchema: GenMessage<AskQuestionToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	136,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionArgs
@@ -4120,7 +4357,10 @@ export type AskQuestionArgs = Message<"agent.v1.AskQuestionArgs"> & {
  * Describes the message agent.v1.AskQuestionArgs.
  * Use `create(AskQuestionArgsSchema)` to create a new message.
  */
-export const AskQuestionArgsSchema: GenMessage<AskQuestionArgs> = /*@__PURE__*/ messageDesc(file_agent, 137);
+export const AskQuestionArgsSchema: GenMessage<AskQuestionArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	137,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionArgs_Question
@@ -4201,7 +4441,10 @@ export type AskQuestionAsync = Message<"agent.v1.AskQuestionAsync"> & {};
  * Describes the message agent.v1.AskQuestionAsync.
  * Use `create(AskQuestionAsyncSchema)` to create a new message.
  */
-export const AskQuestionAsyncSchema: GenMessage<AskQuestionAsync> = /*@__PURE__*/ messageDesc(file_agent, 140);
+export const AskQuestionAsyncSchema: GenMessage<AskQuestionAsync> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	140,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionResult
@@ -4246,7 +4489,10 @@ export type AskQuestionResult = Message<"agent.v1.AskQuestionResult"> & {
  * Describes the message agent.v1.AskQuestionResult.
  * Use `create(AskQuestionResultSchema)` to create a new message.
  */
-export const AskQuestionResultSchema: GenMessage<AskQuestionResult> = /*@__PURE__*/ messageDesc(file_agent, 141);
+export const AskQuestionResultSchema: GenMessage<AskQuestionResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	141,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionSuccess
@@ -4262,7 +4508,10 @@ export type AskQuestionSuccess = Message<"agent.v1.AskQuestionSuccess"> & {
  * Describes the message agent.v1.AskQuestionSuccess.
  * Use `create(AskQuestionSuccessSchema)` to create a new message.
  */
-export const AskQuestionSuccessSchema: GenMessage<AskQuestionSuccess> = /*@__PURE__*/ messageDesc(file_agent, 142);
+export const AskQuestionSuccessSchema: GenMessage<AskQuestionSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	142,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionSuccess_Answer
@@ -4303,7 +4552,10 @@ export type AskQuestionError = Message<"agent.v1.AskQuestionError"> & {
  * Describes the message agent.v1.AskQuestionError.
  * Use `create(AskQuestionErrorSchema)` to create a new message.
  */
-export const AskQuestionErrorSchema: GenMessage<AskQuestionError> = /*@__PURE__*/ messageDesc(file_agent, 144);
+export const AskQuestionErrorSchema: GenMessage<AskQuestionError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	144,
+);
 
 /**
  * @generated from message agent.v1.AskQuestionRejected
@@ -4319,7 +4571,10 @@ export type AskQuestionRejected = Message<"agent.v1.AskQuestionRejected"> & {
  * Describes the message agent.v1.AskQuestionRejected.
  * Use `create(AskQuestionRejectedSchema)` to create a new message.
  */
-export const AskQuestionRejectedSchema: GenMessage<AskQuestionRejected> = /*@__PURE__*/ messageDesc(file_agent, 145);
+export const AskQuestionRejectedSchema: GenMessage<AskQuestionRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	145,
+);
 
 /**
  * @generated from message agent.v1.BackgroundShellSpawnArgs
@@ -4495,7 +4750,10 @@ export type WriteShellStdinArgs = Message<"agent.v1.WriteShellStdinArgs"> & {
  * Describes the message agent.v1.WriteShellStdinArgs.
  * Use `create(WriteShellStdinArgsSchema)` to create a new message.
  */
-export const WriteShellStdinArgsSchema: GenMessage<WriteShellStdinArgs> = /*@__PURE__*/ messageDesc(file_agent, 150);
+export const WriteShellStdinArgsSchema: GenMessage<WriteShellStdinArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	150,
+);
 
 /**
  * @generated from message agent.v1.WriteShellStdinResult
@@ -4567,7 +4825,8 @@ export type WriteShellStdinError = Message<"agent.v1.WriteShellStdinError"> & {
  * Describes the message agent.v1.WriteShellStdinError.
  * Use `create(WriteShellStdinErrorSchema)` to create a new message.
  */
-export const WriteShellStdinErrorSchema: GenMessage<WriteShellStdinError> = /*@__PURE__*/ messageDesc(file_agent, 153);
+export const WriteShellStdinErrorSchema: GenMessage<WriteShellStdinError> =
+	/*@__PURE__*/ messageDesc(file_agent, 153);
 
 /**
  * @generated from message agent.v1.Coordinate
@@ -4611,7 +4870,10 @@ export type ComputerUseArgs = Message<"agent.v1.ComputerUseArgs"> & {
  * Describes the message agent.v1.ComputerUseArgs.
  * Use `create(ComputerUseArgsSchema)` to create a new message.
  */
-export const ComputerUseArgsSchema: GenMessage<ComputerUseArgs> = /*@__PURE__*/ messageDesc(file_agent, 155);
+export const ComputerUseArgsSchema: GenMessage<ComputerUseArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	155,
+);
 
 /**
  * A single computer-use action. This is our internal canonical representation. Provider-specific formats are converted to this by adapters.
@@ -4707,7 +4969,10 @@ export type ComputerUseAction = Message<"agent.v1.ComputerUseAction"> & {
  * Describes the message agent.v1.ComputerUseAction.
  * Use `create(ComputerUseActionSchema)` to create a new message.
  */
-export const ComputerUseActionSchema: GenMessage<ComputerUseAction> = /*@__PURE__*/ messageDesc(file_agent, 156);
+export const ComputerUseActionSchema: GenMessage<ComputerUseAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	156,
+);
 
 /**
  * Move mouse to coordinate (required)
@@ -4725,7 +4990,10 @@ export type MouseMoveAction = Message<"agent.v1.MouseMoveAction"> & {
  * Describes the message agent.v1.MouseMoveAction.
  * Use `create(MouseMoveActionSchema)` to create a new message.
  */
-export const MouseMoveActionSchema: GenMessage<MouseMoveAction> = /*@__PURE__*/ messageDesc(file_agent, 157);
+export const MouseMoveActionSchema: GenMessage<MouseMoveAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	157,
+);
 
 /**
  * Unified click action - coordinate: optional, clicks at current cursor if omitted - button: which mouse button (default: LEFT) - count: click count (1=single, 2=double, 3=triple, default: 1) - modifier_keys: optional, held during click (e.g., "ctrl", "shift", "ctrl+shift")
@@ -4758,7 +5026,10 @@ export type ClickAction = Message<"agent.v1.ClickAction"> & {
  * Describes the message agent.v1.ClickAction.
  * Use `create(ClickActionSchema)` to create a new message.
  */
-export const ClickActionSchema: GenMessage<ClickAction> = /*@__PURE__*/ messageDesc(file_agent, 158);
+export const ClickActionSchema: GenMessage<ClickAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	158,
+);
 
 /**
  * Press mouse button down (for fine-grained drag control)
@@ -4776,7 +5047,10 @@ export type MouseDownAction = Message<"agent.v1.MouseDownAction"> & {
  * Describes the message agent.v1.MouseDownAction.
  * Use `create(MouseDownActionSchema)` to create a new message.
  */
-export const MouseDownActionSchema: GenMessage<MouseDownAction> = /*@__PURE__*/ messageDesc(file_agent, 159);
+export const MouseDownActionSchema: GenMessage<MouseDownAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	159,
+);
 
 /**
  * Release mouse button (for fine-grained drag control)
@@ -4794,7 +5068,10 @@ export type MouseUpAction = Message<"agent.v1.MouseUpAction"> & {
  * Describes the message agent.v1.MouseUpAction.
  * Use `create(MouseUpActionSchema)` to create a new message.
  */
-export const MouseUpActionSchema: GenMessage<MouseUpAction> = /*@__PURE__*/ messageDesc(file_agent, 160);
+export const MouseUpActionSchema: GenMessage<MouseUpAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	160,
+);
 
 /**
  * Drag action - path of coordinates (at least 2 points: [start, ..., end])
@@ -4850,7 +5127,10 @@ export type ScrollAction = Message<"agent.v1.ScrollAction"> & {
  * Describes the message agent.v1.ScrollAction.
  * Use `create(ScrollActionSchema)` to create a new message.
  */
-export const ScrollActionSchema: GenMessage<ScrollAction> = /*@__PURE__*/ messageDesc(file_agent, 162);
+export const ScrollActionSchema: GenMessage<ScrollAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	162,
+);
 
 /**
  * Type text
@@ -4922,7 +5202,10 @@ export type ScreenshotAction = Message<"agent.v1.ScreenshotAction"> & {};
  * Describes the message agent.v1.ScreenshotAction.
  * Use `create(ScreenshotActionSchema)` to create a new message.
  */
-export const ScreenshotActionSchema: GenMessage<ScreenshotAction> = /*@__PURE__*/ messageDesc(file_agent, 166);
+export const ScreenshotActionSchema: GenMessage<ScreenshotAction> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	166,
+);
 
 /**
  * Get current cursor position
@@ -4935,7 +5218,8 @@ export type CursorPositionAction = Message<"agent.v1.CursorPositionAction"> & {}
  * Describes the message agent.v1.CursorPositionAction.
  * Use `create(CursorPositionActionSchema)` to create a new message.
  */
-export const CursorPositionActionSchema: GenMessage<CursorPositionAction> = /*@__PURE__*/ messageDesc(file_agent, 167);
+export const CursorPositionActionSchema: GenMessage<CursorPositionAction> =
+	/*@__PURE__*/ messageDesc(file_agent, 167);
 
 /**
  * Result of computer-use execution
@@ -4968,7 +5252,10 @@ export type ComputerUseResult = Message<"agent.v1.ComputerUseResult"> & {
  * Describes the message agent.v1.ComputerUseResult.
  * Use `create(ComputerUseResultSchema)` to create a new message.
  */
-export const ComputerUseResultSchema: GenMessage<ComputerUseResult> = /*@__PURE__*/ messageDesc(file_agent, 168);
+export const ComputerUseResultSchema: GenMessage<ComputerUseResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	168,
+);
 
 /**
  * @generated from message agent.v1.ComputerUseSuccess
@@ -5013,7 +5300,10 @@ export type ComputerUseSuccess = Message<"agent.v1.ComputerUseSuccess"> & {
  * Describes the message agent.v1.ComputerUseSuccess.
  * Use `create(ComputerUseSuccessSchema)` to create a new message.
  */
-export const ComputerUseSuccessSchema: GenMessage<ComputerUseSuccess> = /*@__PURE__*/ messageDesc(file_agent, 169);
+export const ComputerUseSuccessSchema: GenMessage<ComputerUseSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	169,
+);
 
 /**
  * @generated from message agent.v1.ComputerUseError
@@ -5058,7 +5348,10 @@ export type ComputerUseError = Message<"agent.v1.ComputerUseError"> & {
  * Describes the message agent.v1.ComputerUseError.
  * Use `create(ComputerUseErrorSchema)` to create a new message.
  */
-export const ComputerUseErrorSchema: GenMessage<ComputerUseError> = /*@__PURE__*/ messageDesc(file_agent, 170);
+export const ComputerUseErrorSchema: GenMessage<ComputerUseError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	170,
+);
 
 /**
  * @generated from message agent.v1.ComputerUseToolCall
@@ -5079,7 +5372,10 @@ export type ComputerUseToolCall = Message<"agent.v1.ComputerUseToolCall"> & {
  * Describes the message agent.v1.ComputerUseToolCall.
  * Use `create(ComputerUseToolCallSchema)` to create a new message.
  */
-export const ComputerUseToolCallSchema: GenMessage<ComputerUseToolCall> = /*@__PURE__*/ messageDesc(file_agent, 171);
+export const ComputerUseToolCallSchema: GenMessage<ComputerUseToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	171,
+);
 
 /**
  * @generated from message agent.v1.CreatePlanToolCall
@@ -5100,7 +5396,10 @@ export type CreatePlanToolCall = Message<"agent.v1.CreatePlanToolCall"> & {
  * Describes the message agent.v1.CreatePlanToolCall.
  * Use `create(CreatePlanToolCallSchema)` to create a new message.
  */
-export const CreatePlanToolCallSchema: GenMessage<CreatePlanToolCall> = /*@__PURE__*/ messageDesc(file_agent, 172);
+export const CreatePlanToolCallSchema: GenMessage<CreatePlanToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	172,
+);
 
 /**
  * A phase groups related todos together for project-mode plans
@@ -5168,7 +5467,10 @@ export type CreatePlanArgs = Message<"agent.v1.CreatePlanArgs"> & {
  * Describes the message agent.v1.CreatePlanArgs.
  * Use `create(CreatePlanArgsSchema)` to create a new message.
  */
-export const CreatePlanArgsSchema: GenMessage<CreatePlanArgs> = /*@__PURE__*/ messageDesc(file_agent, 174);
+export const CreatePlanArgsSchema: GenMessage<CreatePlanArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	174,
+);
 
 /**
  * @generated from message agent.v1.CreatePlanResult
@@ -5206,7 +5508,10 @@ export type CreatePlanResult = Message<"agent.v1.CreatePlanResult"> & {
  * Describes the message agent.v1.CreatePlanResult.
  * Use `create(CreatePlanResultSchema)` to create a new message.
  */
-export const CreatePlanResultSchema: GenMessage<CreatePlanResult> = /*@__PURE__*/ messageDesc(file_agent, 175);
+export const CreatePlanResultSchema: GenMessage<CreatePlanResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	175,
+);
 
 /**
  * @generated from message agent.v1.CreatePlanSuccess
@@ -5217,7 +5522,10 @@ export type CreatePlanSuccess = Message<"agent.v1.CreatePlanSuccess"> & {};
  * Describes the message agent.v1.CreatePlanSuccess.
  * Use `create(CreatePlanSuccessSchema)` to create a new message.
  */
-export const CreatePlanSuccessSchema: GenMessage<CreatePlanSuccess> = /*@__PURE__*/ messageDesc(file_agent, 176);
+export const CreatePlanSuccessSchema: GenMessage<CreatePlanSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	176,
+);
 
 /**
  * @generated from message agent.v1.CreatePlanError
@@ -5233,7 +5541,10 @@ export type CreatePlanError = Message<"agent.v1.CreatePlanError"> & {
  * Describes the message agent.v1.CreatePlanError.
  * Use `create(CreatePlanErrorSchema)` to create a new message.
  */
-export const CreatePlanErrorSchema: GenMessage<CreatePlanError> = /*@__PURE__*/ messageDesc(file_agent, 177);
+export const CreatePlanErrorSchema: GenMessage<CreatePlanError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	177,
+);
 
 /**
  * Query sent from server to client to create a plan file
@@ -5289,7 +5600,8 @@ export type CursorRuleTypeGlobal = Message<"agent.v1.CursorRuleTypeGlobal"> & {}
  * Describes the message agent.v1.CursorRuleTypeGlobal.
  * Use `create(CursorRuleTypeGlobalSchema)` to create a new message.
  */
-export const CursorRuleTypeGlobalSchema: GenMessage<CursorRuleTypeGlobal> = /*@__PURE__*/ messageDesc(file_agent, 180);
+export const CursorRuleTypeGlobalSchema: GenMessage<CursorRuleTypeGlobal> =
+	/*@__PURE__*/ messageDesc(file_agent, 180);
 
 /**
  * @generated from message agent.v1.CursorRuleTypeFileGlobs
@@ -5330,7 +5642,8 @@ export const CursorRuleTypeAgentFetchedSchema: GenMessage<CursorRuleTypeAgentFet
 /**
  * @generated from message agent.v1.CursorRuleTypeManuallyAttached
  */
-export type CursorRuleTypeManuallyAttached = Message<"agent.v1.CursorRuleTypeManuallyAttached"> & {};
+export type CursorRuleTypeManuallyAttached =
+	Message<"agent.v1.CursorRuleTypeManuallyAttached"> & {};
 
 /**
  * Describes the message agent.v1.CursorRuleTypeManuallyAttached.
@@ -5383,7 +5696,10 @@ export type CursorRuleType = Message<"agent.v1.CursorRuleType"> & {
  * Describes the message agent.v1.CursorRuleType.
  * Use `create(CursorRuleTypeSchema)` to create a new message.
  */
-export const CursorRuleTypeSchema: GenMessage<CursorRuleType> = /*@__PURE__*/ messageDesc(file_agent, 184);
+export const CursorRuleTypeSchema: GenMessage<CursorRuleType> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	184,
+);
 
 /**
  * @generated from message agent.v1.CursorRule
@@ -5521,7 +5837,10 @@ export type DeleteResult = Message<"agent.v1.DeleteResult"> & {
  * Describes the message agent.v1.DeleteResult.
  * Use `create(DeleteResultSchema)` to create a new message.
  */
-export const DeleteResultSchema: GenMessage<DeleteResult> = /*@__PURE__*/ messageDesc(file_agent, 187);
+export const DeleteResultSchema: GenMessage<DeleteResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	187,
+);
 
 /**
  * @generated from message agent.v1.DeleteSuccess
@@ -5552,7 +5871,10 @@ export type DeleteSuccess = Message<"agent.v1.DeleteSuccess"> & {
  * Describes the message agent.v1.DeleteSuccess.
  * Use `create(DeleteSuccessSchema)` to create a new message.
  */
-export const DeleteSuccessSchema: GenMessage<DeleteSuccess> = /*@__PURE__*/ messageDesc(file_agent, 188);
+export const DeleteSuccessSchema: GenMessage<DeleteSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	188,
+);
 
 /**
  * @generated from message agent.v1.DeleteFileNotFound
@@ -5568,7 +5890,10 @@ export type DeleteFileNotFound = Message<"agent.v1.DeleteFileNotFound"> & {
  * Describes the message agent.v1.DeleteFileNotFound.
  * Use `create(DeleteFileNotFoundSchema)` to create a new message.
  */
-export const DeleteFileNotFoundSchema: GenMessage<DeleteFileNotFound> = /*@__PURE__*/ messageDesc(file_agent, 189);
+export const DeleteFileNotFoundSchema: GenMessage<DeleteFileNotFound> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	189,
+);
 
 /**
  * @generated from message agent.v1.DeleteNotFile
@@ -5591,7 +5916,10 @@ export type DeleteNotFile = Message<"agent.v1.DeleteNotFile"> & {
  * Describes the message agent.v1.DeleteNotFile.
  * Use `create(DeleteNotFileSchema)` to create a new message.
  */
-export const DeleteNotFileSchema: GenMessage<DeleteNotFile> = /*@__PURE__*/ messageDesc(file_agent, 190);
+export const DeleteNotFileSchema: GenMessage<DeleteNotFile> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	190,
+);
 
 /**
  * @generated from message agent.v1.DeletePermissionDenied
@@ -5635,7 +5963,10 @@ export type DeleteFileBusy = Message<"agent.v1.DeleteFileBusy"> & {
  * Describes the message agent.v1.DeleteFileBusy.
  * Use `create(DeleteFileBusySchema)` to create a new message.
  */
-export const DeleteFileBusySchema: GenMessage<DeleteFileBusy> = /*@__PURE__*/ messageDesc(file_agent, 192);
+export const DeleteFileBusySchema: GenMessage<DeleteFileBusy> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	192,
+);
 
 /**
  * @generated from message agent.v1.DeleteRejected
@@ -5656,7 +5987,10 @@ export type DeleteRejected = Message<"agent.v1.DeleteRejected"> & {
  * Describes the message agent.v1.DeleteRejected.
  * Use `create(DeleteRejectedSchema)` to create a new message.
  */
-export const DeleteRejectedSchema: GenMessage<DeleteRejected> = /*@__PURE__*/ messageDesc(file_agent, 193);
+export const DeleteRejectedSchema: GenMessage<DeleteRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	193,
+);
 
 /**
  * @generated from message agent.v1.DeleteError
@@ -5677,7 +6011,10 @@ export type DeleteError = Message<"agent.v1.DeleteError"> & {
  * Describes the message agent.v1.DeleteError.
  * Use `create(DeleteErrorSchema)` to create a new message.
  */
-export const DeleteErrorSchema: GenMessage<DeleteError> = /*@__PURE__*/ messageDesc(file_agent, 194);
+export const DeleteErrorSchema: GenMessage<DeleteError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	194,
+);
 
 /**
  * @generated from message agent.v1.DeleteToolCall
@@ -5698,7 +6035,10 @@ export type DeleteToolCall = Message<"agent.v1.DeleteToolCall"> & {
  * Describes the message agent.v1.DeleteToolCall.
  * Use `create(DeleteToolCallSchema)` to create a new message.
  */
-export const DeleteToolCallSchema: GenMessage<DeleteToolCall> = /*@__PURE__*/ messageDesc(file_agent, 195);
+export const DeleteToolCallSchema: GenMessage<DeleteToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	195,
+);
 
 /**
  * @generated from message agent.v1.DiagnosticsArgs
@@ -5719,7 +6059,10 @@ export type DiagnosticsArgs = Message<"agent.v1.DiagnosticsArgs"> & {
  * Describes the message agent.v1.DiagnosticsArgs.
  * Use `create(DiagnosticsArgsSchema)` to create a new message.
  */
-export const DiagnosticsArgsSchema: GenMessage<DiagnosticsArgs> = /*@__PURE__*/ messageDesc(file_agent, 196);
+export const DiagnosticsArgsSchema: GenMessage<DiagnosticsArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	196,
+);
 
 /**
  * @generated from message agent.v1.DiagnosticsResult
@@ -5771,7 +6114,10 @@ export type DiagnosticsResult = Message<"agent.v1.DiagnosticsResult"> & {
  * Describes the message agent.v1.DiagnosticsResult.
  * Use `create(DiagnosticsResultSchema)` to create a new message.
  */
-export const DiagnosticsResultSchema: GenMessage<DiagnosticsResult> = /*@__PURE__*/ messageDesc(file_agent, 197);
+export const DiagnosticsResultSchema: GenMessage<DiagnosticsResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	197,
+);
 
 /**
  * @generated from message agent.v1.DiagnosticsSuccess
@@ -5797,7 +6143,10 @@ export type DiagnosticsSuccess = Message<"agent.v1.DiagnosticsSuccess"> & {
  * Describes the message agent.v1.DiagnosticsSuccess.
  * Use `create(DiagnosticsSuccessSchema)` to create a new message.
  */
-export const DiagnosticsSuccessSchema: GenMessage<DiagnosticsSuccess> = /*@__PURE__*/ messageDesc(file_agent, 198);
+export const DiagnosticsSuccessSchema: GenMessage<DiagnosticsSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	198,
+);
 
 /**
  * @generated from message agent.v1.Diagnostic
@@ -5859,7 +6208,10 @@ export type DiagnosticsError = Message<"agent.v1.DiagnosticsError"> & {
  * Describes the message agent.v1.DiagnosticsError.
  * Use `create(DiagnosticsErrorSchema)` to create a new message.
  */
-export const DiagnosticsErrorSchema: GenMessage<DiagnosticsError> = /*@__PURE__*/ messageDesc(file_agent, 200);
+export const DiagnosticsErrorSchema: GenMessage<DiagnosticsError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	200,
+);
 
 /**
  * @generated from message agent.v1.DiagnosticsRejected
@@ -5880,7 +6232,10 @@ export type DiagnosticsRejected = Message<"agent.v1.DiagnosticsRejected"> & {
  * Describes the message agent.v1.DiagnosticsRejected.
  * Use `create(DiagnosticsRejectedSchema)` to create a new message.
  */
-export const DiagnosticsRejectedSchema: GenMessage<DiagnosticsRejected> = /*@__PURE__*/ messageDesc(file_agent, 201);
+export const DiagnosticsRejectedSchema: GenMessage<DiagnosticsRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	201,
+);
 
 /**
  * @generated from message agent.v1.DiagnosticsFileNotFound
@@ -6048,7 +6403,10 @@ export type EditSuccess = Message<"agent.v1.EditSuccess"> & {
  * Describes the message agent.v1.EditSuccess.
  * Use `create(EditSuccessSchema)` to create a new message.
  */
-export const EditSuccessSchema: GenMessage<EditSuccess> = /*@__PURE__*/ messageDesc(file_agent, 206);
+export const EditSuccessSchema: GenMessage<EditSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	206,
+);
 
 /**
  * @generated from message agent.v1.EditFileNotFound
@@ -6064,7 +6422,10 @@ export type EditFileNotFound = Message<"agent.v1.EditFileNotFound"> & {
  * Describes the message agent.v1.EditFileNotFound.
  * Use `create(EditFileNotFoundSchema)` to create a new message.
  */
-export const EditFileNotFoundSchema: GenMessage<EditFileNotFound> = /*@__PURE__*/ messageDesc(file_agent, 207);
+export const EditFileNotFoundSchema: GenMessage<EditFileNotFound> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	207,
+);
 
 /**
  * @generated from message agent.v1.EditReadPermissionDenied
@@ -6131,7 +6492,10 @@ export type EditRejected = Message<"agent.v1.EditRejected"> & {
  * Describes the message agent.v1.EditRejected.
  * Use `create(EditRejectedSchema)` to create a new message.
  */
-export const EditRejectedSchema: GenMessage<EditRejected> = /*@__PURE__*/ messageDesc(file_agent, 210);
+export const EditRejectedSchema: GenMessage<EditRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	210,
+);
 
 /**
  * @generated from message agent.v1.EditError
@@ -6178,7 +6542,10 @@ export type EditToolCall = Message<"agent.v1.EditToolCall"> & {
  * Describes the message agent.v1.EditToolCall.
  * Use `create(EditToolCallSchema)` to create a new message.
  */
-export const EditToolCallSchema: GenMessage<EditToolCall> = /*@__PURE__*/ messageDesc(file_agent, 212);
+export const EditToolCallSchema: GenMessage<EditToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	212,
+);
 
 /**
  * @generated from message agent.v1.EditToolCallDelta
@@ -6194,7 +6561,10 @@ export type EditToolCallDelta = Message<"agent.v1.EditToolCallDelta"> & {
  * Describes the message agent.v1.EditToolCallDelta.
  * Use `create(EditToolCallDeltaSchema)` to create a new message.
  */
-export const EditToolCallDeltaSchema: GenMessage<EditToolCallDelta> = /*@__PURE__*/ messageDesc(file_agent, 213);
+export const EditToolCallDeltaSchema: GenMessage<EditToolCallDelta> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	213,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchArgs
@@ -6215,7 +6585,10 @@ export type ExaFetchArgs = Message<"agent.v1.ExaFetchArgs"> & {
  * Describes the message agent.v1.ExaFetchArgs.
  * Use `create(ExaFetchArgsSchema)` to create a new message.
  */
-export const ExaFetchArgsSchema: GenMessage<ExaFetchArgs> = /*@__PURE__*/ messageDesc(file_agent, 214);
+export const ExaFetchArgsSchema: GenMessage<ExaFetchArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	214,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchResult
@@ -6253,7 +6626,10 @@ export type ExaFetchResult = Message<"agent.v1.ExaFetchResult"> & {
  * Describes the message agent.v1.ExaFetchResult.
  * Use `create(ExaFetchResultSchema)` to create a new message.
  */
-export const ExaFetchResultSchema: GenMessage<ExaFetchResult> = /*@__PURE__*/ messageDesc(file_agent, 215);
+export const ExaFetchResultSchema: GenMessage<ExaFetchResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	215,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchSuccess
@@ -6269,7 +6645,10 @@ export type ExaFetchSuccess = Message<"agent.v1.ExaFetchSuccess"> & {
  * Describes the message agent.v1.ExaFetchSuccess.
  * Use `create(ExaFetchSuccessSchema)` to create a new message.
  */
-export const ExaFetchSuccessSchema: GenMessage<ExaFetchSuccess> = /*@__PURE__*/ messageDesc(file_agent, 216);
+export const ExaFetchSuccessSchema: GenMessage<ExaFetchSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	216,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchError
@@ -6285,7 +6664,10 @@ export type ExaFetchError = Message<"agent.v1.ExaFetchError"> & {
  * Describes the message agent.v1.ExaFetchError.
  * Use `create(ExaFetchErrorSchema)` to create a new message.
  */
-export const ExaFetchErrorSchema: GenMessage<ExaFetchError> = /*@__PURE__*/ messageDesc(file_agent, 217);
+export const ExaFetchErrorSchema: GenMessage<ExaFetchError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	217,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchRejected
@@ -6301,7 +6683,10 @@ export type ExaFetchRejected = Message<"agent.v1.ExaFetchRejected"> & {
  * Describes the message agent.v1.ExaFetchRejected.
  * Use `create(ExaFetchRejectedSchema)` to create a new message.
  */
-export const ExaFetchRejectedSchema: GenMessage<ExaFetchRejected> = /*@__PURE__*/ messageDesc(file_agent, 218);
+export const ExaFetchRejectedSchema: GenMessage<ExaFetchRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	218,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchContent
@@ -6332,7 +6717,10 @@ export type ExaFetchContent = Message<"agent.v1.ExaFetchContent"> & {
  * Describes the message agent.v1.ExaFetchContent.
  * Use `create(ExaFetchContentSchema)` to create a new message.
  */
-export const ExaFetchContentSchema: GenMessage<ExaFetchContent> = /*@__PURE__*/ messageDesc(file_agent, 219);
+export const ExaFetchContentSchema: GenMessage<ExaFetchContent> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	219,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchToolCall
@@ -6353,7 +6741,10 @@ export type ExaFetchToolCall = Message<"agent.v1.ExaFetchToolCall"> & {
  * Describes the message agent.v1.ExaFetchToolCall.
  * Use `create(ExaFetchToolCallSchema)` to create a new message.
  */
-export const ExaFetchToolCallSchema: GenMessage<ExaFetchToolCall> = /*@__PURE__*/ messageDesc(file_agent, 220);
+export const ExaFetchToolCallSchema: GenMessage<ExaFetchToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	220,
+);
 
 /**
  * @generated from message agent.v1.ExaFetchRequestQuery
@@ -6369,7 +6760,8 @@ export type ExaFetchRequestQuery = Message<"agent.v1.ExaFetchRequestQuery"> & {
  * Describes the message agent.v1.ExaFetchRequestQuery.
  * Use `create(ExaFetchRequestQuerySchema)` to create a new message.
  */
-export const ExaFetchRequestQuerySchema: GenMessage<ExaFetchRequestQuery> = /*@__PURE__*/ messageDesc(file_agent, 221);
+export const ExaFetchRequestQuerySchema: GenMessage<ExaFetchRequestQuery> =
+	/*@__PURE__*/ messageDesc(file_agent, 221);
 
 /**
  * @generated from message agent.v1.ExaFetchRequestResponse
@@ -6407,7 +6799,8 @@ export const ExaFetchRequestResponseSchema: GenMessage<ExaFetchRequestResponse> 
 /**
  * @generated from message agent.v1.ExaFetchRequestResponse_Approved
  */
-export type ExaFetchRequestResponse_Approved = Message<"agent.v1.ExaFetchRequestResponse_Approved"> & {};
+export type ExaFetchRequestResponse_Approved =
+	Message<"agent.v1.ExaFetchRequestResponse_Approved"> & {};
 
 /**
  * Describes the message agent.v1.ExaFetchRequestResponse_Approved.
@@ -6420,12 +6813,13 @@ export const ExaFetchRequestResponse_ApprovedSchema: GenMessage<ExaFetchRequestR
 /**
  * @generated from message agent.v1.ExaFetchRequestResponse_Rejected
  */
-export type ExaFetchRequestResponse_Rejected = Message<"agent.v1.ExaFetchRequestResponse_Rejected"> & {
-	/**
-	 * @generated from field: string reason = 1;
-	 */
-	reason: string;
-};
+export type ExaFetchRequestResponse_Rejected =
+	Message<"agent.v1.ExaFetchRequestResponse_Rejected"> & {
+		/**
+		 * @generated from field: string reason = 1;
+		 */
+		reason: string;
+	};
 
 /**
  * Describes the message agent.v1.ExaFetchRequestResponse_Rejected.
@@ -6466,7 +6860,10 @@ export type ExaSearchArgs = Message<"agent.v1.ExaSearchArgs"> & {
  * Describes the message agent.v1.ExaSearchArgs.
  * Use `create(ExaSearchArgsSchema)` to create a new message.
  */
-export const ExaSearchArgsSchema: GenMessage<ExaSearchArgs> = /*@__PURE__*/ messageDesc(file_agent, 225);
+export const ExaSearchArgsSchema: GenMessage<ExaSearchArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	225,
+);
 
 /**
  * @generated from message agent.v1.ExaSearchResult
@@ -6504,7 +6901,10 @@ export type ExaSearchResult = Message<"agent.v1.ExaSearchResult"> & {
  * Describes the message agent.v1.ExaSearchResult.
  * Use `create(ExaSearchResultSchema)` to create a new message.
  */
-export const ExaSearchResultSchema: GenMessage<ExaSearchResult> = /*@__PURE__*/ messageDesc(file_agent, 226);
+export const ExaSearchResultSchema: GenMessage<ExaSearchResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	226,
+);
 
 /**
  * @generated from message agent.v1.ExaSearchSuccess
@@ -6520,7 +6920,10 @@ export type ExaSearchSuccess = Message<"agent.v1.ExaSearchSuccess"> & {
  * Describes the message agent.v1.ExaSearchSuccess.
  * Use `create(ExaSearchSuccessSchema)` to create a new message.
  */
-export const ExaSearchSuccessSchema: GenMessage<ExaSearchSuccess> = /*@__PURE__*/ messageDesc(file_agent, 227);
+export const ExaSearchSuccessSchema: GenMessage<ExaSearchSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	227,
+);
 
 /**
  * @generated from message agent.v1.ExaSearchError
@@ -6536,7 +6939,10 @@ export type ExaSearchError = Message<"agent.v1.ExaSearchError"> & {
  * Describes the message agent.v1.ExaSearchError.
  * Use `create(ExaSearchErrorSchema)` to create a new message.
  */
-export const ExaSearchErrorSchema: GenMessage<ExaSearchError> = /*@__PURE__*/ messageDesc(file_agent, 228);
+export const ExaSearchErrorSchema: GenMessage<ExaSearchError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	228,
+);
 
 /**
  * @generated from message agent.v1.ExaSearchRejected
@@ -6552,7 +6958,10 @@ export type ExaSearchRejected = Message<"agent.v1.ExaSearchRejected"> & {
  * Describes the message agent.v1.ExaSearchRejected.
  * Use `create(ExaSearchRejectedSchema)` to create a new message.
  */
-export const ExaSearchRejectedSchema: GenMessage<ExaSearchRejected> = /*@__PURE__*/ messageDesc(file_agent, 229);
+export const ExaSearchRejectedSchema: GenMessage<ExaSearchRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	229,
+);
 
 /**
  * @generated from message agent.v1.ExaSearchReference
@@ -6583,7 +6992,10 @@ export type ExaSearchReference = Message<"agent.v1.ExaSearchReference"> & {
  * Describes the message agent.v1.ExaSearchReference.
  * Use `create(ExaSearchReferenceSchema)` to create a new message.
  */
-export const ExaSearchReferenceSchema: GenMessage<ExaSearchReference> = /*@__PURE__*/ messageDesc(file_agent, 230);
+export const ExaSearchReferenceSchema: GenMessage<ExaSearchReference> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	230,
+);
 
 /**
  * @generated from message agent.v1.ExaSearchToolCall
@@ -6604,7 +7016,10 @@ export type ExaSearchToolCall = Message<"agent.v1.ExaSearchToolCall"> & {
  * Describes the message agent.v1.ExaSearchToolCall.
  * Use `create(ExaSearchToolCallSchema)` to create a new message.
  */
-export const ExaSearchToolCallSchema: GenMessage<ExaSearchToolCall> = /*@__PURE__*/ messageDesc(file_agent, 231);
+export const ExaSearchToolCallSchema: GenMessage<ExaSearchToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	231,
+);
 
 /**
  * @generated from message agent.v1.ExaSearchRequestQuery
@@ -6660,7 +7075,8 @@ export const ExaSearchRequestResponseSchema: GenMessage<ExaSearchRequestResponse
 /**
  * @generated from message agent.v1.ExaSearchRequestResponse_Approved
  */
-export type ExaSearchRequestResponse_Approved = Message<"agent.v1.ExaSearchRequestResponse_Approved"> & {};
+export type ExaSearchRequestResponse_Approved =
+	Message<"agent.v1.ExaSearchRequestResponse_Approved"> & {};
 
 /**
  * Describes the message agent.v1.ExaSearchRequestResponse_Approved.
@@ -6673,12 +7089,13 @@ export const ExaSearchRequestResponse_ApprovedSchema: GenMessage<ExaSearchReques
 /**
  * @generated from message agent.v1.ExaSearchRequestResponse_Rejected
  */
-export type ExaSearchRequestResponse_Rejected = Message<"agent.v1.ExaSearchRequestResponse_Rejected"> & {
-	/**
-	 * @generated from field: string reason = 1;
-	 */
-	reason: string;
-};
+export type ExaSearchRequestResponse_Rejected =
+	Message<"agent.v1.ExaSearchRequestResponse_Rejected"> & {
+		/**
+		 * @generated from field: string reason = 1;
+		 */
+		reason: string;
+	};
 
 /**
  * Describes the message agent.v1.ExaSearchRequestResponse_Rejected.
@@ -6730,7 +7147,10 @@ export type ExecClientThrow = Message<"agent.v1.ExecClientThrow"> & {
  * Describes the message agent.v1.ExecClientThrow.
  * Use `create(ExecClientThrowSchema)` to create a new message.
  */
-export const ExecClientThrowSchema: GenMessage<ExecClientThrow> = /*@__PURE__*/ messageDesc(file_agent, 237);
+export const ExecClientThrowSchema: GenMessage<ExecClientThrow> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	237,
+);
 
 /**
  * @generated from message agent.v1.ExecClientHeartbeat
@@ -6746,7 +7166,10 @@ export type ExecClientHeartbeat = Message<"agent.v1.ExecClientHeartbeat"> & {
  * Describes the message agent.v1.ExecClientHeartbeat.
  * Use `create(ExecClientHeartbeatSchema)` to create a new message.
  */
-export const ExecClientHeartbeatSchema: GenMessage<ExecClientHeartbeat> = /*@__PURE__*/ messageDesc(file_agent, 238);
+export const ExecClientHeartbeatSchema: GenMessage<ExecClientHeartbeat> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	238,
+);
 
 /**
  * @generated from message agent.v1.ExecClientControlMessage
@@ -6827,7 +7250,10 @@ export type SpanContext = Message<"agent.v1.SpanContext"> & {
  * Describes the message agent.v1.SpanContext.
  * Use `create(SpanContextSchema)` to create a new message.
  */
-export const SpanContextSchema: GenMessage<SpanContext> = /*@__PURE__*/ messageDesc(file_agent, 240);
+export const SpanContextSchema: GenMessage<SpanContext> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	240,
+);
 
 /**
  * Empty abort message for aborting running execs
@@ -6851,7 +7277,10 @@ export type AbortResult = Message<"agent.v1.AbortResult"> & {};
  * Describes the message agent.v1.AbortResult.
  * Use `create(AbortResultSchema)` to create a new message.
  */
-export const AbortResultSchema: GenMessage<AbortResult> = /*@__PURE__*/ messageDesc(file_agent, 242);
+export const AbortResultSchema: GenMessage<AbortResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	242,
+);
 
 /**
  * @generated from message agent.v1.ExecServerMessage
@@ -7006,7 +7435,10 @@ export type ExecServerMessage = Message<"agent.v1.ExecServerMessage"> & {
  * Describes the message agent.v1.ExecServerMessage.
  * Use `create(ExecServerMessageSchema)` to create a new message.
  */
-export const ExecServerMessageSchema: GenMessage<ExecServerMessage> = /*@__PURE__*/ messageDesc(file_agent, 243);
+export const ExecServerMessageSchema: GenMessage<ExecServerMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	243,
+);
 
 /**
  * @generated from message agent.v1.ExecClientMessage
@@ -7154,7 +7586,10 @@ export type ExecClientMessage = Message<"agent.v1.ExecClientMessage"> & {
  * Describes the message agent.v1.ExecClientMessage.
  * Use `create(ExecClientMessageSchema)` to create a new message.
  */
-export const ExecClientMessageSchema: GenMessage<ExecClientMessage> = /*@__PURE__*/ messageDesc(file_agent, 244);
+export const ExecClientMessageSchema: GenMessage<ExecClientMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	244,
+);
 
 /**
  * @generated from message agent.v1.FetchArgs
@@ -7206,7 +7641,10 @@ export type FetchResult = Message<"agent.v1.FetchResult"> & {
  * Describes the message agent.v1.FetchResult.
  * Use `create(FetchResultSchema)` to create a new message.
  */
-export const FetchResultSchema: GenMessage<FetchResult> = /*@__PURE__*/ messageDesc(file_agent, 246);
+export const FetchResultSchema: GenMessage<FetchResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	246,
+);
 
 /**
  * @generated from message agent.v1.FetchSuccess
@@ -7237,7 +7675,10 @@ export type FetchSuccess = Message<"agent.v1.FetchSuccess"> & {
  * Describes the message agent.v1.FetchSuccess.
  * Use `create(FetchSuccessSchema)` to create a new message.
  */
-export const FetchSuccessSchema: GenMessage<FetchSuccess> = /*@__PURE__*/ messageDesc(file_agent, 247);
+export const FetchSuccessSchema: GenMessage<FetchSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	247,
+);
 
 /**
  * @generated from message agent.v1.FetchError
@@ -7286,7 +7727,10 @@ export type GenerateImageArgs = Message<"agent.v1.GenerateImageArgs"> & {
  * Describes the message agent.v1.GenerateImageArgs.
  * Use `create(GenerateImageArgsSchema)` to create a new message.
  */
-export const GenerateImageArgsSchema: GenMessage<GenerateImageArgs> = /*@__PURE__*/ messageDesc(file_agent, 249);
+export const GenerateImageArgsSchema: GenMessage<GenerateImageArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	249,
+);
 
 /**
  * @generated from message agent.v1.GenerateImageResult
@@ -7317,7 +7761,10 @@ export type GenerateImageResult = Message<"agent.v1.GenerateImageResult"> & {
  * Describes the message agent.v1.GenerateImageResult.
  * Use `create(GenerateImageResultSchema)` to create a new message.
  */
-export const GenerateImageResultSchema: GenMessage<GenerateImageResult> = /*@__PURE__*/ messageDesc(file_agent, 250);
+export const GenerateImageResultSchema: GenMessage<GenerateImageResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	250,
+);
 
 /**
  * @generated from message agent.v1.GenerateImageSuccess
@@ -7342,7 +7789,8 @@ export type GenerateImageSuccess = Message<"agent.v1.GenerateImageSuccess"> & {
  * Describes the message agent.v1.GenerateImageSuccess.
  * Use `create(GenerateImageSuccessSchema)` to create a new message.
  */
-export const GenerateImageSuccessSchema: GenMessage<GenerateImageSuccess> = /*@__PURE__*/ messageDesc(file_agent, 251);
+export const GenerateImageSuccessSchema: GenMessage<GenerateImageSuccess> =
+	/*@__PURE__*/ messageDesc(file_agent, 251);
 
 /**
  * @generated from message agent.v1.GenerateImageError
@@ -7358,7 +7806,10 @@ export type GenerateImageError = Message<"agent.v1.GenerateImageError"> & {
  * Describes the message agent.v1.GenerateImageError.
  * Use `create(GenerateImageErrorSchema)` to create a new message.
  */
-export const GenerateImageErrorSchema: GenMessage<GenerateImageError> = /*@__PURE__*/ messageDesc(file_agent, 252);
+export const GenerateImageErrorSchema: GenMessage<GenerateImageError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	252,
+);
 
 /**
  * @generated from message agent.v1.GenerateImageToolCall
@@ -7564,7 +8015,10 @@ export type GrepSuccess = Message<"agent.v1.GrepSuccess"> & {
  * Describes the message agent.v1.GrepSuccess.
  * Use `create(GrepSuccessSchema)` to create a new message.
  */
-export const GrepSuccessSchema: GenMessage<GrepSuccess> = /*@__PURE__*/ messageDesc(file_agent, 257);
+export const GrepSuccessSchema: GenMessage<GrepSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	257,
+);
 
 /**
  * @generated from message agent.v1.GrepUnionResult
@@ -7602,7 +8056,10 @@ export type GrepUnionResult = Message<"agent.v1.GrepUnionResult"> & {
  * Describes the message agent.v1.GrepUnionResult.
  * Use `create(GrepUnionResultSchema)` to create a new message.
  */
-export const GrepUnionResultSchema: GenMessage<GrepUnionResult> = /*@__PURE__*/ messageDesc(file_agent, 258);
+export const GrepUnionResultSchema: GenMessage<GrepUnionResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	258,
+);
 
 /**
  * @generated from message agent.v1.GrepCountResult
@@ -7648,7 +8105,10 @@ export type GrepCountResult = Message<"agent.v1.GrepCountResult"> & {
  * Describes the message agent.v1.GrepCountResult.
  * Use `create(GrepCountResultSchema)` to create a new message.
  */
-export const GrepCountResultSchema: GenMessage<GrepCountResult> = /*@__PURE__*/ messageDesc(file_agent, 259);
+export const GrepCountResultSchema: GenMessage<GrepCountResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	259,
+);
 
 /**
  * @generated from message agent.v1.GrepFileCount
@@ -7669,7 +8129,10 @@ export type GrepFileCount = Message<"agent.v1.GrepFileCount"> & {
  * Describes the message agent.v1.GrepFileCount.
  * Use `create(GrepFileCountSchema)` to create a new message.
  */
-export const GrepFileCountSchema: GenMessage<GrepFileCount> = /*@__PURE__*/ messageDesc(file_agent, 260);
+export const GrepFileCountSchema: GenMessage<GrepFileCount> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	260,
+);
 
 /**
  * @generated from message agent.v1.GrepFilesResult
@@ -7708,7 +8171,10 @@ export type GrepFilesResult = Message<"agent.v1.GrepFilesResult"> & {
  * Describes the message agent.v1.GrepFilesResult.
  * Use `create(GrepFilesResultSchema)` to create a new message.
  */
-export const GrepFilesResultSchema: GenMessage<GrepFilesResult> = /*@__PURE__*/ messageDesc(file_agent, 261);
+export const GrepFilesResultSchema: GenMessage<GrepFilesResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	261,
+);
 
 /**
  * @generated from message agent.v1.GrepContentResult
@@ -7754,7 +8220,10 @@ export type GrepContentResult = Message<"agent.v1.GrepContentResult"> & {
  * Describes the message agent.v1.GrepContentResult.
  * Use `create(GrepContentResultSchema)` to create a new message.
  */
-export const GrepContentResultSchema: GenMessage<GrepContentResult> = /*@__PURE__*/ messageDesc(file_agent, 262);
+export const GrepContentResultSchema: GenMessage<GrepContentResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	262,
+);
 
 /**
  * @generated from message agent.v1.GrepFileMatch
@@ -7775,7 +8244,10 @@ export type GrepFileMatch = Message<"agent.v1.GrepFileMatch"> & {
  * Describes the message agent.v1.GrepFileMatch.
  * Use `create(GrepFileMatchSchema)` to create a new message.
  */
-export const GrepFileMatchSchema: GenMessage<GrepFileMatch> = /*@__PURE__*/ messageDesc(file_agent, 263);
+export const GrepFileMatchSchema: GenMessage<GrepFileMatch> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	263,
+);
 
 /**
  * @generated from message agent.v1.GrepContentMatch
@@ -7808,7 +8280,10 @@ export type GrepContentMatch = Message<"agent.v1.GrepContentMatch"> & {
  * Describes the message agent.v1.GrepContentMatch.
  * Use `create(GrepContentMatchSchema)` to create a new message.
  */
-export const GrepContentMatchSchema: GenMessage<GrepContentMatch> = /*@__PURE__*/ messageDesc(file_agent, 264);
+export const GrepContentMatchSchema: GenMessage<GrepContentMatch> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	264,
+);
 
 /**
  * @generated from message agent.v1.GrepStream
@@ -7845,7 +8320,10 @@ export type GrepToolCall = Message<"agent.v1.GrepToolCall"> & {
  * Describes the message agent.v1.GrepToolCall.
  * Use `create(GrepToolCallSchema)` to create a new message.
  */
-export const GrepToolCallSchema: GenMessage<GrepToolCall> = /*@__PURE__*/ messageDesc(file_agent, 266);
+export const GrepToolCallSchema: GenMessage<GrepToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	266,
+);
 
 /**
  * @generated from message agent.v1.GetBlobArgs
@@ -7861,7 +8339,10 @@ export type GetBlobArgs = Message<"agent.v1.GetBlobArgs"> & {
  * Describes the message agent.v1.GetBlobArgs.
  * Use `create(GetBlobArgsSchema)` to create a new message.
  */
-export const GetBlobArgsSchema: GenMessage<GetBlobArgs> = /*@__PURE__*/ messageDesc(file_agent, 267);
+export const GetBlobArgsSchema: GenMessage<GetBlobArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	267,
+);
 
 /**
  * @generated from message agent.v1.GetBlobResult
@@ -7877,7 +8358,10 @@ export type GetBlobResult = Message<"agent.v1.GetBlobResult"> & {
  * Describes the message agent.v1.GetBlobResult.
  * Use `create(GetBlobResultSchema)` to create a new message.
  */
-export const GetBlobResultSchema: GenMessage<GetBlobResult> = /*@__PURE__*/ messageDesc(file_agent, 268);
+export const GetBlobResultSchema: GenMessage<GetBlobResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	268,
+);
 
 /**
  * @generated from message agent.v1.SetBlobArgs
@@ -7898,7 +8382,10 @@ export type SetBlobArgs = Message<"agent.v1.SetBlobArgs"> & {
  * Describes the message agent.v1.SetBlobArgs.
  * Use `create(SetBlobArgsSchema)` to create a new message.
  */
-export const SetBlobArgsSchema: GenMessage<SetBlobArgs> = /*@__PURE__*/ messageDesc(file_agent, 269);
+export const SetBlobArgsSchema: GenMessage<SetBlobArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	269,
+);
 
 /**
  * @generated from message agent.v1.SetBlobResult
@@ -7914,7 +8401,10 @@ export type SetBlobResult = Message<"agent.v1.SetBlobResult"> & {
  * Describes the message agent.v1.SetBlobResult.
  * Use `create(SetBlobResultSchema)` to create a new message.
  */
-export const SetBlobResultSchema: GenMessage<SetBlobResult> = /*@__PURE__*/ messageDesc(file_agent, 270);
+export const SetBlobResultSchema: GenMessage<SetBlobResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	270,
+);
 
 /**
  * @generated from message agent.v1.KvServerMessage
@@ -7957,7 +8447,10 @@ export type KvServerMessage = Message<"agent.v1.KvServerMessage"> & {
  * Describes the message agent.v1.KvServerMessage.
  * Use `create(KvServerMessageSchema)` to create a new message.
  */
-export const KvServerMessageSchema: GenMessage<KvServerMessage> = /*@__PURE__*/ messageDesc(file_agent, 271);
+export const KvServerMessageSchema: GenMessage<KvServerMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	271,
+);
 
 /**
  * @generated from message agent.v1.KvClientMessage
@@ -7993,7 +8486,10 @@ export type KvClientMessage = Message<"agent.v1.KvClientMessage"> & {
  * Describes the message agent.v1.KvClientMessage.
  * Use `create(KvClientMessageSchema)` to create a new message.
  */
-export const KvClientMessageSchema: GenMessage<KvClientMessage> = /*@__PURE__*/ messageDesc(file_agent, 272);
+export const KvClientMessageSchema: GenMessage<KvClientMessage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	272,
+);
 
 /**
  * @generated from message agent.v1.LsArgs
@@ -8137,7 +8633,10 @@ export type LsDirectoryTreeNode = Message<"agent.v1.LsDirectoryTreeNode"> & {
  * Describes the message agent.v1.LsDirectoryTreeNode.
  * Use `create(LsDirectoryTreeNodeSchema)` to create a new message.
  */
-export const LsDirectoryTreeNodeSchema: GenMessage<LsDirectoryTreeNode> = /*@__PURE__*/ messageDesc(file_agent, 276);
+export const LsDirectoryTreeNodeSchema: GenMessage<LsDirectoryTreeNode> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	276,
+);
 
 /**
  * @generated from message agent.v1.LsDirectoryTreeNode_File
@@ -8251,7 +8750,10 @@ export type TerminalMetadata = Message<"agent.v1.TerminalMetadata"> & {
  * Describes the message agent.v1.TerminalMetadata.
  * Use `create(TerminalMetadataSchema)` to create a new message.
  */
-export const TerminalMetadataSchema: GenMessage<TerminalMetadata> = /*@__PURE__*/ messageDesc(file_agent, 281);
+export const TerminalMetadataSchema: GenMessage<TerminalMetadata> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	281,
+);
 
 /**
  * @generated from message agent.v1.TerminalMetadata_Command
@@ -8414,7 +8916,10 @@ export type McpToolNotFound = Message<"agent.v1.McpToolNotFound"> & {
  * Describes the message agent.v1.McpToolNotFound.
  * Use `create(McpToolNotFoundSchema)` to create a new message.
  */
-export const McpToolNotFoundSchema: GenMessage<McpToolNotFound> = /*@__PURE__*/ messageDesc(file_agent, 286);
+export const McpToolNotFoundSchema: GenMessage<McpToolNotFound> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	286,
+);
 
 /**
  * Text content item
@@ -8439,7 +8944,10 @@ export type McpTextContent = Message<"agent.v1.McpTextContent"> & {
  * Describes the message agent.v1.McpTextContent.
  * Use `create(McpTextContentSchema)` to create a new message.
  */
-export const McpTextContentSchema: GenMessage<McpTextContent> = /*@__PURE__*/ messageDesc(file_agent, 287);
+export const McpTextContentSchema: GenMessage<McpTextContent> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	287,
+);
 
 /**
  * Image content item
@@ -8466,7 +8974,10 @@ export type McpImageContent = Message<"agent.v1.McpImageContent"> & {
  * Describes the message agent.v1.McpImageContent.
  * Use `create(McpImageContentSchema)` to create a new message.
  */
-export const McpImageContentSchema: GenMessage<McpImageContent> = /*@__PURE__*/ messageDesc(file_agent, 288);
+export const McpImageContentSchema: GenMessage<McpImageContent> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	288,
+);
 
 /**
  * A single tool result content item: either text or image
@@ -8561,7 +9072,10 @@ export type McpRejected = Message<"agent.v1.McpRejected"> & {
  * Describes the message agent.v1.McpRejected.
  * Use `create(McpRejectedSchema)` to create a new message.
  */
-export const McpRejectedSchema: GenMessage<McpRejected> = /*@__PURE__*/ messageDesc(file_agent, 292);
+export const McpRejectedSchema: GenMessage<McpRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	292,
+);
 
 /**
  * @generated from message agent.v1.McpPermissionDenied
@@ -8582,7 +9096,10 @@ export type McpPermissionDenied = Message<"agent.v1.McpPermissionDenied"> & {
  * Describes the message agent.v1.McpPermissionDenied.
  * Use `create(McpPermissionDeniedSchema)` to create a new message.
  */
-export const McpPermissionDeniedSchema: GenMessage<McpPermissionDenied> = /*@__PURE__*/ messageDesc(file_agent, 293);
+export const McpPermissionDeniedSchema: GenMessage<McpPermissionDenied> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	293,
+);
 
 /**
  * List MCP resources exec args
@@ -8651,41 +9168,42 @@ export const ListMcpResourcesExecResultSchema: GenMessage<ListMcpResourcesExecRe
 /**
  * @generated from message agent.v1.ListMcpResourcesExecResult_McpResource
  */
-export type ListMcpResourcesExecResult_McpResource = Message<"agent.v1.ListMcpResourcesExecResult_McpResource"> & {
-	/**
-	 * @generated from field: string uri = 1;
-	 */
-	uri: string;
+export type ListMcpResourcesExecResult_McpResource =
+	Message<"agent.v1.ListMcpResourcesExecResult_McpResource"> & {
+		/**
+		 * @generated from field: string uri = 1;
+		 */
+		uri: string;
 
-	/**
-	 * @generated from field: optional string name = 2;
-	 */
-	name?: string;
+		/**
+		 * @generated from field: optional string name = 2;
+		 */
+		name?: string;
 
-	/**
-	 * @generated from field: optional string description = 3;
-	 */
-	description?: string;
+		/**
+		 * @generated from field: optional string description = 3;
+		 */
+		description?: string;
 
-	/**
-	 * @generated from field: optional string mime_type = 4;
-	 */
-	mimeType?: string;
+		/**
+		 * @generated from field: optional string mime_type = 4;
+		 */
+		mimeType?: string;
 
-	/**
-	 * Server name that provides this resource
-	 *
-	 * @generated from field: string server = 5;
-	 */
-	server: string;
+		/**
+		 * Server name that provides this resource
+		 *
+		 * @generated from field: string server = 5;
+		 */
+		server: string;
 
-	/**
-	 * Additional metadata
-	 *
-	 * @generated from field: map<string, string> annotations = 6;
-	 */
-	annotations: { [key: string]: string };
-};
+		/**
+		 * Additional metadata
+		 *
+		 * @generated from field: map<string, string> annotations = 6;
+		 */
+		annotations: { [key: string]: string };
+	};
 
 /**
  * Describes the message agent.v1.ListMcpResourcesExecResult_McpResource.
@@ -8920,7 +9438,8 @@ export type ReadMcpResourceError = Message<"agent.v1.ReadMcpResourceError"> & {
  * Describes the message agent.v1.ReadMcpResourceError.
  * Use `create(ReadMcpResourceErrorSchema)` to create a new message.
  */
-export const ReadMcpResourceErrorSchema: GenMessage<ReadMcpResourceError> = /*@__PURE__*/ messageDesc(file_agent, 303);
+export const ReadMcpResourceErrorSchema: GenMessage<ReadMcpResourceError> =
+	/*@__PURE__*/ messageDesc(file_agent, 303);
 
 /**
  * @generated from message agent.v1.ReadMcpResourceRejected
@@ -8997,7 +9516,10 @@ export type McpToolDefinition = Message<"agent.v1.McpToolDefinition"> & {
  * Describes the message agent.v1.McpToolDefinition.
  * Use `create(McpToolDefinitionSchema)` to create a new message.
  */
-export const McpToolDefinitionSchema: GenMessage<McpToolDefinition> = /*@__PURE__*/ messageDesc(file_agent, 306);
+export const McpToolDefinitionSchema: GenMessage<McpToolDefinition> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	306,
+);
 
 /**
  * @generated from message agent.v1.McpTools
@@ -9036,7 +9558,10 @@ export type McpInstructions = Message<"agent.v1.McpInstructions"> & {
  * Describes the message agent.v1.McpInstructions.
  * Use `create(McpInstructionsSchema)` to create a new message.
  */
-export const McpInstructionsSchema: GenMessage<McpInstructions> = /*@__PURE__*/ messageDesc(file_agent, 308);
+export const McpInstructionsSchema: GenMessage<McpInstructions> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	308,
+);
 
 /**
  * @generated from message agent.v1.McpDescriptor
@@ -9076,7 +9601,10 @@ export type McpDescriptor = Message<"agent.v1.McpDescriptor"> & {
  * Describes the message agent.v1.McpDescriptor.
  * Use `create(McpDescriptorSchema)` to create a new message.
  */
-export const McpDescriptorSchema: GenMessage<McpDescriptor> = /*@__PURE__*/ messageDesc(file_agent, 309);
+export const McpDescriptorSchema: GenMessage<McpDescriptor> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	309,
+);
 
 /**
  * @generated from message agent.v1.McpToolDescriptor
@@ -9097,7 +9625,10 @@ export type McpToolDescriptor = Message<"agent.v1.McpToolDescriptor"> & {
  * Describes the message agent.v1.McpToolDescriptor.
  * Use `create(McpToolDescriptorSchema)` to create a new message.
  */
-export const McpToolDescriptorSchema: GenMessage<McpToolDescriptor> = /*@__PURE__*/ messageDesc(file_agent, 310);
+export const McpToolDescriptorSchema: GenMessage<McpToolDescriptor> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	310,
+);
 
 /**
  * @generated from message agent.v1.McpFileSystemOptions
@@ -9123,7 +9654,8 @@ export type McpFileSystemOptions = Message<"agent.v1.McpFileSystemOptions"> & {
  * Describes the message agent.v1.McpFileSystemOptions.
  * Use `create(McpFileSystemOptionsSchema)` to create a new message.
  */
-export const McpFileSystemOptionsSchema: GenMessage<McpFileSystemOptions> = /*@__PURE__*/ messageDesc(file_agent, 311);
+export const McpFileSystemOptionsSchema: GenMessage<McpFileSystemOptions> =
+	/*@__PURE__*/ messageDesc(file_agent, 311);
 
 /**
  * @generated from message agent.v1.ReadArgs
@@ -9263,7 +9795,10 @@ export type ReadSuccess = Message<"agent.v1.ReadSuccess"> & {
  * Describes the message agent.v1.ReadSuccess.
  * Use `create(ReadSuccessSchema)` to create a new message.
  */
-export const ReadSuccessSchema: GenMessage<ReadSuccess> = /*@__PURE__*/ messageDesc(file_agent, 314);
+export const ReadSuccessSchema: GenMessage<ReadSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	314,
+);
 
 /**
  * @generated from message agent.v1.ReadError
@@ -9305,7 +9840,10 @@ export type ReadRejected = Message<"agent.v1.ReadRejected"> & {
  * Describes the message agent.v1.ReadRejected.
  * Use `create(ReadRejectedSchema)` to create a new message.
  */
-export const ReadRejectedSchema: GenMessage<ReadRejected> = /*@__PURE__*/ messageDesc(file_agent, 316);
+export const ReadRejectedSchema: GenMessage<ReadRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	316,
+);
 
 /**
  * @generated from message agent.v1.ReadFileNotFound
@@ -9321,7 +9859,10 @@ export type ReadFileNotFound = Message<"agent.v1.ReadFileNotFound"> & {
  * Describes the message agent.v1.ReadFileNotFound.
  * Use `create(ReadFileNotFoundSchema)` to create a new message.
  */
-export const ReadFileNotFoundSchema: GenMessage<ReadFileNotFound> = /*@__PURE__*/ messageDesc(file_agent, 317);
+export const ReadFileNotFoundSchema: GenMessage<ReadFileNotFound> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	317,
+);
 
 /**
  * @generated from message agent.v1.ReadPermissionDenied
@@ -9337,7 +9878,8 @@ export type ReadPermissionDenied = Message<"agent.v1.ReadPermissionDenied"> & {
  * Describes the message agent.v1.ReadPermissionDenied.
  * Use `create(ReadPermissionDeniedSchema)` to create a new message.
  */
-export const ReadPermissionDeniedSchema: GenMessage<ReadPermissionDenied> = /*@__PURE__*/ messageDesc(file_agent, 318);
+export const ReadPermissionDeniedSchema: GenMessage<ReadPermissionDenied> =
+	/*@__PURE__*/ messageDesc(file_agent, 318);
 
 /**
  * @generated from message agent.v1.ReadInvalidFile
@@ -9360,7 +9902,10 @@ export type ReadInvalidFile = Message<"agent.v1.ReadInvalidFile"> & {
  * Describes the message agent.v1.ReadInvalidFile.
  * Use `create(ReadInvalidFileSchema)` to create a new message.
  */
-export const ReadInvalidFileSchema: GenMessage<ReadInvalidFile> = /*@__PURE__*/ messageDesc(file_agent, 319);
+export const ReadInvalidFileSchema: GenMessage<ReadInvalidFile> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	319,
+);
 
 /**
  * @generated from message agent.v1.ReadToolCall
@@ -9381,7 +9926,10 @@ export type ReadToolCall = Message<"agent.v1.ReadToolCall"> & {
  * Describes the message agent.v1.ReadToolCall.
  * Use `create(ReadToolCallSchema)` to create a new message.
  */
-export const ReadToolCallSchema: GenMessage<ReadToolCall> = /*@__PURE__*/ messageDesc(file_agent, 320);
+export const ReadToolCallSchema: GenMessage<ReadToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	320,
+);
 
 /**
  * @generated from message agent.v1.ReadToolArgs
@@ -9407,7 +9955,10 @@ export type ReadToolArgs = Message<"agent.v1.ReadToolArgs"> & {
  * Describes the message agent.v1.ReadToolArgs.
  * Use `create(ReadToolArgsSchema)` to create a new message.
  */
-export const ReadToolArgsSchema: GenMessage<ReadToolArgs> = /*@__PURE__*/ messageDesc(file_agent, 321);
+export const ReadToolArgsSchema: GenMessage<ReadToolArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	321,
+);
 
 /**
  * @generated from message agent.v1.ReadToolResult
@@ -9438,7 +9989,10 @@ export type ReadToolResult = Message<"agent.v1.ReadToolResult"> & {
  * Describes the message agent.v1.ReadToolResult.
  * Use `create(ReadToolResultSchema)` to create a new message.
  */
-export const ReadToolResultSchema: GenMessage<ReadToolResult> = /*@__PURE__*/ messageDesc(file_agent, 322);
+export const ReadToolResultSchema: GenMessage<ReadToolResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	322,
+);
 
 /**
  * @generated from message agent.v1.ReadRange
@@ -9534,7 +10088,10 @@ export type ReadToolSuccess = Message<"agent.v1.ReadToolSuccess"> & {
  * Describes the message agent.v1.ReadToolSuccess.
  * Use `create(ReadToolSuccessSchema)` to create a new message.
  */
-export const ReadToolSuccessSchema: GenMessage<ReadToolSuccess> = /*@__PURE__*/ messageDesc(file_agent, 324);
+export const ReadToolSuccessSchema: GenMessage<ReadToolSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	324,
+);
 
 /**
  * @generated from message agent.v1.ReadToolError
@@ -9550,7 +10107,10 @@ export type ReadToolError = Message<"agent.v1.ReadToolError"> & {
  * Describes the message agent.v1.ReadToolError.
  * Use `create(ReadToolErrorSchema)` to create a new message.
  */
-export const ReadToolErrorSchema: GenMessage<ReadToolError> = /*@__PURE__*/ messageDesc(file_agent, 325);
+export const ReadToolErrorSchema: GenMessage<ReadToolError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	325,
+);
 
 /**
  * @generated from message agent.v1.RecordScreenArgs
@@ -9578,7 +10138,10 @@ export type RecordScreenArgs = Message<"agent.v1.RecordScreenArgs"> & {
  * Describes the message agent.v1.RecordScreenArgs.
  * Use `create(RecordScreenArgsSchema)` to create a new message.
  */
-export const RecordScreenArgsSchema: GenMessage<RecordScreenArgs> = /*@__PURE__*/ messageDesc(file_agent, 326);
+export const RecordScreenArgsSchema: GenMessage<RecordScreenArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	326,
+);
 
 /**
  * @generated from message agent.v1.RecordScreenResult
@@ -9623,7 +10186,10 @@ export type RecordScreenResult = Message<"agent.v1.RecordScreenResult"> & {
  * Describes the message agent.v1.RecordScreenResult.
  * Use `create(RecordScreenResultSchema)` to create a new message.
  */
-export const RecordScreenResultSchema: GenMessage<RecordScreenResult> = /*@__PURE__*/ messageDesc(file_agent, 327);
+export const RecordScreenResultSchema: GenMessage<RecordScreenResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	327,
+);
 
 /**
  * @generated from message agent.v1.RecordScreenStartSuccess
@@ -9717,7 +10283,10 @@ export type RecordScreenFailure = Message<"agent.v1.RecordScreenFailure"> & {
  * Describes the message agent.v1.RecordScreenFailure.
  * Use `create(RecordScreenFailureSchema)` to create a new message.
  */
-export const RecordScreenFailureSchema: GenMessage<RecordScreenFailure> = /*@__PURE__*/ messageDesc(file_agent, 331);
+export const RecordScreenFailureSchema: GenMessage<RecordScreenFailure> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	331,
+);
 
 /**
  * @generated from message agent.v1.CursorPackagePrompt
@@ -9738,7 +10307,10 @@ export type CursorPackagePrompt = Message<"agent.v1.CursorPackagePrompt"> & {
  * Describes the message agent.v1.CursorPackagePrompt.
  * Use `create(CursorPackagePromptSchema)` to create a new message.
  */
-export const CursorPackagePromptSchema: GenMessage<CursorPackagePrompt> = /*@__PURE__*/ messageDesc(file_agent, 332);
+export const CursorPackagePromptSchema: GenMessage<CursorPackagePrompt> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	332,
+);
 
 /**
  * @generated from message agent.v1.CursorPackage
@@ -9789,7 +10361,10 @@ export type CursorPackage = Message<"agent.v1.CursorPackage"> & {
  * Describes the message agent.v1.CursorPackage.
  * Use `create(CursorPackageSchema)` to create a new message.
  */
-export const CursorPackageSchema: GenMessage<CursorPackage> = /*@__PURE__*/ messageDesc(file_agent, 333);
+export const CursorPackageSchema: GenMessage<CursorPackage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	333,
+);
 
 /**
  * TODO: you should be able to override / configure this list in your .vscode settings not exactly sure what that should look like... but i guess you should be able to specify an override URL because we use URLs for identifying repos and maybe you should be able to specify additional buckets too... like in the jane street case: i guess jane street should have some default buckets
@@ -9887,7 +10462,10 @@ export type RequestContextArgs = Message<"agent.v1.RequestContextArgs"> & {
  * Describes the message agent.v1.RequestContextArgs.
  * Use `create(RequestContextArgsSchema)` to create a new message.
  */
-export const RequestContextArgsSchema: GenMessage<RequestContextArgs> = /*@__PURE__*/ messageDesc(file_agent, 335);
+export const RequestContextArgsSchema: GenMessage<RequestContextArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	335,
+);
 
 /**
  * @generated from message agent.v1.RequestContextResult
@@ -9925,7 +10503,8 @@ export type RequestContextResult = Message<"agent.v1.RequestContextResult"> & {
  * Describes the message agent.v1.RequestContextResult.
  * Use `create(RequestContextResultSchema)` to create a new message.
  */
-export const RequestContextResultSchema: GenMessage<RequestContextResult> = /*@__PURE__*/ messageDesc(file_agent, 336);
+export const RequestContextResultSchema: GenMessage<RequestContextResult> =
+	/*@__PURE__*/ messageDesc(file_agent, 336);
 
 /**
  * @generated from message agent.v1.RequestContextSuccess
@@ -9959,7 +10538,10 @@ export type RequestContextError = Message<"agent.v1.RequestContextError"> & {
  * Describes the message agent.v1.RequestContextError.
  * Use `create(RequestContextErrorSchema)` to create a new message.
  */
-export const RequestContextErrorSchema: GenMessage<RequestContextError> = /*@__PURE__*/ messageDesc(file_agent, 338);
+export const RequestContextErrorSchema: GenMessage<RequestContextError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	338,
+);
 
 /**
  * @generated from message agent.v1.RequestContextRejected
@@ -10041,7 +10623,8 @@ export type ImageProto_Dimension = Message<"agent.v1.ImageProto_Dimension"> & {
  * Describes the message agent.v1.ImageProto_Dimension.
  * Use `create(ImageProto_DimensionSchema)` to create a new message.
  */
-export const ImageProto_DimensionSchema: GenMessage<ImageProto_Dimension> = /*@__PURE__*/ messageDesc(file_agent, 341);
+export const ImageProto_DimensionSchema: GenMessage<ImageProto_Dimension> =
+	/*@__PURE__*/ messageDesc(file_agent, 341);
 
 /**
  * Git repository information for a workspace
@@ -10074,7 +10657,10 @@ export type GitRepoInfo = Message<"agent.v1.GitRepoInfo"> & {
  * Describes the message agent.v1.GitRepoInfo.
  * Use `create(GitRepoInfoSchema)` to create a new message.
  */
-export const GitRepoInfoSchema: GenMessage<GitRepoInfo> = /*@__PURE__*/ messageDesc(file_agent, 342);
+export const GitRepoInfoSchema: GenMessage<GitRepoInfo> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	342,
+);
 
 /**
  * Environment details for system prompt/context
@@ -10141,7 +10727,10 @@ export type RequestContextEnv = Message<"agent.v1.RequestContextEnv"> & {
  * Describes the message agent.v1.RequestContextEnv.
  * Use `create(RequestContextEnvSchema)` to create a new message.
  */
-export const RequestContextEnvSchema: GenMessage<RequestContextEnv> = /*@__PURE__*/ messageDesc(file_agent, 343);
+export const RequestContextEnvSchema: GenMessage<RequestContextEnv> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	343,
+);
 
 /**
  * @generated from message agent.v1.DebugModeConfig
@@ -10162,7 +10751,10 @@ export type DebugModeConfig = Message<"agent.v1.DebugModeConfig"> & {
  * Describes the message agent.v1.DebugModeConfig.
  * Use `create(DebugModeConfigSchema)` to create a new message.
  */
-export const DebugModeConfigSchema: GenMessage<DebugModeConfig> = /*@__PURE__*/ messageDesc(file_agent, 344);
+export const DebugModeConfigSchema: GenMessage<DebugModeConfig> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	344,
+);
 
 /**
  * @generated from message agent.v1.SkillDescriptor
@@ -10208,7 +10800,10 @@ export type SkillDescriptor = Message<"agent.v1.SkillDescriptor"> & {
  * Describes the message agent.v1.SkillDescriptor.
  * Use `create(SkillDescriptorSchema)` to create a new message.
  */
-export const SkillDescriptorSchema: GenMessage<SkillDescriptor> = /*@__PURE__*/ messageDesc(file_agent, 345);
+export const SkillDescriptorSchema: GenMessage<SkillDescriptor> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	345,
+);
 
 /**
  * @generated from message agent.v1.SkillOptions
@@ -10224,7 +10819,10 @@ export type SkillOptions = Message<"agent.v1.SkillOptions"> & {
  * Describes the message agent.v1.SkillOptions.
  * Use `create(SkillOptionsSchema)` to create a new message.
  */
-export const SkillOptionsSchema: GenMessage<SkillOptions> = /*@__PURE__*/ messageDesc(file_agent, 346);
+export const SkillOptionsSchema: GenMessage<SkillOptions> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	346,
+);
 
 /**
  * @generated from message agent.v1.RequestContext
@@ -10333,7 +10931,10 @@ export type RequestContext = Message<"agent.v1.RequestContext"> & {
  * Describes the message agent.v1.RequestContext.
  * Use `create(RequestContextSchema)` to create a new message.
  */
-export const RequestContextSchema: GenMessage<RequestContext> = /*@__PURE__*/ messageDesc(file_agent, 347);
+export const RequestContextSchema: GenMessage<RequestContext> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	347,
+);
 
 /**
  * @generated from message agent.v1.SandboxPolicy
@@ -10381,7 +10982,10 @@ export type SandboxPolicy = Message<"agent.v1.SandboxPolicy"> & {
  * Describes the message agent.v1.SandboxPolicy.
  * Use `create(SandboxPolicySchema)` to create a new message.
  */
-export const SandboxPolicySchema: GenMessage<SandboxPolicy> = /*@__PURE__*/ messageDesc(file_agent, 348);
+export const SandboxPolicySchema: GenMessage<SandboxPolicy> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	348,
+);
 
 /**
  * @generated from message agent.v1.SelectedImage
@@ -10439,7 +11043,10 @@ export type SelectedImage = Message<"agent.v1.SelectedImage"> & {
  * Describes the message agent.v1.SelectedImage.
  * Use `create(SelectedImageSchema)` to create a new message.
  */
-export const SelectedImageSchema: GenMessage<SelectedImage> = /*@__PURE__*/ messageDesc(file_agent, 349);
+export const SelectedImageSchema: GenMessage<SelectedImage> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	349,
+);
 
 /**
  * Contains both blob_id and data together, for when the client has both and wants to populate the server-side cache without re-uploading
@@ -10520,7 +11127,10 @@ export type ExtraContextEntry = Message<"agent.v1.ExtraContextEntry"> & {
  * Describes the message agent.v1.ExtraContextEntry.
  * Use `create(ExtraContextEntrySchema)` to create a new message.
  */
-export const ExtraContextEntrySchema: GenMessage<ExtraContextEntry> = /*@__PURE__*/ messageDesc(file_agent, 352);
+export const ExtraContextEntrySchema: GenMessage<ExtraContextEntry> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	352,
+);
 
 /**
  * A selected file from the UI
@@ -10550,7 +11160,10 @@ export type SelectedFile = Message<"agent.v1.SelectedFile"> & {
  * Describes the message agent.v1.SelectedFile.
  * Use `create(SelectedFileSchema)` to create a new message.
  */
-export const SelectedFileSchema: GenMessage<SelectedFile> = /*@__PURE__*/ messageDesc(file_agent, 353);
+export const SelectedFileSchema: GenMessage<SelectedFile> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	353,
+);
 
 /**
  * A selected code selection from the UI
@@ -10615,7 +11228,10 @@ export type SelectedTerminal = Message<"agent.v1.SelectedTerminal"> & {
  * Describes the message agent.v1.SelectedTerminal.
  * Use `create(SelectedTerminalSchema)` to create a new message.
  */
-export const SelectedTerminalSchema: GenMessage<SelectedTerminal> = /*@__PURE__*/ messageDesc(file_agent, 355);
+export const SelectedTerminalSchema: GenMessage<SelectedTerminal> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	355,
+);
 
 /**
  * A selected terminal selection from the UI
@@ -10680,7 +11296,10 @@ export type SelectedFolder = Message<"agent.v1.SelectedFolder"> & {
  * Describes the message agent.v1.SelectedFolder.
  * Use `create(SelectedFolderSchema)` to create a new message.
  */
-export const SelectedFolderSchema: GenMessage<SelectedFolder> = /*@__PURE__*/ messageDesc(file_agent, 357);
+export const SelectedFolderSchema: GenMessage<SelectedFolder> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	357,
+);
 
 /**
  * An external link manually attached by the user
@@ -10720,7 +11339,8 @@ export type SelectedExternalLink = Message<"agent.v1.SelectedExternalLink"> & {
  * Describes the message agent.v1.SelectedExternalLink.
  * Use `create(SelectedExternalLinkSchema)` to create a new message.
  */
-export const SelectedExternalLinkSchema: GenMessage<SelectedExternalLink> = /*@__PURE__*/ messageDesc(file_agent, 358);
+export const SelectedExternalLinkSchema: GenMessage<SelectedExternalLink> =
+	/*@__PURE__*/ messageDesc(file_agent, 358);
 
 /**
  * A cursor rule manually attached by the user
@@ -10738,7 +11358,10 @@ export type SelectedCursorRule = Message<"agent.v1.SelectedCursorRule"> & {
  * Describes the message agent.v1.SelectedCursorRule.
  * Use `create(SelectedCursorRuleSchema)` to create a new message.
  */
-export const SelectedCursorRuleSchema: GenMessage<SelectedCursorRule> = /*@__PURE__*/ messageDesc(file_agent, 359);
+export const SelectedCursorRuleSchema: GenMessage<SelectedCursorRule> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	359,
+);
 
 /**
  * Git diff (uncommitted changes in working tree)
@@ -10758,21 +11381,25 @@ export type SelectedGitDiff = Message<"agent.v1.SelectedGitDiff"> & {
  * Describes the message agent.v1.SelectedGitDiff.
  * Use `create(SelectedGitDiffSchema)` to create a new message.
  */
-export const SelectedGitDiffSchema: GenMessage<SelectedGitDiff> = /*@__PURE__*/ messageDesc(file_agent, 360);
+export const SelectedGitDiffSchema: GenMessage<SelectedGitDiff> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	360,
+);
 
 /**
  * Git diff from branch to main
  *
  * @generated from message agent.v1.SelectedGitDiffFromBranchToMain
  */
-export type SelectedGitDiffFromBranchToMain = Message<"agent.v1.SelectedGitDiffFromBranchToMain"> & {
-	/**
-	 * Raw git diff output
-	 *
-	 * @generated from field: string content = 1;
-	 */
-	content: string;
-};
+export type SelectedGitDiffFromBranchToMain =
+	Message<"agent.v1.SelectedGitDiffFromBranchToMain"> & {
+		/**
+		 * Raw git diff output
+		 *
+		 * @generated from field: string content = 1;
+		 */
+		content: string;
+	};
 
 /**
  * Describes the message agent.v1.SelectedGitDiffFromBranchToMain.
@@ -10815,7 +11442,10 @@ export type SelectedGitCommit = Message<"agent.v1.SelectedGitCommit"> & {
  * Describes the message agent.v1.SelectedGitCommit.
  * Use `create(SelectedGitCommitSchema)` to create a new message.
  */
-export const SelectedGitCommitSchema: GenMessage<SelectedGitCommit> = /*@__PURE__*/ messageDesc(file_agent, 362);
+export const SelectedGitCommitSchema: GenMessage<SelectedGitCommit> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	362,
+);
 
 /**
  * A pull request manually attached by the user via @mention Uses the same folder structure as ViewedPullRequest for consistency
@@ -10871,7 +11501,10 @@ export type SelectedPullRequest = Message<"agent.v1.SelectedPullRequest"> & {
  * Describes the message agent.v1.SelectedPullRequest.
  * Use `create(SelectedPullRequestSchema)` to create a new message.
  */
-export const SelectedPullRequestSchema: GenMessage<SelectedPullRequest> = /*@__PURE__*/ messageDesc(file_agent, 363);
+export const SelectedPullRequestSchema: GenMessage<SelectedPullRequest> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	363,
+);
 
 /**
  * A selection from a pull request diff (for files that may not exist on disk)
@@ -11001,7 +11634,10 @@ export type SelectedPastChat = Message<"agent.v1.SelectedPastChat"> & {
  * Describes the message agent.v1.SelectedPastChat.
  * Use `create(SelectedPastChatSchema)` to create a new message.
  */
-export const SelectedPastChatSchema: GenMessage<SelectedPastChat> = /*@__PURE__*/ messageDesc(file_agent, 367);
+export const SelectedPastChatSchema: GenMessage<SelectedPastChat> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	367,
+);
 
 /**
  * A call frame from a stack trace
@@ -11107,7 +11743,10 @@ export type SelectedConsoleLog = Message<"agent.v1.SelectedConsoleLog"> & {
  * Describes the message agent.v1.SelectedConsoleLog.
  * Use `create(SelectedConsoleLogSchema)` to create a new message.
  */
-export const SelectedConsoleLogSchema: GenMessage<SelectedConsoleLog> = /*@__PURE__*/ messageDesc(file_agent, 370);
+export const SelectedConsoleLogSchema: GenMessage<SelectedConsoleLog> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	370,
+);
 
 /**
  * A UI element picked by the user from the runtime
@@ -11150,7 +11789,10 @@ export type SelectedUIElement = Message<"agent.v1.SelectedUIElement"> & {
  * Describes the message agent.v1.SelectedUIElement.
  * Use `create(SelectedUIElementSchema)` to create a new message.
  */
-export const SelectedUIElementSchema: GenMessage<SelectedUIElement> = /*@__PURE__*/ messageDesc(file_agent, 371);
+export const SelectedUIElementSchema: GenMessage<SelectedUIElement> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	371,
+);
 
 /**
  * A subagent selected by the user from the slash menu
@@ -11168,7 +11810,10 @@ export type SelectedSubagent = Message<"agent.v1.SelectedSubagent"> & {
  * Describes the message agent.v1.SelectedSubagent.
  * Use `create(SelectedSubagentSchema)` to create a new message.
  */
-export const SelectedSubagentSchema: GenMessage<SelectedSubagent> = /*@__PURE__*/ messageDesc(file_agent, 372);
+export const SelectedSubagentSchema: GenMessage<SelectedSubagent> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	372,
+);
 
 /**
  * Container for selected context from the UI
@@ -11295,7 +11940,10 @@ export type SelectedContext = Message<"agent.v1.SelectedContext"> & {
  * Describes the message agent.v1.SelectedContext.
  * Use `create(SelectedContextSchema)` to create a new message.
  */
-export const SelectedContextSchema: GenMessage<SelectedContext> = /*@__PURE__*/ messageDesc(file_agent, 373);
+export const SelectedContextSchema: GenMessage<SelectedContext> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	373,
+);
 
 /**
  * InvocationContext represents the context from the external app/integration that triggered this agent request.
@@ -11342,7 +11990,10 @@ export type InvocationContext = Message<"agent.v1.InvocationContext"> & {
  * Describes the message agent.v1.InvocationContext.
  * Use `create(InvocationContextSchema)` to create a new message.
  */
-export const InvocationContextSchema: GenMessage<InvocationContext> = /*@__PURE__*/ messageDesc(file_agent, 374);
+export const InvocationContextSchema: GenMessage<InvocationContext> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	374,
+);
 
 /**
  * @generated from message agent.v1.InvocationContext_SlackThread
@@ -11443,38 +12094,39 @@ export const InvocationContext_IdeStateSchema: GenMessage<InvocationContext_IdeS
 /**
  * @generated from message agent.v1.InvocationContext_IdeState_File
  */
-export type InvocationContext_IdeState_File = Message<"agent.v1.InvocationContext_IdeState_File"> & {
-	/**
-	 * This is the full path
-	 *
-	 * @generated from field: string path = 1;
-	 */
-	path: string;
+export type InvocationContext_IdeState_File =
+	Message<"agent.v1.InvocationContext_IdeState_File"> & {
+		/**
+		 * This is the full path
+		 *
+		 * @generated from field: string path = 1;
+		 */
+		path: string;
 
-	/**
-	 * @generated from field: optional string relative_path = 2;
-	 */
-	relativePath?: string;
+		/**
+		 * @generated from field: optional string relative_path = 2;
+		 */
+		relativePath?: string;
 
-	/**
-	 * Present if file is currently focused
-	 *
-	 * @generated from field: optional agent.v1.InvocationContext_IdeState_File_CursorPosition cursor_position = 3;
-	 */
-	cursorPosition?: InvocationContext_IdeState_File_CursorPosition;
+		/**
+		 * Present if file is currently focused
+		 *
+		 * @generated from field: optional agent.v1.InvocationContext_IdeState_File_CursorPosition cursor_position = 3;
+		 */
+		cursorPosition?: InvocationContext_IdeState_File_CursorPosition;
 
-	/**
-	 * @generated from field: int32 total_lines = 4;
-	 */
-	totalLines: number;
+		/**
+		 * @generated from field: int32 total_lines = 4;
+		 */
+		totalLines: number;
 
-	/**
-	 * Present for terminal files
-	 *
-	 * @generated from field: optional string active_command = 5;
-	 */
-	activeCommand?: string;
-};
+		/**
+		 * Present for terminal files
+		 *
+		 * @generated from field: optional string active_command = 5;
+		 */
+		activeCommand?: string;
+	};
 
 /**
  * Describes the message agent.v1.InvocationContext_IdeState_File.
@@ -11913,7 +12565,10 @@ export type ShellResult = Message<"agent.v1.ShellResult"> & {
  * Describes the message agent.v1.ShellResult.
  * Use `create(ShellResultSchema)` to create a new message.
  */
-export const ShellResultSchema: GenMessage<ShellResult> = /*@__PURE__*/ messageDesc(file_agent, 389);
+export const ShellResultSchema: GenMessage<ShellResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	389,
+);
 
 /**
  * @generated from message agent.v1.ShellStreamStdout
@@ -11929,7 +12584,10 @@ export type ShellStreamStdout = Message<"agent.v1.ShellStreamStdout"> & {
  * Describes the message agent.v1.ShellStreamStdout.
  * Use `create(ShellStreamStdoutSchema)` to create a new message.
  */
-export const ShellStreamStdoutSchema: GenMessage<ShellStreamStdout> = /*@__PURE__*/ messageDesc(file_agent, 390);
+export const ShellStreamStdoutSchema: GenMessage<ShellStreamStdout> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	390,
+);
 
 /**
  * @generated from message agent.v1.ShellStreamStderr
@@ -11945,7 +12603,10 @@ export type ShellStreamStderr = Message<"agent.v1.ShellStreamStderr"> & {
  * Describes the message agent.v1.ShellStreamStderr.
  * Use `create(ShellStreamStderrSchema)` to create a new message.
  */
-export const ShellStreamStderrSchema: GenMessage<ShellStreamStderr> = /*@__PURE__*/ messageDesc(file_agent, 391);
+export const ShellStreamStderrSchema: GenMessage<ShellStreamStderr> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	391,
+);
 
 /**
  * @generated from message agent.v1.ShellStreamExit
@@ -11983,7 +12644,10 @@ export type ShellStreamExit = Message<"agent.v1.ShellStreamExit"> & {
  * Describes the message agent.v1.ShellStreamExit.
  * Use `create(ShellStreamExitSchema)` to create a new message.
  */
-export const ShellStreamExitSchema: GenMessage<ShellStreamExit> = /*@__PURE__*/ messageDesc(file_agent, 392);
+export const ShellStreamExitSchema: GenMessage<ShellStreamExit> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	392,
+);
 
 /**
  * @generated from message agent.v1.ShellStreamStart
@@ -11999,7 +12663,10 @@ export type ShellStreamStart = Message<"agent.v1.ShellStreamStart"> & {
  * Describes the message agent.v1.ShellStreamStart.
  * Use `create(ShellStreamStartSchema)` to create a new message.
  */
-export const ShellStreamStartSchema: GenMessage<ShellStreamStart> = /*@__PURE__*/ messageDesc(file_agent, 393);
+export const ShellStreamStartSchema: GenMessage<ShellStreamStart> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	393,
+);
 
 /**
  * @generated from message agent.v1.ShellStreamBackgrounded
@@ -12105,7 +12772,10 @@ export type ShellStream = Message<"agent.v1.ShellStream"> & {
  * Describes the message agent.v1.ShellStream.
  * Use `create(ShellStreamSchema)` to create a new message.
  */
-export const ShellStreamSchema: GenMessage<ShellStream> = /*@__PURE__*/ messageDesc(file_agent, 395);
+export const ShellStreamSchema: GenMessage<ShellStream> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	395,
+);
 
 /**
  * @generated from message agent.v1.OutputLocation
@@ -12137,7 +12807,10 @@ export type OutputLocation = Message<"agent.v1.OutputLocation"> & {
  * Describes the message agent.v1.OutputLocation.
  * Use `create(OutputLocationSchema)` to create a new message.
  */
-export const OutputLocationSchema: GenMessage<OutputLocation> = /*@__PURE__*/ messageDesc(file_agent, 396);
+export const OutputLocationSchema: GenMessage<OutputLocation> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	396,
+);
 
 /**
  * @generated from message agent.v1.ShellSuccess
@@ -12220,7 +12893,10 @@ export type ShellSuccess = Message<"agent.v1.ShellSuccess"> & {
  * Describes the message agent.v1.ShellSuccess.
  * Use `create(ShellSuccessSchema)` to create a new message.
  */
-export const ShellSuccessSchema: GenMessage<ShellSuccess> = /*@__PURE__*/ messageDesc(file_agent, 397);
+export const ShellSuccessSchema: GenMessage<ShellSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	397,
+);
 
 /**
  * @generated from message agent.v1.ShellFailure
@@ -12296,7 +12972,10 @@ export type ShellFailure = Message<"agent.v1.ShellFailure"> & {
  * Describes the message agent.v1.ShellFailure.
  * Use `create(ShellFailureSchema)` to create a new message.
  */
-export const ShellFailureSchema: GenMessage<ShellFailure> = /*@__PURE__*/ messageDesc(file_agent, 398);
+export const ShellFailureSchema: GenMessage<ShellFailure> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	398,
+);
 
 /**
  * @generated from message agent.v1.ShellTimeout
@@ -12322,7 +13001,10 @@ export type ShellTimeout = Message<"agent.v1.ShellTimeout"> & {
  * Describes the message agent.v1.ShellTimeout.
  * Use `create(ShellTimeoutSchema)` to create a new message.
  */
-export const ShellTimeoutSchema: GenMessage<ShellTimeout> = /*@__PURE__*/ messageDesc(file_agent, 399);
+export const ShellTimeoutSchema: GenMessage<ShellTimeout> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	399,
+);
 
 /**
  * @generated from message agent.v1.ShellRejected
@@ -12353,7 +13035,10 @@ export type ShellRejected = Message<"agent.v1.ShellRejected"> & {
  * Describes the message agent.v1.ShellRejected.
  * Use `create(ShellRejectedSchema)` to create a new message.
  */
-export const ShellRejectedSchema: GenMessage<ShellRejected> = /*@__PURE__*/ messageDesc(file_agent, 400);
+export const ShellRejectedSchema: GenMessage<ShellRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	400,
+);
 
 /**
  * @generated from message agent.v1.ShellPermissionDenied
@@ -12412,7 +13097,10 @@ export type ShellSpawnError = Message<"agent.v1.ShellSpawnError"> & {
  * Describes the message agent.v1.ShellSpawnError.
  * Use `create(ShellSpawnErrorSchema)` to create a new message.
  */
-export const ShellSpawnErrorSchema: GenMessage<ShellSpawnError> = /*@__PURE__*/ messageDesc(file_agent, 402);
+export const ShellSpawnErrorSchema: GenMessage<ShellSpawnError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	402,
+);
 
 /**
  * @generated from message agent.v1.ShellPartialResult
@@ -12433,7 +13121,10 @@ export type ShellPartialResult = Message<"agent.v1.ShellPartialResult"> & {
  * Describes the message agent.v1.ShellPartialResult.
  * Use `create(ShellPartialResultSchema)` to create a new message.
  */
-export const ShellPartialResultSchema: GenMessage<ShellPartialResult> = /*@__PURE__*/ messageDesc(file_agent, 403);
+export const ShellPartialResultSchema: GenMessage<ShellPartialResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	403,
+);
 
 /**
  * @generated from message agent.v1.ShellToolCall
@@ -12454,7 +13145,10 @@ export type ShellToolCall = Message<"agent.v1.ShellToolCall"> & {
  * Describes the message agent.v1.ShellToolCall.
  * Use `create(ShellToolCallSchema)` to create a new message.
  */
-export const ShellToolCallSchema: GenMessage<ShellToolCall> = /*@__PURE__*/ messageDesc(file_agent, 404);
+export const ShellToolCallSchema: GenMessage<ShellToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	404,
+);
 
 /**
  * @generated from message agent.v1.ShellToolCallStdoutDelta
@@ -12521,7 +13215,10 @@ export type ShellToolCallDelta = Message<"agent.v1.ShellToolCallDelta"> & {
  * Describes the message agent.v1.ShellToolCallDelta.
  * Use `create(ShellToolCallDeltaSchema)` to create a new message.
  */
-export const ShellToolCallDeltaSchema: GenMessage<ShellToolCallDelta> = /*@__PURE__*/ messageDesc(file_agent, 407);
+export const ShellToolCallDeltaSchema: GenMessage<ShellToolCallDelta> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	407,
+);
 
 /**
  * @generated from message agent.v1.SubagentType
@@ -12566,7 +13263,10 @@ export type SubagentType = Message<"agent.v1.SubagentType"> & {
  * Describes the message agent.v1.SubagentType.
  * Use `create(SubagentTypeSchema)` to create a new message.
  */
-export const SubagentTypeSchema: GenMessage<SubagentType> = /*@__PURE__*/ messageDesc(file_agent, 408);
+export const SubagentTypeSchema: GenMessage<SubagentType> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	408,
+);
 
 /**
  * Empty message for unspecified subagent type
@@ -12609,7 +13309,10 @@ export type SubagentTypeExplore = Message<"agent.v1.SubagentTypeExplore"> & {};
  * Describes the message agent.v1.SubagentTypeExplore.
  * Use `create(SubagentTypeExploreSchema)` to create a new message.
  */
-export const SubagentTypeExploreSchema: GenMessage<SubagentTypeExplore> = /*@__PURE__*/ messageDesc(file_agent, 411);
+export const SubagentTypeExploreSchema: GenMessage<SubagentTypeExplore> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	411,
+);
 
 /**
  * Custom subagent type with a name field
@@ -12629,7 +13332,10 @@ export type SubagentTypeCustom = Message<"agent.v1.SubagentTypeCustom"> & {
  * Describes the message agent.v1.SubagentTypeCustom.
  * Use `create(SubagentTypeCustomSchema)` to create a new message.
  */
-export const SubagentTypeCustomSchema: GenMessage<SubagentTypeCustom> = /*@__PURE__*/ messageDesc(file_agent, 412);
+export const SubagentTypeCustomSchema: GenMessage<SubagentTypeCustom> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	412,
+);
 
 /**
  * Custom subagent definition loaded from local workspace configuration.
@@ -12691,7 +13397,10 @@ export type CustomSubagent = Message<"agent.v1.CustomSubagent"> & {
  * Describes the message agent.v1.CustomSubagent.
  * Use `create(CustomSubagentSchema)` to create a new message.
  */
-export const CustomSubagentSchema: GenMessage<CustomSubagent> = /*@__PURE__*/ messageDesc(file_agent, 413);
+export const CustomSubagentSchema: GenMessage<CustomSubagent> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	413,
+);
 
 /**
  * @generated from message agent.v1.SwitchModeArgs
@@ -12721,7 +13430,10 @@ export type SwitchModeArgs = Message<"agent.v1.SwitchModeArgs"> & {
  * Describes the message agent.v1.SwitchModeArgs.
  * Use `create(SwitchModeArgsSchema)` to create a new message.
  */
-export const SwitchModeArgsSchema: GenMessage<SwitchModeArgs> = /*@__PURE__*/ messageDesc(file_agent, 414);
+export const SwitchModeArgsSchema: GenMessage<SwitchModeArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	414,
+);
 
 /**
  * @generated from message agent.v1.SwitchModeResult
@@ -12759,7 +13471,10 @@ export type SwitchModeResult = Message<"agent.v1.SwitchModeResult"> & {
  * Describes the message agent.v1.SwitchModeResult.
  * Use `create(SwitchModeResultSchema)` to create a new message.
  */
-export const SwitchModeResultSchema: GenMessage<SwitchModeResult> = /*@__PURE__*/ messageDesc(file_agent, 415);
+export const SwitchModeResultSchema: GenMessage<SwitchModeResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	415,
+);
 
 /**
  * @generated from message agent.v1.SwitchModeSuccess
@@ -12784,7 +13499,10 @@ export type SwitchModeSuccess = Message<"agent.v1.SwitchModeSuccess"> & {
  * Describes the message agent.v1.SwitchModeSuccess.
  * Use `create(SwitchModeSuccessSchema)` to create a new message.
  */
-export const SwitchModeSuccessSchema: GenMessage<SwitchModeSuccess> = /*@__PURE__*/ messageDesc(file_agent, 416);
+export const SwitchModeSuccessSchema: GenMessage<SwitchModeSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	416,
+);
 
 /**
  * @generated from message agent.v1.SwitchModeError
@@ -12800,7 +13518,10 @@ export type SwitchModeError = Message<"agent.v1.SwitchModeError"> & {
  * Describes the message agent.v1.SwitchModeError.
  * Use `create(SwitchModeErrorSchema)` to create a new message.
  */
-export const SwitchModeErrorSchema: GenMessage<SwitchModeError> = /*@__PURE__*/ messageDesc(file_agent, 417);
+export const SwitchModeErrorSchema: GenMessage<SwitchModeError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	417,
+);
 
 /**
  * @generated from message agent.v1.SwitchModeRejected
@@ -12816,7 +13537,10 @@ export type SwitchModeRejected = Message<"agent.v1.SwitchModeRejected"> & {
  * Describes the message agent.v1.SwitchModeRejected.
  * Use `create(SwitchModeRejectedSchema)` to create a new message.
  */
-export const SwitchModeRejectedSchema: GenMessage<SwitchModeRejected> = /*@__PURE__*/ messageDesc(file_agent, 418);
+export const SwitchModeRejectedSchema: GenMessage<SwitchModeRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	418,
+);
 
 /**
  * @generated from message agent.v1.SwitchModeToolCall
@@ -12837,7 +13561,10 @@ export type SwitchModeToolCall = Message<"agent.v1.SwitchModeToolCall"> & {
  * Describes the message agent.v1.SwitchModeToolCall.
  * Use `create(SwitchModeToolCallSchema)` to create a new message.
  */
-export const SwitchModeToolCallSchema: GenMessage<SwitchModeToolCall> = /*@__PURE__*/ messageDesc(file_agent, 419);
+export const SwitchModeToolCallSchema: GenMessage<SwitchModeToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	419,
+);
 
 /**
  * @generated from message agent.v1.SwitchModeRequestQuery
@@ -12893,7 +13620,8 @@ export const SwitchModeRequestResponseSchema: GenMessage<SwitchModeRequestRespon
 /**
  * @generated from message agent.v1.SwitchModeRequestResponse_Approved
  */
-export type SwitchModeRequestResponse_Approved = Message<"agent.v1.SwitchModeRequestResponse_Approved"> & {};
+export type SwitchModeRequestResponse_Approved =
+	Message<"agent.v1.SwitchModeRequestResponse_Approved"> & {};
 
 /**
  * Describes the message agent.v1.SwitchModeRequestResponse_Approved.
@@ -12906,12 +13634,13 @@ export const SwitchModeRequestResponse_ApprovedSchema: GenMessage<SwitchModeRequ
 /**
  * @generated from message agent.v1.SwitchModeRequestResponse_Rejected
  */
-export type SwitchModeRequestResponse_Rejected = Message<"agent.v1.SwitchModeRequestResponse_Rejected"> & {
-	/**
-	 * @generated from field: string reason = 1;
-	 */
-	reason: string;
-};
+export type SwitchModeRequestResponse_Rejected =
+	Message<"agent.v1.SwitchModeRequestResponse_Rejected"> & {
+		/**
+		 * @generated from field: string reason = 1;
+		 */
+		reason: string;
+	};
 
 /**
  * Describes the message agent.v1.SwitchModeRequestResponse_Rejected.
@@ -12985,7 +13714,10 @@ export type UpdateTodosToolCall = Message<"agent.v1.UpdateTodosToolCall"> & {
  * Describes the message agent.v1.UpdateTodosToolCall.
  * Use `create(UpdateTodosToolCallSchema)` to create a new message.
  */
-export const UpdateTodosToolCallSchema: GenMessage<UpdateTodosToolCall> = /*@__PURE__*/ messageDesc(file_agent, 425);
+export const UpdateTodosToolCallSchema: GenMessage<UpdateTodosToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	425,
+);
 
 /**
  * @generated from message agent.v1.UpdateTodosArgs
@@ -13006,7 +13738,10 @@ export type UpdateTodosArgs = Message<"agent.v1.UpdateTodosArgs"> & {
  * Describes the message agent.v1.UpdateTodosArgs.
  * Use `create(UpdateTodosArgsSchema)` to create a new message.
  */
-export const UpdateTodosArgsSchema: GenMessage<UpdateTodosArgs> = /*@__PURE__*/ messageDesc(file_agent, 426);
+export const UpdateTodosArgsSchema: GenMessage<UpdateTodosArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	426,
+);
 
 /**
  * @generated from message agent.v1.UpdateTodosResult
@@ -13037,7 +13772,10 @@ export type UpdateTodosResult = Message<"agent.v1.UpdateTodosResult"> & {
  * Describes the message agent.v1.UpdateTodosResult.
  * Use `create(UpdateTodosResultSchema)` to create a new message.
  */
-export const UpdateTodosResultSchema: GenMessage<UpdateTodosResult> = /*@__PURE__*/ messageDesc(file_agent, 427);
+export const UpdateTodosResultSchema: GenMessage<UpdateTodosResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	427,
+);
 
 /**
  * @generated from message agent.v1.UpdateTodosSuccess
@@ -13065,7 +13803,10 @@ export type UpdateTodosSuccess = Message<"agent.v1.UpdateTodosSuccess"> & {
  * Describes the message agent.v1.UpdateTodosSuccess.
  * Use `create(UpdateTodosSuccessSchema)` to create a new message.
  */
-export const UpdateTodosSuccessSchema: GenMessage<UpdateTodosSuccess> = /*@__PURE__*/ messageDesc(file_agent, 428);
+export const UpdateTodosSuccessSchema: GenMessage<UpdateTodosSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	428,
+);
 
 /**
  * @generated from message agent.v1.UpdateTodosError
@@ -13081,7 +13822,10 @@ export type UpdateTodosError = Message<"agent.v1.UpdateTodosError"> & {
  * Describes the message agent.v1.UpdateTodosError.
  * Use `create(UpdateTodosErrorSchema)` to create a new message.
  */
-export const UpdateTodosErrorSchema: GenMessage<UpdateTodosError> = /*@__PURE__*/ messageDesc(file_agent, 429);
+export const UpdateTodosErrorSchema: GenMessage<UpdateTodosError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	429,
+);
 
 /**
  * ReadTodos tool call
@@ -13104,7 +13848,10 @@ export type ReadTodosToolCall = Message<"agent.v1.ReadTodosToolCall"> & {
  * Describes the message agent.v1.ReadTodosToolCall.
  * Use `create(ReadTodosToolCallSchema)` to create a new message.
  */
-export const ReadTodosToolCallSchema: GenMessage<ReadTodosToolCall> = /*@__PURE__*/ messageDesc(file_agent, 430);
+export const ReadTodosToolCallSchema: GenMessage<ReadTodosToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	430,
+);
 
 /**
  * @generated from message agent.v1.ReadTodosArgs
@@ -13129,7 +13876,10 @@ export type ReadTodosArgs = Message<"agent.v1.ReadTodosArgs"> & {
  * Describes the message agent.v1.ReadTodosArgs.
  * Use `create(ReadTodosArgsSchema)` to create a new message.
  */
-export const ReadTodosArgsSchema: GenMessage<ReadTodosArgs> = /*@__PURE__*/ messageDesc(file_agent, 431);
+export const ReadTodosArgsSchema: GenMessage<ReadTodosArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	431,
+);
 
 /**
  * @generated from message agent.v1.ReadTodosResult
@@ -13160,7 +13910,10 @@ export type ReadTodosResult = Message<"agent.v1.ReadTodosResult"> & {
  * Describes the message agent.v1.ReadTodosResult.
  * Use `create(ReadTodosResultSchema)` to create a new message.
  */
-export const ReadTodosResultSchema: GenMessage<ReadTodosResult> = /*@__PURE__*/ messageDesc(file_agent, 432);
+export const ReadTodosResultSchema: GenMessage<ReadTodosResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	432,
+);
 
 /**
  * @generated from message agent.v1.ReadTodosSuccess
@@ -13181,7 +13934,10 @@ export type ReadTodosSuccess = Message<"agent.v1.ReadTodosSuccess"> & {
  * Describes the message agent.v1.ReadTodosSuccess.
  * Use `create(ReadTodosSuccessSchema)` to create a new message.
  */
-export const ReadTodosSuccessSchema: GenMessage<ReadTodosSuccess> = /*@__PURE__*/ messageDesc(file_agent, 433);
+export const ReadTodosSuccessSchema: GenMessage<ReadTodosSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	433,
+);
 
 /**
  * @generated from message agent.v1.ReadTodosError
@@ -13197,7 +13953,10 @@ export type ReadTodosError = Message<"agent.v1.ReadTodosError"> & {
  * Describes the message agent.v1.ReadTodosError.
  * Use `create(ReadTodosErrorSchema)` to create a new message.
  */
-export const ReadTodosErrorSchema: GenMessage<ReadTodosError> = /*@__PURE__*/ messageDesc(file_agent, 434);
+export const ReadTodosErrorSchema: GenMessage<ReadTodosError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	434,
+);
 
 /**
  * @generated from message agent.v1.Range
@@ -13276,7 +14035,10 @@ export type WebSearchArgs = Message<"agent.v1.WebSearchArgs"> & {
  * Describes the message agent.v1.WebSearchArgs.
  * Use `create(WebSearchArgsSchema)` to create a new message.
  */
-export const WebSearchArgsSchema: GenMessage<WebSearchArgs> = /*@__PURE__*/ messageDesc(file_agent, 438);
+export const WebSearchArgsSchema: GenMessage<WebSearchArgs> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	438,
+);
 
 /**
  * @generated from message agent.v1.WebSearchResult
@@ -13314,7 +14076,10 @@ export type WebSearchResult = Message<"agent.v1.WebSearchResult"> & {
  * Describes the message agent.v1.WebSearchResult.
  * Use `create(WebSearchResultSchema)` to create a new message.
  */
-export const WebSearchResultSchema: GenMessage<WebSearchResult> = /*@__PURE__*/ messageDesc(file_agent, 439);
+export const WebSearchResultSchema: GenMessage<WebSearchResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	439,
+);
 
 /**
  * @generated from message agent.v1.WebSearchSuccess
@@ -13330,7 +14095,10 @@ export type WebSearchSuccess = Message<"agent.v1.WebSearchSuccess"> & {
  * Describes the message agent.v1.WebSearchSuccess.
  * Use `create(WebSearchSuccessSchema)` to create a new message.
  */
-export const WebSearchSuccessSchema: GenMessage<WebSearchSuccess> = /*@__PURE__*/ messageDesc(file_agent, 440);
+export const WebSearchSuccessSchema: GenMessage<WebSearchSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	440,
+);
 
 /**
  * @generated from message agent.v1.WebSearchError
@@ -13346,7 +14114,10 @@ export type WebSearchError = Message<"agent.v1.WebSearchError"> & {
  * Describes the message agent.v1.WebSearchError.
  * Use `create(WebSearchErrorSchema)` to create a new message.
  */
-export const WebSearchErrorSchema: GenMessage<WebSearchError> = /*@__PURE__*/ messageDesc(file_agent, 441);
+export const WebSearchErrorSchema: GenMessage<WebSearchError> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	441,
+);
 
 /**
  * @generated from message agent.v1.WebSearchRejected
@@ -13362,7 +14133,10 @@ export type WebSearchRejected = Message<"agent.v1.WebSearchRejected"> & {
  * Describes the message agent.v1.WebSearchRejected.
  * Use `create(WebSearchRejectedSchema)` to create a new message.
  */
-export const WebSearchRejectedSchema: GenMessage<WebSearchRejected> = /*@__PURE__*/ messageDesc(file_agent, 442);
+export const WebSearchRejectedSchema: GenMessage<WebSearchRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	442,
+);
 
 /**
  * @generated from message agent.v1.WebSearchReference
@@ -13388,7 +14162,10 @@ export type WebSearchReference = Message<"agent.v1.WebSearchReference"> & {
  * Describes the message agent.v1.WebSearchReference.
  * Use `create(WebSearchReferenceSchema)` to create a new message.
  */
-export const WebSearchReferenceSchema: GenMessage<WebSearchReference> = /*@__PURE__*/ messageDesc(file_agent, 443);
+export const WebSearchReferenceSchema: GenMessage<WebSearchReference> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	443,
+);
 
 /**
  * @generated from message agent.v1.WebSearchToolCall
@@ -13409,7 +14186,10 @@ export type WebSearchToolCall = Message<"agent.v1.WebSearchToolCall"> & {
  * Describes the message agent.v1.WebSearchToolCall.
  * Use `create(WebSearchToolCallSchema)` to create a new message.
  */
-export const WebSearchToolCallSchema: GenMessage<WebSearchToolCall> = /*@__PURE__*/ messageDesc(file_agent, 444);
+export const WebSearchToolCallSchema: GenMessage<WebSearchToolCall> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	444,
+);
 
 /**
  * @generated from message agent.v1.WebSearchRequestQuery
@@ -13465,7 +14245,8 @@ export const WebSearchRequestResponseSchema: GenMessage<WebSearchRequestResponse
 /**
  * @generated from message agent.v1.WebSearchRequestResponse_Approved
  */
-export type WebSearchRequestResponse_Approved = Message<"agent.v1.WebSearchRequestResponse_Approved"> & {};
+export type WebSearchRequestResponse_Approved =
+	Message<"agent.v1.WebSearchRequestResponse_Approved"> & {};
 
 /**
  * Describes the message agent.v1.WebSearchRequestResponse_Approved.
@@ -13478,12 +14259,13 @@ export const WebSearchRequestResponse_ApprovedSchema: GenMessage<WebSearchReques
 /**
  * @generated from message agent.v1.WebSearchRequestResponse_Rejected
  */
-export type WebSearchRequestResponse_Rejected = Message<"agent.v1.WebSearchRequestResponse_Rejected"> & {
-	/**
-	 * @generated from field: string reason = 1;
-	 */
-	reason: string;
-};
+export type WebSearchRequestResponse_Rejected =
+	Message<"agent.v1.WebSearchRequestResponse_Rejected"> & {
+		/**
+		 * @generated from field: string reason = 1;
+		 */
+		reason: string;
+	};
 
 /**
  * Describes the message agent.v1.WebSearchRequestResponse_Rejected.
@@ -13581,7 +14363,10 @@ export type WriteResult = Message<"agent.v1.WriteResult"> & {
  * Describes the message agent.v1.WriteResult.
  * Use `create(WriteResultSchema)` to create a new message.
  */
-export const WriteResultSchema: GenMessage<WriteResult> = /*@__PURE__*/ messageDesc(file_agent, 450);
+export const WriteResultSchema: GenMessage<WriteResult> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	450,
+);
 
 /**
  * @generated from message agent.v1.WriteSuccess
@@ -13612,7 +14397,10 @@ export type WriteSuccess = Message<"agent.v1.WriteSuccess"> & {
  * Describes the message agent.v1.WriteSuccess.
  * Use `create(WriteSuccessSchema)` to create a new message.
  */
-export const WriteSuccessSchema: GenMessage<WriteSuccess> = /*@__PURE__*/ messageDesc(file_agent, 451);
+export const WriteSuccessSchema: GenMessage<WriteSuccess> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	451,
+);
 
 /**
  * @generated from message agent.v1.WritePermissionDenied
@@ -13668,7 +14456,10 @@ export type WriteNoSpace = Message<"agent.v1.WriteNoSpace"> & {
  * Describes the message agent.v1.WriteNoSpace.
  * Use `create(WriteNoSpaceSchema)` to create a new message.
  */
-export const WriteNoSpaceSchema: GenMessage<WriteNoSpace> = /*@__PURE__*/ messageDesc(file_agent, 453);
+export const WriteNoSpaceSchema: GenMessage<WriteNoSpace> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	453,
+);
 
 /**
  * @generated from message agent.v1.WriteError
@@ -13710,7 +14501,10 @@ export type WriteRejected = Message<"agent.v1.WriteRejected"> & {
  * Describes the message agent.v1.WriteRejected.
  * Use `create(WriteRejectedSchema)` to create a new message.
  */
-export const WriteRejectedSchema: GenMessage<WriteRejected> = /*@__PURE__*/ messageDesc(file_agent, 455);
+export const WriteRejectedSchema: GenMessage<WriteRejected> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	455,
+);
 
 /**
  * @generated from message agent.v1.BootstrapStatsigRequest
@@ -13746,7 +14540,10 @@ export type PingResponse = Message<"agent.v1.PingResponse"> & {};
  * Describes the message agent.v1.PingResponse.
  * Use `create(PingResponseSchema)` to create a new message.
  */
-export const PingResponseSchema: GenMessage<PingResponse> = /*@__PURE__*/ messageDesc(file_agent, 457);
+export const PingResponseSchema: GenMessage<PingResponse> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	457,
+);
 
 /**
  * @generated from message agent.v1.ExecRequest
@@ -13777,7 +14574,10 @@ export type ExecRequest = Message<"agent.v1.ExecRequest"> & {
  * Describes the message agent.v1.ExecRequest.
  * Use `create(ExecRequestSchema)` to create a new message.
  */
-export const ExecRequestSchema: GenMessage<ExecRequest> = /*@__PURE__*/ messageDesc(file_agent, 458);
+export const ExecRequestSchema: GenMessage<ExecRequest> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	458,
+);
 
 /**
  * @generated from message agent.v1.ExecResponse
@@ -13815,7 +14615,10 @@ export type ExecResponse = Message<"agent.v1.ExecResponse"> & {
  * Describes the message agent.v1.ExecResponse.
  * Use `create(ExecResponseSchema)` to create a new message.
  */
-export const ExecResponseSchema: GenMessage<ExecResponse> = /*@__PURE__*/ messageDesc(file_agent, 459);
+export const ExecResponseSchema: GenMessage<ExecResponse> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	459,
+);
 
 /**
  * @generated from message agent.v1.StdoutEvent
@@ -13831,7 +14634,10 @@ export type StdoutEvent = Message<"agent.v1.StdoutEvent"> & {
  * Describes the message agent.v1.StdoutEvent.
  * Use `create(StdoutEventSchema)` to create a new message.
  */
-export const StdoutEventSchema: GenMessage<StdoutEvent> = /*@__PURE__*/ messageDesc(file_agent, 460);
+export const StdoutEventSchema: GenMessage<StdoutEvent> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	460,
+);
 
 /**
  * @generated from message agent.v1.StderrEvent
@@ -13847,7 +14653,10 @@ export type StderrEvent = Message<"agent.v1.StderrEvent"> & {
  * Describes the message agent.v1.StderrEvent.
  * Use `create(StderrEventSchema)` to create a new message.
  */
-export const StderrEventSchema: GenMessage<StderrEvent> = /*@__PURE__*/ messageDesc(file_agent, 461);
+export const StderrEventSchema: GenMessage<StderrEvent> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	461,
+);
 
 /**
  * @generated from message agent.v1.ExitEvent
@@ -13879,7 +14688,10 @@ export type ReadTextFileRequest = Message<"agent.v1.ReadTextFileRequest"> & {
  * Describes the message agent.v1.ReadTextFileRequest.
  * Use `create(ReadTextFileRequestSchema)` to create a new message.
  */
-export const ReadTextFileRequestSchema: GenMessage<ReadTextFileRequest> = /*@__PURE__*/ messageDesc(file_agent, 463);
+export const ReadTextFileRequestSchema: GenMessage<ReadTextFileRequest> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	463,
+);
 
 /**
  * @generated from message agent.v1.ReadTextFileResponse
@@ -13895,7 +14707,8 @@ export type ReadTextFileResponse = Message<"agent.v1.ReadTextFileResponse"> & {
  * Describes the message agent.v1.ReadTextFileResponse.
  * Use `create(ReadTextFileResponseSchema)` to create a new message.
  */
-export const ReadTextFileResponseSchema: GenMessage<ReadTextFileResponse> = /*@__PURE__*/ messageDesc(file_agent, 464);
+export const ReadTextFileResponseSchema: GenMessage<ReadTextFileResponse> =
+	/*@__PURE__*/ messageDesc(file_agent, 464);
 
 /**
  * @generated from message agent.v1.WriteTextFileRequest
@@ -13916,7 +14729,8 @@ export type WriteTextFileRequest = Message<"agent.v1.WriteTextFileRequest"> & {
  * Describes the message agent.v1.WriteTextFileRequest.
  * Use `create(WriteTextFileRequestSchema)` to create a new message.
  */
-export const WriteTextFileRequestSchema: GenMessage<WriteTextFileRequest> = /*@__PURE__*/ messageDesc(file_agent, 465);
+export const WriteTextFileRequestSchema: GenMessage<WriteTextFileRequest> =
+	/*@__PURE__*/ messageDesc(file_agent, 465);
 
 /**
  * Empty response - success is implied by RPC completion
@@ -14033,12 +14847,13 @@ export const GetWorkspaceChangesHashRequestSchema: GenMessage<GetWorkspaceChange
 /**
  * @generated from message agent.v1.GetWorkspaceChangesHashResponse
  */
-export type GetWorkspaceChangesHashResponse = Message<"agent.v1.GetWorkspaceChangesHashResponse"> & {
-	/**
-	 * @generated from field: string hash = 1;
-	 */
-	hash: string;
-};
+export type GetWorkspaceChangesHashResponse =
+	Message<"agent.v1.GetWorkspaceChangesHashResponse"> & {
+		/**
+		 * @generated from field: string hash = 1;
+		 */
+		hash: string;
+	};
 
 /**
  * Describes the message agent.v1.GetWorkspaceChangesHashResponse.
@@ -14051,19 +14866,20 @@ export const GetWorkspaceChangesHashResponseSchema: GenMessage<GetWorkspaceChang
 /**
  * @generated from message agent.v1.RefreshGithubAccessTokenRequest
  */
-export type RefreshGithubAccessTokenRequest = Message<"agent.v1.RefreshGithubAccessTokenRequest"> & {
-	/**
-	 * @generated from field: string github_access_token = 1;
-	 */
-	githubAccessToken: string;
+export type RefreshGithubAccessTokenRequest =
+	Message<"agent.v1.RefreshGithubAccessTokenRequest"> & {
+		/**
+		 * @generated from field: string github_access_token = 1;
+		 */
+		githubAccessToken: string;
 
-	/**
-	 * e.g., "github.com", "gitlab.com", "gitlab.example.com"
-	 *
-	 * @generated from field: string hostname = 2;
-	 */
-	hostname: string;
-};
+		/**
+		 * e.g., "github.com", "gitlab.com", "gitlab.example.com"
+		 *
+		 * @generated from field: string hostname = 2;
+		 */
+		hostname: string;
+	};
 
 /**
  * Describes the message agent.v1.RefreshGithubAccessTokenRequest.
@@ -14078,7 +14894,8 @@ export const RefreshGithubAccessTokenRequestSchema: GenMessage<RefreshGithubAcce
  *
  * @generated from message agent.v1.RefreshGithubAccessTokenResponse
  */
-export type RefreshGithubAccessTokenResponse = Message<"agent.v1.RefreshGithubAccessTokenResponse"> & {};
+export type RefreshGithubAccessTokenResponse =
+	Message<"agent.v1.RefreshGithubAccessTokenResponse"> & {};
 
 /**
  * Describes the message agent.v1.RefreshGithubAccessTokenResponse.
@@ -14121,7 +14938,8 @@ export const WarmRemoteAccessServerRequestSchema: GenMessage<WarmRemoteAccessSer
  *
  * @generated from message agent.v1.WarmRemoteAccessServerResponse
  */
-export type WarmRemoteAccessServerResponse = Message<"agent.v1.WarmRemoteAccessServerResponse"> & {};
+export type WarmRemoteAccessServerResponse =
+	Message<"agent.v1.WarmRemoteAccessServerResponse"> & {};
 
 /**
  * Describes the message agent.v1.WarmRemoteAccessServerResponse.
@@ -14140,7 +14958,8 @@ export type ListArtifactsRequest = Message<"agent.v1.ListArtifactsRequest"> & {}
  * Describes the message agent.v1.ListArtifactsRequest.
  * Use `create(ListArtifactsRequestSchema)` to create a new message.
  */
-export const ListArtifactsRequestSchema: GenMessage<ListArtifactsRequest> = /*@__PURE__*/ messageDesc(file_agent, 477);
+export const ListArtifactsRequestSchema: GenMessage<ListArtifactsRequest> =
+	/*@__PURE__*/ messageDesc(file_agent, 477);
 
 /**
  * @generated from message agent.v1.ArtifactUploadMetadata
@@ -14376,21 +15195,22 @@ export const GetMcpRefreshTokensResponseSchema: GenMessage<GetMcpRefreshTokensRe
 /**
  * @generated from message agent.v1.UpdateEnvironmentVariablesRequest
  */
-export type UpdateEnvironmentVariablesRequest = Message<"agent.v1.UpdateEnvironmentVariablesRequest"> & {
-	/**
-	 * Environment variables to manage (plaintext values).
-	 *
-	 * @generated from field: map<string, string> env = 1;
-	 */
-	env: { [key: string]: string };
+export type UpdateEnvironmentVariablesRequest =
+	Message<"agent.v1.UpdateEnvironmentVariablesRequest"> & {
+		/**
+		 * Environment variables to manage (plaintext values).
+		 *
+		 * @generated from field: map<string, string> env = 1;
+		 */
+		env: { [key: string]: string };
 
-	/**
-	 * If true, unset previously-managed keys that are not present in `env`.
-	 *
-	 * @generated from field: bool replace = 2;
-	 */
-	replace: boolean;
-};
+		/**
+		 * If true, unset previously-managed keys that are not present in `env`.
+		 *
+		 * @generated from field: bool replace = 2;
+		 */
+		replace: boolean;
+	};
 
 /**
  * Describes the message agent.v1.UpdateEnvironmentVariablesRequest.
@@ -14403,17 +15223,18 @@ export const UpdateEnvironmentVariablesRequestSchema: GenMessage<UpdateEnvironme
 /**
  * @generated from message agent.v1.UpdateEnvironmentVariablesResponse
  */
-export type UpdateEnvironmentVariablesResponse = Message<"agent.v1.UpdateEnvironmentVariablesResponse"> & {
-	/**
-	 * @generated from field: uint32 applied = 1;
-	 */
-	applied: number;
+export type UpdateEnvironmentVariablesResponse =
+	Message<"agent.v1.UpdateEnvironmentVariablesResponse"> & {
+		/**
+		 * @generated from field: uint32 applied = 1;
+		 */
+		applied: number;
 
-	/**
-	 * @generated from field: uint32 removed = 2;
-	 */
-	removed: number;
-};
+		/**
+		 * @generated from field: uint32 removed = 2;
+		 */
+		removed: number;
+	};
 
 /**
  * Describes the message agent.v1.UpdateEnvironmentVariablesResponse.
@@ -14454,7 +15275,10 @@ export type McpOAuthStoredData = Message<"agent.v1.McpOAuthStoredData"> & {
  * Describes the message agent.v1.McpOAuthStoredData.
  * Use `create(McpOAuthStoredDataSchema)` to create a new message.
  */
-export const McpOAuthStoredDataSchema: GenMessage<McpOAuthStoredData> = /*@__PURE__*/ messageDesc(file_agent, 488);
+export const McpOAuthStoredDataSchema: GenMessage<McpOAuthStoredData> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	488,
+);
 
 /**
  * @generated from message agent.v1.Frame
@@ -14527,7 +15351,10 @@ export type BidiRequestId = Message<"agent.v1.BidiRequestId"> & {
  * Describes the message agent.v1.BidiRequestId.
  * Use `create(BidiRequestIdSchema)` to create a new message.
  */
-export const BidiRequestIdSchema: GenMessage<BidiRequestId> = /*@__PURE__*/ messageDesc(file_agent, 491);
+export const BidiRequestIdSchema: GenMessage<BidiRequestId> = /*@__PURE__*/ messageDesc(
+	file_agent,
+	491,
+);
 
 /**
  * @generated from enum agent.v1.AppliedAgentChange_ChangeType
@@ -14634,7 +15461,10 @@ export enum ScrollDirection {
 /**
  * Describes the enum agent.v1.ScrollDirection.
  */
-export const ScrollDirectionSchema: GenEnum<ScrollDirection> = /*@__PURE__*/ enumDesc(file_agent, 2);
+export const ScrollDirectionSchema: GenEnum<ScrollDirection> = /*@__PURE__*/ enumDesc(
+	file_agent,
+	2,
+);
 
 /**
  * @generated from enum agent.v1.CursorRuleSource
@@ -14659,7 +15489,10 @@ export enum CursorRuleSource {
 /**
  * Describes the enum agent.v1.CursorRuleSource.
  */
-export const CursorRuleSourceSchema: GenEnum<CursorRuleSource> = /*@__PURE__*/ enumDesc(file_agent, 3);
+export const CursorRuleSourceSchema: GenEnum<CursorRuleSource> = /*@__PURE__*/ enumDesc(
+	file_agent,
+	3,
+);
 
 /**
  * @generated from enum agent.v1.DiagnosticSeverity
@@ -14694,7 +15527,10 @@ export enum DiagnosticSeverity {
 /**
  * Describes the enum agent.v1.DiagnosticSeverity.
  */
-export const DiagnosticSeveritySchema: GenEnum<DiagnosticSeverity> = /*@__PURE__*/ enumDesc(file_agent, 4);
+export const DiagnosticSeveritySchema: GenEnum<DiagnosticSeverity> = /*@__PURE__*/ enumDesc(
+	file_agent,
+	4,
+);
 
 /**
  * @generated from enum agent.v1.RecordingMode
@@ -14811,7 +15647,10 @@ export enum SandboxPolicy_Type {
 /**
  * Describes the enum agent.v1.SandboxPolicy_Type.
  */
-export const SandboxPolicy_TypeSchema: GenEnum<SandboxPolicy_Type> = /*@__PURE__*/ enumDesc(file_agent, 8);
+export const SandboxPolicy_TypeSchema: GenEnum<SandboxPolicy_Type> = /*@__PURE__*/ enumDesc(
+	file_agent,
+	8,
+);
 
 /**
  * @generated from enum agent.v1.TimeoutBehavior
@@ -14836,7 +15675,10 @@ export enum TimeoutBehavior {
 /**
  * Describes the enum agent.v1.TimeoutBehavior.
  */
-export const TimeoutBehaviorSchema: GenEnum<TimeoutBehavior> = /*@__PURE__*/ enumDesc(file_agent, 9);
+export const TimeoutBehaviorSchema: GenEnum<TimeoutBehavior> = /*@__PURE__*/ enumDesc(
+	file_agent,
+	9,
+);
 
 /**
  * @generated from enum agent.v1.ShellAbortReason
@@ -14861,7 +15703,10 @@ export enum ShellAbortReason {
 /**
  * Describes the enum agent.v1.ShellAbortReason.
  */
-export const ShellAbortReasonSchema: GenEnum<ShellAbortReason> = /*@__PURE__*/ enumDesc(file_agent, 10);
+export const ShellAbortReasonSchema: GenEnum<ShellAbortReason> = /*@__PURE__*/ enumDesc(
+	file_agent,
+	10,
+);
 
 /**
  * @generated from enum agent.v1.CustomSubagentPermissionMode
@@ -15055,7 +15900,8 @@ export enum BugbotDeeplinkEventKind {
 /**
  * Describes the enum agent.v1.BugbotDeeplinkEventKind.
  */
-export const BugbotDeeplinkEventKindSchema: GenEnum<BugbotDeeplinkEventKind> = /*@__PURE__*/ enumDesc(file_agent, 16);
+export const BugbotDeeplinkEventKindSchema: GenEnum<BugbotDeeplinkEventKind> =
+	/*@__PURE__*/ enumDesc(file_agent, 16);
 
 /**
  * Agent Service with bidirectional streaming
@@ -15229,7 +16075,10 @@ export const ControlService: GenService<{
  *
  * @generated from service agent.v1.ExecService
  */
-export const ExecService: GenService<Record<string, never>> = /*@__PURE__*/ serviceDesc(file_agent, 2);
+export const ExecService: GenService<Record<string, never>> = /*@__PURE__*/ serviceDesc(
+	file_agent,
+	2,
+);
 
 /**
  * @generated from service agent.v1.PrivateWorkerBridgeExternalService

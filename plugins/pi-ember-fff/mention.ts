@@ -106,9 +106,7 @@ export function registerAutocompleteProvider(
 				return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 			},
 			shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
-				return (
-					current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true
-				);
+				return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
 			},
 		};
 	});

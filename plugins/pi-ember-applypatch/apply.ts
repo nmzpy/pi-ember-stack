@@ -316,7 +316,11 @@ function context_new_lines(lines: HunkLine[]): string[] {
 }
 
 /** Build replacement lines, preserving original file bytes for matched keep rows. */
-function context_replacement_lines(hunk_lines: HunkLine[], file_lines: string[], start: number): string[] {
+function context_replacement_lines(
+	hunk_lines: HunkLine[],
+	file_lines: string[],
+	start: number,
+): string[] {
 	const out: string[] = [];
 	let file_idx = start;
 	for (const line of hunk_lines) {

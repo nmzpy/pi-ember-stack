@@ -43,9 +43,9 @@ export function find_editor_container(tui: TUI): RenderableChild | undefined {
 	);
 }
 
-function widget_container_above_editor(tui: TUI):
-	| (RenderableChild & { children?: RenderableChild[] })
-	| undefined {
+function widget_container_above_editor(
+	tui: TUI,
+): (RenderableChild & { children?: RenderableChild[] }) | undefined {
 	const children = tui.children as RenderableChild[];
 	const editor_container = find_editor_container(tui);
 	if (!editor_container) return undefined;

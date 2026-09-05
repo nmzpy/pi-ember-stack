@@ -1,8 +1,8 @@
 import { CustomEditor, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { compressAttachment } from "./compress.ts";
-import { readClipboardImage } from "./clipboard.ts";
 import { describeReject, replaceImagePathsInText } from "./image-utils.ts";
+import { readClipboardImage } from "./clipboard.ts";
 import type { AttachmentStore } from "./store.ts";
 import {
 	format_image_styled_editor_placeholder,
@@ -13,6 +13,15 @@ import { request_render } from "../pi-ember-ui/render-intent.ts";
 
 export const PASTE_START = "\x1b[200~";
 export const PASTE_END = "\x1b[201~";
+
+/**
+ * Max length of a single non-bracketed input chunk that may continue an
+ * image path. Bracketed pastes are handled by `handleBracketedPaste` and
+ * never reach `transformPastedPathAlreadyInEditor`; this guard stops the
+ * per-chunk full-text rescan during non-bracketed fast pastes while still
+ * detecting a path being typed character by character.
+ */
+const MAX_SINGLE_PATH_CHUNK_LEN = 256;
 
 export class EmberImagesEditor extends CustomEditor {
 	private emberPasteBuffer: string | undefined;
@@ -43,20 +52,60 @@ export class EmberImagesEditor extends CustomEditor {
 	}
 
 	private transformPastedPathAlreadyInEditor(data: string): void {
+		// Only revisit when the current input chunk is plausibly contributing
+		// to a file path. Large paste chunks and ordinary keystrokes outside a
+		// path token skip the full-text rescan entirely — scanning the whole
+		// editor per character froze the TUI on large non-bracketed pastes
+		// (tokenize + synchronous fs probes per path-like token). The scan
+		// budget in `replaceImagePathsInText` bounds the actual transform; this
+		// gate just avoids the getText() walk.
+		if (data.length === 0 || data.length > MAX_SINGLE_PATH_CHUNK_LEN) return;
+		const carriesPathChar =
+			data.includes("/") || data.includes("\\") || data.includes(":");
+		if (!carriesPathChar && (data.length !== 1 || !this.isTypingPathTail())) return;
 		const text = this.getText();
-		const mayContainPath = data.length > 1 || text.includes("\\") || text.includes("/");
-		if (!mayContainPath) return;
+		if (text.length === 0) return;
 		const transformed = this.transform(text);
 		if (transformed.replaced === 0 || transformed.text === text) return;
 		super.setText(transformed.text);
 		request_render();
 	}
 
-	private pasteClipboardImage(): void {
-		const result = readClipboardImage();
+	/** True when the cursor sits inside a token that already looks like a path.
+	 *  Bounded to the current line — never a whole-text scan. Lets a typed or
+	 *  streamed filename/extension complete a path placeholder live.
+	 */
+	private isTypingPathTail(): boolean {
+		const cursor = this.getCursor();
+		const line = this.getLines()[cursor.line] ?? "";
+		const col = Math.max(0, Math.min(cursor.col, line.length));
+		const beforeCursor = line.slice(0, col);
+		let tokenStart = beforeCursor.length;
+		for (let index = beforeCursor.length - 1; index >= 0; index--) {
+			const ch = beforeCursor[index] ?? "";
+			if (/\s/.test(ch) || ch === '"' || ch === "'" || ch === "(" || ch === ")") {
+				tokenStart = index + 1;
+				break;
+			}
+		}
+		const token = beforeCursor.slice(tokenStart);
+		if (token.length === 0) return false;
+		return (
+			token.includes("/") ||
+			token.includes("\\") ||
+			token.includes(":") ||
+			token.startsWith("~/") ||
+			token.startsWith("./") ||
+			token.startsWith("../")
+		);
+	}
+
+	private async pasteClipboardImage(): Promise<void> {
+		const result = await readClipboardImage();
 		if (!result.ok) {
 			if (result.reason !== "empty" && result.reason !== "unsupported-platform") {
-				this.options.notify(`Clipboard image could not be attached (${result.reason}).`);
+				const detail = result.reason === "timed-out" ? "timed out" : result.reason;
+				this.options.notify(`Clipboard image could not be attached (${detail}).`);
 			}
 			return;
 		}

@@ -255,9 +255,7 @@ export function installEmberFooter(ctx: any): void {
 					tpsSegment = ` ${theme.fg("dim", "\u2022")} ${tpsColored}`;
 				}
 				const statsStr =
-					isShellMode() || isUserBashRunning()
-						? "shell"
-						: `${statsParts.join(" ")}${tpsSegment}`;
+					isShellMode() || isUserBashRunning() ? "shell" : `${statsParts.join(" ")}${tpsSegment}`;
 				const leftSide =
 					theme.fg("dim", folderName) +
 					` ${theme.fg("dim", "\u2022")} ` +

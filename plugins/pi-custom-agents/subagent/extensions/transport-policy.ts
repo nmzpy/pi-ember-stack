@@ -92,10 +92,7 @@ export function is_parser_stream_error(message: string | undefined): boolean {
 	);
 }
 
-
-const PROVIDER_INTERNAL_ERROR_PATTERNS: readonly RegExp[] = [
-	/^an internal error occurred/i,
-];
+const PROVIDER_INTERNAL_ERROR_PATTERNS: readonly RegExp[] = [/^an internal error occurred/i];
 
 /** True for a raw provider-side internal-error message (transient 500-class). */
 function is_provider_internal_error(message: string | undefined): boolean {
@@ -144,10 +141,7 @@ function is_provider_network_finish_reason(message: string | undefined): boolean
  */
 function is_upstream_server_error(message: string | undefined): boolean {
 	if (!message) return false;
-	return (
-		/"type"\s*:\s*"server_error"/i.test(message) &&
-		/upstream request failed/i.test(message)
-	);
+	return /"type"\s*:\s*"server_error"/i.test(message) && /upstream request failed/i.test(message);
 }
 
 // ---------------------------------------------------------------------------

@@ -46,7 +46,8 @@ export function build_plan_review_questions(): QuizQuestion[] {
 				{
 					value: "implement-fresh",
 					label: "Implement with fresh context",
-					description: "Start a new session with the plan pasted in, then choose Code or Orchestrate.",
+					description:
+						"Start a new session with the plan pasted in, then choose Code or Orchestrate.",
 				},
 				{ value: "copy", label: "Copy Plan" },
 			],

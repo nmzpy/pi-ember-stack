@@ -23,6 +23,7 @@ export function trim_to_token_budget<T>(
 	items: T[],
 	budget: number,
 	serialize: (slice: T[]) => string,
+	opts?: { keepHead?: boolean },
 ): T[] {
 	if (!Number.isFinite(budget) || budget <= 0 || items.length === 0) {
 		return [];
@@ -31,13 +32,16 @@ export function trim_to_token_budget<T>(
 	if (count_tokens(full) <= budget) {
 		return items;
 	}
+	// Default keeps the TAIL (most recent items). keepHead keeps the HEAD
+	// (oldest items) — the summarizer needs the discarded history, not the
+	// recent tail that is retained verbatim after the cut point.
 	let lo = 1;
 	let hi = items.length;
 	let best = 0;
 	while (lo <= hi) {
 		const mid = Math.floor((lo + hi) / 2);
-		const start = items.length - mid;
-		const text = serialize(items.slice(start));
+		const slice = opts?.keepHead ? items.slice(0, mid) : items.slice(items.length - mid);
+		const text = serialize(slice);
 		const tokens = count_tokens(text);
 		if (tokens <= budget) {
 			best = mid;
@@ -46,5 +50,5 @@ export function trim_to_token_budget<T>(
 			hi = mid - 1;
 		}
 	}
-	return best > 0 ? items.slice(items.length - best) : [];
+	return best > 0 ? (opts?.keepHead ? items.slice(0, best) : items.slice(items.length - best)) : [];
 }

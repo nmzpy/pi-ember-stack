@@ -30,7 +30,7 @@ export default function (pi: ExtensionAPI): void {
 	regReplace(pi);
 	regReplaceUndo(pi);
 
-	let autoRead = true;
+	let autoRead = false;
 
 	pi.on("session_start", async (_event, ctx) => {
 		await initHasher();

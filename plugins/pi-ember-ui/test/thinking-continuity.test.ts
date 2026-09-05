@@ -543,7 +543,7 @@ describe("Thinking pass timer lifecycle (idempotent arm / single clear)", () => 
 		}
 	});
 
-	test("message_end / agent_end preserves timer across inter-run gap", () => {
+	test("message_end resets the Thinking pass timer for the next turn", () => {
 		const { handlers } = installPlugins();
 		const ctx = makeCtx();
 		setThinkingBlocksHidden(true);
@@ -562,17 +562,54 @@ describe("Thinking pass timer lifecycle (idempotent arm / single clear)", () => 
 				ctx,
 			);
 
-			// message_end fires for the assistant message — timer must survive.
+			// message_end is a turn boundary for the thinking pass timer.
 			performance.now = () => SEND_TIME + 2000;
 			fire(handlers, "message_end", { message: { role: "assistant", timestamp: 200 } }, ctx);
-			expect(is_thinking_pass_timer_armed()).toBe(true);
+			expect(is_thinking_pass_timer_armed()).toBe(false);
 
-			// agent_end fires (inter-run gap) — timer must still survive.
+			// A later hidden thinking stream re-arms and starts a fresh pass.
+			performance.now = () => SEND_TIME + 10_000;
+			fire(
+				handlers,
+				"message_update",
+				{ message: { role: "assistant", timestamp: 300 }, assistantMessageEvent: { type: "thinking_delta", delta: "again" } },
+				ctx,
+			);
+			expect(is_thinking_pass_timer_armed()).toBe(true);
+			performance.now = () => SEND_TIME + 10_500;
+			expect(stripAnsi(format_thinking_pass_elapsed_suffix(makeTheme() as never))).toBe("");
+			performance.now = () => SEND_TIME + 12_500;
+			expect(stripAnsi(format_thinking_pass_elapsed_suffix(makeTheme() as never))).toBe(
+				"[dim: 2s]",
+			);
+		} finally {
+			performance.now = originalNow;
+		}
+	});
+
+	test("agent_end does not clear the pass timer", () => {
+		const { handlers } = installPlugins();
+		const ctx = makeCtx();
+		setThinkingBlocksHidden(true);
+		const originalNow = performance.now;
+		performance.now = () => SEND_TIME;
+		try {
+			fire(handlers, "session_start", { reason: "startup" }, ctx);
+			fire(handlers, "message_start", { message: { role: "user", timestamp: 100 } }, ctx);
+			fire(handlers, "before_agent_start", { prompt: "hello" }, ctx);
+			fire(handlers, "agent_start", {}, ctx);
+			fire(handlers, "message_start", { message: { role: "assistant", timestamp: 200 } }, ctx);
+			fire(
+				handlers,
+				"message_update",
+				{ message: { role: "assistant", timestamp: 200 }, assistantMessageEvent: { type: "thinking_delta", delta: "reason" } },
+				ctx,
+			);
+
+			// agent_end is still not a hard boundary.
 			performance.now = () => SEND_TIME + 3000;
 			fire(handlers, "agent_end", {}, ctx);
 			expect(is_thinking_pass_timer_armed()).toBe(true);
-
-			// Elapsed continues from the original arm.
 			performance.now = () => SEND_TIME + 5000;
 			expect(stripAnsi(format_thinking_pass_elapsed_suffix(makeTheme() as never))).toBe(
 				"[dim: 5s]",
@@ -581,7 +618,6 @@ describe("Thinking pass timer lifecycle (idempotent arm / single clear)", () => 
 			performance.now = originalNow;
 		}
 	});
-
 	test("compaction rebuild preserves an already-armed pass timer", () => {
 		const { handlers } = installPlugins();
 		const ctx = makeCtx();

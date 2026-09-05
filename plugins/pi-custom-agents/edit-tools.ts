@@ -21,9 +21,7 @@ export const LEGACY_SUBAGENT_RESUME_TOOL_NAME = "subagent.resume" as const;
 export const SUBAGENT_DELEGATION_TOOLS = ["subagent", SUBAGENT_RESUME_TOOL_NAME] as const;
 
 export function is_subagent_resume_tool(toolName: string): boolean {
-	return (
-		toolName === SUBAGENT_RESUME_TOOL_NAME || toolName === LEGACY_SUBAGENT_RESUME_TOOL_NAME
-	);
+	return toolName === SUBAGENT_RESUME_TOOL_NAME || toolName === LEGACY_SUBAGENT_RESUME_TOOL_NAME;
 }
 
 export function without_subagent_delegation_tools(tools: string[]): string[] {
@@ -74,23 +72,20 @@ export function model_provider_of(model: { provider?: string } | undefined): str
 /** Full code-mode tool set with the correct patch/edit tool for the provider. */
 export function build_full_tools(provider: string | undefined): string[] {
 	const patch_tool = resolve_parent_editing_tool_name(provider);
-	return [
-		"read",
-		"bash",
-		"write",
-		patch_tool,
-		"grep",
-		"find",
-		"ls",
-		"quiz",
-		...WEB_ACCESS_TOOLS,
-	];
+	return ["read", "bash", "write", patch_tool, "grep", "find", "ls", "quiz", ...WEB_ACCESS_TOOLS];
 }
 
-/** Replace apply_patch/edit in an agent tool list with the provider-appropriate tool. */
+/**
+ * Replace `apply_patch`/`edit` in an agent tool list with the provider-appropriate
+ * tool. This is a SWAP, not an add: if the agent's frontmatter listed neither
+ * editing tool (e.g. Scout's read-only `read, bash, grep, find, ls`), no editing
+ * tool is injected — the agent stays non-editing regardless of provider.
+ */
 export function with_provider_patch_tool(tools: string[], provider: string | undefined): string[] {
 	const patch_tool = resolve_patch_tool_name(provider);
+	const has_editing = tools.some((tool) => tool === "apply_patch" || tool === "edit");
 	const filtered = tools.filter((tool) => tool !== "apply_patch" && tool !== "edit");
+	if (!has_editing) return filtered;
 	const write_idx = filtered.indexOf("write");
 	if (write_idx >= 0) {
 		return [...filtered.slice(0, write_idx + 1), patch_tool, ...filtered.slice(write_idx + 1)];

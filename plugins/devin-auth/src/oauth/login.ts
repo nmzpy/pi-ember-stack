@@ -21,10 +21,10 @@
  * the only shape that fits pi's callback contract.
  */
 
-import * as crypto from 'node:crypto';
-import type { OAuthCredentials, OAuthLoginCallbacks } from '@earendil-works/pi-ai';
-import { registerUser } from './register-user.js';
-import { DEFAULT_REGION, type WindsurfRegion } from './types.js';
+import * as crypto from "node:crypto";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import { registerUser } from "./register-user.js";
+import { DEFAULT_REGION, type WindsurfRegion } from "./types.js";
 
 /** One year in milliseconds — the API key is effectively non-expiring. */
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
@@ -44,14 +44,14 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
  *     has an SSO session, so they can pick a different account.
  */
 function buildSignInUrl(region: WindsurfRegion): string {
-    const params = new URLSearchParams({
-        response_type: 'token',
-        client_id: region.oauthClientId,
-        redirect_uri: 'show-auth-token',
-        state: crypto.randomUUID(),
-        prompt: 'login',
-    });
-    return `${region.website}/windsurf/signin?${params.toString()}`;
+	const params = new URLSearchParams({
+		response_type: "token",
+		client_id: region.oauthClientId,
+		redirect_uri: "show-auth-token",
+		state: crypto.randomUUID(),
+		prompt: "login",
+	});
+	return `${region.website}/windsurf/signin?${params.toString()}`;
 }
 
 /**
@@ -66,30 +66,30 @@ function buildSignInUrl(region: WindsurfRegion): string {
  * propagate — pi surfaces it to the user.
  */
 export async function loginDevin(
-    callbacks: OAuthLoginCallbacks,
-    region: WindsurfRegion = DEFAULT_REGION,
+	callbacks: OAuthLoginCallbacks,
+	region: WindsurfRegion = DEFAULT_REGION,
 ): Promise<OAuthCredentials> {
-    const url = buildSignInUrl(region);
+	const url = buildSignInUrl(region);
 
-    // Open the browser to the Auth0 sign-in page.
-    callbacks.onAuth({ url });
+	// Open the browser to the Auth0 sign-in page.
+	callbacks.onAuth({ url });
 
-    // Block until the user pastes the token rendered on the sign-in page.
-    // This is the Firebase ID token (OAuth `access_token` from the fragment).
-    const firebaseIdToken = await callbacks.onPrompt({
-        message: 'Paste the token from the sign-in page:',
-    });
+	// Block until the user pastes the token rendered on the sign-in page.
+	// This is the Firebase ID token (OAuth `access_token` from the fragment).
+	const firebaseIdToken = await callbacks.onPrompt({
+		message: "Paste the token from the sign-in page:",
+	});
 
-    if (!firebaseIdToken) {
-        throw new Error('No token pasted; cannot complete sign-in.');
-    }
+	if (!firebaseIdToken) {
+		throw new Error("No token pasted; cannot complete sign-in.");
+	}
 
-    // Exchange the Firebase token for a long-lived Windsurf API key.
-    const result = await registerUser(firebaseIdToken.trim(), region);
+	// Exchange the Firebase token for a long-lived Windsurf API key.
+	const result = await registerUser(firebaseIdToken.trim(), region);
 
-    return {
-        refresh: '',
-        access: result.apiKey,
-        expires: Date.now() + ONE_YEAR_MS,
-    };
+	return {
+		refresh: "",
+		access: result.apiKey,
+		expires: Date.now() + ONE_YEAR_MS,
+	};
 }

@@ -12,10 +12,7 @@
 
 export const DEFAULT_AUTO_CONTINUE_MAX_CHARS = 6000;
 
-const BENIGN_COMPACT_SUBSTRINGS: readonly string[] = [
-	"Already compacted",
-	"Nothing to compact",
-];
+const BENIGN_COMPACT_SUBSTRINGS: readonly string[] = ["Already compacted", "Nothing to compact"];
 
 const COMPACT_FAILED_PREFIX = "Compaction failed: ";
 

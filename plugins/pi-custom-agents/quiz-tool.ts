@@ -139,18 +139,13 @@ export function format_quiz_call_row(
 ): string {
 	if (options.hidden) return "";
 	if (options.cancelled) {
-		return (
-			statusBulletColor(true, false, theme) +
-			theme.fg("dim", theme.bold("Quiz cancelled"))
-		);
+		return statusBulletColor(true, false, theme) + theme.fg("dim", theme.bold("Quiz cancelled"));
 	}
 	const count = args.questions?.length ?? 0;
 	const count_text = theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`);
 	if (options.completed) {
 		return (
-			statusBulletColor(false, true, theme) +
-			theme.fg("muted", theme.bold("Quiz ")) +
-			count_text
+			statusBulletColor(false, true, theme) + theme.fg("muted", theme.bold("Quiz ")) + count_text
 		);
 	}
 	return (
@@ -200,10 +195,7 @@ export interface QuizOptionRowPaint {
  * Keep this direction durable: the historically inverted behavior painted the
  * selected row dim and the unselected row bright white.
  */
-export function buildQuizOptionRow(
-	theme: Theme,
-	params: QuizOptionRowParams,
-): QuizOptionRowPaint {
+export function buildQuizOptionRow(theme: Theme, params: QuizOptionRowParams): QuizOptionRowPaint {
 	const numberedLabel = `${params.index + 1}. ${params.label}`;
 	const prefix = params.selected ? theme.fg("text", "> ") : "  ";
 	const painted = params.selected
@@ -276,10 +268,7 @@ export function finalize_quiz_tool_render(
  * the user saw. Question metadata is sourced only from `params.questions`
  * (SSOT) — never mirrored onto `QuizAnswer`.
  */
-export function format_answers_for_model(
-	questions: QuizQuestion[],
-	answers: QuizAnswer[],
-): string {
+export function format_answers_for_model(questions: QuizQuestion[], answers: QuizAnswer[]): string {
 	const by_id = new Map<string, QuizQuestion>();
 	for (const q of questions) by_id.set(q.id, q);
 	return answers
@@ -325,7 +314,12 @@ export async function askQuiz(
 	const includeNone = options?.includeNone !== false;
 
 	const result = await ctx.ui.custom(
-		(_tui: TUI, theme: Theme, _keybindings: KeybindingsManager, done: (result: QuizResult) => void) => {
+		(
+			_tui: TUI,
+			theme: Theme,
+			_keybindings: KeybindingsManager,
+			done: (result: QuizResult) => void,
+		) => {
 			setQuizActive(true);
 			request_render();
 			const finish = (r: QuizResult): void => {
@@ -414,9 +408,10 @@ export async function askQuiz(
 
 			function displayOptions(): { option: QuizOption; isNone: boolean }[] {
 				const q = currentQuestion();
-				const result: { option: QuizOption; isNone: boolean }[] = q.options.map(
-					(option) => ({ option, isNone: false }),
-				);
+				const result: { option: QuizOption; isNone: boolean }[] = q.options.map((option) => ({
+					option,
+					isNone: false,
+				}));
 				if (includeNone) {
 					result.push({
 						option: { value: NONE_VALUE, label: "None", description: NONE_DESC },

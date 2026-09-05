@@ -250,7 +250,13 @@ export class ThreadViewer {
 		let header = `${icon} ${t.fg("toolTitle", t.bold(this.thread.agentName))}${modeLabel}`;
 		if (status === "running") header += ` ${t.fg("warning", "(running...)")}`;
 		else if (status === "aborted") header += ` ${t.fg("error", "[aborted]")}`;
-		if (result && isErr && result.stopReason && result.stopReason !== "error" && result.stopReason !== "aborted") {
+		if (
+			result &&
+			isErr &&
+			result.stopReason &&
+			result.stopReason !== "error" &&
+			result.stopReason !== "aborted"
+		) {
 			const reasonColor = result.stopReason === "timeout" ? "warning" : "error";
 			header += ` ${t.fg(reasonColor, `[${result.stopReason}]`)}`;
 		}
@@ -303,9 +309,11 @@ export class ThreadViewer {
 					}
 				}
 				// Check if final output not already shown
-				const finalAlreadyShown = finalOutput && displayItems.some(
-					(it) => it.type === "text" && it.text.includes(finalOutput.slice(0, 100)),
-				);
+				const finalAlreadyShown =
+					finalOutput &&
+					displayItems.some(
+						(it) => it.type === "text" && it.text.includes(finalOutput.slice(0, 100)),
+					);
 				if (finalOutput && !finalAlreadyShown) {
 					const contentWidth = Math.max(1, width - 2);
 					const md = new Markdown(finalOutput.trim(), 0, 0, mdTheme);
@@ -345,10 +353,7 @@ export class ThreadViewer {
 		const maxVisible = Math.max(3, OVERLAY_HEIGHT);
 
 		// Clamp scrollOffset so the last page shows a full viewport minus one indicator line
-		const maxOffset =
-			total > maxVisible
-				? Math.max(0, total - (maxVisible - 1))
-				: 0;
+		const maxOffset = total > maxVisible ? Math.max(0, total - (maxVisible - 1)) : 0;
 		const offset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
 
 		// Reserve space for scroll indicators
@@ -361,18 +366,16 @@ export class ThreadViewer {
 
 		// Scroll indicator at top
 		if (aboveShown) {
-			visible.unshift(truncateToWidth(
-				this.theme.fg("muted", `↑ ${offset} more lines above`),
-				width,
-			));
+			visible.unshift(
+				truncateToWidth(this.theme.fg("muted", `↑ ${offset} more lines above`), width),
+			);
 		}
 		// Scroll indicator at bottom
 		if (belowShown) {
 			const remaining = total - offset - bodyHeight;
-			visible.push(truncateToWidth(
-				this.theme.fg("muted", `↓ ${remaining} more lines below`),
-				width,
-			));
+			visible.push(
+				truncateToWidth(this.theme.fg("muted", `↓ ${remaining} more lines below`), width),
+			);
 		}
 
 		return visible;

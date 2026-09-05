@@ -539,8 +539,9 @@ export function installAgentsMdHooks(pi: ExtensionAPI): void {
 	// custom messages so a resumed session does not re-deliver them.
 	loader.seedFn = () => {
 		try {
-			const entries = (pi as unknown as { ctx?: { sessionManager?: { getEntries: () => unknown[] } } })
-				.ctx?.sessionManager?.getEntries();
+			const entries = (
+				pi as unknown as { ctx?: { sessionManager?: { getEntries: () => unknown[] } } }
+			).ctx?.sessionManager?.getEntries();
 			if (!entries) return [];
 			const result: Array<{ role: string; customType: string; content: string }> = [];
 			for (const entry of entries) {
@@ -569,7 +570,11 @@ export function installAgentsMdHooks(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", (event) => {
 		if (!loader.active) return;
-		loader.noteToolCall(event.toolCallId, event.toolName, event.input as unknown as Record<string, unknown>);
+		loader.noteToolCall(
+			event.toolCallId,
+			event.toolName,
+			event.input as unknown as Record<string, unknown>,
+		);
 	});
 
 	pi.on("tool_execution_end", (event) => {

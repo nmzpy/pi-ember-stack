@@ -1,10 +1,6 @@
 import type { ImageContent as PiImageContent } from "@earendil-works/pi-ai";
 import type { ImageDimensions } from "@earendil-works/pi-tui";
-import {
-	hexToRgb,
-	SUCCESS_GREEN,
-	TEXT_COLOR,
-} from "../pi-ember-ui/mode-colors.ts";
+import { hexToRgb, SUCCESS_GREEN, TEXT_COLOR } from "../pi-ember-ui/mode-colors.ts";
 
 export const IMAGE_PLACEHOLDER_PREFIX = "[image ";
 export const IMAGE_PLACEHOLDER_PATTERN = /\[image \d+\]/gi;
@@ -61,9 +57,7 @@ function format_styled_image_label(label: string, resume_background?: string): s
 	const bg = `\x1b[48;2;${hexToRgb(SUCCESS_GREEN)}m`;
 	const fg = `\x1b[38;2;${hexToRgb(IMAGE_FALLBACK_TEXT_COLOR)}m`;
 	const resumeFg = `\x1b[38;2;${hexToRgb(TEXT_COLOR)}m`;
-	const resumeBg = resume_background
-		? `\x1b[48;2;${hexToRgb(resume_background)}m`
-		: "";
+	const resumeBg = resume_background ? `\x1b[48;2;${hexToRgb(resume_background)}m` : "";
 	return `${bg}${fg}${label}\x1b[39;49m${resumeFg}${resumeBg}`;
 }
 
@@ -72,10 +66,7 @@ export function format_image_styled_fallback_label(
 	dimensions?: ImageDimensions,
 	resumeBackground?: string,
 ): string {
-	return format_styled_image_label(
-		format_image_fallback_label(id, dimensions),
-		resumeBackground,
-	);
+	return format_styled_image_label(format_image_fallback_label(id, dimensions), resumeBackground);
 }
 
 /** Styled editor placeholder for an image attachment. The text `[image N]` is

@@ -135,9 +135,7 @@ export async function refresh_cursor_token(refresh_token: string): Promise<OAuth
 	};
 }
 
-export async function ensure_cursor_access_token(
-	credentials: OAuthCredentials,
-): Promise<string> {
+export async function ensure_cursor_access_token(credentials: OAuthCredentials): Promise<string> {
 	if (credentials.access && credentials.expires > Date.now()) {
 		return credentials.access;
 	}

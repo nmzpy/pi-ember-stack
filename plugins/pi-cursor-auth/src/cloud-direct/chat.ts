@@ -42,7 +42,14 @@ import {
 	type KvServerMessage,
 	type McpToolDefinition,
 } from "./proto/agent_pb.js";
-import { CONNECT_END_STREAM_FLAG, frame_connect_message, format_bridge_stderr, is_conversation_recovery_error, parse_connect_trailer_error, type ConnectTrailerError } from "./wire.js";
+import {
+	CONNECT_END_STREAM_FLAG,
+	frame_connect_message,
+	format_bridge_stderr,
+	is_conversation_recovery_error,
+	parse_connect_trailer_error,
+	type ConnectTrailerError,
+} from "./wire.js";
 import { spawn_bridge } from "./transport.js";
 import { CURSOR_RUN_RPC_PATH } from "./metadata.js";
 import {
@@ -106,8 +113,7 @@ interface StreamState {
 	total_tokens: number;
 }
 
-const REJECT_REASON =
-	"Tool not available in this environment. Use the MCP tools provided instead.";
+const REJECT_REASON = "Tool not available in this environment. Use the MCP tools provided instead.";
 const MCP_IDLE_CLOSE_MS = 1000;
 export const MCP_DEFERRED_RESULT_TEXT =
 	"Pi is executing this tool; the real result will be provided on the next turn.";
@@ -395,7 +401,10 @@ function handle_exec_message(
 			exec_msg,
 			"writeShellStdinResult",
 			create(WriteShellStdinResultSchema, {
-				result: { case: "error", value: create(WriteShellStdinErrorSchema, { error: REJECT_REASON }) },
+				result: {
+					case: "error",
+					value: create(WriteShellStdinErrorSchema, { error: REJECT_REASON }),
+				},
 			}),
 			send_frame,
 		);
@@ -407,14 +416,22 @@ function handle_exec_message(
 			exec_msg,
 			"fetchResult",
 			create(FetchResultSchema, {
-				result: { case: "error", value: create(FetchErrorSchema, { url: args.url ?? "", error: REJECT_REASON }) },
+				result: {
+					case: "error",
+					value: create(FetchErrorSchema, { url: args.url ?? "", error: REJECT_REASON }),
+				},
 			}),
 			send_frame,
 		);
 		return;
 	}
 	if (exec_case === "diagnosticsArgs") {
-		send_exec_result(exec_msg, "diagnosticsResult", create(DiagnosticsResultSchema, {}), send_frame);
+		send_exec_result(
+			exec_msg,
+			"diagnosticsResult",
+			create(DiagnosticsResultSchema, {}),
+			send_frame,
+		);
 	}
 }
 
@@ -503,7 +520,9 @@ function process_server_message(
 	}
 }
 
-export async function* stream_agent_events(req: CursorChatRequest): AsyncGenerator<CursorChatEvent> {
+export async function* stream_agent_events(
+	req: CursorChatRequest,
+): AsyncGenerator<CursorChatEvent> {
 	const max_attempts = 3;
 	for (let attempt = 0; attempt < max_attempts; attempt++) {
 		if (attempt > 0) {
@@ -643,8 +662,7 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 						on_native_tool_call,
 					);
 				} catch (error) {
-					stream_error =
-						error instanceof Error ? error : new Error(String(error));
+					stream_error = error instanceof Error ? error : new Error(String(error));
 					mark_stream_done();
 				}
 			},
@@ -663,10 +681,7 @@ async function* stream_agent_events_once(req: CursorChatRequest): AsyncGenerator
 				yield next;
 			}
 			if (done) break;
-			await Promise.race([
-				close_promise,
-				new Promise<void>((resolve) => setTimeout(resolve, 25)),
-			]);
+			await Promise.race([close_promise, new Promise<void>((resolve) => setTimeout(resolve, 25))]);
 			if (req.signal?.aborted) {
 				throw new CursorChatError("Cursor request aborted");
 			}

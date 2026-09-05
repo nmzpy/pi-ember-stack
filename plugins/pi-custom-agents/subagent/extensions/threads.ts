@@ -39,12 +39,18 @@ export class ThreadStore {
 	/** Subscribe to thread store changes. Returns an unsubscribe function. */
 	subscribe(listener: () => void): () => void {
 		this.listeners.add(listener);
-		return () => { this.listeners.delete(listener); };
+		return () => {
+			this.listeners.delete(listener);
+		};
 	}
 
 	private notify(): void {
 		for (const listener of this.listeners) {
-			try { listener(); } catch { /* best effort */ }
+			try {
+				listener();
+			} catch {
+				/* best effort */
+			}
 		}
 	}
 

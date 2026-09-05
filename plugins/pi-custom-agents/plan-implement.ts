@@ -7,10 +7,7 @@
  */
 
 /** Join the mode directive with the durable plan text captured during plan mode. */
-export function build_plan_implement_message_content(
-	plan_text: string,
-	directive: string,
-): string {
+export function build_plan_implement_message_content(plan_text: string, directive: string): string {
 	const plan = plan_text.trim();
 	const trimmed_directive = directive.trim();
 	if (!plan) return trimmed_directive;

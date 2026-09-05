@@ -106,9 +106,7 @@ const FAST_LINE_ID_RE = new RegExp(`^(.*)-${EFFORT_TOKEN_CAPTURE}-fast$`, "i");
  * Ids whose trailing `-{effort}-fast` is a separate Fast model line (not a Devin
  * speed tier) because the same effort exists without `-fast`.
  */
-export function build_fast_line_model_ids(
-	models: readonly { id: string }[],
-): ReadonlySet<string> {
+export function build_fast_line_model_ids(models: readonly { id: string }[]): ReadonlySet<string> {
 	const idSet = new Set(models.map((m) => m.id.trim().toLowerCase()));
 	const fastLine = new Set<string>();
 	for (const rawId of idSet) {
@@ -120,10 +118,7 @@ export function build_fast_line_model_ids(
 	return fastLine;
 }
 
-export function is_fast_line_model_id(
-	id: string,
-	fastLineIds: ReadonlySet<string>,
-): boolean {
+export function is_fast_line_model_id(id: string, fastLineIds: ReadonlySet<string>): boolean {
 	return fastLineIds.has(id.trim().toLowerCase());
 }
 
@@ -179,10 +174,7 @@ export function extract_model_class_token(idOrName: string): ModelClassToken | u
 }
 
 /** Whether this catalog row is a standalone model-class line (Fast / Thinking), not effort-only. */
-export function has_standalone_model_class(model: {
-	id: string;
-	name?: string;
-}): boolean {
+export function has_standalone_model_class(model: { id: string; name?: string }): boolean {
 	if (extract_model_class_token(model.id)) return true;
 	if (model.name && extract_model_class_token(model.name)) return true;
 	return false;
@@ -193,15 +185,33 @@ function format_model_class_label(token: string): string {
 }
 
 /** Reattach model class when the catalog name omits it but the id carries it. */
-export function append_model_class_if_missing(base: string, modelClass: string | undefined): string {
+export function append_model_class_if_missing(
+	base: string,
+	modelClass: string | undefined,
+): string {
 	if (!modelClass || !MODEL_CLASS_TOKEN_SET.has(modelClass)) return base;
 	if (extract_model_class_token(base)) return base;
 	return `${base.trim()} ${format_model_class_label(modelClass)}`;
 }
 
+/** Collapse a leading provider/brand prefix that repeats the first word of the model name.
+ * "DeepSeek: DeepSeek V4 Flash" → "DeepSeek V4 Flash"
+ * "OpenAI: OpenAI o4" → "OpenAI o4"
+ * "Google: Gemini 2.5" is left unchanged because the prefix word does not repeat.
+ */
+export function collapse_duplicate_brand_prefix(name: string): string {
+	const trimmed = name.trim();
+	const m = /^(\S+):\s+(\S+)(?:\s+|$)/.exec(trimmed);
+	if (m && m[1].toLowerCase() === m[2].toLowerCase()) {
+		const rest = trimmed.slice(m[0].length).trim();
+		return rest ? `${m[2]} ${rest}` : m[2];
+	}
+	return trimmed;
+}
+
 /** Strip effort variants for grouping while preserving standalone model class suffixes. */
 export function strip_for_family_grouping(idOrName: string, classHint?: string): string {
-	const base = strip_variant_token(idOrName);
+	const base = strip_variant_token(collapse_duplicate_brand_prefix(idOrName));
 	const detectedClass = extract_model_class_token(idOrName) ?? classHint;
 	return append_model_class_if_missing(base, detectedClass);
 }
@@ -292,15 +302,24 @@ export function strip_variant_token(idOrName: string): string {
 
 	const withoutThinking = trimmed.replace(THINKING_SUFFIX_RE, "");
 	if (withoutThinking !== trimmed && withoutThinking.trim().length > 0) {
-		return withoutThinking.trim().replace(/[-_.\s]+$/g, "").trim();
+		return withoutThinking
+			.trim()
+			.replace(/[-_.\s]+$/g, "")
+			.trim();
 	}
 
 	const withoutLevelFast = trimmed.replace(LEVEL_FAST_SUFFIX_RE, "");
 	if (withoutLevelFast !== trimmed && withoutLevelFast.trim().length > 0) {
-		return withoutLevelFast.trim().replace(/[-_.\s]+$/g, "").trim();
+		return withoutLevelFast
+			.trim()
+			.replace(/[-_.\s]+$/g, "")
+			.trim();
 	}
 
-	const withoutParen = trimmed.replace(/\s*\(\s*(minimal|low|medium|high|xhigh|max|none)\s*\)$/i, "");
+	const withoutParen = trimmed.replace(
+		/\s*\(\s*(minimal|low|medium|high|xhigh|max|none)\s*\)$/i,
+		"",
+	);
 	if (withoutParen !== trimmed) return withoutParen.trim();
 
 	const withoutSuffix = trimmed.replace(
@@ -322,9 +341,7 @@ export function is_thinking_fast_variant(idOrName: string): boolean {
 }
 
 /** Map a detection token onto an Effort slider point when possible. */
-export function variant_to_effort_point(
-	token: string | undefined,
-): EffortSliderPoint | undefined {
+export function variant_to_effort_point(token: string | undefined): EffortSliderPoint | undefined {
 	if (!token) return undefined;
 	const lower = token.toLowerCase();
 	if (lower === "no" || lower === "none") return undefined; // not a slider tick
@@ -394,10 +411,7 @@ function normalize_effort_suffix_level(thinkingLevel?: string): string | undefin
 }
 
 /** Bare id/name with no baked effort suffix (not even `none` / `no`). */
-export function is_unlabeled_sibling_base(model: {
-	id?: string;
-	name?: string;
-}): boolean {
+export function is_unlabeled_sibling_base(model: { id?: string; name?: string }): boolean {
 	const id = model.id?.trim() ?? "";
 	if (!id) return false;
 	if (extract_variant_token(id)) return false;

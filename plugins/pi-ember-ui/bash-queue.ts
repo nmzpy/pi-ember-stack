@@ -70,9 +70,7 @@ export type BashQueueEditor = {
 
 /** Live TUI surface for the bash-queue input listener. */
 export type BashQueueTui = {
-	addInputListener?: (
-		listener: (data: string) => { consume?: boolean } | undefined,
-	) => () => void;
+	addInputListener?: (listener: (data: string) => { consume?: boolean } | undefined) => () => void;
 	focusedComponent?: BashQueueEditor;
 	hasOverlay?: () => boolean;
 };

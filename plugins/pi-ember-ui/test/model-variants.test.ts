@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	EFFORT_SLIDER_POINTS,
 	append_model_class_if_missing,
+	collapse_duplicate_brand_prefix,
 	build_fast_line_model_ids,
 	effort_description,
 	effort_from_fast_line_id,
@@ -178,6 +179,22 @@ describe("effort helpers", () => {
 		);
 		expect(strip_for_family_grouping("DeepSeek V4 Flash 0731 High cro")).toBe(
 			"DeepSeek V4 Flash 0731",
+		);
+	});
+
+	test("collapses a duplicated leading brand prefix (case-insensitive)", () => {
+		expect(collapse_duplicate_brand_prefix("DeepSeek: DeepSeek V4 Flash")).toBe(
+			"DeepSeek V4 Flash",
+		);
+		expect(collapse_duplicate_brand_prefix("openai: openAI o4")).toBe("openAI o4");
+		expect(collapse_duplicate_brand_prefix("  DeepSeek:  DeepSeek   V4  ")).toBe(
+			"DeepSeek V4",
+		);
+		expect(collapse_duplicate_brand_prefix("Google: Gemini 2.5")).toBe(
+			"Google: Gemini 2.5",
+		);
+		expect(collapse_duplicate_brand_prefix("DeepSeek V4 Flash")).toBe(
+			"DeepSeek V4 Flash",
 		);
 	});
 

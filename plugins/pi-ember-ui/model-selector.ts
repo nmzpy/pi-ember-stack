@@ -22,23 +22,11 @@ import {
 	nearest_effort,
 	resolve_family_selection,
 } from "./model-families.ts";
-import {
-	type EffortSliderPoint,
-	format_effort_display_label,
-} from "./model-variants.ts";
-import {
-	PAGE_BG,
-	SUCCESS_GREEN,
-	blendToHex,
-	colorize,
-	setQuizActive,
-} from "./mode-colors.ts";
+import { type EffortSliderPoint, format_effort_display_label } from "./model-variants.ts";
+import { PAGE_BG, SUCCESS_GREEN, blendToHex, colorize, setQuizActive } from "./mode-colors.ts";
 import { resolve_select_list_theme } from "./select-list-theme.ts";
 import { find_exact_model_reference } from "./model-reference.ts";
-import {
-	rank_families_by_recents,
-	recent_identities_from_mode_models,
-} from "./model-recent.ts";
+import { rank_families_by_recents, recent_identities_from_mode_models } from "./model-recent.ts";
 import { request_render } from "./render-intent.ts";
 
 export const MODEL_COMMAND_PREFIX = "/model";
@@ -68,9 +56,7 @@ export function extract_model_command_search(text: string): string | null {
 
 /** True once the user is typing a model filter after `/model`. */
 export function should_route_model_slash_to_picker(text: string): boolean {
-	return (
-		text.startsWith(MODEL_COMMAND_PREFIX) && text.length > MODEL_COMMAND_PREFIX.length
-	);
+	return text.startsWith(MODEL_COMMAND_PREFIX) && text.length > MODEL_COMMAND_PREFIX.length;
 }
 
 export interface ModelSelectorResult {
@@ -90,7 +76,9 @@ export interface OpenModelPickerOptions {
 		thinkingLevel?: string;
 	};
 	/** Per-mode saved model bindings used to rank recent picks at the top. */
-	modeModels?: Readonly<Partial<Record<string, { readonly provider: string; readonly modelId: string }>>>;
+	modeModels?: Readonly<
+		Partial<Record<string, { readonly provider: string; readonly modelId: string }>>
+	>;
 	currentMode?: string;
 	onConfirm?: (result: ModelSelectorResult) => void;
 	onCancel?: () => void;
@@ -98,14 +86,15 @@ export interface OpenModelPickerOptions {
 
 const MAX_VISIBLE_FAMILIES = 7;
 
-const EFFORT_OPACITY_FOUR: Record<"minimal" | "low" | "medium" | "high" | "xhigh" | "max", number> = {
-	minimal: 0.2,
-	low: 0.25,
-	medium: 0.5,
-	high: 0.75,
-	xhigh: 1,
-	max: 1,
-};
+const EFFORT_OPACITY_FOUR: Record<"minimal" | "low" | "medium" | "high" | "xhigh" | "max", number> =
+	{
+		minimal: 0.2,
+		low: 0.25,
+		medium: 0.5,
+		high: 0.75,
+		xhigh: 1,
+		max: 1,
+	};
 
 const EFFORT_OPACITY_FIVE: Record<EffortSliderPoint, number> = {
 	default: 0.5,
@@ -151,8 +140,8 @@ export function effort_point_color(
 		efforts && efforts.length > 0
 			? effort_point_opacity(point, efforts)
 			: point === "default"
-			  ? 0.5
-			  : EFFORT_OPACITY_FOUR[point];
+				? 0.5
+				: EFFORT_OPACITY_FOUR[point];
 	return blendToHex(SUCCESS_GREEN, PAGE_BG, opacity);
 }
 
@@ -307,9 +296,7 @@ function display_families(state: PickerState, filter: string): ModelFamily[] {
 	const list = filtered_families(state, filter);
 	if (filter) return list;
 
-	const ranked = state.recent?.length
-		? rank_families_by_recents(list, state.recent)
-		: list;
+	const ranked = state.recent?.length ? rank_families_by_recents(list, state.recent) : list;
 
 	if (!state.currentInfo) return ranked;
 	const current_idx = ranked.findIndex((family) =>
@@ -340,10 +327,7 @@ function ensure_visible(state: PickerState, listLen: number): void {
 	);
 }
 
-function seed_effort_for(
-	state: PickerState,
-	family: ModelFamily | undefined,
-): void {
+function seed_effort_for(state: PickerState, family: ModelFamily | undefined): void {
 	if (!family || family.efforts.length < 2) {
 		state.effort = undefined;
 		return;
@@ -386,7 +370,10 @@ export function close_model_picker(editor?: { setText?: (t: string) => void }): 
 	editor?.setText?.("");
 }
 
-function finish_confirm(editor: { setText?: (t: string) => void }, result: ModelSelectorResult): void {
+function finish_confirm(
+	editor: { setText?: (t: string) => void },
+	result: ModelSelectorResult,
+): void {
 	const handler = confirm_handler;
 	close_model_picker(editor);
 	handler?.(result);
@@ -560,11 +547,7 @@ export function render_model_picker_rows(width: number): string[] {
 	}
 
 	if (list.length > MAX_VISIBLE_FAMILIES) {
-		push_line(
-			lines,
-			theme.fg("dim", `${state.familyIndex + 1}/${list.length}`),
-			renderWidth,
-		);
+		push_line(lines, theme.fg("dim", `${state.familyIndex + 1}/${list.length}`), renderWidth);
 	}
 
 	return lines;
@@ -592,9 +575,11 @@ function request_picker_render(_editor: { tui?: { requestRender?: () => void } }
 }
 
 /** Call after editor text changes so the filter list stays in sync. */
-export function on_model_picker_filter_changed(
-	editor: { getText?: () => string; setText?: (t: string) => void; tui?: { requestRender?: (force?: boolean) => void } },
-): void {
+export function on_model_picker_filter_changed(editor: {
+	getText?: () => string;
+	setText?: (t: string) => void;
+	tui?: { requestRender?: (force?: boolean) => void };
+}): void {
 	if (!picker_active || !picker_state) return;
 	bind_picker_editor(editor);
 	const normalized = normalize_picker_filter(editor.getText?.() ?? "");

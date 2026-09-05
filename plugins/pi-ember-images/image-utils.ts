@@ -23,6 +23,22 @@ interface PathToken {
 }
 
 const MAX_BARE_PATH_EXTENSIONS = 8;
+/**
+ * Maximum text budget for the synchronous path→image transform.
+ *
+ * The transform tokenizes the whole text and probes path-like tokens with
+ * synchronous fs calls. Scanning a large pasted block (thousands of lines of
+ * code) blocks the TUI event loop on every `/`-token — the freeze when
+ * copy-pasting big text. Image paths are short, so text beyond this budget
+ * is never scanned: the paste flows through Pi's native bracketed-paste
+ * path (which collapses >10-line / >1000-char pastes to an expandable
+ * marker) instantly and deterministically.
+ *
+ * SSOT: every call site (editor bracketed paste, per-keystroke rescan,
+ * submit-time input transform) shares this one cap. Never duplicate a
+ * second scan threshold in another plugin.
+ */
+export const MAX_IMAGE_PATH_SCAN_CHARS = 2000;
 const WINDOWS_DRIVE_PATH = /^([a-zA-Z]):[\\/](.*)$/;
 
 export function detectImageMimeType(bytes: Uint8Array): SupportedImageMimeType | undefined {
@@ -271,6 +287,12 @@ export function replaceImagePathsInText(
 		onReject?: (result: Exclude<LoadImageResult, { ok: true }>) => void;
 	},
 ): { text: string; replaced: number; accepted: ImageAttachment[] } {
+	// Deterministic scan budget (SSOT): never tokenize + synchronously probe
+	// path-like tokens beyond MAX_IMAGE_PATH_SCAN_CHARS. Large pasted blocks
+	// skip the transform entirely so the TUI stays responsive.
+	if (text.length > MAX_IMAGE_PATH_SCAN_CHARS) {
+		return { text, replaced: 0, accepted: [] };
+	}
 	const tokens = tokenizePathLikeText(text);
 	if (tokens.length === 0) return { text, replaced: 0, accepted: [] };
 
@@ -342,7 +364,9 @@ export function replaceImagePlaceholdersWithFallbackLabels(
 	for (const attachment of attachments) {
 		output = output
 			.split(attachment.placeholder)
-			.join(format_image_styled_fallback_label(attachment.id, attachment.dimensions, MUTED_MESSAGE_BG));
+			.join(
+				format_image_styled_fallback_label(attachment.id, attachment.dimensions, MUTED_MESSAGE_BG),
+			);
 	}
 	return output;
 }

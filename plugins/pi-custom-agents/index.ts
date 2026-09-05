@@ -62,6 +62,7 @@ import {
 	setShellMode,
 } from "../pi-ember-ui/mode-colors.ts";
 import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
+import { apply_openrouter_routing, build_openrouter_routing, live_openrouter_provider } from "../pi-ember-ui/openrouter-routing.ts";
 import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
 import { with_suppressed_shell_history_sync as withSuppressedShellHistorySync } from "../pi-ember-ui/shell-mode.ts";
 import { installAgentsMdHooks } from "./agents-md.ts";
@@ -276,7 +277,6 @@ const BASE_RESEARCH_TOOLS = [
 	"ls",
 	"bash",
 	"quiz",
-	"todo",
 	...WEB_ACCESS_TOOLS,
 ];
 const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATION_TOOLS];
@@ -287,7 +287,7 @@ const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATIO
  */
 export const ORCHESTRATE_TOOLS = [
 	"quiz",
-	"todo",
+
 	"subagent",
 	SUBAGENT_RESUME_TOOL_NAME,
 	...WEB_ACCESS_TOOLS,
@@ -481,9 +481,16 @@ Decomposition rules:
 
 Respond in plain labeled lines, no markdown headers or bullets. Provide a Task Summary, a concise Modules section, an Execution Order, and the self-contained prompts you would send to each Coder subagent. Do not emit "Delegation Prompts:" or other scaffold headings after you have already finished delegating the work.`);
 
-const HEALTH_CHECK_PROMPT_APPENDIX = `If the user's request is a health-check or diagnostic task, classify each finding as 'Confirmed issue' or 'Needs owner decision' and include File, Evidence, Impact, Correction, and Risks.
+const HEALTH_CHECK_PROMPT_APPENDIX = `Health-check mode is active. You are a read-only diagnostic auditor and delegation planner.
 
-Focus areas: ownership conflicts, hidden coupling, duplicated state or mirrored config, SSOT violations, fail-fast behavior, and high-change-entropy files.`;
+Your task:
+1. Identify every file relevant to the user's health-check request.
+2. For each batch of up to 10 files, spawn one Scout subagent to gather evidence about: SSOT violations, duplicated state or mirrored config, duplicated logic (DRY), dead or unreachable code (DCE), hidden coupling, ownership conflicts, fail-fast behavior, and high-change-entropy files.
+3. After Scouts return, classify each finding as Confirmed issue or Needs owner decision with the file path, evidence, impact, and correction.
+4. Plan fixes as self-contained modules of at most 10 files each. Spawn parallel Coder subagents to implement the fixes.
+5. Do not edit, write, or run mutating shell commands yourself.
+
+Report the file list, Scout assignments, findings, and Coder delegation plan in plain dense text. Use short labeled lines. Do not emit markdown headers or decorative bullets.`;
 
 function coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`Code mode is active. You are now in Code mode. You have full tool access. Implement, test, and verify code with autonomy.
@@ -747,12 +754,26 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		const needs_model =
 			current?.provider !== canonical.provider || current?.id !== canonical.modelId;
 		if (needs_model && (!target || !ctx.modelRegistry.hasConfiguredAuth(target))) return;
+		// OpenRouter upstream provider preference: bake the chosen upstream into the
+		// model's compat.openRouterRouting before setModel so the marketplace routes
+		// to it. Re-apply even when the model id is unchanged but the upstream differs
+		// (mode A and mode B bind the same OpenRouter model to different upstreams).
+		const routing = build_openrouter_routing(canonical.openRouterProvider ?? "");
+		const live_routing_matches =
+			!needs_model && live_openrouter_provider(current) === (canonical.openRouterProvider ?? undefined);
+		if (!needs_model && live_routing_matches) {
+			// Only the thinking level may need clamping; routing already matches.
+			await apply_bound_thinking_level(ctx, canonical);
+			sync_footer_after_model_restore(ctx, canonical.thinkingLevel);
+			return;
+		}
+		const base_model = (needs_model ? target : current) as Model<Api> | undefined;
+		if (!base_model) return;
+		const routed_model = apply_openrouter_routing(base_model, routing);
 
 		applying_mode_model = true;
 		try {
-			if (needs_model && target) {
-				await pi.setModel(target);
-			}
+			await pi.setModel(routed_model);
 			await apply_bound_thinking_level(ctx, canonical);
 			sync_footer_after_model_restore(ctx, canonical.thinkingLevel);
 		} finally {
@@ -801,11 +822,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		pi.setActiveTools(build_full_tools(model_provider_of(ctx.model)));
 	}
 
-	async function apply_mode(
-		modeId: string,
-		ctx: ExtensionContext,
-		force = false,
-	): Promise<void> {
+	async function apply_mode(modeId: string, ctx: ExtensionContext, force = false): Promise<void> {
 		const mode = MODES[modeId];
 		if (!mode) return;
 
@@ -824,10 +841,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		// flush itself) pass force=true: the run is logically over even though
 		// the shared agentRunPending flag is still set by a later listener, and
 		// deferring would start the implement follow-up turn in the stale mode.
-		if (
-			prevMode &&
-			should_defer_mode_switch(prevModeId, modeId, isAgentRunPending(), force)
-		) {
+		if (prevMode && should_defer_mode_switch(prevModeId, modeId, isAgentRunPending(), force)) {
 			setActiveMode(modeId);
 			pi.events.emit("pi-ember-ui:mode-change", { mode: modeId, liveOnly: true });
 			render_mode_status(modeId, ctx);
@@ -906,11 +920,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		await apply_mode(modeId, ctx, true);
 	}
 
-	async function switchMode(
-		modeId: string,
-		ctx: ExtensionContext,
-		force = false,
-	): Promise<void> {
+	async function switchMode(modeId: string, ctx: ExtensionContext, force = false): Promise<void> {
 		if (!MODES[modeId]) return;
 		if (!is_live_session(ctx)) {
 			// Queue only for the session that is currently binding. Never retain a
@@ -1529,8 +1539,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 				pi.sendMessage(
 					{
 						customType: "pi-agents-loop-retry",
-						content:
-							"Stop looping. Call a different tool and continue.",
+						content: "Stop looping. Call a different tool and continue.",
 						display: false,
 					},
 					{ triggerTurn: true },
@@ -1548,11 +1557,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					);
 				}
 				const choice = ctx.hasUI ? await showLoopRecovery(ctx) : undefined;
-				apply_quiz_outcome(
-					loop_guard,
-					choice?.action ?? "end",
-					settled_action.signature,
-				);
+				apply_quiz_outcome(loop_guard, choice?.action ?? "end", settled_action.signature);
 				lastTurnAborted = false;
 				lastTurnLengthStopped = false;
 				lastTurnError = false;
@@ -1561,8 +1566,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					pi.sendMessage(
 						{
 							customType: "pi-agents-loop-retry",
-							content:
-								"You have been looping, back off and continue with a different tool.",
+							content: "You have been looping, back off and continue with a different tool.",
 							display: false,
 						},
 						{ triggerTurn: true },

@@ -8,6 +8,7 @@ import piCrofAuthPlugin from "./pi-crof-auth/extensions/index.ts";
 import piCursorAuthPlugin from "./pi-cursor-auth/extensions/index.ts";
 import piCustomAgentsPlugin from "./pi-custom-agents/index.ts";
 import piEmberApplypatchPlugin from "./pi-ember-applypatch/index.ts";
+import piEmberAutonamePlugin from "./pi-ember-autoname/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberHasheditPlugin from "./pi-ember-hashedit/index.ts";
 import piEmberImagesPlugin from "./pi-ember-images/index.ts";
@@ -15,28 +16,13 @@ import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 import piEmberWebtoolsPlugin from "./pi-ember-webtools/extensions/index.ts";
 import piNovitaAuthPlugin from "./pi-novita-auth/extensions/index.ts";
+import { runEnabledPlugins, type PluginId, type StackPlugin } from "./registry-loader.ts";
 
-export { getSharedRenderer };
+export { getSharedRenderer, runEnabledPlugins };
 
-type PluginId =
-	| "pi-compact-tools"
-	| "pi-ember-applypatch"
-	| "pi-custom-agents"
-	| "devin-auth"
-	| "pi-crof-auth"
-	| "pi-cursor-auth"
-	| "pi-novita-auth"
-	| "pi-ember-fff"
-	| "pi-ember-hashedit"
-	| "pi-ember-images"
-	| "pi-ember-ui"
-	| "pi-ember-tps"
-	| "pi-ember-webtools";
-type StackPlugin = {
-	id: PluginId;
-	description: string;
-	extension: (pi: ExtensionAPI) => void | Promise<void>;
-};
+// Re-export the registry-loader types for consumers that import from the
+// package entry point.
+export type { PluginId, StackPlugin };
 
 const CONFIG_FILENAME = "pi-ember-stack.json";
 const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
@@ -52,6 +38,7 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-ember-hashedit",
 	"pi-ember-ui",
 	"pi-ember-tps",
+	"pi-ember-autoname",
 	"pi-ember-webtools",
 ];
 
@@ -110,6 +97,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-ember-ui",
 		description: "Ember accent theme — green success accents, accent borders",
 		extension: piEmberUiPlugin,
+	},
+	{
+		id: "pi-ember-autoname",
+		description: "Auto-generate a session name from the first user message",
+		extension: piEmberAutonamePlugin,
 	},
 	{
 		id: "pi-ember-tps",
@@ -223,13 +215,11 @@ function registerPluginCommand(pi: ExtensionAPI, enabledPlugins: Set<PluginId>):
 export default async function piEmberStackPlugin(pi: ExtensionAPI): Promise<void> {
 	const enabledPlugins = readEnabledPlugins();
 	const fffEnabled = enabledPlugins.has("pi-ember-fff");
-	for (const plugin of PLUGINS) {
-		if (!enabledPlugins.has(plugin.id)) continue;
+	await runEnabledPlugins(PLUGINS, enabledPlugins, (plugin) => {
 		if (plugin.id === "pi-compact-tools") {
-			await piCompactToolsPlugin(pi, fffEnabled ? { excludeTools: ["grep", "find"] } : undefined);
-			continue;
+			return piCompactToolsPlugin(pi, fffEnabled ? { excludeTools: ["grep", "find"] } : undefined);
 		}
-		await plugin.extension(pi);
-	}
+		return plugin.extension(pi);
+	});
 	registerPluginCommand(pi, enabledPlugins);
 }

@@ -951,8 +951,15 @@ field. Keep that mechanism aligned with the actual plugin folders.
 ### `pi-ember-images`
 
 - Owns clipboard and pasted-path image attachments for the parent TUI.
-- Windows clipboard capture uses the STA PowerShell `System.Windows.Forms`/
-  `System.Drawing` backend; macOS uses `osascript`. Windows file paths from
+- Clipboard reads prefer the pi runtime's native clipboard module
+  (`@mariozechner/clipboard` via `dist/utils/clipboard-native.js`, resolved
+  through the shared `resolve_coding_agent_dist_dir` SSOT) — in-process,
+  instant, zero subprocess spawns, so a clipboard read can never hang or time
+  out. When the native module is unavailable (WSL/headless), Windows falls
+  back to an async STA PowerShell `System.Windows.Forms`/`System.Drawing`
+  read and macOS to `osascript`; both fallbacks run through the shared
+  `runCaptured` helper with a hard timeout and process-tree kill so a hung
+  clipboard owner can never freeze the TUI. Windows file paths from
   bracketed terminal paste are recognized before they reach the normal editor.
 - Image placeholders use the single `[image N]` format in the editor. On submit,
   the input handler removes placeholders from prompt text and attaches native
@@ -999,6 +1006,22 @@ field. Keep that mechanism aligned with the actual plugin folders.
   normalizer would silently drop such formats.
 - The extension loads before `pi-custom-agents` so the existing editor wrapper
   composes around the image-aware editor instead of being replaced.
+- **Deterministic paste scan budget:** `MAX_IMAGE_PATH_SCAN_CHARS` (2000) in
+  `image-utils.ts` is the SSOT cap for the synchronous path→image transform
+  (`replaceImagePathsInText`). Text beyond the budget is returned unchanged
+  before tokenize + synchronous fs probes ever run, so copy-pasting a large
+  text block can never block the TUI on `existsSync`/`statSync`/`readFileSync`
+  per path-like token. Every call site (editor bracketed paste, per-keystroke
+  rescan, submit-time `input` transform) shares this one cap — never add a
+  second scan threshold. The editor's `transformPastedPathAlreadyInEditor`
+  additionally only rescans when the current input chunk carries a path
+  separator/drive-colon (`/`, `\`, `:`) at most `MAX_SINGLE_PATH_CHUNK_LEN`
+  (256) chars, or when the cursor sits inside an already path-like token
+  (`isTypingPathTail`, bounded to the current line only), killing the
+  per-character full-text rescan on non-bracketed fast pastes while still
+  completing typed/pasted paths live. Large pastes flow through Pi's native
+  bracketed-paste path (collapsed to an expandable `[paste #N +N lines]`
+  marker) instantly and deterministically.
 - Attachment state is session-local and held by one `AttachmentStore`; it is
   cleared on `session_start` and `session_shutdown`.
 
@@ -1562,12 +1585,40 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `PLAN_SUBAGENT_AWARENESS_PROMPT` in `index.ts`).
 - Owns per-mode model memory. The persisted `pi-ember-stack.json` state is the
   SSOT for the active `mode` and the `modeModels` map
-  (`Partial<Record<modeId, { provider, modelId, thinkingLevel? }>>`). Each mode
+  (`Partial<Record<modeId, { provider, modelId, thinkingLevel?, openRouterProvider? }>>`). Each mode
   remembers its own last user-selected model and effort variant (`thinkingLevel`
   from `/model` Effort slider or thinking-level cycle); unbound modes have no
   entry and keep the live model on switch. The legacy top-level `model` field is
   migrated once into `modeModels[persistedMode || "code"]` and deleted on write,
   so `modeModels` is the sole authority — never write a parallel global `model`.
+  The optional `openRouterProvider` field stores the OpenRouter upstream provider
+  slug (e.g. `anthropic`, `amazon-bedrock/us`) the user pinned via the model
+  picker's second step; it is only meaningful for `provider === "openrouter"`
+  bindings and is stripped by `canonical_model_identity` for any other provider
+  and for the `OPENROUTER_PROVIDER_AUTO` sentinel.
+- **OpenRouter upstream provider picker:** OpenRouter is a marketplace, not a
+  single provider — one model id is served by multiple upstreams (Anthropic,
+  Google Vertex, Azure, Amazon Bedrock, …). When the user confirms an
+  OpenRouter model in the Switch Model picker, `apply_model_selection` in
+  `pi-ember-ui/model-picker.ts` runs a second `ctx.ui.select` step
+  (`pick_openrouter_provider`) that fetches the live upstream list from
+  OpenRouter's `/api/v1/models/{author}/{slug}/endpoints` endpoint and offers
+  `Auto (let OpenRouter route)` plus each upstream with its pricing and
+  quantization. The chosen upstream is baked into a clone of the registry
+  `Model` via `apply_openrouter_routing` (`compat.openRouterRouting = { only:
+  [tag], allow_fallbacks: false }`) before `pi.setModel`, because Pi sends
+  `model.compat.openRouterRouting` as-is in the request body and there is no
+  per-request routing argument on `setModel`. The choice is remembered per mode
+  through `ModelIdentity.openRouterProvider` and re-applied on mode restore
+  (`apply_bound_model` re-bakes the routing even when the model id is unchanged
+  but the upstream differs). The SSOT for path parsing, the endpoints fetch,
+  routing-config construction, model cloning, live-routing extraction
+  (`live_openrouter_provider`), and the per-mode preference read lives in
+  `plugins/pi-ember-ui/openrouter-routing.ts` — never duplicate OpenRouter
+  routing logic in other plugins. Network failures and empty endpoint lists
+  fall back to Auto so the model still switches. `Ctrl+P` cycle does not run the
+  provider step (it uses the registry model directly); only `/model` and the
+  Switch Model overlay do.
 - Binds a model to the active mode only on explicit user picks: `model_select`
   events whose `source` is `"set"` (`/model`) or `"cycle"` (`Ctrl+P`), and
   `thinking_level_select` when the user changes effort. Restore and unknown
@@ -1855,6 +1906,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   with no editing tool. Subagent child sessions never load hashedit and keep
   native `edit` because `with_provider_patch_tool()` deliberately stays on
   `resolve_patch_tool_name()`.
+- **`endpoint_only` mode (large contiguous deletions):** `replace` accepts an optional `endpoint_only: boolean` field. When true, `execPipeline` passes `skipRangeServed` to `applyEdit`, which skips `assertRangeServed` (the interior served-range stale check) and trusts only the two endpoint hashes — which are still validated for existence and uniqueness by `valEdit`. This fixes `E_RANGE_STALE` false positives on large block deletes (50+ lines) where the model has read the endpoints but not every interior line; the default served check requires every interior hash to have been shown, so it rejects such deletes even when both endpoints are correct. The `RangeStaleError` message is trimmed to the two fresh endpoint hashes + a retry hint (re-read for interior anchors OR set `endpoint_only=true`) instead of the old 100-row dump. `lastChangedLine` in `changedRange` reports the last line that differed in the ORIGINAL file (not the result), so a pure 560-line delete correctly reports `Lines 11–570 changed` instead of collapsing to the deletion point. Never use `endpoint_only` for small surgical edits where the full range was shown — the interior check catches real drift there.
 - Hash computation, anchor validation, replace semantics, and undo behavior stay
   owned by the hashedit implementation; the Ember adaptation changes only its
   registration and TUI rendering seams.
@@ -1871,6 +1923,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `hashline/hash.ts` is the single near-miss regex; never duplicate prefix
   stripping in another plugin. The `replace-guidelines.md` prompt states the
   bare-content contract explicitly.
+- **Quiet output defaults:** auto-read is OFF by default (`DEFAULT_CONFIG.autoRead = false` in `config.ts`, mirrored by the module-level `autoRead = false` in `index.ts`). A successful `replace` returns one confirmation line — `Successfully replaced in {path}. Added N line(s), removed M line(s). Lines X–Y changed.` — and nothing else; the model calls `read` explicitly (with offset/limit) when it needs fresh anchors. The `/toggle-auto-read` command still flips it live for sessions that want the post-edit delta diff. When auto-read IS enabled, the post-edit diff is delta-only (`genDiff` context 0): just the changed `+/-` rows with hashes, no surrounding context block and no `...` ellipsis — a two-line change returns two rows, not 40. The `RangeStaleError` and undo diff use the same delta-only mode. Never re-enable auto-read by default or restore the full-context post-edit diff — the noise was the top friction report.
 
 ### `pi-ember-tps`
 

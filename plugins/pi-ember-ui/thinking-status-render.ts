@@ -1,9 +1,4 @@
-import {
-	type GradientPreset,
-	get_gradient_phase,
-	render_gradient,
-} from "./gradient.ts";
-
+import { type GradientPreset, get_gradient_phase, render_gradient } from "./gradient.ts";
 
 /** SSOT label for the gradient Thinking status row. */
 export const THINKING_STATUS_LABEL = "Thinking";

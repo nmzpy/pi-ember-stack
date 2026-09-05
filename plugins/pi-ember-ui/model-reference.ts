@@ -1,8 +1,7 @@
 /** Mirrors pi-coding-agent `findExactModelReferenceMatch` for /model submit handling. */
-export function find_exact_model_reference<T extends { provider: string; id: string; name?: string }>(
-	modelReference: string,
-	availableModels: T[],
-): T | undefined {
+export function find_exact_model_reference<
+	T extends { provider: string; id: string; name?: string },
+>(modelReference: string, availableModels: T[]): T | undefined {
 	const trimmedReference = modelReference.trim();
 	if (!trimmedReference) return undefined;
 	const normalizedReference = trimmedReference.toLowerCase();

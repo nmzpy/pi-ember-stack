@@ -126,11 +126,17 @@ export function buildChanged(input: SuccessInput): TResult {
 		resultHashes,
 	} = input;
 	const resultLines = visLines(result);
-	const diffResult = genDiff(originalNormalized, result, 1, resultHashes, originalHashes);
+	// Delta-only diff (context 0): the model sees just the changed +/- rows,
+	// never the surrounding block it already sent as replacement_lines.
+	const diffResult = genDiff(originalNormalized, result, 0, resultHashes, originalHashes);
 	const addedLines = editMeta.addedLines;
 	const removedLines = editMeta.removedLines;
 	const warningsBlock = warnBlock(warnings);
 	const successPrefix = `Successfully replaced in ${path}.`;
+	const rangeSummary =
+		editMeta.firstChangedLine !== undefined && editMeta.lastChangedLine !== undefined
+			? ` Lines ${editMeta.firstChangedLine}–${editMeta.lastChangedLine} changed.`
+			: "";
 	const lineSummary =
 		addedLines > 0 || removedLines > 0
 			? ` Added ${addedLines} line(s), removed ${removedLines} line(s).`
@@ -139,8 +145,8 @@ export function buildChanged(input: SuccessInput): TResult {
 		resultLines.length === 0
 			? "File is empty. Use replace to insert content."
 			: warningsBlock
-				? `${successPrefix}${lineSummary}${warningsBlock}`
-				: `${successPrefix}${lineSummary}`;
+				? `${successPrefix}${lineSummary}${rangeSummary}${warningsBlock}`
+				: `${successPrefix}${lineSummary}${rangeSummary}`;
 
 	const metrics = buildMetrics({
 		classification: "applied",

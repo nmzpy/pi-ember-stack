@@ -11,9 +11,11 @@ export function infer_bare_agent_name(displayName: string): string {
 }
 
 export function is_scout_agent_name(agentName: string): boolean {
-	return infer_bare_agent_name(agentName).localeCompare(PLAN_MODE_SCOUT_AGENT, undefined, {
-		sensitivity: "accent",
-	}) === 0;
+	return (
+		infer_bare_agent_name(agentName).localeCompare(PLAN_MODE_SCOUT_AGENT, undefined, {
+			sensitivity: "accent",
+		}) === 0
+	);
 }
 
 function collect_subagent_agent_names(toolName: string, input: unknown): string[] {
@@ -30,7 +32,11 @@ function collect_subagent_agent_names(toolName: string, input: unknown): string[
 		const items = params[key];
 		if (!Array.isArray(items)) continue;
 		for (const item of items) {
-			if (item && typeof item === "object" && typeof (item as { agent?: unknown }).agent === "string") {
+			if (
+				item &&
+				typeof item === "object" &&
+				typeof (item as { agent?: unknown }).agent === "string"
+			) {
 				names.push((item as { agent: string }).agent);
 			}
 		}

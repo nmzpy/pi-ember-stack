@@ -1,4 +1,4 @@
-import { MAX_RANGE_STALE_LINES, NEW_CONTENT_NOT_ARRAY_MSG } from "../constants.ts";
+import { NEW_CONTENT_NOT_ARRAY_MSG } from "../constants.ts";
 import {
 	abortIf,
 	clipLine,
@@ -236,9 +236,7 @@ export function stripBarePrefixes(edit: HEdit, fileHashes: string[], warnings: s
 
 	// Silent when every strip was an exact match against a real file hash — that is the
 	// intended, safe "pasted a read row" path and warning on every edit is just noise.
-	const risky = stripped.filter(
-		(s) => s.kind === "fuzzy" || !s.matched,
-	);
+	const risky = stripped.filter((s) => s.kind === "fuzzy" || !s.matched);
 	if (risky.length === 0) return { ...edit, content_lines: contentLines };
 
 	const loc = (s: Strip) =>
@@ -534,26 +532,29 @@ export function assertRangeServed(
 	}
 	if (mismatchLines.length === 0) return;
 
-	const rangeLength = endLine - startLine + 1;
-	const shownLength = Math.min(rangeLength, MAX_RANGE_STALE_LINES);
-	const rows: string[] = [];
-	const shownHashes: string[] = [];
-	for (let line = startLine; line < startLine + shownLength; line++) {
-		const hash = requireArrayItem(fileHashes, line - 1);
-		shownHashes.push(hash);
-		rows.push(`${hash}${HASH_SEP}${fileLines[line - 1]}`);
-	}
 	const location = filePath ? ` in ${filePath}` : "";
 	const first = requireArrayItem(mismatchLines, 0);
+	const rangeLength = endLine - startLine + 1;
 	const mismatchText =
 		mismatchLines.length === 1
 			? `Line ${first} of the replaced range (lines ${startLine}-${endLine})${location} does not match`
 			: `${mismatchLines.length} of ${rangeLength} line(s) in the replaced range (lines ${startLine}-${endLine})${location} do not match`;
-	const capHint =
-		rangeLength > shownLength
-			? `\n\n[The range has ${rangeLength} lines; showing the first ${shownLength}. Call read() with offset=${startLine + shownLength} to see the rest.]`
-			: "";
-	const message = `[E_RANGE_STALE] ${mismatchText} what was previously shown: the file changed on disk after the anchors were read, or the line(s) were never shown. Nothing was modified. Current range with fresh anchors:\n\n${rows.join("\n")}${capHint}`;
+
+	// Trim the stale feedback to the two fresh ENDPOINT hashes only — the full
+	// range dump (up to MAX_RANGE_STALE_LINES rows) is noise the model cannot
+	// act on (those interior hashes are stale by definition). The endpoints let
+	// it retry immediately, or switch to endpoint_only for a large contiguous
+	// delete where the interior was never read.
+	const startHash = requireArrayItem(fileHashes, startLine - 1);
+	const endHash = requireArrayItem(fileHashes, endLine - 1);
+	const startRow = `${startHash}${HASH_SEP}${fileLines[startLine - 1]}`;
+	const endRow = `${endHash}${HASH_SEP}${fileLines[endLine - 1]}`;
+	const shownHashes = [startHash, endHash];
+	const retryHint =
+		rangeLength > 1
+			? `\n\nTo retry: re-read the range (read with offset=${startLine}, limit=${rangeLength}) for fresh interior anchors, OR set endpoint_only=true on the next replace to trust just these two endpoint hashes (use for large contiguous deletions where you have not read every interior line).`
+			: "\n\nTo retry: re-read the range for fresh anchors, then replace again.";
+	const message = `[E_RANGE_STALE] ${mismatchText} what was previously shown: the file changed on disk after the anchors were read, or the line(s) were never shown. Nothing was modified. Fresh endpoint anchors for the range:\n\n${startRow}\n${endRow}${retryHint}`;
 	throw new RangeStaleError(message, first, shownHashes);
 }
 

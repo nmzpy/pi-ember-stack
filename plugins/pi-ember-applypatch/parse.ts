@@ -188,12 +188,7 @@ export function parse_patch(input: string): ParseResult {
 						header = undefined;
 					}
 					i++;
-				} else if (
-					t.startsWith(" ") ||
-					t.startsWith("-") ||
-					t.startsWith("+") ||
-					t === EOF
-				) {
+				} else if (t.startsWith(" ") || t.startsWith("-") || t.startsWith("+") || t === EOF) {
 					// Hunk without @@ header is allowed
 				} else {
 					return {

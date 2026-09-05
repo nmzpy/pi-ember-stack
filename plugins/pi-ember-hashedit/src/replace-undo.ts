@@ -218,7 +218,7 @@ export function regReplaceUndo(pi: ExtensionAPI): void {
 				const undoDiff = genDiff(
 					currentNormalized,
 					undo.content,
-					1,
+					0,
 					undo.hashes,
 					currentHashes,
 				).diff;

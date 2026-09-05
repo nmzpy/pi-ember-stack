@@ -138,6 +138,8 @@ export function applyEdit(
 	precomputedHashes?: string[],
 	filePath?: string,
 	servedHashes?: ReadonlySet<string>,
+	/** Skip the interior served-range stale check; trust the two endpoint hashes only. */
+	skipRangeServed?: boolean,
 ): {
 	content: string;
 	firstChangedLine: number | undefined;
@@ -211,7 +213,7 @@ export function applyEdit(
 		resolved = correctedResult.resolved;
 	}
 
-	if (servedHashes) {
+	if (servedHashes && skipRangeServed !== true) {
 		abortIf(signal);
 		assertRangeServed(resolved, lineIndex.fileLines, fileHashes, servedHashes, filePath);
 	}
@@ -289,6 +291,10 @@ export function changedRange(
 	}
 	return {
 		firstChangedLine: first + 1,
-		lastChangedLine: Math.max(first, lastRes) + 1,
+		// lastChangedLine is the last line that DIFFERED in the ORIGINAL file, not the
+		// result — for a pure 560-line delete the result has no changed lines past the
+		// deletion point, so reporting the result's last changed line would collapse to
+		// the first changed line and hide the true extent of what was removed.
+		lastChangedLine: Math.max(first, lastOrig) + 1,
 	};
 }

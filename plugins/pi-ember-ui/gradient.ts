@@ -57,8 +57,6 @@ export const EXTERNAL_THINKING_RENDER_INTERVAL_MS = GRADIENT_TICK_MS;
 /** Sweep cycle duration: 1.6 s (faster sweep feels more responsive). */
 export const GRADIENT_DURATION_MS = 1600;
 
-
-
 /** Gaussian sigma in character-cell units. Wider bright region for smoother sweep. */
 export const GRADIENT_SIGMA = 3.0;
 
@@ -154,8 +152,6 @@ function get_thinking_palette(): GradientPalette {
 function rgb_to_hex(rgb: Rgb): string {
 	return `#${rgb[0].toString(16).padStart(2, "0")}${rgb[1].toString(16).padStart(2, "0")}${rgb[2].toString(16).padStart(2, "0")}`;
 }
-
-
 
 /**
  * Accent palette: dim→accent glow for working/subagent labels.
@@ -296,8 +292,6 @@ export function get_gradient_phase_with_offset(offsetMs: number): number {
 	const elapsed = performance.now() - clock_start + offsetMs;
 	return (elapsed % GRADIENT_DURATION_MS) / GRADIENT_DURATION_MS;
 }
-
-
 
 /**
  * Dispatch one tick to all current subscribers. Exposed for deterministic

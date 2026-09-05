@@ -7,9 +7,7 @@ import {
 	build_cursor_request,
 	type CursorRequestPayload,
 } from "./request.js";
-import {
-	ConversationStateStructureSchema,
-} from "./proto/agent_pb.js";
+import { ConversationStateStructureSchema } from "./proto/agent_pb.js";
 import { blob_id_to_store_key, bytes_look_like_blob_id } from "./blobs.js";
 import type { CursorMappedContext } from "../context-map.js";
 import {
@@ -115,10 +113,7 @@ export function build_run_payload(
 	);
 }
 
-export function persist_blob_store(
-	session_key: string,
-	blob_store: Map<string, Uint8Array>,
-): void {
+export function persist_blob_store(session_key: string, blob_store: Map<string, Uint8Array>): void {
 	const state = session_states.get(session_key);
 	if (!state) return;
 	for (const [key, value] of blob_store) state.blob_store.set(key, value);

@@ -43,7 +43,8 @@ const PI_TO_CURSOR_ARG_NAMES: Record<string, Record<string, string>> = {
 const MODE_DIRECTIVES: Record<string, string> = {
 	plan: "You are in plan mode. Design your approach before coding. Do not write code until the plan is approved.",
 	code: "You are in code mode. Implement the task directly. Prefer parallel read and edit calls for independent files. Explain briefly after changes.",
-	orchestrate: "You are in orchestrate mode. Break the task into independent subtasks, delegate where possible, and synthesize results. Prefer parallel tool calls.",
+	orchestrate:
+		"You are in orchestrate mode. Break the task into independent subtasks, delegate where possible, and synthesize results. Prefer parallel tool calls.",
 };
 
 function remap_property_names(schema: unknown, pi_tool_name: string): unknown {
@@ -267,7 +268,10 @@ const CANONICAL_PI_TOOLS = new Set([
 	"subagent_resume",
 ]);
 
-export function resolve_pi_tool_name(raw_name: string, tools: readonly Tool[] = []): string | undefined {
+export function resolve_pi_tool_name(
+	raw_name: string,
+	tools: readonly Tool[] = [],
+): string | undefined {
 	const exact = tools.find((tool) => tool.name === raw_name);
 	if (exact) return exact.name;
 
@@ -283,7 +287,8 @@ export function resolve_pi_tool_name(raw_name: string, tools: readonly Tool[] = 
 
 	// Cursor owns its tool loop — Pi's context.tools is often empty. Still map
 	// known Cursor names onto Pi compact-tool ids so grouping/labels stay SSOT.
-	const cursor_to_pi = CURSOR_TO_PI_TOOL_NAME.get(normalized) ?? CURSOR_TO_PI_TOOL_NAME.get(raw_name);
+	const cursor_to_pi =
+		CURSOR_TO_PI_TOOL_NAME.get(normalized) ?? CURSOR_TO_PI_TOOL_NAME.get(raw_name);
 	if (cursor_to_pi) return cursor_to_pi;
 	if (TOOL_ALIASES.has(normalized)) return TOOL_ALIASES.get(normalized);
 	if (CANONICAL_PI_TOOLS.has(aliased)) return aliased;

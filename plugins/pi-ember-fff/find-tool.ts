@@ -55,9 +55,7 @@ const findSchema = Type.Object({
 			description: `Max results per page (default ${DEFAULT_FIND_LIMIT})`,
 		}),
 	),
-	cursor: Type.Optional(
-		Type.String({ description: "Pagination cursor from previous result" }),
-	),
+	cursor: Type.Optional(Type.String({ description: "Pagination cursor from previous result" })),
 });
 
 export function registerFindTool(pi: ExtensionAPI, deps: FindToolDeps): void {
@@ -117,8 +115,7 @@ export function registerFindTool(pi: ExtensionAPI, deps: FindToolDeps): void {
 			let output = formatted.output;
 
 			const shownSoFar = pageIndex * effectiveLimit + result.items.length;
-			const hasMore =
-				result.items.length >= effectiveLimit && result.totalMatched > shownSoFar;
+			const hasMore = result.items.length >= effectiveLimit && result.totalMatched > shownSoFar;
 
 			const notices: string[] = [];
 			if (formatted.weak && formatted.shownCount > 0)

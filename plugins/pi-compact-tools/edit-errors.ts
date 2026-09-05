@@ -59,10 +59,7 @@ function shortestHeadTailMatch(a: string, b: string): number {
 	let i = 0;
 	while (i < Math.min(a.length, b.length) && a[i] === b[i]) i++;
 	let j = 0;
-	while (
-		j < Math.min(a.length, b.length) &&
-		a[a.length - 1 - j] === b[b.length - 1 - j]
-	) {
+	while (j < Math.min(a.length, b.length) && a[a.length - 1 - j] === b[b.length - 1 - j]) {
 		j++;
 	}
 	return Math.max(i, j);
@@ -118,9 +115,10 @@ function findIndentTolerantCandidate(content: string, oldText: string): Candidat
 function buildCandidateHint(candidate: Candidate, oldText: string): string {
 	let hint = `Nearest similar block found around line ${candidate.line}:\n`;
 	hint += "```\n";
-	const targetIndent = removeCommonIndent(normalizeNewlines(oldText))
-		.split("\n")
-		.find((l) => l.trim().length > 0)?.length ?? 0;
+	const targetIndent =
+		removeCommonIndent(normalizeNewlines(oldText))
+			.split("\n")
+			.find((l) => l.trim().length > 0)?.length ?? 0;
 	for (const line of candidate.contextLines.slice(0, MAX_CANDIDATE_LINES)) {
 		const stripped = line.trimStart();
 		const leading = line.length - stripped.length;
@@ -128,7 +126,8 @@ function buildCandidateHint(candidate: Candidate, oldText: string): string {
 		hint += `${" ".repeat(displayIndent)}${stripped}\n`;
 	}
 	hint += "```\n";
-	hint += "Recommended action: re-read the file and copy the exact oldText from this block, including indentation.\n";
+	hint +=
+		"Recommended action: re-read the file and copy the exact oldText from this block, including indentation.\n";
 	return hint;
 }
 
@@ -218,7 +217,8 @@ function classifyEditError(error: Error): string {
 	if (message.includes("No changes made")) return "no-change";
 	if (message.includes("overlap")) return "overlap";
 	if (message.includes("occurrences") || message.includes("unique")) return "duplicate";
-	if (message.includes("Could not find") || message.includes("oldText must match")) return "not-found";
+	if (message.includes("Could not find") || message.includes("oldText must match"))
+		return "not-found";
 	if (message.includes("Could not edit file")) return "io";
 	return "unknown";
 }

@@ -874,7 +874,6 @@ class ThinkingStatusComponent implements Component {
 	}
 }
 
-
 /** Bind Pi's public TUI render request through the canonical render-intent
  *  entry point. The callback is stored on globalThis via Symbol.for so jiti
  *  module duplication cannot desync the live callback from callers. */
@@ -3135,6 +3134,12 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 				) {
 					latestAssistantMessageTimestamp = event.message.timestamp;
 				}
+				// Each completed assistant message is a turn boundary for the
+				// Thinking pass timer: the next pre-token wait or hidden
+				// thinking stream starts from zero. The final user-turn timer
+				// (turnStartedAt) is left alone so the end-of-turn notify still
+				// reports total wall time across the full user turn.
+				clear_thinking_pass_timer();
 				stopThinkingAnimation();
 			}
 		}

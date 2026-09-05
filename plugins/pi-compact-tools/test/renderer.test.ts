@@ -2165,6 +2165,159 @@ describe("CompactRenderer apply_patch failures", () => {
 	});
 });
 
+describe("CompactRenderer apply_patch streaming rows", () => {
+	const partial_patch = [
+		"*** Begin Patch",
+		"*** Update File: src/x.ts",
+		"@@",
+		"-old",
+		"+new",
+	].join("\n");
+
+	test("shows the streamed single-file path and live stats", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const state: Record<string, any> = {};
+
+		r.renderCall(
+			"apply_patch",
+			{ input: partial_patch },
+			theme,
+			makeContext("patch-stream", state) as any,
+		);
+
+		const row = stripAnsi((state.callText as any).text);
+		expect(row).toContain("Patching src/x.ts");
+		expect(row).toContain("+1");
+		expect(row).toContain("-1");
+		expect(row).not.toContain("Patching 1 file");
+	});
+
+	test("does not invent a path before a file header arrives", () => {
+		const theme = makeTheme() as any;
+		const no_header = { input: "*** Begin Patch" };
+		const standalone_state: Record<string, any> = {};
+		const standalone = new CompactRenderer();
+
+		standalone.renderCall(
+			"apply_patch",
+			no_header,
+			theme,
+			makeContext("patch-no-header", standalone_state) as any,
+		);
+		const standalone_row = stripAnsi((standalone_state.callText as any).text);
+		expect(standalone_row).not.toContain(".");
+
+		const child = stripAnsi(
+			formatCompactChildRow("apply_patch", no_header, false, undefined, theme),
+		);
+		expect(child).not.toContain(".");
+
+		const owner_state: Record<string, any> = {};
+		const grouped = new CompactRenderer();
+		grouped.renderCall(
+			"apply_patch",
+			no_header,
+			theme,
+			makeContext("patch-no-header-owner", owner_state) as any,
+		);
+		grouped.renderCall(
+			"apply_patch",
+			no_header,
+			theme,
+			makeContext("patch-no-header-child", {}) as any,
+		);
+		grouped.renderCall(
+			"apply_patch",
+			no_header,
+			theme,
+			makeContext("patch-no-header-owner", owner_state) as any,
+		);
+		const grouped_row = stripAnsi((owner_state.callText as any).text);
+		expect(grouped_row).not.toContain(".");
+		expect(grouped_row).not.toContain("Patching .");
+	});
+
+	test("grouped latest child uses the same streamed path and live stats", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const owner_ctx = makeContext("patch-child-owner", owner_state) as any;
+
+		r.renderCall("read", { path: "before.ts" }, theme, owner_ctx);
+		r.renderCall(
+			"apply_patch",
+			{ input: partial_patch },
+			theme,
+			makeContext("patch-child", {}) as any,
+		);
+		r.renderCall("read", { path: "before.ts" }, theme, owner_ctx);
+
+		const lines = stripAnsi((owner_state.callText as any).text).split("\n");
+		const child = lines[lines.length - 1] ?? "";
+		expect(child).toContain("Patching");
+		expect(child).toContain("src/x.ts");
+		expect(child).toContain("+1");
+		expect(child).toContain("-1");
+	});
+
+	test("shows the streamed single-file path and final stats after completion", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const state: Record<string, any> = {};
+		const ctx = makeContext("patch-complete", state) as any;
+
+		r.renderCall("apply_patch", { input: partial_patch }, theme, ctx);
+		r.renderResult(
+			"apply_patch",
+			{ input: partial_patch },
+			{
+				details: {
+					ok: true,
+					fileCount: 1,
+					results: [{ path: "src/x.ts", op: "update", status: "ok" }],
+				},
+			},
+			{ expanded: false, isPartial: false },
+			theme,
+			{ ...ctx, isError: false },
+		);
+
+		const row = stripAnsi((state.callText as any).text);
+		expect(row).toContain("Patched src/x.ts");
+		expect(row).toContain("+1");
+		expect(row).toContain("-1");
+		expect(row).not.toContain("Patched 1 file");
+	});
+
+	test("keeps multi-file standalone patches compact without a path", () => {
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const state: Record<string, any> = {};
+		const input = [
+			"*** Begin Patch",
+			"*** Add File: src/a.ts",
+			"+a",
+			"*** Add File: src/b.ts",
+			"+b",
+		].join("\n");
+
+		r.renderCall(
+			"apply_patch",
+			{ input },
+			theme,
+			makeContext("patch-multi-standalone", state) as any,
+		);
+
+		const row = stripAnsi((state.callText as any).text);
+		expect(row).toContain("Patching 2 files");
+		expect(row).toContain("+2");
+		expect(row).not.toContain("src/a.ts");
+		expect(row).not.toContain("src/b.ts");
+		expect(row).not.toContain("Patching .");
+	});
+});
+
 describe("CompactRenderer apply_patch grouping", () => {
 	test("uses a collapsible Patching group for two pure patch calls", () => {
 		const r = new CompactRenderer();

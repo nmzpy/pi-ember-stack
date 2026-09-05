@@ -1,9 +1,9 @@
 import { FileFinder } from "@ff-labs/fff-node";
-import {
-	buildQuery,
-	resolveExternalTarget,
-	type ExternalAllowlist,
-} from "./query.ts";
+import { buildQuery, resolveExternalTarget, type ExternalAllowlist } from "./query.ts";
+
+export type FileFinderFactory = (
+	options: Parameters<typeof FileFinder.create>[0],
+) => ReturnType<typeof FileFinder.create>;
 
 export type FinderManagerConfig = {
 	frecencyDbPath: string | undefined;
@@ -11,31 +11,45 @@ export type FinderManagerConfig = {
 	enableFsRootScanning: boolean;
 	enableExternalAllow: boolean;
 	externalAllowlist: ExternalAllowlist;
+	/**
+	 * Injectable FileFinder factory (defaults to the real native FileFinder).
+	 * Used by tests to observe readiness without a real native scan. SSOT for
+	 * finder construction — both the workspace and external finders go through it.
+	 */
+	createFileFinder?: FileFinderFactory;
 };
 
 export function createFinderManager(config: FinderManagerConfig) {
 	let finder: FileFinder | null = null;
 	let finderCwd: string | null = null;
-	let finderPromise: Promise<FileFinder> | null = null;
+	// Single shared readiness promise for the workspace finder. When set, every
+	// caller awaits it — so a tool that runs while the scan is still in flight
+	// waits for the index to be ready instead of searching an incomplete index.
+	let finderReady: Promise<FileFinder> | null = null;
 	let activeCwd = process.cwd();
 
 	let externalFinder: FileFinder | null = null;
 	let externalFinderDir: string | null = null;
-	let externalFinderPromise: Promise<FileFinder> | null = null;
+	let externalFinderReady: Promise<FileFinder> | null = null;
 
 	function ensureFinder(cwd: string): Promise<FileFinder> {
-		if (finder && !finder.isDestroyed && finderCwd === cwd)
+		// Same-cwd finder: await its in-flight scan, or return it once ready.
+		if (finder && !finder.isDestroyed && finderCwd === cwd) {
+			if (finderReady) return finderReady;
 			return Promise.resolve(finder);
-		if (finderPromise) return finderPromise;
+		}
+		// A different-cwd creation is in flight (rare) — share its readiness.
+		if (finderReady) return finderReady;
 
-		finderPromise = (async () => {
+		const createFinder = config.createFileFinder ?? FileFinder.create;
+		const p = (async () => {
 			if (finder && !finder.isDestroyed) {
 				finder.destroy();
 				finder = null;
 				finderCwd = null;
 			}
 
-			const result = FileFinder.create({
+			const result = createFinder({
 				basePath: cwd,
 				frecencyDbPath: config.frecencyDbPath,
 				historyDbPath: config.historyDbPath,
@@ -44,21 +58,25 @@ export function createFinderManager(config: FinderManagerConfig) {
 				enableFsRootScanning: config.enableFsRootScanning,
 			});
 
-			if (!result.ok)
-				throw new Error(`Failed to create FFF file finder: ${result.error}`);
+			if (!result.ok) throw new Error(`Failed to create FFF file finder: ${result.error}`);
 
-			finder = result.value;
+			const created = result.value;
+			finder = created;
 			finderCwd = cwd;
-			await finder.waitForScan(15000);
-			return finder;
-		})().finally(() => {
-			finderPromise = null;
+			await created.waitForScan(15000);
+			return created;
+		})();
+		// Return the finally-derived promise so a rejection is never left
+		// unhandled; the cleanup only clears the slot it owns.
+		const ready = p.finally(() => {
+			if (finderReady === ready) finderReady = null;
 		});
-
-		return finderPromise;
+		finderReady = ready;
+		return ready;
 	}
 
 	function destroyFinder() {
+		finderReady = null;
 		if (finder && !finder.isDestroyed) {
 			finder.destroy();
 			finder = null;
@@ -67,39 +85,44 @@ export function createFinderManager(config: FinderManagerConfig) {
 	}
 
 	function ensureExternalFinder(dir: string): Promise<FileFinder> {
-		if (externalFinder && !externalFinder.isDestroyed && externalFinderDir === dir)
+		if (externalFinder && !externalFinder.isDestroyed && externalFinderDir === dir) {
+			if (externalFinderReady) return externalFinderReady;
 			return Promise.resolve(externalFinder);
-		if (externalFinderPromise) return externalFinderPromise;
+		}
+		if (externalFinderReady) return externalFinderReady;
 
-		externalFinderPromise = (async () => {
+		const createFinder = config.createFileFinder ?? FileFinder.create;
+		const p = (async () => {
 			if (externalFinder && !externalFinder.isDestroyed) {
 				externalFinder.destroy();
 				externalFinder = null;
 				externalFinderDir = null;
 			}
 
-			const result = FileFinder.create({
+			const result = createFinder({
 				basePath: dir,
 				aiMode: true,
 				enableHomeDirScanning: false,
 				enableFsRootScanning: false,
 			});
 
-			if (!result.ok)
-				throw new Error(`Failed to create external FFF file finder: ${result.error}`);
+			if (!result.ok) throw new Error(`Failed to create external FFF file finder: ${result.error}`);
 
-			externalFinder = result.value;
+			const created = result.value;
+			externalFinder = created;
 			externalFinderDir = dir;
-			await externalFinder.waitForScan(15000);
-			return externalFinder;
-		})().finally(() => {
-			externalFinderPromise = null;
+			await created.waitForScan(15000);
+			return created;
+		})();
+		const ready = p.finally(() => {
+			if (externalFinderReady === ready) externalFinderReady = null;
 		});
-
-		return externalFinderPromise;
+		externalFinderReady = ready;
+		return ready;
 	}
 
 	function destroyExternalFinder() {
+		externalFinderReady = null;
 		if (externalFinder && !externalFinder.isDestroyed) {
 			externalFinder.destroy();
 			externalFinder = null;
@@ -127,13 +150,7 @@ export function createFinderManager(config: FinderManagerConfig) {
 			}
 		}
 		const f = await ensureFinder(activeCwd);
-		const query = buildQuery(
-			pathParam,
-			pattern,
-			exclude,
-			activeCwd,
-			config.externalAllowlist,
-		);
+		const query = buildQuery(pathParam, pattern, exclude, activeCwd, config.externalAllowlist);
 		return { finder: f, query };
 	}
 

@@ -114,7 +114,10 @@ const SUBAGENT_TRAY_GAP = " "; // outer-branch slot for trailing Thinking/status
 const SUBAGENT_BRANCH_LAST = "\u2514"; // └
 
 /** Render the transient hidden-mode finalization row with Thinking's gradient. */
-function renderLiveFinishingRow(theme: ThemeLike, treePrefix = `  ${SUBAGENT_BRANCH_LAST}`): string {
+function renderLiveFinishingRow(
+	theme: ThemeLike,
+	treePrefix = `  ${SUBAGENT_BRANCH_LAST}`,
+): string {
 	return (
 		theme.fg(SUBAGENT_TREE_COLOR, treePrefix) +
 		renderLiveGradient("Finishing", THINKING_GRADIENT_PRESET)
@@ -383,14 +386,8 @@ export class SubagentLiveOutputText implements Component {
 					// stripped because the outer tray branch already marks the block.
 					const record = liveRowToCall(segment.rows[0], 0);
 					const standalone = formatStandaloneCallRow(record, theme);
-					const bullet = statusBulletColor(
-						record.isError,
-						record._completed === true,
-						theme,
-					);
-					const body = standalone.startsWith(bullet)
-						? standalone.slice(bullet.length)
-						: standalone;
+					const bullet = statusBulletColor(record.isError, record._completed === true, theme);
+					const body = standalone.startsWith(bullet) ? standalone.slice(bullet.length) : standalone;
 					rows.push({ body, header: false });
 				} else if (segment.rows.length > 1) {
 					const group = buildLiveGroup(segment.rows);
@@ -892,17 +889,13 @@ function buildFlatEntries(rows: AgentRowDescriptor[], thinkingBlocksVisible: boo
 		// Visible thinking blocks show the full child live output tray.
 		// When thinking blocks are hidden, show only ONE single row below the agent header
 		// (the latest tool call, thinking status, or finishing status).
-		const has_live_output =
-			row.status === "running" && thinkingBlocksVisible && has_live_items;
+		const has_live_output = row.status === "running" && thinkingBlocksVisible && has_live_items;
 
 		if (!has_live_output) {
 			if (row.status === "running") {
 				if (row.result?.isFinishing) {
 					entries.push({ type: "finishing", descriptor: row, parentAgentIndex: i });
-				} else if (
-					row.result?.isThinking &&
-					row.result.reasoning !== false
-				) {
+				} else if (row.result?.isThinking && row.result.reasoning !== false) {
 					entries.push({ type: "thinking", descriptor: row, parentAgentIndex: i });
 				} else if (row.result?.latestToolCall) {
 					entries.push({ type: "tool", descriptor: row, parentAgentIndex: i });

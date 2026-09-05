@@ -38,18 +38,29 @@ export async function runNamedAgent(options: {
 	signal?: AbortSignal;
 	onMessage?: (result: SubAgentResult) => void;
 }): Promise<SubAgentResult> {
-	const { model, attempted } = resolveModel(options.agent.model, options.ctx.model, options.ctx.modelRegistry);
-	if (!model) throw new Error(`No model resolved for agent "${options.agent.name}" (tried: ${attempted.join(", ") || "none"})`);
+	const { model, attempted } = resolveModel(
+		options.agent.model,
+		options.ctx.model,
+		options.ctx.modelRegistry,
+	);
+	if (!model)
+		throw new Error(
+			`No model resolved for agent "${options.agent.name}" (tried: ${attempted.join(", ") || "none"})`,
+		);
 
 	const modelRegistry = options.ctx.modelRegistry;
 	const contract = options.instructions?.slice(0, 16 * 1024);
 
 	return runSubAgent({
 		cwd: options.cwd,
-		systemPrompt: contract ? `${options.agent.systemPrompt}\n\n## Task Contract\n${contract}` : options.agent.systemPrompt,
+		systemPrompt: contract
+			? `${options.agent.systemPrompt}\n\n## Task Contract\n${contract}`
+			: options.agent.systemPrompt,
 		task: options.task,
 		tools: with_provider_patch_tool(
-			without_subagent_delegation_tools(options.agent.tools ?? [...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS]),
+			without_subagent_delegation_tools(
+				options.agent.tools ?? [...DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS],
+			),
 			model_provider_of(model),
 		),
 		model,

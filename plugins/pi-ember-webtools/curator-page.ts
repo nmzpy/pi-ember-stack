@@ -12,9 +12,7 @@ function buildProviderButtons(
 	selected: string,
 	hasInitialQueries: boolean,
 ): string {
-	const providers = [
-		{ value: "exa", label: "Exa", available: available.exa },
-	];
+	const providers = [{ value: "exa", label: "Exa", available: available.exa }];
 
 	return providers
 		.filter((p) => p.available)

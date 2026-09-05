@@ -35,10 +35,7 @@ import {
 } from "./blobs.js";
 import type { CursorMappedContext, CursorToolDef, CursorTurn } from "../context-map.js";
 import { cursor_tool_name_for_pi_tool } from "../context.js";
-import {
-	build_assistant_step_bytes,
-	build_tool_call_step_bytes,
-} from "./history.js";
+import { build_assistant_step_bytes, build_tool_call_step_bytes } from "./history.js";
 
 /** Legacy Pi/catalog ids that are not valid Cursor Run model keys. */
 const CURSOR_MODEL_ALIASES: Record<string, string> = {
@@ -77,10 +74,7 @@ export function derive_conversation_key(session_key: string, mapped: CursorMappe
 
 /** Deterministic UUID from conv key so Cursor server-side conversation persists. */
 export function deterministic_conversation_id(conv_key: string): string {
-	const hex = createHash("sha256")
-		.update(`cursor-conv-id:${conv_key}`)
-		.digest("hex")
-		.slice(0, 32);
+	const hex = createHash("sha256").update(`cursor-conv-id:${conv_key}`).digest("hex").slice(0, 32);
 	return [
 		hex.slice(0, 8),
 		hex.slice(8, 12),
@@ -157,7 +151,9 @@ export function build_request_context(
 	});
 }
 
-export function format_tool_results_for_cursor(results: readonly { tool_call_id: string; content: string }[]): string {
+export function format_tool_results_for_cursor(
+	results: readonly { tool_call_id: string; content: string }[],
+): string {
 	return results
 		.map(
 			(result) =>
@@ -186,10 +182,7 @@ function blob_ids_match(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 /** Preserve non-history checkpoint fields when the system prompt blob is unchanged. */
-function checkpoint_metadata_shell(
-	checkpoint: Uint8Array | null,
-	system_blob_id: Uint8Array,
-) {
+function checkpoint_metadata_shell(checkpoint: Uint8Array | null, system_blob_id: Uint8Array) {
 	if (!checkpoint) return empty_conversation_metadata();
 
 	const loaded = fromBinary(ConversationStateStructureSchema, checkpoint);
@@ -220,9 +213,7 @@ function push_root_prompt_json_blob(
 	ids: Uint8Array[],
 	value: unknown,
 ): void {
-	ids.push(
-		store_cursor_blob(blob_store, new TextEncoder().encode(JSON.stringify(value))),
-	);
+	ids.push(store_cursor_blob(blob_store, new TextEncoder().encode(JSON.stringify(value))));
 }
 
 /** Cursor feeds rootPromptMessagesJson (not turns[]) to the model — include prior JSON history. */
@@ -263,18 +254,12 @@ function build_root_prompt_blob_ids(
 	return ids;
 }
 
-function build_turn_blob_ids(
-	turn: CursorTurn,
-	blob_store: Map<string, Uint8Array>,
-): Uint8Array {
+function build_turn_blob_ids(turn: CursorTurn, blob_store: Map<string, Uint8Array>): Uint8Array {
 	const user_msg = create(UserMessageSchema, {
 		text: turn.user_text,
 		messageId: crypto.randomUUID(),
 	});
-	const user_message_blob_id = store_cursor_blob(
-		blob_store,
-		toBinary(UserMessageSchema, user_msg),
-	);
+	const user_message_blob_id = store_cursor_blob(blob_store, toBinary(UserMessageSchema, user_msg));
 
 	const step_blob_ids: Uint8Array[] = [];
 	if (turn.assistant_text) {
@@ -316,7 +301,9 @@ export function read_turn_structure_blob(
 ): ConversationTurnStructure {
 	const turn_bytes = lookup_blob(blob_store, turn_blob_id);
 	if (!turn_bytes) {
-		throw new Error(`Cursor turn blob missing from store: ${blob_id_to_store_key(turn_blob_id).slice(0, 12)}`);
+		throw new Error(
+			`Cursor turn blob missing from store: ${blob_id_to_store_key(turn_blob_id).slice(0, 12)}`,
+		);
 	}
 	return fromBinary(ConversationTurnStructureSchema, turn_bytes);
 }

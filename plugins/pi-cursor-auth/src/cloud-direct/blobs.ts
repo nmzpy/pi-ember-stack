@@ -82,9 +82,7 @@ export function assert_conversation_blobs_present(
 	for (const blob_id of root_prompt_blob_ids) {
 		const key = blob_id_to_store_key(blob_id);
 		if (!blob_store.has(key)) {
-			throw new Error(
-				`Cursor blob store missing root prompt blob ${key.slice(0, 12)} before Run`,
-			);
+			throw new Error(`Cursor blob store missing root prompt blob ${key.slice(0, 12)} before Run`);
 		}
 	}
 }

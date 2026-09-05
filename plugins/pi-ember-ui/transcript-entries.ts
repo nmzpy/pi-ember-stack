@@ -20,6 +20,8 @@ export type TranscriptSessionManager = {
  * compaction is appended at its chronological position without deleting
  * upstream plan, assistant, or tool rows.
  */
-export function build_transcript_entries(manager: TranscriptSessionManager): TranscriptSessionEntry[] {
+export function build_transcript_entries(
+	manager: TranscriptSessionManager,
+): TranscriptSessionEntry[] {
 	return manager.getBranch();
 }

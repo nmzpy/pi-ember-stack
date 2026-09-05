@@ -154,11 +154,8 @@ export async function call_cursor_unary_rpc(
 	});
 
 	const chunks: Buffer[] = [];
-	let resolve_close: (value: {
-		body: Uint8Array;
-		exit_code: number;
-		timed_out: boolean;
-	}) => void = () => {};
+	let resolve_close: (value: { body: Uint8Array; exit_code: number; timed_out: boolean }) => void =
+		() => {};
 	const promise = new Promise<{
 		body: Uint8Array;
 		exit_code: number;

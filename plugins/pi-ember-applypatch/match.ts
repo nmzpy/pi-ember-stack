@@ -37,11 +37,20 @@ export function normalize_for_fuzzy_match(text: string): string {
 	return trim_trailing_whitespace_line(normalized);
 }
 
-export function line_matches_at_rung(file_line: string, pattern_line: string, rung: MatchRung): boolean {
+export function line_matches_at_rung(
+	file_line: string,
+	pattern_line: string,
+	rung: MatchRung,
+): boolean {
 	if (rung === "exact") return file_line === pattern_line;
-	const left = rung === "fuzzy" ? normalize_for_fuzzy_match(file_line) : trim_trailing_whitespace_line(file_line);
+	const left =
+		rung === "fuzzy"
+			? normalize_for_fuzzy_match(file_line)
+			: trim_trailing_whitespace_line(file_line);
 	const right =
-		rung === "fuzzy" ? normalize_for_fuzzy_match(pattern_line) : trim_trailing_whitespace_line(pattern_line);
+		rung === "fuzzy"
+			? normalize_for_fuzzy_match(pattern_line)
+			: trim_trailing_whitespace_line(pattern_line);
 	return left === right;
 }
 

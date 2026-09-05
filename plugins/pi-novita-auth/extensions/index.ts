@@ -10,11 +10,13 @@
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { clear_cached_novita_models, discover_novita_models } from "../src/catalog.js";
 import {
-	clear_cached_novita_models,
-	discover_novita_models,
-} from "../src/catalog.js";
-import { get_novita_status, login_novita, logout_novita, resolve_novita_api_key } from "../src/cli.js";
+	get_novita_status,
+	login_novita,
+	logout_novita,
+	resolve_novita_api_key,
+} from "../src/cli.js";
 import { NOVITA_BASE_URL, NOVITA_PROVIDER_ID, NOVITA_PROVIDER_NAME } from "../src/constants.js";
 import { build_novita_models } from "../src/models.js";
 
@@ -116,7 +118,7 @@ export default async function pi_novita_auth(pi: ExtensionAPI): Promise<void> {
 				ctx.ui.notify(`Novita: refreshed ${models.length} models.`, "info");
 			} catch (error) {
 				ctx.ui.notify(
-					`Novita model refresh failed: ${error instanceof Error? error.message : String(error)}`,
+					`Novita model refresh failed: ${error instanceof Error ? error.message : String(error)}`,
 					"error",
 				);
 			}

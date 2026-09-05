@@ -51,9 +51,7 @@ export {
 	is_parser_stream_error,
 	is_transient_transport_death,
 };
-export {
-	retry_transient_transport_operation,
-} from "./transport-policy.ts";
+export { retry_transient_transport_operation } from "./transport-policy.ts";
 import {
 	mark_checkpoint_dir_live,
 	persist_checkpoint_meta,
@@ -86,6 +84,11 @@ export function resolve_subagent_timeout_ms(timeout: unknown): number {
 const COMPACTION_WIRING_PATH = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"../../compaction-wiring.ts",
+);
+
+const SUBAGENT_BASH_RULES_PATH = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../../subagent-bash-rules.ts",
 );
 
 const PARALLEL_TOOL_CALL_GUIDANCE = `
@@ -126,12 +129,12 @@ export function build_subagent_settings(): {
 }
 
 export async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResult> {
-	// The compaction-wiring extension is what makes native
-	// reason=overflow/threshold compaction use Ember's structured stack summary
-	// (session_before_compact hook) instead of Pi's default summarizer.
-	// Exported so tests exercise the real loading seam rather than re-deriving
-	// the paths.
-	const paths = [COMPACTION_WIRING_PATH];
+	// The compaction-wiring extension makes native reason=overflow/threshold
+	// compaction use Ember's structured stack summary (session_before_compact hook)
+	// instead of Pi's default summarizer. The bash-rules extension enforces the
+	// same git checkout/stash/restore (and user-defined) bashRules on child
+	// sessions that the parent session uses.
+	const paths = [COMPACTION_WIRING_PATH, SUBAGENT_BASH_RULES_PATH];
 	return discoverAndLoadExtensions(paths, cwd);
 }
 
@@ -1401,17 +1404,17 @@ export async function runSubAgent(options: {
 		throw error;
 	}
 
-		let total_retries = 0;
-		try {
-			const session_options: Record<string, unknown> = {
-				cwd,
-				model,
-				thinkingLevel,
-				resourceLoader,
-				tools,
-				sessionManager,
-				settingsManager,
-			};
+	let total_retries = 0;
+	try {
+		const session_options: Record<string, unknown> = {
+			cwd,
+			model,
+			thinkingLevel,
+			resourceLoader,
+			tools,
+			sessionManager,
+			settingsManager,
+		};
 		// Pi 0.80.10+ exposes the canonical ModelRuntime via the registry facade;
 		// pass it through so child sessions inherit every registered provider,
 		// credential source, and custom models.json entry. Pi 0.80.6 has no
@@ -1503,11 +1506,11 @@ export async function runSubAgent(options: {
 				}
 			}
 		});
-			let length_continues = 0;
-			let pending_task = task;
-			let websocket_retries = 0;
-			let http500_retried = false;
-			while (true) {
+		let length_continues = 0;
+		let pending_task = task;
+		let websocket_retries = 0;
+		let http500_retried = false;
+		while (true) {
 			// Re-ensure the checkpoint dir AND refresh the durable live marker
 			// before each prompt so a concurrent prune (session_shutdown of a
 			// foreign parent session) cannot leave the SDK's next run-record write

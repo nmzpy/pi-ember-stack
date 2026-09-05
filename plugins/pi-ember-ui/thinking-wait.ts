@@ -49,10 +49,7 @@ export function reconcile_thinking_wait_ui(options?: {
 	}
 	const thinkingActive = get_thinking_active();
 	const thinkingStreamActive = get_thinking_stream_active_fn();
-	if (
-		options?.force_arm ||
-		(thinkingStreamActive && is_agent_thinking_wait(thinkingActive))
-	) {
+	if (options?.force_arm || (thinkingStreamActive && is_agent_thinking_wait(thinkingActive))) {
 		arm_pre_token_fn?.();
 	}
 	refresh_fn?.();

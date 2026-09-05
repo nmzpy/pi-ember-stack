@@ -11,10 +11,13 @@ import {
 	detectImageMimeType,
 	isWindowsDrivePath,
 	isWindowsLikePath,
+	MAX_IMAGE_PATH_SCAN_CHARS,
 	removeImagePlaceholders,
+	replaceImagePathsInText,
 	replaceImagePlaceholdersWithFallbackLabels,
 	tokenizePathLikeText,
 } from "../image-utils.ts";
+import type { AttachmentStore } from "../store.ts";
 
 function attachment(
 	id: number,
@@ -118,10 +121,49 @@ describe("replaceImagePlaceholdersWithFallbackLabels", () => {
 		);
 		expect(stripAnsi(result)).toBe("[image 2: 30x40] vs [image 1: 10x20]");
 	});
-
 	test("ignores placeholders that are not present in the text", () => {
 		const attachments = [attachment(1, { widthPx: 2, heightPx: 2 })];
 		const result = replaceImagePlaceholdersWithFallbackLabels("plain text", attachments);
 		expect(stripAnsi(result)).toBe("plain text");
+	});
+});
+
+describe("deterministic paste scan budget", () => {
+	test("large pasted blocks skip the sync image-path scan entirely (same reference, store untouched)", () => {
+		let addCalls = 0;
+		const store = {
+			add: () => {
+				addCalls++;
+				throw new Error("store.add must not be called for oversized text");
+			},
+		} as unknown as AttachmentStore;
+
+		const token = String.raw`C:\\nope\\dir\\img.png `;
+		const large = token.repeat(Math.ceil(MAX_IMAGE_PATH_SCAN_CHARS / token.length) + 1);
+		expect(large.length).toBeGreaterThan(MAX_IMAGE_PATH_SCAN_CHARS);
+
+		const result = replaceImagePathsInText(large, {
+			cwd: "/cwd",
+			store,
+		});
+		// Same string reference — the guard returns before tokenize + fs probes.
+		expect(result.text).toBe(large);
+		expect(result.replaced).toBe(0);
+		expect(result.accepted).toHaveLength(0);
+		expect(addCalls).toBe(0);
+	});
+
+	test("short text without path-like tokens returns unchanged within the budget", () => {
+		const store = {
+			add: () => {
+				throw new Error("no image should load");
+			},
+		} as unknown as AttachmentStore;
+		const short = "plain text without paths";
+
+		const result = replaceImagePathsInText(short, { cwd: "/cwd", store });
+		expect(result.text).toBe(short);
+		expect(result.replaced).toBe(0);
+		expect(result.accepted).toHaveLength(0);
 	});
 });

@@ -49,6 +49,12 @@ export function genDiff(
 ): { diff: string; firstChangedLine: number | undefined } {
 	const effectiveNewHashes = newContentHashes ?? _lineHashesPure(newContent);
 
+	// Delta-only mode (contextLines <= 0): emit ONLY the changed lines (+/-)
+	// with their hashes — no unchanged context rows and no ` ...` ellipsis
+	// markers. This is the default for post-edit diffs so a two-line change
+	// returns two +/- rows instead of re-printing the surrounding block.
+	const deltaOnly = contextLines <= 0;
+
 	const parts = Diff.diffLines(oldContent, newContent);
 	const output: string[] = [];
 	let newLineNum = 1;
@@ -76,6 +82,14 @@ export function genDiff(
 				}
 			}
 			lastWasChange = true;
+			continue;
+		}
+
+		// Unchanged lines: in delta-only mode they never appear in the output.
+		if (deltaOnly) {
+			newLineNum += displayLines.length;
+			oldLineNum += displayLines.length;
+			lastWasChange = false;
 			continue;
 		}
 

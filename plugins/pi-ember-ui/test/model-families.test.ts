@@ -327,7 +327,7 @@ describe("build_model_families", () => {
 		]);
 		expect(families).toHaveLength(1);
 		expect(families[0].kind).toBe("sibling");
-		expect(families[0].displayName).toBe("DeepSeek: DeepSeek V4 Flash 0731");
+		expect(families[0].displayName).toBe("DeepSeek V4 Flash 0731");
 		expect(families[0].efforts).toEqual(["low", "medium", "high"]);
 		expect(families[0].baseModel.id).toBe("deepseek-v4-flash-0731");
 		expect(families[0].variants.low?.id).toBe("deepseek-v4-flash-0731-low-cro");

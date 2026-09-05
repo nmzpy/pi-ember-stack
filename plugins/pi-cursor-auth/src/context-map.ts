@@ -106,10 +106,7 @@ function map_tools(tools: readonly Tool[] | undefined): CursorToolDef[] {
 	});
 }
 
-function find_turn_for_tool_result(
-	turns: readonly CursorTurn[],
-	tool_call_id: string,
-): number {
+function find_turn_for_tool_result(turns: readonly CursorTurn[], tool_call_id: string): number {
 	for (let i = turns.length - 1; i >= 0; i--) {
 		if (turns[i]?.tool_calls.some((call) => call.id === tool_call_id)) return i;
 	}
@@ -242,7 +239,8 @@ export function map_context_to_cursor(
 ): CursorMappedContext {
 	const parsed = parse_pi_messages(context.messages);
 	const { completed_turns, pending_user_text } = split_pending_user_turn(parsed.turns);
-	const system_prompt = system_prompt_override ?? context.systemPrompt ?? "You are a helpful assistant.";
+	const system_prompt =
+		system_prompt_override ?? context.systemPrompt ?? "You are a helpful assistant.";
 	let user_text = resolve_mapped_user_text(context, parsed, explicit_user_text);
 	if (!user_text.trim() && pending_user_text.trim()) {
 		user_text = pending_user_text;
@@ -258,9 +256,7 @@ export function map_context_to_cursor(
 
 export function cursor_context_has_content(mapped: CursorMappedContext): boolean {
 	return (
-		mapped.user_text.trim().length > 0 ||
-		mapped.tool_results.length > 0 ||
-		mapped.turns.length > 0
+		mapped.user_text.trim().length > 0 || mapped.tool_results.length > 0 || mapped.turns.length > 0
 	);
 }
 

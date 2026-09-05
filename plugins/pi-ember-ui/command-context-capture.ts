@@ -77,7 +77,10 @@ function refresh_from_runner(runner: ExtensionRunner): void {
 
 function patch_bind_command_context(runnerProto: Record<PropertyKey, unknown>): void {
 	const state = global_state();
-	if (state.bindPatched && (runnerProto.bindCommandContext as { [WRAPPER_KEY]?: boolean })?.[WRAPPER_KEY]) {
+	if (
+		state.bindPatched &&
+		(runnerProto.bindCommandContext as { [WRAPPER_KEY]?: boolean })?.[WRAPPER_KEY]
+	) {
 		return;
 	}
 

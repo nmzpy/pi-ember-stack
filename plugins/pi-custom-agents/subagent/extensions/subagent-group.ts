@@ -54,9 +54,9 @@ function has_shared_live_items_buffer(
 			: incoming[old_index];
 		return Boolean(
 			next_result &&
-			old_result.exitCode === next_result.exitCode &&
-			old_result.liveItems &&
-			old_result.liveItems === next_result.liveItems,
+				old_result.exitCode === next_result.exitCode &&
+				old_result.liveItems &&
+				old_result.liveItems === next_result.liveItems,
 		);
 	});
 }
@@ -70,15 +70,16 @@ function has_authoritative_finishing_clear(
 	existing: SubAgentResult[],
 	incoming: SubAgentResult[],
 ): boolean {
-	return existing.some((old_result, old_index) =>
-		old_result.isFinishing === true &&
-		incoming.some(
-			(next_result, next_index) =>
-				next_result.isFinishing === false &&
+	return existing.some(
+		(old_result, old_index) =>
+			old_result.isFinishing === true &&
+			incoming.some(
+				(next_result, next_index) =>
+					next_result.isFinishing === false &&
 					(old_result.toolCallId && next_result.toolCallId
 						? old_result.toolCallId === next_result.toolCallId
 						: old_index === next_index),
-		),
+			),
 	);
 }
 

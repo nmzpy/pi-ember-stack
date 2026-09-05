@@ -35,9 +35,7 @@ export function bind_thinking_status_tick_should_paint(fn: () => boolean): void 
 }
 
 /** Wire the SSOT host resolver without importing the host owner (circularly). */
-export function bind_thinking_status_tick_host_resolver(
-	fn: () => ThinkingStatusHostKind,
-): void {
+export function bind_thinking_status_tick_host_resolver(fn: () => ThinkingStatusHostKind): void {
 	resolve_host_fn = fn;
 }
 

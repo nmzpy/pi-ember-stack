@@ -22,11 +22,11 @@
  * cache it and refresh shortly before `exp`.
  */
 
-import * as crypto from 'node:crypto';
-import { encodeMessage, iterFields } from './wire.js';
-import { buildMetadata } from './metadata.js';
+import * as crypto from "node:crypto";
+import { encodeMessage, iterFields } from "./wire.js";
+import { buildMetadata } from "./metadata.js";
 
-const DEFAULT_HOST = 'https://server.codeium.com';
+const DEFAULT_HOST = "https://server.codeium.com";
 
 /**
  * Polyfill for `AbortSignal.any` — composes multiple signals so the result
@@ -37,33 +37,36 @@ const DEFAULT_HOST = 'https://server.codeium.com';
  * alive for up to the full 30s timeout).
  */
 function anySignal(signals: AbortSignal[]): AbortSignal {
-  const builtin = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
-  if (typeof builtin === 'function') return builtin(signals);
-  const controller = new AbortController();
-  const onAbort = (reason: unknown): void => {
-    if (!controller.signal.aborted) controller.abort(reason);
-  };
-  for (const s of signals) {
-    if (s.aborted) {
-      onAbort(s.reason);
-      break;
-    }
-    s.addEventListener('abort', () => onAbort(s.reason), { once: true });
-  }
-  return controller.signal;
+	const builtin = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
+	if (typeof builtin === "function") return builtin(signals);
+	const controller = new AbortController();
+	const onAbort = (reason: unknown): void => {
+		if (!controller.signal.aborted) controller.abort(reason);
+	};
+	for (const s of signals) {
+		if (s.aborted) {
+			onAbort(s.reason);
+			break;
+		}
+		s.addEventListener("abort", () => onAbort(s.reason), { once: true });
+	}
+	return controller.signal;
 }
 
 export interface MintedUserJwt {
-  jwt: string;
-  /** Unix epoch seconds when the JWT expires. */
-  expiresAt: number;
+	jwt: string;
+	/** Unix epoch seconds when the JWT expires. */
+	expiresAt: number;
 }
 
 export class CloudAuthError extends Error {
-  constructor(message: string, public readonly status?: number) {
-    super(message);
-    this.name = 'CloudAuthError';
-  }
+	constructor(
+		message: string,
+		public readonly status?: number,
+	) {
+		super(message);
+		this.name = "CloudAuthError";
+	}
 }
 
 /**
@@ -83,86 +86,86 @@ const MINT_TIMEOUT_MS = 30_000;
  * we honor whichever fires first via AbortSignal.any.
  */
 export async function mintUserJwt(
-  apiKey: string,
-  host: string = DEFAULT_HOST,
-  signal?: AbortSignal,
+	apiKey: string,
+	host: string = DEFAULT_HOST,
+	signal?: AbortSignal,
 ): Promise<MintedUserJwt> {
-  const metadata = buildMetadata({
-    apiKey,
-    sessionId: crypto.randomUUID(),
-    requestId: BigInt(Date.now()),
-    triggerId: crypto.randomUUID(),
-  });
-  // GetUserJwtRequest { metadata: Metadata }   — Metadata is field 1
-  const req = encodeMessage(1, metadata);
+	const metadata = buildMetadata({
+		apiKey,
+		sessionId: crypto.randomUUID(),
+		requestId: BigInt(Date.now()),
+		triggerId: crypto.randomUUID(),
+	});
+	// GetUserJwtRequest { metadata: Metadata }   — Metadata is field 1
+	const req = encodeMessage(1, metadata);
 
-  // Compose caller signal with our internal timeout via `anySignal` — a
-  // small polyfill of `AbortSignal.any` for runtimes (Node 18 / older
-  // Bun) that lack the built-in. The previous fallback silently dropped
-  // the CALLER's signal on those runtimes, so a chat-cancel during a
-  // GetUserJwt mint would keep the network request alive for up to the
-  // full 30s timeout.
-  const timeoutSignal = AbortSignal.timeout(MINT_TIMEOUT_MS);
-  const combinedSignal: AbortSignal = signal
-    ? anySignal([signal, timeoutSignal])
-    : timeoutSignal;
+	// Compose caller signal with our internal timeout via `anySignal` — a
+	// small polyfill of `AbortSignal.any` for runtimes (Node 18 / older
+	// Bun) that lack the built-in. The previous fallback silently dropped
+	// the CALLER's signal on those runtimes, so a chat-cancel during a
+	// GetUserJwt mint would keep the network request alive for up to the
+	// full 30s timeout.
+	const timeoutSignal = AbortSignal.timeout(MINT_TIMEOUT_MS);
+	const combinedSignal: AbortSignal = signal ? anySignal([signal, timeoutSignal]) : timeoutSignal;
 
-  const resp = await fetch(`${host.replace(/\/$/, '')}/exa.auth_pb.AuthService/GetUserJwt`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/proto',
-      'Connect-Protocol-Version': '1',
-    },
-    body: req,
-    signal: combinedSignal,
-  });
-  const buf = Buffer.from(await resp.arrayBuffer());
+	const resp = await fetch(`${host.replace(/\/$/, "")}/exa.auth_pb.AuthService/GetUserJwt`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/proto",
+			"Connect-Protocol-Version": "1",
+		},
+		body: req,
+		signal: combinedSignal,
+	});
+	const buf = Buffer.from(await resp.arrayBuffer());
 
-  if (!resp.ok) {
-    const text = buf.toString('utf8');
-    throw new CloudAuthError(`GetUserJwt HTTP ${resp.status}: ${text.slice(0, 400)}`, resp.status);
-  }
+	if (!resp.ok) {
+		const text = buf.toString("utf8");
+		throw new CloudAuthError(`GetUserJwt HTTP ${resp.status}: ${text.slice(0, 400)}`, resp.status);
+	}
 
-  // Response is GetUserJwtResponse { user_jwt: string } where user_jwt is
-  // field 1, length-delimited. Decode the field properly instead of
-  // regex-scanning the whole buffer — the previous regex would pick up
-  // any JWT-shaped substring in the response (trace IDs, signature
-  // headers, any cached token inadvertently logged) and could even land
-  // on a non-user_jwt if Cognition ever embeds another JWT in a sibling
-  // field.
-  let jwt: string | null = null;
-  for (const f of iterFields(buf)) {
-    if (f.num === 1 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-      const s = (f.value as Buffer).toString('utf8');
-      // Sanity-check the shape — defensive: if the cloud ever moves user_jwt
-      // out from field 1 we want a clean error, not silently wrong creds.
-      // base64url with OPTIONAL `=` padding on each segment. Most modern
-      // JWTs omit the `=`, but the spec allows it and a future server-side
-      // change could re-introduce it; either way it's still a valid token.
-      if (/^eyJ[A-Za-z0-9_-]{10,}={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}$/.test(s)) {
-        jwt = s;
-        break;
-      }
-    }
-  }
-  if (!jwt) {
-    throw new CloudAuthError(
-      `GetUserJwt 200 but no field-1 JWT found (${buf.length} bytes): ${buf.toString('utf8').slice(0, 200)}`,
-    );
-  }
+	// Response is GetUserJwtResponse { user_jwt: string } where user_jwt is
+	// field 1, length-delimited. Decode the field properly instead of
+	// regex-scanning the whole buffer — the previous regex would pick up
+	// any JWT-shaped substring in the response (trace IDs, signature
+	// headers, any cached token inadvertently logged) and could even land
+	// on a non-user_jwt if Cognition ever embeds another JWT in a sibling
+	// field.
+	let jwt: string | null = null;
+	for (const f of iterFields(buf)) {
+		if (f.num === 1 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+			const s = (f.value as Buffer).toString("utf8");
+			// Sanity-check the shape — defensive: if the cloud ever moves user_jwt
+			// out from field 1 we want a clean error, not silently wrong creds.
+			// base64url with OPTIONAL `=` padding on each segment. Most modern
+			// JWTs omit the `=`, but the spec allows it and a future server-side
+			// change could re-introduce it; either way it's still a valid token.
+			if (/^eyJ[A-Za-z0-9_-]{10,}={0,2}\.[A-Za-z0-9_-]+={0,2}\.[A-Za-z0-9_-]+={0,2}$/.test(s)) {
+				jwt = s;
+				break;
+			}
+		}
+	}
+	if (!jwt) {
+		throw new CloudAuthError(
+			`GetUserJwt 200 but no field-1 JWT found (${buf.length} bytes): ${buf.toString("utf8").slice(0, 200)}`,
+		);
+	}
 
-  // Decode the payload to get the expiry.
-  let expiresAt = Math.floor(Date.now() / 1000) + 600;   // fallback: 10 min
-  try {
-    const parts = jwt.split('.');
-    const pad = (s: string) => s + '='.repeat((4 - (s.length % 4)) % 4);
-    const payload = JSON.parse(
-      Buffer.from(pad(parts[1]).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
-    );
-    if (typeof payload.exp === 'number') expiresAt = payload.exp;
-  } catch { /* fall back to default */ }
+	// Decode the payload to get the expiry.
+	let expiresAt = Math.floor(Date.now() / 1000) + 600; // fallback: 10 min
+	try {
+		const parts = jwt.split(".");
+		const pad = (s: string) => s + "=".repeat((4 - (s.length % 4)) % 4);
+		const payload = JSON.parse(
+			Buffer.from(pad(parts[1]).replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"),
+		);
+		if (typeof payload.exp === "number") expiresAt = payload.exp;
+	} catch {
+		/* fall back to default */
+	}
 
-  return { jwt, expiresAt };
+	return { jwt, expiresAt };
 }
 
 // ----------------------------------------------------------------------------
@@ -170,10 +173,10 @@ export async function mintUserJwt(
 // ----------------------------------------------------------------------------
 
 interface CacheEntry {
-  jwt: string;
-  expiresAt: number;
-  apiKey: string;
-  host: string;
+	jwt: string;
+	expiresAt: number;
+	apiKey: string;
+	host: string;
 }
 
 /**
@@ -198,7 +201,7 @@ const inFlight = new Map<string, Promise<MintedUserJwt>>();
 let cacheEpoch = 0;
 
 function flightKey(apiKey: string, host: string): string {
-  return `${host}\x1f${apiKey}`;
+	return `${host}\x1f${apiKey}`;
 }
 
 /**
@@ -207,29 +210,33 @@ function flightKey(apiKey: string, host: string): string {
  * share the same in-flight mint; concurrent callers for DIFFERENT keys each
  * get their own mint.
  */
-export async function getCachedUserJwt(apiKey: string, host: string = DEFAULT_HOST, signal?: AbortSignal): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  if (cache && cache.apiKey === apiKey && cache.host === host && cache.expiresAt > now + 60) {
-    return cache.jwt;
-  }
-  const key = flightKey(apiKey, host);
-  const existing = inFlight.get(key);
-  if (existing) return (await existing).jwt;
-  const promise = mintUserJwt(apiKey, host, signal);
-  inFlight.set(key, promise);
-  // Snapshot the epoch BEFORE awaiting the mint. If clearCachedUserJwt()
-  // fires while we're awaiting (logout-during-mint), the epoch changes
-  // and we won't repopulate the cache with the just-invalidated JWT.
-  const epochAtStart = cacheEpoch;
-  try {
-    const minted = await promise;
-    if (cacheEpoch === epochAtStart) {
-      cache = { jwt: minted.jwt, expiresAt: minted.expiresAt, apiKey, host };
-    }
-    return minted.jwt;
-  } finally {
-    inFlight.delete(key);
-  }
+export async function getCachedUserJwt(
+	apiKey: string,
+	host: string = DEFAULT_HOST,
+	signal?: AbortSignal,
+): Promise<string> {
+	const now = Math.floor(Date.now() / 1000);
+	if (cache && cache.apiKey === apiKey && cache.host === host && cache.expiresAt > now + 60) {
+		return cache.jwt;
+	}
+	const key = flightKey(apiKey, host);
+	const existing = inFlight.get(key);
+	if (existing) return (await existing).jwt;
+	const promise = mintUserJwt(apiKey, host, signal);
+	inFlight.set(key, promise);
+	// Snapshot the epoch BEFORE awaiting the mint. If clearCachedUserJwt()
+	// fires while we're awaiting (logout-during-mint), the epoch changes
+	// and we won't repopulate the cache with the just-invalidated JWT.
+	const epochAtStart = cacheEpoch;
+	try {
+		const minted = await promise;
+		if (cacheEpoch === epochAtStart) {
+			cache = { jwt: minted.jwt, expiresAt: minted.expiresAt, apiKey, host };
+		}
+		return minted.jwt;
+	} finally {
+		inFlight.delete(key);
+	}
 }
 
 /**
@@ -240,7 +247,7 @@ export async function getCachedUserJwt(apiKey: string, host: string = DEFAULT_HO
  * with the stale JWT after-the-fact.
  */
 export function clearCachedUserJwt(): void {
-  cache = null;
-  inFlight.clear();
-  cacheEpoch++;
+	cache = null;
+	inFlight.clear();
+	cacheEpoch++;
 }

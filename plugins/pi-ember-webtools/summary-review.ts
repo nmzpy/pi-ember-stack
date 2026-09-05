@@ -3,9 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { QueryResultData } from "./storage.ts";
 import { loadEnabledModelPatterns, modelMatchesEnabledPatterns } from "./summary-model-scope.ts";
 
-const PREFERRED_SUMMARY_MODELS = [
-	{ provider: "anthropic", id: "claude-haiku-4-5" },
-] as const;
+const PREFERRED_SUMMARY_MODELS = [{ provider: "openai-codex", id: "gpt-5.6-luna" }] as const;
 
 export interface SummaryMeta {
 	model: string | null;

@@ -8,7 +8,7 @@ export interface Config {
 }
 
 const DEFAULT_CONFIG: Config = {
-	autoRead: true,
+	autoRead: false,
 };
 
 function parseConfig(content: string): Config {

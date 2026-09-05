@@ -23,7 +23,11 @@ export async function login_cursor(callbacks: OAuthLoginCallbacks): Promise<OAut
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), LOGIN_TIMEOUT_MS);
 	try {
-		const { access_token, refresh_token } = await poll_cursor_auth(uuid, verifier, controller.signal);
+		const { access_token, refresh_token } = await poll_cursor_auth(
+			uuid,
+			verifier,
+			controller.signal,
+		);
 		return {
 			access: access_token,
 			refresh: refresh_token,

@@ -70,9 +70,9 @@ export function get_fresh_context_mode(
 		const candidate = entry as { type?: unknown; customType?: unknown };
 		if (
 			candidate.type === "custom_message" &&
-			(typeof candidate.customType === "string" &&
-				(candidate.customType.startsWith("pi-agents-enter-") ||
-					candidate.customType === "pi-agents-exit"))
+			typeof candidate.customType === "string" &&
+			(candidate.customType.startsWith("pi-agents-enter-") ||
+				candidate.customType === "pi-agents-exit")
 		) {
 			return undefined;
 		}

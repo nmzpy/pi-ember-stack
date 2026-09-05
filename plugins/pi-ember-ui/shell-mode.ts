@@ -17,10 +17,12 @@ export type ShellModeEditor = {
 	tui?: { requestRender?: (force?: boolean) => void };
 };
 
-export type ShellModeInputResult = {
-	consume?: boolean;
-	data?: string;
-} | undefined;
+export type ShellModeInputResult =
+	| {
+			consume?: boolean;
+			data?: string;
+	  }
+	| undefined;
 
 /** Set when shell-mode Enter prefixes `!` for Pi bash submit (TUI or editor path). */
 let pending_shell_submit_enter = false;
@@ -87,11 +89,7 @@ export function with_suppressed_shell_history_sync<T>(fn: () => T): T {
 function is_bang_key(data: string): boolean {
 	if (isKeyRelease(data)) return false;
 	if (decodeKittyPrintable(data) === "!") return true;
-	if (
-		matchesKey(data, "!") ||
-		matchesKey(data, "shift+!") ||
-		matchesKey(data, "shift+1")
-	)
+	if (matchesKey(data, "!") || matchesKey(data, "shift+!") || matchesKey(data, "shift+1"))
 		return true;
 	const id = parseKey(data);
 	return id === "!" || id === "shift+!" || id === "shift+1";
@@ -183,10 +181,7 @@ export function sync_shell_mode_from_editor_text(editor: ShellModeEditor): boole
  * call submit, clear the chatbox, and consume the key so the TUI listener
  * path cannot leave the command visible while bash runs.
  */
-export function process_shell_input(
-	data: string,
-	editor: ShellModeEditor,
-): ShellModeInputResult {
+export function process_shell_input(data: string, editor: ShellModeEditor): ShellModeInputResult {
 	if (is_bang_key(data)) {
 		if (is_editor_empty(editor)) {
 			setShellMode(true);
@@ -250,7 +245,7 @@ export function process_shell_input(
 export function intercept_shell_input(data: string, editor: ShellModeEditor): boolean {
 	const result = process_shell_input(data, editor);
 	if (result?.consume) {
-	request_render();
+		request_render();
 		return true;
 	}
 	return false;
@@ -271,7 +266,10 @@ const SHELL_HISTORY_SYNC_PATCH_MARKER = Symbol.for("pi-ember-ui:shell-history-sy
  */
 export function install_shell_history_sync_patch(): void {
 	// biome-ignore lint/suspicious/noExplicitAny: Pi's Editor prototype is dynamic at runtime
-	const proto = (Editor as any).prototype as { setTextInternal?: (...args: any[]) => any } & Record<symbol, unknown>;
+	const proto = (Editor as any).prototype as { setTextInternal?: (...args: any[]) => any } & Record<
+		symbol,
+		unknown
+	>;
 	if (!proto.setTextInternal) return;
 	if (proto[SHELL_HISTORY_SYNC_PATCH_MARKER]) return;
 	proto[SHELL_HISTORY_SYNC_PATCH_MARKER] = true;
@@ -279,7 +277,11 @@ export function install_shell_history_sync_patch(): void {
 	const originalSetTextInternal = proto.setTextInternal;
 
 	// biome-ignore lint/suspicious/noExplicitAny: Pi's Editor prototype is dynamic at runtime
-	proto.setTextInternal = function setTextInternalPatched(this: any, text: string, ...rest: any[]): any {
+	proto.setTextInternal = function setTextInternalPatched(
+		this: any,
+		text: string,
+		...rest: any[]
+	): any {
 		let syncInProgress = false;
 		const doSync = () => {
 			if (syncInProgress) return;
@@ -292,7 +294,10 @@ export function install_shell_history_sync_patch(): void {
 				setShellMode(true);
 				// Rewrite without resetting history browsing state. Prefer the
 				// patched setTextInternal if available; fall back to setText.
-				if (typeof originalSetTextInternal === "function" && typeof this.setTextInternal === "function") {
+				if (
+					typeof originalSetTextInternal === "function" &&
+					typeof this.setTextInternal === "function"
+				) {
 					// Avoid recursion by re-entering our own patched method; call the
 					// stored original directly. restore cursor at end like navigateHistory.
 					originalSetTextInternal.call(this, newText, "end");

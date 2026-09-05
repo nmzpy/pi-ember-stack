@@ -83,11 +83,7 @@ function renderWebToolBlock(
 /** Shared collapsed/expanded renderer for an error/cancel plan produced by
  * buildSearchErrorPlan(). Used by every tool renderResult's error branch so
  * Ctrl+O (app.tools.expand) reveals diagnostics instead of a dead-end single line. */
-function renderSearchErrorPlan(
-	plan: SearchErrorPlan,
-	expanded: boolean,
-	theme: WebToolTheme,
-) {
+function renderSearchErrorPlan(plan: SearchErrorPlan, expanded: boolean, theme: WebToolTheme) {
 	if (expanded) {
 		return renderWebToolBlock(
 			plan.expanded.map((line, index) =>
@@ -1768,7 +1764,7 @@ export default function (pi: ExtensionAPI) {
 				const queryList = normalizeQueryList(rawQueryList);
 				if (queryList.length === 0) {
 					return renderWebToolBlock(
-						[theme.fg("toolTitle", theme.bold("search ")) + theme.fg("error", "(no query)")],
+						[theme.fg("toolTitle", theme.bold("Websearch ")) + theme.fg("error", "(no query)")],
 						"running",
 						theme,
 					);
@@ -1777,13 +1773,13 @@ export default function (pi: ExtensionAPI) {
 					const q = queryList[0];
 					const display = q.length > 60 ? `${q.slice(0, 57)}...` : q;
 					return renderWebToolBlock(
-						[theme.fg("toolTitle", theme.bold("search ")) + theme.fg("text", `"${display}"`)],
+						[theme.fg("toolTitle", theme.bold("Websearch ")) + theme.fg("text", `"${display}"`)],
 						"running",
 						theme,
 					);
 				}
 				const lines = [
-					theme.fg("toolTitle", theme.bold("search ")) +
+					theme.fg("toolTitle", theme.bold("Websearch ")) +
 						theme.fg("text", `${queryList.length} queries`),
 				];
 				for (const q of queryList.slice(0, 5)) {
@@ -1918,11 +1914,7 @@ export default function (pi: ExtensionAPI) {
 					// browser connection state, cancel reason. See render-search-error.ts.
 					const plan = buildSearchErrorPlan(details as SearchErrorDetails);
 					if (plan) return renderSearchErrorPlan(plan, expanded, theme);
-					return renderWebToolBlock(
-						[theme.fg("error", `Error: ${details.error}`)],
-						"error",
-						theme,
-					);
+					return renderWebToolBlock([theme.fg("error", `Error: ${details.error}`)], "error", theme);
 				}
 
 				let statusLine: string;
@@ -2347,11 +2339,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const plan = buildSearchErrorPlan({ error: details.error, extraLines: extras });
 				if (plan) return renderSearchErrorPlan(plan, expanded, theme);
-				return renderWebToolBlock(
-					[theme.fg("error", `Error: ${details.error}`)],
-					"error",
-					theme,
-				);
+				return renderWebToolBlock([theme.fg("error", `Error: ${details.error}`)], "error", theme);
 			}
 
 			if (details?.urlCount === 1) {
@@ -2403,7 +2391,11 @@ export default function (pi: ExtensionAPI) {
 				theme.fg(countColor, `${details?.successful}/${details?.urlCount} URLs`) +
 				theme.fg("muted", " (content stored)");
 			if (!expanded) {
-				return renderWebToolBlock([statusLine], countColor === "error" ? "error" : "success", theme);
+				return renderWebToolBlock(
+					[statusLine],
+					countColor === "error" ? "error" : "success",
+					theme,
+				);
 			}
 			const textContent = result.content.find((c) => c.type === "text")?.text || "";
 			const preview = textContent.length > 500 ? `${textContent.slice(0, 500)}...` : textContent;
@@ -2590,11 +2582,7 @@ export default function (pi: ExtensionAPI) {
 				else if (details.title) extras.push(`resource: ${details.title}`);
 				const plan = buildSearchErrorPlan({ error: details.error, extraLines: extras });
 				if (plan) return renderSearchErrorPlan(plan, expanded, theme);
-				return renderWebToolBlock(
-					[theme.fg("error", `Error: ${details.error}`)],
-					"error",
-					theme,
-				);
+				return renderWebToolBlock([theme.fg("error", `Error: ${details.error}`)], "error", theme);
 			}
 
 			let statusLine: string;

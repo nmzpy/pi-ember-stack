@@ -6,12 +6,28 @@
  * or encoded result. Failures are intentionally silent — the original bytes
  * are always preserved.
  */
-import sharp from "sharp";
-import { ATTACHMENT_MAX_DIMENSION_PX, ATTACHMENT_WEBP_QUALITY, type ImageAttachment } from "./types.ts";
+import {
+	ATTACHMENT_MAX_DIMENSION_PX,
+	ATTACHMENT_WEBP_QUALITY,
+	type ImageAttachment,
+} from "./types.ts";
 
 export { ATTACHMENT_MAX_DIMENSION_PX, ATTACHMENT_WEBP_QUALITY };
 
 const SKIP_MIME_TYPES = new Set<`${"image"}/${string}`>(["image/gif", "image/webp"]);
+
+/**
+ * Lazily-loaded sharp module (cached). sharp is a heavy native dependency; it
+ * is only pulled in when the first attachment is actually encoded, never at
+ * plugin/startup load time. The cached promise keeps a single import across
+ * calls and works on both Node and Bun.
+ */
+let sharp_loader: Promise<typeof import("sharp")> | null = null;
+
+function load_sharp(): Promise<typeof import("sharp")> {
+	sharp_loader ??= import("sharp");
+	return sharp_loader;
+}
 
 function base64_size(data: string): number {
 	return Buffer.byteLength(data, "utf8");
@@ -26,6 +42,7 @@ export async function compressAttachment(attachment: ImageAttachment): Promise<v
 	if (!attachment.mimeType.startsWith("image/")) return;
 	const originalSize = base64_size(attachment.data);
 	try {
+		const sharp = (await load_sharp()).default;
 		const raw = Buffer.from(attachment.data, "base64");
 		if (raw.length === 0) return;
 		const output = await sharp(raw, { animated: false })

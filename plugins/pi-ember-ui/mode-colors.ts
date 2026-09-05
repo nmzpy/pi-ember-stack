@@ -24,10 +24,7 @@ export const TPS_ACCENT_THRESHOLD = 100;
  * bleed through. Mode-independent — no orange/purple/green/yellow accent
  * tint. Matches the neutral character of MUTED_COLOR text.
  */
-export const MUTED_MESSAGE_BG = desaturateHex(
-	blendToHex("#ffffff", PAGE_BG, 0.05),
-	1,
-);
+export const MUTED_MESSAGE_BG = desaturateHex(blendToHex("#ffffff", PAGE_BG, 0.05), 1);
 
 export const MODE_COLORS: Record<string, string> = {
 	code: MUTED_COLOR,
@@ -137,9 +134,7 @@ export function setAgentRunPending(active: boolean): void {
 
 export function isCurrentTurnAssistantTimestamp(timestamp: number | undefined): boolean {
 	if (timestamp === undefined) return false;
-	const anchor = (globalThis as GlobalThis)[USER_TURN_ANCHOR_TIMESTAMP_KEY] as
-		| number
-		| undefined;
+	const anchor = (globalThis as GlobalThis)[USER_TURN_ANCHOR_TIMESTAMP_KEY] as number | undefined;
 	if (anchor === undefined) {
 		// Without an anchor, only assistants from an active turn qualify — never
 		// historical bubbles after session load / resume.
@@ -206,7 +201,9 @@ function tool_call_id_set(key: symbol): Set<string> {
 /** True from the first streamed toolCall until its matching execution starts. */
 export function isToolCallPending(): boolean {
 	const count = (globalThis as GlobalThis)[PENDING_TOOL_CALL_COUNT_KEY];
-	return (typeof count === "number" && count > 0) || tool_call_id_set(PENDING_TOOL_CALL_IDS_KEY).size > 0;
+	return (
+		(typeof count === "number" && count > 0) || tool_call_id_set(PENDING_TOOL_CALL_IDS_KEY).size > 0
+	);
 }
 
 function pending_tool_call_count(): number {
@@ -335,9 +332,7 @@ export function setToolGroupActive(active: boolean): void {
 	(globalThis as GlobalThis)[TOOL_GROUP_ACTIVE_KEY] = active;
 }
 
-const GROUP_THINKING_CHILD_ACTIVE_KEY = Symbol.for(
-	"pi-ember-ui:group-thinking-child-active",
-);
+const GROUP_THINKING_CHILD_ACTIVE_KEY = Symbol.for("pi-ember-ui:group-thinking-child-active");
 
 /** Whether a settled compact group is painting an in-group Thinking child row.
  *  GlobalThis-backed: written by pi-compact-tools lifecycle flag syncs, read
@@ -484,8 +479,6 @@ export function hexToRgb(hex: string): string {
 export function colorize(hex: string, text: string): string {
 	return `\x1b[38;2;${hexToRgb(hex)}m${text}\x1b[39m`;
 }
-
-
 
 export function mutedBullet(): string {
 	return colorize(MUTED_BULLET_COLOR, "\u2022");
@@ -658,7 +651,8 @@ export function buildThemeBgColors(_accentHex: string): Record<string, string> {
  * - `# Thinking` / `## Thinking` (markdown headings)
  * - Bare `Thinking` on its own line
  */
-const THINKING_HEADER_RE = /^(?:#{1,6}\s+)?(?:\*{1,2}|_{1,2})?\s*thinking\s*(?:\*{1,2}|_{1,2})?\s*:?\s*$/i;
+const THINKING_HEADER_RE =
+	/^(?:#{1,6}\s+)?(?:\*{1,2}|_{1,2})?\s*thinking\s*(?:\*{1,2}|_{1,2})?\s*:?\s*$/i;
 
 /**
  * SSOT: strip `<think>`, `</think>`, `<thought>`, `</thought>`, `<reasoning>`,

@@ -16,11 +16,7 @@ import {
 import { CURSOR_MODEL_ID_PATTERN } from "./constants.js";
 import { map_context_to_cursor, cursor_context_has_content } from "./context-map.js";
 import { resolve_pi_tool_name, normalize_tool_arguments } from "./context.js";
-import {
-	stream_agent_events,
-	type CursorChatEvent,
-	CursorChatError,
-} from "./cloud-direct/chat.js";
+import { stream_agent_events, type CursorChatEvent, CursorChatError } from "./cloud-direct/chat.js";
 
 let active_session_key = "default";
 let active_workspace_path = "";
@@ -208,9 +204,7 @@ export function stream_cursor(
 			const aborted = options?.signal?.aborted === true;
 			output.stopReason = aborted ? "aborted" : "error";
 			output.errorMessage =
-				error instanceof CursorChatError || error instanceof Error
-					? error.message
-					: String(error);
+				error instanceof CursorChatError || error instanceof Error ? error.message : String(error);
 			stream.push({
 				type: "error",
 				reason: aborted ? "aborted" : "error",
@@ -314,18 +308,13 @@ export function stream_cursor(
 					close_thinking_block();
 					close_tool_call();
 					output.stopReason =
-						ev.reason === "tool_calls"
-							? "toolUse"
-							: ev.reason === "length"
-								? "length"
-								: "stop";
+						ev.reason === "tool_calls" ? "toolUse" : ev.reason === "length" ? "length" : "stop";
 					break;
 				}
 				case "usage": {
 					output.usage.input = ev.prompt_tokens ?? 0;
 					output.usage.output = ev.completion_tokens ?? 0;
-					output.usage.totalTokens =
-						ev.total_tokens ?? output.usage.input + output.usage.output;
+					output.usage.totalTokens = ev.total_tokens ?? output.usage.input + output.usage.output;
 					calculateCost(model, output.usage);
 					break;
 				}

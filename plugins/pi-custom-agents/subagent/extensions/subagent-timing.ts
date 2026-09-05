@@ -7,10 +7,7 @@ const subagent_started_at = new Map<string, number>();
 const subagent_final_elapsed_ms = new Map<string, number>();
 const subagent_thinking_started_at = new Map<string, number>();
 
-export function make_subagent_member_tool_call_id(
-	parentToolCallId: string,
-	index: number,
-): string {
+export function make_subagent_member_tool_call_id(parentToolCallId: string, index: number): string {
 	return `${parentToolCallId}#${index}`;
 }
 

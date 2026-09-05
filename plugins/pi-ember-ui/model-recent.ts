@@ -18,7 +18,9 @@ type RecentIdentity = {
  * considered "more recent" when it appears later in the key iteration.
  */
 export function recent_identities_from_mode_models(
-	modeModels: Readonly<Partial<Record<string, { readonly provider: string; readonly modelId: string }>>> | undefined,
+	modeModels:
+		| Readonly<Partial<Record<string, { readonly provider: string; readonly modelId: string }>>>
+		| undefined,
 	currentMode?: string,
 ): RecentIdentity[] {
 	const entries: { mode: string; index: number; identity: RecentIdentity }[] = [];

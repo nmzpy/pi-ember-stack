@@ -44,11 +44,7 @@ const KNOWN_PROVIDERS: [string, RegExp][] = [
 	["groq", /^(groq-|llama-)/i],
 ];
 
-function tryGetModel(
-	provider: string,
-	id: string,
-	modelRegistry?: ModelRegistry,
-): PiModel | null {
+function tryGetModel(provider: string, id: string, modelRegistry?: ModelRegistry): PiModel | null {
 	// Query parent ModelRegistry first — it includes custom-configured models
 	// (overridden base URLs, headers, compatibility settings, per-model overrides).
 	// Fall back to built-in registry for unconfigured models.

@@ -956,8 +956,8 @@ function formatCallBodyDetails(
 			return paint_compact_tool(theme, ` ${pathName}`, completed);
 		case "apply_patch": {
 			const files = patch_files_from_input(patch_input(args));
-			const path = files[0]?.path ?? ".";
-			return paint_compact_tool(theme, ` ${path}`, completed);
+			const file_path = files[0]?.path;
+			return file_path ? paint_compact_tool(theme, ` ${file_path}`, completed) : "";
 		}
 		default:
 			return "";
@@ -1159,9 +1159,14 @@ function apply_patch_header_text(
 	_record: CompactCall,
 	files: PatchFileRow[],
 	completed: boolean,
+	include_single_file_path = false,
 ): string {
 	const n = files.length;
 	const verb = completed ? "Patched" : "Patching";
+	if (include_single_file_path && n === 1) {
+		const file_path = files[0]?.path;
+		if (file_path) return `${verb} ${normalize_patch_display_path(file_path)}`;
+	}
 	const header = n > 1 ? `${verb} ${n} files` : n === 1 ? `${verb} 1 file` : verb;
 	return header;
 }
@@ -1171,7 +1176,7 @@ function format_apply_patch_block(record: CompactCall, theme: ThemeLike): string
 	const files = patch_files_for_record(record);
 	const completed = record._completed === true;
 	const bullet = apply_patch_bullet(record, undefined, theme);
-	const header = apply_patch_header_text(record, files, completed);
+	const header = apply_patch_header_text(record, files, completed, true);
 	let row = `${bullet}${theme.fg("muted", theme.bold(header))}`;
 	const stats = formatEditStatsFromCounts(apply_patch_total_stats(files), theme, true, false);
 	if (stats) row += paint_compact_tool(theme, "  ", completed) + stats;
@@ -1180,8 +1185,7 @@ function format_apply_patch_block(record: CompactCall, theme: ThemeLike): string
 
 function format_patch_group(group: DiscoveryGroup, theme: ThemeLike): string {
 	const files = patch_files_in_group(group);
-	const any_running = group.records.some((r) => !r._completed);
-	const headerVerb = any_running ? "Patching" : "Patched";
+	const headerVerb = group.records.some((r) => !r._completed) ? "Patching" : "Patched";
 	const header =
 		files.length > 0
 			? `${headerVerb} ${files.length} file${files.length === 1 ? "" : "s"}`
@@ -1221,12 +1225,9 @@ function format_patch_group(group: DiscoveryGroup, theme: ThemeLike): string {
 	];
 	if (group.settled) return lines.join("\n");
 	const file_errors = patch_errors_for_records(visible_records);
-	const children =
-		visible_file_rows.length > 0
-			? visible_file_rows
-			: [{ file: { path: ".", additions: 0, removals: 0 }, completed: !any_running }];
-	for (const [index, child] of children.entries()) {
-		const is_last_child = index === children.length - 1;
+	if (visible_file_rows.length === 0) return lines.join("\n");
+	for (const [index, child] of visible_file_rows.entries()) {
+		const is_last_child = index === visible_file_rows.length - 1;
 		const prefix = format_compact_group_child_prefix(
 			is_last_child ? "last" : child.completed ? "pipe" : "tee",
 		);
@@ -1620,6 +1621,13 @@ export class CompactRenderer {
 	/** Last same-key group type kept for reopen after soft settle. */
 	private reopenGroupKey: string | undefined;
 
+	/** Group that was hard-exited by a visible thinking stream; its merge cause
+	 *  is finalized when the next transcript boundary or tool wave arrives.
+	 *  Stays unsettled until then so a visible→hidden toggle can decide whether
+	 *  the gap contained only thinking output (merge) or also visible text/noisy
+	 *  output (do not merge).
+	 */
+	private pendingVisibleThinkingGroup: DiscoveryGroup | undefined;
 	beginTurn(): void {
 		// The latest child remains visible through turn_end. Every new tool call
 		// replaces that child; hard boundaries still freeze the aggregate header.
@@ -1697,15 +1705,10 @@ export class CompactRenderer {
 		return candidate;
 	}
 
-	/** Hard boundary: non-groupable tool (subagent, quiz, …) appeared
-	 *  chronologically after the work group — freeze header and never reopen. */
-	noteInterveningToolCall(): void {
-		this.hardExitGroup();
-	}
-
 	/** Mutate `group.thinkingChild` keeping the O(1) lane counter in sync.
-	 *  Every arm/clear site must go through here so `hasAnyGroupThinkingChild()`
-	 *  (the render-path gate) can never diverge from the painted lane. */
+	 *  Every arm/clear site must go through here so `hasAnyGroupThinkingChild()
+	 *  (the render-path gate) can never diverge from the painted lane.
+	 */
 	private setThinkingChild(group: DiscoveryGroup, value: boolean): void {
 		const current = group.thinkingChild === true;
 		if (current === value) return;
@@ -1713,19 +1716,49 @@ export class CompactRenderer {
 		this.thinkingLaneCount += value ? 1 : -1;
 	}
 
-	/** Hard boundary: visible assistant text (or visible thinking). Freeze
-	 *  to header-only and clear so a later same-type call starts fresh below
-	 *  the intervening transcript block. */
+	/** Finalize the merge cause of a group that was hard-exited by a visible
+	 *  thinking stream. When `pure` is true, the next tool wave was reached
+	 *  without any visible text/user message/non-groupable tool in between, so
+	 *  a visible→hidden toggle may merge the split work groups.
+	 *  When `pure` is false, the gap contained real transcript output that must
+	 *  keep the groups split.
+	 */
+	private finalizeVisibleThinkingHardExit(pure: boolean): void {
+		const group = this.pendingVisibleThinkingGroup;
+		if (!group) return;
+		group.hardExitCause = pure ? "visible_thinking" : undefined;
+		this.pendingVisibleThinkingGroup = undefined;
+	}
+	
+	/** Hard boundary: visible assistant text. Freeze to header-only and clear
+	 *  so a later same-type call starts fresh below the intervening transcript
+	 *  block. If this follows a visible-thinking hard exit, the gap was not
+	 *  pure thinking, so do not merge the split groups on a hidden toggle.
+	 */
 	noteVisibleText(): void {
+		this.finalizeVisibleThinkingHardExit(false);
 		this.hardExitGroup();
 	}
-
+	
 	noteUserMessage(): void {
+		this.finalizeVisibleThinkingHardExit(false);
 		this.hardExitGroup();
 	}
-
+	
+	/** Hard boundary: non-groupable tool (subagent, quiz, …) appeared
+	 *  chronologically after the work group — freeze header and never reopen.
+	 *  This also dirties any pending visible-thinking gap.
+	 */
+	noteInterveningToolCall(): void {
+		this.finalizeVisibleThinkingHardExit(false);
+		this.hardExitGroup();
+	}
+	
 	/** Hard boundary when thinking is visible in the transcript: freeze the work
-	 *  group header and spawn a fresh group for the next tool wave downstream. */
+	 *  group header and spawn a fresh group for the next tool wave downstream.
+	 *  The hard-exit cause stays unsettled until the next boundary or tool wave
+	 *  proves the gap was pure thinking (no visible text/noisy output).
+	 */
 	noteVisibleThinking(): void {
 		let group = this.resolveLiveGroup();
 		if (!group && this.reopenGroupKey) {
@@ -1733,38 +1766,105 @@ export class CompactRenderer {
 			if (group) this.currentGroup = group;
 		}
 		if (!group || group.records.length < 1) return;
-		// Tag the hard exit so a visible→hidden thinking-block toggle can revert
-		// it and restore the in-group Thinking lane + reopenable grouping.
-		group.hardExitCause = "visible_thinking";
 		this.hardExitGroup();
+		this.pendingVisibleThinkingGroup = group;
 	}
 
-	/** Revert a hard exit caused only by visible thinking so the group becomes
-	 *  reopenable again and the in-group `└ Thinking` lane can be restored.
-	 *  Called during a visible→hidden thinking-block toggle. */
-	revertVisibleThinkingHardExit(): boolean {
+	/**
+	 *  Merge same-key work groups that were split only by a visible thinking
+	 *  transcript boundary. When the user switches thinking blocks from visible
+	 *  to hidden, the visible reasoning block disappears, so consecutive tool
+	 *  waves that were separated only by that block should collapse back into
+	 *  one compact work group. Groups separated by real boundaries
+	 *  (visible text, user message, non-groupable tool) stay split.
+	 *  Called during a visible→hidden thinking-block toggle.
+	 */
+	mergeVisibleThinkingHardExits(): boolean {
 		if (!isThinkingBlocksHidden()) return false;
-		// Find the most recent hard-exited group whose cause was visible thinking.
-		let target: DiscoveryGroup | undefined;
+		// If a visible-thinking hard exit is still pending, no visible text or
+		// other hard boundary has arrived yet, so the gap is pure thinking and
+		// the live group may be reopened/merged when hidden.
+		this.finalizeVisibleThinkingHardExit(true);
+		// Build a chronological, de-duplicated list of groups.
+		const groups: DiscoveryGroup[] = [];
 		const seen = new Set<DiscoveryGroup>();
 		for (const record of this.calls.values()) {
 			const group = record.group;
 			if (!group || seen.has(group)) continue;
 			seen.add(group);
-			if (group.hardExited && group.hardExitCause === "visible_thinking") {
-				target = group;
-			}
+			groups.push(group);
 		}
-		if (!target || target.records.length < 1) return false;
-		// Revert the hard exit: the group is reopenable again.
-		target.hardExited = false;
-		target.hardExitCause = undefined;
-		this.currentGroup = target;
-		this.reopenGroupKey = target.key;
+		if (groups.length === 0) return false;
+		// Single pass: merge each right group into the left group when the only
+		// boundary between them was a visible thinking block.
+		const merged: DiscoveryGroup[] = [groups[0]];
+		for (let i = 1; i < groups.length; i++) {
+			const left = merged[merged.length - 1];
+			const right = groups[i];
+			const can_merge =
+				left.key === right.key &&
+				left.hardExited === true &&
+				left.hardExitCause === "visible_thinking";
+			if (!can_merge) {
+				merged.push(right);
+				continue;
+			}
+			// Move right's records into left.
+			for (const record of right.records) {
+				record.group = left;
+				left.records.push(record);
+			}
+			// Transfer thinking/hold state.
+			if (right.thinkingChild) {
+				if (!left.thinkingChild) this.setThinkingChild(left, true);
+				this.setThinkingChild(right, false);
+			}
+			left.holdingToolLane = right.holdingToolLane || left.holdingToolLane;
+			left.settled = right.settled;
+			// If the right group itself ended with a real hard boundary, the
+			// merged group inherits that boundary.
+			if (right.hardExited) {
+				left.hardExited = true;
+				left.hardExitCause = right.hardExitCause;
+			} else {
+				left.hardExited = false;
+				left.hardExitCause = undefined;
+			}
+			// The right group no longer exists.
+			right.records.length = 0;
+			right.hardExited = false;
+			right.hardExitCause = undefined;
+			right.settled = false;
+			right.holdingToolLane = false;
+			right.childAbsorbBefore = 0;
+			right.thinkingChild = false;
+			right.callText = undefined;
+			right.renderOwner = undefined;
+			right.anchorOwner = undefined;
+			right.pendingShrink = false;
+			right.staticText = undefined;
+			right.staticTextValid = false;
+		}
+		const live = merged[merged.length - 1];
+		// The final visible thinking hard exit is removed when blocks are hidden:
+		// there is no longer a visible reasoning block after the group.
+		if (live.hardExited && live.hardExitCause === "visible_thinking") {
+			live.hardExited = false;
+			live.hardExitCause = undefined;
+		}
+		if (live.hardExited) {
+			this.currentGroup = undefined;
+			this.reopenGroupKey = undefined;
+			return false;
+		}
+		this.currentGroup = live;
+		this.reopenGroupKey = live.key;
+		live.childAbsorbBefore = Math.max(0, live.records.length - 1);
+		live.pendingShrink = true;
 		return true;
 	}
 
-	/** Core implementation for arming the in-group `└ Thinking` lane. */
+	/** Core implementation for arming the in-group Thinking lane. */
 	private arm_in_group_thinking(): void {
 		let group = this.resolveLiveGroup();
 		if (!group && this.reopenGroupKey) {
@@ -1926,6 +2026,7 @@ export class CompactRenderer {
 		this.calls.clear();
 		this.currentGroup = undefined;
 		this.reopenGroupKey = undefined;
+		this.pendingVisibleThinkingGroup = undefined;
 		this.pendingGroupInvalidations.clear();
 		this.thinkingLaneCount = 0;
 		this.lastTheme = undefined;
@@ -2183,7 +2284,7 @@ export class CompactRenderer {
 		if (blocks_hidden) {
 			// Revert any hard exit caused only by visible thinking so the group
 			// becomes reopenable and the in-group Thinking lane can be restored.
-			this.revertVisibleThinkingHardExit();
+			this.mergeVisibleThinkingHardExits();
 			if (restore_thinking_lane) {
 				this.restoreInGroupThinkingLaneIfSettled(true);
 			}
@@ -2304,6 +2405,10 @@ export class CompactRenderer {
 	}
 
 	private startGroup(key: string, record: CompactCall): DiscoveryGroup {
+		// Reaching a new tool wave with a pending visible-thinking hard exit
+		// means the gap was filled only by thinking output, so the previous
+		// group may be merged back on a hidden toggle.
+		this.finalizeVisibleThinkingHardExit(true);
 		const group: DiscoveryGroup = {
 			records: [record],
 			renderOwner: record,
@@ -2312,6 +2417,7 @@ export class CompactRenderer {
 			key,
 			childAbsorbBefore: 0,
 		};
+		record.group = group;
 		this.currentGroup = group;
 		if (group.key) this.reopenGroupKey = group.key;
 		return group;

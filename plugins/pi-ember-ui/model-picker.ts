@@ -3,6 +3,7 @@ import path from "node:path";
 import {
 	CustomEditor,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
 	ExtensionRunner,
 	type SessionInfo,
@@ -14,21 +15,36 @@ import {
 	Editor,
 	fuzzyFilter,
 	getKeybindings,
-	SelectList,
 	type SelectItem,
+	SelectList,
 	type SelectListTheme,
 	truncateToWidth,
 } from "@earendil-works/pi-tui";
+import {
+	model_identity_from_user_selection,
+	PI_AGENTS_BIND_MODE_MODEL_EVENT,
+} from "../pi-custom-agents/mode-models.ts";
+import {
+	get_switch_session_fn,
+	install_command_context_capture,
+	resolve_switch_session_fn,
+} from "./command-context-capture.ts";
+import { refresh_footer, set_footer_thinking_level } from "./footer.ts";
 import {
 	finalize_editor_input_after,
 	reset_slash_command_tracking,
 	sync_slash_command_active,
 } from "./layout.ts";
-import { refresh_footer, set_footer_thinking_level } from "./footer.ts";
+import { find_exact_model_reference } from "./model-reference.ts";
 import {
-	PI_AGENTS_BIND_MODE_MODEL_EVENT,
-	model_identity_from_user_selection,
-} from "../pi-custom-agents/mode-models.ts";
+	OPENROUTER_PROVIDER_AUTO,
+	apply_openrouter_routing,
+	build_openrouter_routing,
+	fetch_openrouter_upstreams,
+	format_upstream_label,
+	is_openrouter_model,
+	resolve_openrouter_api_key,
+} from "./openrouter-routing.ts";
 import {
 	bind_picker_editor,
 	close_model_picker,
@@ -43,14 +59,8 @@ import {
 } from "./model-selector.ts";
 import type { EffortSliderPoint } from "./model-variants.ts";
 import { format_model_effort_suffix } from "./model-variants.ts";
-import { buildSelectListTheme, resolve_select_list_theme } from "./select-list-theme.ts";
-import {
-	get_switch_session_fn,
-	install_command_context_capture,
-	resolve_switch_session_fn,
-} from "./command-context-capture.ts";
-import { find_exact_model_reference } from "./model-reference.ts";
 import { request_render } from "./render-intent.ts";
+import { buildSelectListTheme, resolve_select_list_theme } from "./select-list-theme.ts";
 
 export { find_exact_model_reference } from "./model-reference.ts";
 export {
@@ -113,7 +123,10 @@ export function resume_truncate_text(
 		text,
 		Math.max(
 			1,
-			Math.min(maxWidth, Math.floor((contentWidth || columnWidth) * RESUME_PRIMARY_COLUMN_FRACTION)),
+			Math.min(
+				maxWidth,
+				Math.floor((contentWidth || columnWidth) * RESUME_PRIMARY_COLUMN_FRACTION),
+			),
 		),
 	);
 }
@@ -288,6 +301,35 @@ export function open_resume_autocomplete(editor: ModelPickerEditor, initialSearc
 	void refresh_session_cache({ force: true });
 	open_slash_autocomplete(editor, RESUME_PREFIX, initialSearch);
 }
+const OPENROUTER_PROVIDER_PICKER_TITLE = "OpenRouter upstream provider";
+
+/**
+ * Second picker step for an OpenRouter model: fetch the live upstream providers
+ * from OpenRouter's endpoints API and let the user pick one (or Auto). Returns
+ * the chosen provider tag, or `OPENROUTER_PROVIDER_AUTO` when the user picks
+ * Auto / cancels / the fetch yields no endpoints. Never throws — a network
+ * failure falls back to Auto so the model still switches.
+ */
+async function pick_openrouter_provider(
+	ctx: ExtensionContext,
+	modelId: string,
+): Promise<string> {
+	const apiKey = await resolve_openrouter_api_key(ctx.modelRegistry);
+	const upstreams = await fetch_openrouter_upstreams(modelId, { apiKey });
+	if (upstreams.length === 0) return OPENROUTER_PROVIDER_AUTO;
+	const autoLabel = "Auto (let OpenRouter route)";
+	const labels = [autoLabel, ...upstreams.map(format_upstream_label)];
+	try {
+		const choice = await ctx.ui.select(OPENROUTER_PROVIDER_PICKER_TITLE, labels);
+		if (!choice || choice === autoLabel) return OPENROUTER_PROVIDER_AUTO;
+		const index = labels.indexOf(choice);
+		if (index <= 0) return OPENROUTER_PROVIDER_AUTO;
+		const upstream = upstreams[index - 1];
+		return upstream?.tag ?? OPENROUTER_PROVIDER_AUTO;
+	} catch {
+		return OPENROUTER_PROVIDER_AUTO;
+	}
+}
 
 async function apply_model_selection(
 	pi: ExtensionAPI,
@@ -297,6 +339,8 @@ async function apply_model_selection(
 		id: string;
 		thinkingLevel?: EffortSliderPoint;
 		syncThinkingLevelToPi?: boolean;
+		/** OpenRouter upstream provider slug chosen in the second picker step. */
+		openRouterProvider?: string;
 	},
 ): Promise<boolean> {
 	const models = ctx.modelRegistry.getAvailable();
@@ -305,8 +349,18 @@ async function apply_model_selection(
 		ctx.ui.notify(`Model not found: ${selection.provider}/${selection.id}`, "error");
 		return false;
 	}
+	// OpenRouter marketplace: offer a second step to pin the upstream provider
+	// (Anthropic, Google Vertex, Amazon Bedrock, …) that actually serves the
+	// model. The choice is baked into the model's compat.openRouterRouting and
+	// remembered per mode. Auto (the default) lets OpenRouter load-balance.
+	let openRouterProvider = selection.openRouterProvider;
+	if (is_openrouter_model(model) && openRouterProvider === undefined) {
+		openRouterProvider = await pick_openrouter_provider(ctx, model.id);
+	}
+	const routing = build_openrouter_routing(openRouterProvider ?? "");
+	const routed_model = apply_openrouter_routing(model, routing);
 	try {
-		await pi.setModel(model);
+		await pi.setModel(routed_model);
 		if (selection.thinkingLevel) {
 			set_footer_thinking_level(selection.thinkingLevel);
 			if (selection.syncThinkingLevelToPi) {
@@ -326,6 +380,7 @@ async function apply_model_selection(
 			{
 				thinkingLevel: selection.thinkingLevel,
 				syncThinkingLevelToPi: selection.syncThinkingLevelToPi,
+				openRouterProvider,
 			},
 		);
 		if (identity) {
@@ -335,13 +390,17 @@ async function apply_model_selection(
 				name: model.name,
 				thinkingLevel: identity.thinkingLevel,
 				syncThinkingLevelToPi: selection.syncThinkingLevelToPi,
+				openRouterProvider: identity.openRouterProvider,
 			});
 		}
 		const effortHint = format_model_effort_suffix(
 			{ id: model.id, name: model.name },
 			selection.thinkingLevel,
 		);
-		ctx.ui.notify(`Model: ${model.id}${effortHint} • ${model.provider}`, "info");
+		const providerHint = openRouterProvider && openRouterProvider !== OPENROUTER_PROVIDER_AUTO
+			? ` • via ${openRouterProvider}`
+			: "";
+		ctx.ui.notify(`Model: ${model.id}${effortHint} • ${model.provider}${providerHint}`, "info");
 		return true;
 	} catch (err) {
 		ctx.ui.notify(
@@ -381,15 +440,16 @@ export type PickModelInEditorOptions = {
 };
 
 /** Read per-mode model memory from the persisted JSON file. */
-function read_mode_models(): Partial<Record<string, { readonly provider: string; readonly modelId: string }>> {
+function read_mode_models(): Partial<
+	Record<string, { readonly provider: string; readonly modelId: string }>
+> {
 	try {
 		const home =
 			process.env.PI_HOME ||
 			path.join(process.env.HOME || process.env.USERPROFILE || "", ".pi", "agent");
-		const raw = JSON.parse(fs.readFileSync(path.join(home, "pi-ember-stack.json"), "utf8")) as Record<
-			string,
-			unknown
-		>;
+		const raw = JSON.parse(
+			fs.readFileSync(path.join(home, "pi-ember-stack.json"), "utf8"),
+		) as Record<string, unknown>;
 		const modeModels = raw.modeModels;
 		if (!modeModels || typeof modeModels !== "object" || Array.isArray(modeModels)) return {};
 		const result: Partial<Record<string, { provider: string; modelId: string }>> = {};
@@ -421,8 +481,7 @@ function open_model_selector_ui(
 	if (!model_picker_ctx || !model_picker_pi) return;
 	const ctx = model_picker_ctx;
 	const pi = model_picker_pi;
-	const normalized =
-		typeof options === "string" ? { initialSearch: options } : (options ?? {});
+	const normalized = typeof options === "string" ? { initialSearch: options } : (options ?? {});
 	live_editor = editor;
 	model_selector_busy = true;
 
@@ -606,13 +665,25 @@ export async function apply_resume_from_term(searchTerm: string): Promise<void> 
 		);
 		return;
 	}
+	let newCtx: ExtensionCommandContext | undefined;
 	try {
-		const result = await switch_session(match.path);
-		if (result?.cancelled) {
-			ctx.ui.notify("Resume cancelled", "info");
+		const result = await switch_session(match.path, {
+			withSession: async (nCtx) => {
+				newCtx = nCtx;
+			},
+		});
+		if (result?.cancelled && newCtx) {
+			newCtx.ui.notify("Resume cancelled", "info");
 		}
 	} catch (err) {
-		ctx.ui.notify(`Failed to resume: ${err instanceof Error ? err.message : String(err)}`, "error");
+		const error = err instanceof Error ? err : new Error(String(err));
+		// If the new session was already bound, the live withSession context reports the error;
+		// otherwise the switch failed before replacement and the original ctx is still live.
+		if (newCtx) {
+			newCtx.ui.notify(`Failed to resume: ${error.message}`, "error");
+		} else if (model_picker_ctx && model_picker_ctx === ctx) {
+			ctx.ui.notify(`Failed to resume: ${error.message}`, "error");
+		}
 	}
 }
 
@@ -668,7 +739,12 @@ export function resume_list_primary_column_width_before_render_for_tests(
 	theme: SelectListTheme,
 ): number {
 	resume_render_width = 0;
-	const list = new ResumeSelectList(items, AUTOCOMPLETE_MAX_VISIBLE, theme, RESUME_SELECT_LIST_LAYOUT);
+	const list = new ResumeSelectList(
+		items,
+		AUTOCOMPLETE_MAX_VISIBLE,
+		theme,
+		RESUME_SELECT_LIST_LAYOUT,
+	);
 	return (list as unknown as ResumeListPrimaryColumnSeam).getPrimaryColumnWidth();
 }
 
@@ -1109,9 +1185,7 @@ type PickerTui = {
  * TUI-level arrow/enter capture for the model picker. Pi can replace the live
  * editor instance; this listener persists and runs before focusedComponent.
  */
-export function install_model_picker_input_listener(
-	get_tui: () => PickerTui | undefined,
-): void {
+export function install_model_picker_input_listener(get_tui: () => PickerTui | undefined): void {
 	model_picker_input_unsubscribe?.();
 	const tui = get_tui();
 	if (!tui?.addInputListener) return;
@@ -1184,8 +1258,7 @@ export async function pick_model_in_editor(
 	const editor = live_editor;
 	model_picker_ctx = ctx;
 	model_picker_pi = pi;
-	const normalized =
-		typeof options === "string" ? { initialSearch: options } : (options ?? {});
+	const normalized = typeof options === "string" ? { initialSearch: options } : (options ?? {});
 	return new Promise((resolve) => {
 		pending_pick = { resolve };
 		open_model_selector_ui(editor, normalized);

@@ -44,7 +44,9 @@ export type ExtensionSelectorOption = {
 let extension_selector_options: ExtensionSelectorOption[] | undefined;
 
 /** Optional label+description rows for ctx.ui.select (ExtensionSelector). */
-export function set_extension_selector_options(options: ExtensionSelectorOption[] | undefined): void {
+export function set_extension_selector_options(
+	options: ExtensionSelectorOption[] | undefined,
+): void {
 	extension_selector_options = options;
 }
 
@@ -79,7 +81,11 @@ export function buildSelectListTheme(live: Theme): EmberSelectListTheme {
 }
 
 /** SSOT row paint for ctx.ui.select and other arrow-prefix pickers. */
-export function format_selector_option_row(live: Theme, label: string, is_selected: boolean): string {
+export function format_selector_option_row(
+	live: Theme,
+	label: string,
+	is_selected: boolean,
+): string {
 	const prefix = is_selected ? "→ " : "  ";
 	const row = `${prefix}${label}`;
 	return is_selected ? live.fg("text", row) : live.fg("dim", row);
@@ -132,7 +138,9 @@ type ExtensionSelectorProto = {
 	selectedIndex: number;
 };
 
-type ExtensionSelectorClass = new (...args: unknown[]) => HintStripContainer & ExtensionSelectorProto;
+type ExtensionSelectorClass = new (
+	...args: unknown[]
+) => HintStripContainer & ExtensionSelectorProto;
 
 function patch_extension_selector_update_list(
 	ExtensionSelectorComponent: ExtensionSelectorClass,
@@ -216,7 +224,9 @@ function install_extension_selector_patch(get_theme: () => Theme): void {
 
 	try {
 		const req = createRequire(import.meta.url);
-		const selector_mod = req(join(dist_dir, "modes/interactive/components/extension-selector.js")) as {
+		const selector_mod = req(
+			join(dist_dir, "modes/interactive/components/extension-selector.js"),
+		) as {
 			ExtensionSelectorComponent: ExtensionSelectorClass;
 		};
 		patch_extension_selector_update_list(selector_mod.ExtensionSelectorComponent, get_theme);
@@ -309,7 +319,12 @@ function install_select_list_render_patch(get_theme: () => Theme): void {
 				Math.min(primaryColumnWidth, width - prefixWidth - 4),
 			);
 			const maxPrimaryWidth = Math.max(1, effectivePrimaryColumnWidth - PRIMARY_COLUMN_GAP);
-			const truncatedValue = this.truncatePrimary(item, isSelected, maxPrimaryWidth, effectivePrimaryColumnWidth);
+			const truncatedValue = this.truncatePrimary(
+				item,
+				isSelected,
+				maxPrimaryWidth,
+				effectivePrimaryColumnWidth,
+			);
 			const truncatedValueWidth = visibleWidth(truncatedValue);
 			const spacing = " ".repeat(Math.max(1, effectivePrimaryColumnWidth - truncatedValueWidth));
 			const descriptionStart = prefixWidth + truncatedValueWidth + spacing.length;
