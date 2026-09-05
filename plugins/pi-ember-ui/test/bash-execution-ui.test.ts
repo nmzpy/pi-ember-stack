@@ -52,17 +52,26 @@ describe("user bash integrated UI helpers", () => {
 	test("format_ember_bash_transcript_lines drops all horizontal rules and draws a pipe tree", () => {
 		const width = 40;
 		const raw = [ruleLine(38), "$ bash foo", ruleLine(38), "output"];
-		const running = format_ember_bash_transcript_lines(raw, width, true);
+		const complete = format_ember_bash_transcript_lines(raw, width, false);
 
-		expect(running.filter((line) => line.includes("\u2500"))).toHaveLength(0);
-		expect(running.some((line) => line.includes("$ bash foo"))).toBe(true);
-		expect(running[running.length - 1]?.includes("\u2514")).toBe(true);
+		expect(complete.filter((line) => line.includes("\u2500"))).toHaveLength(0);
+		expect(complete.some((line) => line.includes("$ bash foo"))).toBe(true);
+		expect(complete[complete.length - 1]?.includes("\u2514")).toBe(true);
 	});
 
+	test("format_ember_bash_transcript_lines keeps the pipe open while running", () => {
+		const width = 40;
+		const raw = [ruleLine(38), "$ bash foo", ruleLine(38), "output"];
+		const running = format_ember_bash_transcript_lines(raw, width, true);
+
+		expect(running.some((line) => line.includes("$ bash foo"))).toBe(true);
+		expect(running[running.length - 1]?.includes("\u2514")).toBe(false);
+		expect(running[running.length - 1]?.includes("\u2502")).toBe(true);
+	});
 	test("format_ember_bash_transcript_lines places the branch pipe at column 2", () => {
 		const width = 30;
 		const raw = [ruleLine(28), "header", ruleLine(28), "output one", "output two"];
-		const rows = format_ember_bash_transcript_lines(raw, width, true);
+		const rows = format_ember_bash_transcript_lines(raw, width, false);
 		const pipe = rows[1]?.replace(/\x1b\[[0-9;]*m/g, "");
 		const last = rows[2]?.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -71,6 +80,18 @@ describe("user bash integrated UI helpers", () => {
 		expect(last?.indexOf("\u2514")).toBe(2);
 	});
 
+	test("format_ember_bash_transcript_lines puts the corner on the last output row, not the hint", () => {
+		const width = 80;
+		const raw = [ruleLine(78), "header", ruleLine(78), "output one", "output two", "... 151 more lines (ctrl+o to expand)"];
+		const rows = format_ember_bash_transcript_lines(raw, width, false);
+
+		// The last output row should carry the `└`; the hint row should not.
+		const outputRow = rows.find((r) => r.includes("output two"))?.replace(/\x1b\[[0-9;]*m/g, "");
+		const hintRow = rows.find((r) => r.includes("more lines"))?.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(outputRow?.includes("\u2514")).toBe(true);
+		expect(hintRow?.includes("\u2514")).toBe(false);
+		expect(hintRow?.includes("\u2502")).toBe(false);
+	});
 	test("format_ember_bash_transcript_lines skips the stock Spacer and keeps the header flush", () => {
 		const width = 40;
 		const raw = ["", ruleLine(38), " • Ran foo", ruleLine(38), "output"];

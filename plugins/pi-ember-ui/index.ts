@@ -1621,8 +1621,10 @@ function pad_terminal_rule_line(line: string, width: number): string {
 	return fitted + " ".repeat(Math.max(0, width - visibleWidth(fitted)));
 }
 
+const ANSI_STRIP = /\x1b\[[0-9;]*m/g;
+
 function is_horizontal_rule_line(line: string): boolean {
-	const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+	const stripped = line.replace(ANSI_STRIP, "");
 	return /^[\s\u2500]*$/.test(stripped) && stripped.includes("\u2500");
 }
 
@@ -1630,15 +1632,19 @@ function is_horizontal_rule_line(line: string): boolean {
  *  connecting the flush bullet header to the latest output row. Leading empty
  *  rows (the stock component's Spacer) are skipped so the header is never
  *  branch-prefixed; following rows carry `│ ` / `└ ` at column 2, below the
- *  `R` of `Ran` (the `• ` bullet occupies columns 0-1). When a live theme is
- *  supplied every content row — plus one blank row above and below — is padded
- *  to the full terminal width and wrapped in the `userMessageBg` background so
- *  the whole bash output reads as one user-message block, with one true dead
- *  space row above the block separating it from the transcript content above. */
+ *  `R` of `Ran` (the `• ` bullet occupies columns 0-1). The `└` only appears
+ *  on the last real output row once the command is complete; status hints
+ *  (`... N more lines (ctrl+o to expand)`, exit codes, cancellation, and
+ *  truncation notices) are indented to align with output but carry no branch
+ *  glyph. When a live theme is supplied every content row — plus one blank
+ *  row above and below — is padded to the full terminal width and wrapped in
+ *  the `userMessageBg` background so the whole bash output reads as one
+ *  user-message block, with one true dead space row above the block
+ *  separating it from the transcript content above. */
 export function format_ember_bash_transcript_lines(
 	rawLines: string[],
 	width: number,
-	_running: boolean,
+	running: boolean,
 	theme?: Theme,
 ): string[] {
 	const contentLines: string[] = [];
@@ -1667,10 +1673,37 @@ export function format_ember_bash_transcript_lines(
 		: undefined;
 
 	const result: string[] = [];
-	for (let i = headerIndex; i < contentLines.length; i++) {
-		const isLast = i === contentLines.length - 1;
-		const branch = i === headerIndex ? "" : `${indent}${isLast ? branchLast : branchPipe}`;
-		const row = fit_terminal_content_line(`${branch}${stripMargin(contentLines[i] ?? "")}`, width);
+	const header = stripMargin(contentLines[headerIndex] ?? "");
+	if (header) result.push(bgFn ? bgFn(fit_terminal_content_line(header, width)) : header);
+
+	// Separate real output rows from trailing status/hint rows. The BashExecutionComponent
+	// appends status lines after the output preview, and we must not place the `└`
+	// on a hint row like `... 151 more lines (ctrl+o to expand)`.
+	const bodyLines = contentLines.slice(headerIndex + 1);
+	const outputLines: string[] = [];
+	const statusLines: string[] = [];
+	let statusStarted = false;
+	for (const line of bodyLines) {
+		const stripped = (line ?? "").replace(ANSI_STRIP, "").trim();
+		if (stripped === "") continue;
+		if (!statusStarted && is_bash_status_line(line)) statusStarted = true;
+		if (statusStarted) statusLines.push(line);
+		else outputLines.push(line);
+	}
+
+	for (let i = 0; i < outputLines.length; i++) {
+		const isLastOutput = i === outputLines.length - 1;
+		const branch = !running && isLastOutput ? branchLast : branchPipe;
+		const prefix = `${indent}${branch}`;
+		const row = fit_terminal_content_line(`${prefix}${stripMargin(outputLines[i] ?? "")}`, width);
+		result.push(bgFn ? bgFn(row) : row);
+	}
+
+	// Status hints are not part of the output tree; indent them so their text
+	// aligns with the output content (column 4) but do not draw `│`/`└`.
+	const statusPrefix = `${indent}  `;
+	for (const line of statusLines) {
+		const row = fit_terminal_content_line(`${statusPrefix}${stripMargin(line)}`, width);
 		result.push(bgFn ? bgFn(row) : row);
 	}
 
@@ -1683,6 +1716,22 @@ export function format_ember_bash_transcript_lines(
 		result.unshift("");
 	}
 	return result;
+}
+
+/**
+ * Recognize BashExecutionComponent status/hint rows so they are not treated
+ * as command output for tree-branch placement.
+ */
+function is_bash_status_line(line: string): boolean {
+	const stripped = line.replace(ANSI_STRIP, "").trim();
+	if (!stripped) return false;
+	return (
+		/^\.\.\.\s+\d+\s+more lines\s+\(/.test(stripped) ||
+		/^\([^)]*to\s+(expand|collapse)\)/.test(stripped) ||
+		stripped === "(cancelled)" ||
+		/^\(exit\s+\d+\)/.test(stripped) ||
+		/^Output truncated\. Full output:/.test(stripped)
+	);
 }
 
 /**
@@ -2569,8 +2618,6 @@ function colorize(text: string, hex: string): string {
 	const [r, g, b] = hexToRgbTriplet(hex);
 	return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
 }
-
-const ANSI_STRIP = /\x1b\[[0-9;]*m/g;
 
 /**
  * Split an ANSI-laden string at the first visible occurrence of `sep`,
