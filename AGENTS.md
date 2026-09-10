@@ -309,7 +309,10 @@
   with TEXT_COLOR as its peak. Semantic presets (`thinking`, `working`,
   `exploringGroup`, `actionGroup`, `subagent`) reference the shared palettes;
   `renderLiveGradient(text, preset)` drives Thinking/Summarizing, running
-  subagent labels, and compact child rows. The Pi logo is static because it
+  subagent labels, and compact child rows. The transient subagent status rows
+  (`Delegating` pre-delegation wait and hidden-mode `Finishing`) use the
+  `thinking` preset — the accent preset peaks at MUTED_COLOR and renders
+  barely visible. The Pi logo is static because it
   can sit above the live viewport: a stable 2-stop vertical gradient with a
   box-drawing drop-shadow contour. Startup has no logo animation or logo timer;
   a static header is installed once per session and remains byte-stable across
@@ -549,6 +552,22 @@
   rebuilds the chat and can change the transcript line count — see the Running
   / lingering children bullet in the `pi-compact-tools` grouping contract for
   how group child rows absorb and linger independently of that toggle.
+  **Visible→hidden toggle merges reasoning-only splits:** a Ctrl+T while the
+  turn is settled rebuilds the branch, and the flag flip happens while Pi
+  constructs the first replayed assistant message — before that turn's tool
+  components replay. `apply_thinking_blocks_hidden()` in `pi-ember-ui/index.ts`
+  is the single transition observer (called from the patched
+  `AssistantMessageComponent.updateContent` and `setHideThinkingBlock`, the only
+  two writers of the live component value). It runs
+  `handle_thinking_blocks_visibility_change()` synchronously — so
+  `mergeVisibleThinkingHardExits()` folds work groups that were split only by a
+  visible reasoning block before the rebuilt components render (absorbed
+  members render zero rows, never a stale standalone row) — then re-paints and
+  releases the boundary suppression in a deferred microtask. The result matches
+  hiding thinking blocks for the whole turn. Never register a global visibility
+  listener for this: its lifetime outlives the session and it would react to
+  unrelated renderer instances. Session-start settings sync writes the flag
+  directly (the renderer starts empty, nothing to reconcile).
   SSOT note (2026-08-07): Thinking now shows ONLY on user send (pre-tool wait)
   or a real thinking stream — `agent_start`/`agent_end`/`tool_execution_end`
   never re-arm (post-tool feedback stays with compact tool `-ing` verbs via
@@ -724,7 +743,7 @@ Pi
     ├── plugins/pi-ember-hashedit/
     │   └── Hash-anchored read/replace/undo tools with stable line anchors
     ├── plugins/pi-ember-screen/
-    │   └── Windows window listing and screenshots for visual verification
+    │   └── Windows/macOS window listing and screenshots (Bun FFI helper) for visual verification
     └── plugins/pi-ember-webtools/
         └── Web search, URL fetching, GitHub cloning, PDF/YouTube/video extraction
 ```
@@ -1079,6 +1098,18 @@ field. Keep that mechanism aligned with the actual plugin folders.
   is active, the compact `Quiz N questions` call row is hidden (redundant
   with the overlay title); `renderResult` restores the header plus answer
   rows once complete (`should_hide_quiz_call_row` SSOT in `quiz-tool.ts`).
+- **Quiz cancel aborts the run:** Escape on the quiz tool's overlay is a
+  cancellation of the agent operation, not an answer — `registerQuizTool`
+  calls `ctx.abort()` (Pi's documented "abort the current agent operation",
+  identical to Pi's own Escape: interactive mode restores queued messages and
+  aborts the agent) when `askQuiz` reports `cancelled`. The tool result still
+  lands, so the transcript keeps the `• Quiz cancelled` row and the model
+  never receives a "cancelled" answer that would let it keep working after the
+  user stopped it. Never swap this for a model-visible cancel result. The
+  loop-recovery quiz is unaffected (Escape already maps to `End stream`), and
+  the bash-rule `ask` quiz keeps its deny semantics (the run continues with the
+  command refused), while plan review runs on a settled agent where the abort
+  is a no-op.
 - **Plan review:** Every completed plan turn, including turns where the model
   invoked and received a quiz answer, opens the canonical
   `showPlanReview()` quiz (`build_plan_review_questions` /
@@ -1551,6 +1582,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
   hidden-thinking mode retains the compact shape above without this padding.
   Internal visible-Markdown paragraph blanks render as pipe continuation rows
   (`│`, not bare blanks) and count toward the 15-line budget; empty markers and blank-only Markdown results are omitted.
+  The tray's branch glyph marks the terminal row of the LAST chronological
+  segment: a trailing multi-row work block marks its group header (its child
+  rows keep their own inner `└`), every other trailing segment marks its last
+  visible row. Anchoring on the last group header of the whole tray instead
+  stripped the pipe — and the branch line — from every row of a later segment:
+  visible reasoning after a tool burst rendered as unpiped text with bare blank
+  gaps, and a trailing single-tool row lost its `└` (2026-08-10 regression).
   No top horizontal rule; a bottom `──` rule (via
   `chatboxBorderColor`) appears only
   when the agent settles. When more than one subagent is shown, the agent tree
@@ -1978,33 +2016,75 @@ field. Keep that mechanism aligned with the actual plugin folders.
 
 ### `pi-ember-screen`
 
-- Owns two Windows-only desktop tools for visual verification from inside pi:
+- Owns two cross-platform desktop tools for visual verification from inside pi:
   `window_list` (enumerate visible top-level windows with process, title, size,
   pid, and handle) and `window_screenshot` (capture one window to a PNG and
   return it as image content so the model inspects a real running UI instead of
-  inferring it from source).
+  inferring it from source). Supported on Windows and macOS.
 - Scope is window discovery and pixel capture only. It does not click, type,
   or drive the desktop, owns no harness, and is not a computer-use agent.
-- Registered only when `process.platform === "win32"`, so non-Windows sessions
-  never see tools they cannot fulfil.
-- `index.ts` owns tool schemas, argument shaping, and module resolution;
-  `capture-window.ps1` owns all Win32 work (EnumWindows, GetWindowRect,
-  PrintWindow with `PW_RENDERFULLCONTENT`, `SetProcessDPIAware`) and is the only
-  platform-specific file. The script writes one JSON object to stdout and keeps
-  diagnostics on stderr; failures come back as `ok: false` with a message.
-- Capture uses `PrintWindow` so DWM-composited Qt/Chromium windows render
-  correctly even when occluded or partially off-screen. If that yields no
-  usable pixels the script falls back to a screen-region copy and reports
-  `method: "screen-copy"` so the difference is visible in the result.
-- Client area only: the native title bar is not part of the capture.
+- Registered only when `process.platform` is `win32` or `darwin`, so other
+  platforms never see tools they cannot fulfil.
+- **Bun owns all native work.** `helper.ts` is a Bun program spawned by the
+  plugin; `platform/win32.ts` and `platform/darwin.ts` bind user32/gdi32 and
+  CoreGraphics through `bun:ffi`. pi itself runs on Node and Node has no FFI,
+  so the helper is a child process by design: a wedged `PrintWindow` /
+  CoreGraphics call must be killable, and a blocked thread is not. Bun is
+  resolved from `PI_EMBER_SCREEN_BUN` / `BUN_BIN` (then `~/.bun/bin/bun.exe`,
+  then PATH) and a missing Bun fails fast with an install hint instead of
+  degrading. Never reintroduce a PowerShell or per-platform shell helper.
+- `index.ts` owns tool schemas, argument shaping, the exec deadline, and the
+  compact row (`render.ts`); `args.ts` is the argv contract shared with the
+  helper. The helper writes exactly one JSON object to stdout and keeps
+  diagnostics on stderr; failures return `ok: false` with a message.
+- Capture uses `PrintWindow` with `PW_RENDERFULLCONTENT` on Windows so
+  DWM-composited Qt/Chromium windows render even when occluded. When Windows
+  returns no pixels for a window (it paints through the compositor) the
+  screen-region fallback runs ONLY while that window is the foreground window —
+  otherwise it would return whatever is drawn on top of it — and reports
+  `method: "screen-copy"`. On macOS pixels come from Apple's `screencapture -x
+  -o -l <windowid>`, which owns the Screen Recording permission flow.
+- Background capture has a hard Windows limit: while a fullscreen application owns
+  the display, Windows stops rendering covered windows, so PrintWindow returns an
+  empty surface for every occluded window and a screen-region copy would return
+  the wrong pixels. No user-space API can read them back (DXGI duplication has no
+  composed frames in that state either). The tool detects it with
+  `SHQueryUserNotificationState` (QUNS_BUSY / QUNS_RUNNING_D3D_FULL_SCREEN),
+  names the blocking app, and `blocker_message` selects the message: fullscreen
+  owner > minimized > covering window. The fullscreen app itself and the desktop
+  still capture normally. Never silently return a screen-region copy of a covered
+  window — refusing is the correct behavior.
+- Minimized windows are attempted rather than refused (PrintWindow usually still
+  paints them); a blank result reports a minimized-specific message. The
+  `--include-minimized` helper flag backs the `include_minimized` tool parameter,
+  which the helper would otherwise filter away before the tool could honor it.
+- Retina/DPI: `SetProcessDPIAware` on Windows; macOS reports the backing-pixel
+  size the capture actually produced.
 - Image bytes are handed to pi as `{ type: "image", data, mimeType }`; pi's
   tool-result normalization owns provider resizing, so the plugin does not
   pre-resize unless the caller passes `max_width`/`scale`.
+- Image encoding is one owner: `encode.ts` maps format → encoder, extension,
+  and MIME type, and both platform backends use `encode_with`. The default is
+  **webp, lossless**: measured on a real 2103x1537 window capture, PNG 195KB
+  vs WebP lossless 49KB with byte-identical pixels, and JPEG q90 was worse than
+  both (160KB, 0.82x PNG) while smearing UI text with ringing. `png` stays
+  available for consumers that need the container (some inline-image terminal
+  protocols are PNG-only; pi converts non-PNG for them asynchronously). JPEG is
+  opt-in and only sensible for photographic content. Never reintroduce a
+  hardcoded `.png` path or a second encoder choice.
+- The result MIME type must match the encoding (`format_mime_type`); the row
+  shows the format only when it is not the default.
+- Never bind a native call in-process or on a worker thread: a blocked native
+  call cannot be interrupted, so capture stays in the killable helper process.
 - Both names must also be listed in `SCREEN_TOOLS` inside `build_full_tools`
   (`plugins/pi-custom-agents/edit-tools.ts`). Registering a tool only makes it
   visible to `pi.getAllTools()`; a name absent from the active mode list is
   silently deactivated, which is what the mode tool sets in `pi-custom-agents`
   do to every unlisted tool.
+- Rows use the shared compact contract: `statusBulletColor` + `BULLET` +
+  `CompactGroupText` from `pi-compact-tools/renderer.ts` in a transparent
+  `Box(1, 0, undefined)`, one ANSI-truncated line, updated in place from the
+  result slot. Expanded detail (window rows / saved file) is for Ctrl+O only.
 - `BROWSER_TOOLS` in the same file is the matching curated activation list for
   the optional third-party `pi-browser` extension (navigate/snapshot/interact/
   screenshot/console/network core). The browser storage, cookie, route, and
@@ -2133,6 +2213,21 @@ For package or loader changes, also verify:
 git diff --check
 npm pack --dry-run
 ```
+
+For `pi-ember-screen` changes, also drive the helper directly — it is the only
+place native calls happen, and the deadline/JSON contract must hold on both
+platforms:
+
+```text
+bun run plugins/pi-ember-screen/helper.ts --diagnose   # platform, bun, permission state
+bun run plugins/pi-ember-screen/helper.ts --list       # JSON window list
+bun run plugins/pi-ember-screen/helper.ts --match <name> --max-width 700 --out /tmp/x.webp
+```
+
+A window whose app is not pumping messages must come back marked `hung` in the
+list and must fail a capture in well under a second with a 'not responding'
+message — never hang. Verify that with a blocked-window fixture (a window whose
+UI thread sleeps) before trusting a capture change.
 
 and from a clean project directory:
 

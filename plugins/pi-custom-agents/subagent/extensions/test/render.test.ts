@@ -8,6 +8,7 @@ import {
 	isSubagentDelegating,
 	shouldShowSubagentDelegating,
 	renderDelegatingRow,
+	DELEGATING_GRADIENT_PRESET,
 	formatSubagentElapsedSuffix,
 	SubagentToolText,
 	SubagentLiveOutputText,
@@ -25,6 +26,7 @@ import {
 	TREE_SINGLE_TOOL,
 } from "../../../../pi-compact-tools/renderer.ts";
 import { set_gradient_colorizer, reset_gradient_colorizer, type Rgb } from "../../../../pi-ember-ui/gradient.ts";
+import { THINKING_GRADIENT_PRESET } from "../../../../pi-ember-ui/thinking-status-render.ts";
 import { apply_subagent_stream_event } from "../runner.ts";
 import {
 	buildThemeBgColors,
@@ -264,6 +266,33 @@ describe("SubagentLiveOutputText", () => {
 		expect(rows.at(-1)).not.toBe("  [dim:│]");
 		expect(rows.at(-1)).toContain("Reasoning about the next edit.");
 		expect(rows.join("\n")).not.toContain("a.ts");
+	});
+
+	test("a later segment keeps the pipe column instead of breaking the branch", () => {
+		const theme = makeTheme() as any;
+		const items = [
+			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
+			toolItem("grep", { pattern: "StackContext" }, { completed: true, toolCallId: "c2" }),
+			thinkingItem("First paragraph of reasoning.\n\nSecond paragraph after the gap."),
+			toolItem(
+				"grep",
+				{ pattern: "apply_adjust_role_position(" },
+				{ completed: true, toolCallId: "c3" },
+			),
+		];
+		const rows = new SubagentLiveOutputText(items, "  ", true, theme).render(80).map(stripAnsi);
+
+		// The trailing single-tool row owns the tray's terminal branch glyph.
+		expect(rows.at(-1)?.startsWith("  [dim:└]")).toBe(true);
+		// Every earlier row keeps the pipe: the group header, its child, both
+		// reasoning paragraphs, and the Markdown paragraph gap.
+		for (const row of rows.slice(0, -1)) {
+			expect(row.startsWith("  [dim:│]")).toBe(true);
+		}
+		// Two segment separators plus the in-paragraph gap — never a bare blank.
+		expect(rows.filter((row) => row === "  [dim:│]")).toHaveLength(3);
+		expect(rows).not.toContain("");
+		expect(rows.join("\n")).toContain("Second paragraph after the gap.");
 	});
 
 	test("pipe padding stays width-safe at narrow widths", () => {
@@ -902,6 +931,10 @@ describe("subagent delegating state", () => {
 		expect(stripAnsi(out)).toContain("\u2022");
 		expect(out).toContain("\u001b[38;2;");
 		expect(stripAnsi(renderDelegatingRow(theme))).toContain("Delegating");
+	});
+
+	test("Delegating row uses the SSOT Thinking gradient, not the muted accent preset", () => {
+		expect(DELEGATING_GRADIENT_PRESET).toBe(THINKING_GRADIENT_PRESET);
 	});
 
 	test("running placeholders render per-agent blocks without a Subagents header", () => {

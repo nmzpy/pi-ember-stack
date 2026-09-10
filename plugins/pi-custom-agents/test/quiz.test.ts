@@ -6,6 +6,7 @@ import {
 	format_quiz_transcript_answers,
 	finalize_quiz_tool_render,
 	should_hide_quiz_call_row,
+	registerQuizTool,
 	type QuizQuestion,
 } from "../quiz-tool.ts";
 
@@ -238,5 +239,70 @@ describe("buildQuizOptionRow", () => {
 		expect(unselected.descriptionPainted).toBe("[dim:desc]");
 		expect(unselected.painted).not.toContain("[text:");
 		expect(unselected.descriptionPainted).not.toContain("[text:");
+	});
+});
+
+describe("quiz tool cancel", () => {
+	function capture_quiz_tool(): {
+		execute: (
+			toolCallId: string,
+			params: unknown,
+			signal: unknown,
+			onUpdate: unknown,
+			ctx: unknown,
+		) => Promise<unknown>;
+	} {
+		let definition: unknown;
+		registerQuizTool({
+			registerTool: (registered: unknown): void => {
+				definition = registered;
+			},
+			on: (): void => {},
+		} as never);
+		return definition as never;
+	}
+
+	/** Fake TUI context: `ui.custom` resolves the overlay result immediately. */
+	function make_ctx(result: unknown): { ctx: unknown; abort_calls: () => number } {
+		let aborts = 0;
+		return {
+			ctx: {
+				mode: "tui",
+				hasUI: true,
+				ui: { custom: (): Promise<unknown> => Promise.resolve(result) },
+				abort: (): void => {
+					aborts++;
+				},
+			},
+			abort_calls: () => aborts,
+		};
+	}
+
+	test("Escape on the overlay aborts the agent run instead of letting it continue", async () => {
+		const tool = capture_quiz_tool();
+		const { ctx, abort_calls } = make_ctx({ answers: [], cancelled: true });
+		const result = (await tool.execute("quiz-cancel", { questions: [questions[0]] }, undefined, undefined, ctx)) as {
+			content: { text: string }[];
+			details: { cancelled: boolean };
+		};
+
+		expect(abort_calls()).toBe(1);
+		expect(result.details.cancelled).toBe(true);
+		// The result still lands so the transcript keeps the `Quiz cancelled` row.
+		expect(result.content[0].text).toBe("User cancelled the quiz.");
+	});
+
+	test("an answered quiz never aborts the run", async () => {
+		const tool = capture_quiz_tool();
+		const { ctx, abort_calls } = make_ctx({
+			answers: [{ id: "plan-review", value: "implement", label: "Implement Plan", wasCustom: false }],
+			cancelled: false,
+		});
+		const result = (await tool.execute("quiz-answered", { questions: [questions[0]] }, undefined, undefined, ctx)) as {
+			details: { cancelled: boolean };
+		};
+
+		expect(abort_calls()).toBe(0);
+		expect(result.details.cancelled).toBe(false);
 	});
 });

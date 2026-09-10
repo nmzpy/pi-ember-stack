@@ -452,17 +452,19 @@ export class SubagentLiveOutputText implements Component {
 			const header = rows.find((row) => row.header) ?? rows[0];
 			rows = [header, ...rows.slice(-(SUBAGENT_LIVE_OUTPUT_MAX_ROWS - 1))];
 		}
+		// The tray's branch glyph marks the terminal row of the LAST chronological
+		// segment: a trailing multi-row work block marks its group header (its child
+		// rows keep their own inner `└`), every other trailing segment marks its last
+		// visible row. Anchoring on the last group header of the whole tray instead
+		// stripped the pipe — and the branch line itself — from every row of a later
+		// segment: visible reasoning after a tool burst rendered as bare gaps and
+		// unpiped text, and a trailing single-tool row lost its `└`.
 		const lastSegment = segmentRows[segmentRows.length - 1];
+		const trailing_group_block = lastSegment.kind === "work" && lastSegment.rows.length > 1;
 		let lastHeaderIndex = -1;
-		for (let i = 0; i < rows.length; i++) {
-			if (rows[i].header) lastHeaderIndex = i;
-		}
-		if (lastSegment.kind === "text" || lastSegment.kind === "thinking") {
-			for (let i = rows.length - 1; i >= 0; i--) {
-				if (hasVisibleTrayContent(rows[i].body)) {
-					lastHeaderIndex = i;
-					break;
-				}
+		if (trailing_group_block) {
+			for (let i = 0; i < rows.length; i++) {
+				if (rows[i].header) lastHeaderIndex = i;
 			}
 		}
 		if (lastHeaderIndex < 0) {
@@ -982,10 +984,18 @@ export function shouldShowSubagentDelegating(
 	return isSubagentDelegating(results);
 }
 
+/**
+ * SSOT gradient preset for the transient Delegating row. The pre-delegation
+ * wait is the same live-status class as the Finishing row, so it uses the
+ * `thinking` preset (dim→text glow) instead of the muted accent palette —
+ * the accent presets peak at MUTED_COLOR, which renders barely visible.
+ */
+export const DELEGATING_GRADIENT_PRESET: typeof THINKING_GRADIENT_PRESET = THINKING_GRADIENT_PRESET;
+
 /** Compact single-row state while the parent invokes the subagent tool. */
 export function renderDelegatingRow(theme: ThemeLike): string {
 	const bullet = groupBulletColorFromFlags(false, false, theme);
-	const label = renderLiveGradient(DELEGATING_LABEL, "subagent");
+	const label = renderLiveGradient(DELEGATING_LABEL, DELEGATING_GRADIENT_PRESET);
 	return bullet + label;
 }
 

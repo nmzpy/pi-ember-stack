@@ -623,6 +623,14 @@ export function registerQuizTool(pi: ExtensionAPI): void {
 			} finally {
 				request_render();
 			}
+			if (answers === undefined) {
+				// Escape on the overlay cancels the run, not just the question: mirror
+				// Pi's own Escape (abort the agent operation) so the model never
+				// receives a "cancelled" answer and keeps working after the user
+				// stopped it. The tool result still lands, so the transcript keeps
+				// the `Quiz cancelled` row.
+				ctx.abort();
+			}
 			return {
 				content: [
 					{

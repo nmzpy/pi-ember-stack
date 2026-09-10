@@ -1857,6 +1857,68 @@ function render_shell_aware_editor(
 	return lines.map(fit);
 }
 
+/**
+ * Reconcile the compact work groups after a thinking-blocks visibility
+ * transition (Ctrl+T while streaming, Ctrl+T after the turn settled where the
+ * flag flips during Pi's rebuild replay, and the settings selector). Called by
+ * `apply_thinking_blocks_hidden`, which is the single transition observer.
+ *
+ * The compact renderer keeps its live records across Pi's chat rebuild, so a
+ * visible→hidden toggle must merge work groups that were split only by a
+ * visible reasoning block (no visible text between them) and re-arm the
+ * in-group `└ Thinking` lane; hidden→visible drops the lane.
+ *
+ * Two passes, deliberately:
+ *   1. structural, synchronously — the Ctrl+T flag flip happens from the first
+ *      assistant message Pi replays mid-rebuild, which precedes that turn's
+ *      tool components. Merging before they replay lets each rebuilt component
+ *      render the merged structure (absorbed members render zero rows instead
+ *      of a stale standalone row).
+ *   2. paint, deferred past the synchronous rebuild — every group visual handle
+ *      then points at the live component Pi just created.
+ */
+export function handle_thinking_blocks_visibility_change(next_hidden: boolean): void {
+	begin_work_group_boundary_suppression();
+	const renderer = getSharedRenderer();
+	renderer.repaintAfterThinkingBlocksToggle(next_hidden, thinking_toggle_arm_lane(next_hidden));
+	sync_compact_group_flags(renderer);
+	queueMicrotask(() => {
+		queueMicrotask(() => {
+			const live = getSharedRenderer();
+			live.repaintAfterThinkingBlocksToggle(next_hidden, thinking_toggle_arm_lane(next_hidden));
+			sync_compact_group_flags(live);
+			end_work_group_boundary_suppression();
+			request_render();
+		});
+	});
+}
+
+/**
+ * Apply Pi's live thinking-blocks visibility to the shared flag and run the
+ * one compact-group reconciliation when it is a real transition.
+ *
+ * This is the ONLY transition observer. Every writer of the flag in
+ * production is one of Pi's assistant-message seams (`AssistantMessageComponent`
+ * constructor → `updateContent` during the Ctrl+T rebuild replay, and
+ * `setHideThinkingBlock` for the streaming component and the settings
+ * selector), so the change is detected here rather than through a global
+ * listener — a registration would outlive the session and react to unrelated
+ * renderer instances. Session-start settings sync writes the flag directly:
+ * the renderer starts empty, so there is no group state to reconcile.
+ */
+export function apply_thinking_blocks_hidden(next_hidden: boolean): void {
+	const prev_hidden = isThinkingBlocksHidden();
+	setThinkingBlocksHidden(next_hidden);
+	if (prev_hidden !== next_hidden) handle_thinking_blocks_visibility_change(next_hidden);
+}
+
+/** Re-arm the in-group `└ Thinking` lane only when a real thinking stream is
+ *  active; without one the group enters the tool-lane hold (gradient `-ing`
+ *  verbs) instead. */
+function thinking_toggle_arm_lane(next_hidden: boolean): boolean {
+	return next_hidden && is_thinking_stream_active();
+}
+
 function installAssistantMessagePatch(): void {
 	const proto = patchableProto(AssistantMessageComponent);
 	if (proto[EMBER_PATCH_MARKER]) return;
@@ -1869,29 +1931,10 @@ function installAssistantMessagePatch(): void {
 			this: AssistantMessagePatchHost,
 			hide: boolean,
 		): void {
-			const next_hidden = hide === true;
-			const prev_hidden = isThinkingBlocksHidden();
-			if (prev_hidden === next_hidden) {
-				originalSetHideThinkingBlock.call(this, hide);
-				return;
-			}
-			begin_work_group_boundary_suppression();
-			setThinkingBlocksHidden(next_hidden);
+			// Live-transition observer: runs the compact-group reconciliation
+			// once when this is a real flip.
+			apply_thinking_blocks_hidden(hide === true);
 			originalSetHideThinkingBlock.call(this, hide);
-			queueMicrotask(() => {
-				queueMicrotask(() => {
-					const renderer = getSharedRenderer();
-					renderer.repaintAfterThinkingBlocksToggle(
-						next_hidden,
-						// Re-arm the in-group `└ Thinking` lane only when a real
-						// thinking stream is active; without one the group enters the
-						// tool-lane hold (gradient `-ing` verbs) instead.
-						next_hidden && is_thinking_stream_active(),
-					);
-					sync_compact_group_flags(renderer);
-					end_work_group_boundary_suppression();
-				});
-			});
 			refresh_thinking_status();
 		};
 	}
@@ -1923,7 +1966,11 @@ function installAssistantMessagePatch(): void {
 		}
 
 		const hide = this.hideThinkingBlock;
-		setThinkingBlocksHidden(hide === true);
+		// The Ctrl+T flag flip is observed here on the post-settle rebuild replay:
+		// Pi constructs this component with the new value, which precedes that
+		// turn's tool components. `apply_thinking_blocks_hidden` runs the one
+		// compact-group reconciliation per real transition.
+		apply_thinking_blocks_hidden(hide === true);
 		const outputPad = this.outputPad;
 		// Skip the full rebuild only when nothing that affects output changed.
 		// Must include:
