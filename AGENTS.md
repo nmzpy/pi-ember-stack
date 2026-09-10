@@ -723,6 +723,8 @@ Pi
     │   └── FFF-powered grep/find with external allowlist
     ├── plugins/pi-ember-hashedit/
     │   └── Hash-anchored read/replace/undo tools with stable line anchors
+    ├── plugins/pi-ember-screen/
+    │   └── Windows window listing and screenshots for visual verification
     └── plugins/pi-ember-webtools/
         └── Web search, URL fetching, GitHub cloning, PDF/YouTube/video extraction
 ```
@@ -1414,9 +1416,11 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `ENOENT ... subagent-sessions/...` failure.
   The subagent runs **in-process** on the main thread — not in a
   `worker_thread`. The runner accepts the parent's extension-facing
-  `ModelRegistry` and crosses to its canonical `ModelRuntime` exactly once in
-  `runner.ts`; child sessions receive that same runtime so every registered
-  provider, credential source, header, runtime override, and custom
+  `ModelRegistry` and crosses to its canonical `ModelRuntime` in
+  `model-runtime-bridge.ts` (SSOT — `resolve_parent_model_runtime` /
+  `is_legacy_model_registry` / `resolve_runtime_stream_simple`, shared with
+  `compaction-wiring.ts`); child sessions receive that same runtime, so every
+  registered provider, credential source, header, runtime override, and custom
   `models.json` entry is available without copying auth or re-registering
   providers. Never recreate child auth storage in `index.ts` or `service.ts`.
   `session.prompt()` is async and does not block the TUI
@@ -1941,6 +1945,18 @@ field. Keep that mechanism aligned with the actual plugin folders.
   top on long sessions. While the agent is settled the plugin is inert — zero
   periodic renders, zero subscriptions — so terminal scrollback stays owned by
   Pi and the terminal.
+- **Aux stream driver (compaction):** summarization emits no transcript
+  `message_*` events, so `stack-compaction.ts` taps the summarizer stream
+  directly through `begin_aux_stream()` / `note_aux_delta()` /
+  `end_aux_stream()`. The caller MUST pass a `streamFn` — the non-streaming
+  `completeSimple` path exposes no deltas and leaves the meter at zero (the
+  historical `• Compacting` row with no live TPS). `compaction-wiring.ts`
+  supplies it from `resolve_runtime_stream_simple()`
+  (`plugins/pi-custom-agents/model-runtime-bridge.ts`, SSOT) so the
+  summarizer streams through the canonical ModelRuntime — the global pi-ai
+  dispatcher does not see extension-registered providers — and the footer
+  paints the meter on the 20 FPS renders the compaction status row already
+  issues. Never add a second meter driver, render clock, or subscription.
 
 ### `pi-ember-applypatch`
 
@@ -1959,6 +1975,43 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Partial success returns `ok: false` with per-path results so the model can
   recover; `isError` is set only on parse failure or when every op fails.
 - Does not own compact native-tool grouping, modes, or providers.
+
+### `pi-ember-screen`
+
+- Owns two Windows-only desktop tools for visual verification from inside pi:
+  `window_list` (enumerate visible top-level windows with process, title, size,
+  pid, and handle) and `window_screenshot` (capture one window to a PNG and
+  return it as image content so the model inspects a real running UI instead of
+  inferring it from source).
+- Scope is window discovery and pixel capture only. It does not click, type,
+  or drive the desktop, owns no harness, and is not a computer-use agent.
+- Registered only when `process.platform === "win32"`, so non-Windows sessions
+  never see tools they cannot fulfil.
+- `index.ts` owns tool schemas, argument shaping, and module resolution;
+  `capture-window.ps1` owns all Win32 work (EnumWindows, GetWindowRect,
+  PrintWindow with `PW_RENDERFULLCONTENT`, `SetProcessDPIAware`) and is the only
+  platform-specific file. The script writes one JSON object to stdout and keeps
+  diagnostics on stderr; failures come back as `ok: false` with a message.
+- Capture uses `PrintWindow` so DWM-composited Qt/Chromium windows render
+  correctly even when occluded or partially off-screen. If that yields no
+  usable pixels the script falls back to a screen-region copy and reports
+  `method: "screen-copy"` so the difference is visible in the result.
+- Client area only: the native title bar is not part of the capture.
+- Image bytes are handed to pi as `{ type: "image", data, mimeType }`; pi's
+  tool-result normalization owns provider resizing, so the plugin does not
+  pre-resize unless the caller passes `max_width`/`scale`.
+- Both names must also be listed in `SCREEN_TOOLS` inside `build_full_tools`
+  (`plugins/pi-custom-agents/edit-tools.ts`). Registering a tool only makes it
+  visible to `pi.getAllTools()`; a name absent from the active mode list is
+  silently deactivated, which is what the mode tool sets in `pi-custom-agents`
+  do to every unlisted tool.
+- `BROWSER_TOOLS` in the same file is the matching curated activation list for
+  the optional third-party `pi-browser` extension (navigate/snapshot/interact/
+  screenshot/console/network core). The browser storage, cookie, route, and
+  raw-coordinate mouse families are deliberately left inactive: widen that list
+  when a task needs them instead of activating all 50 `browser_*` tools.
+- Does not own clipboard images (`pi-ember-images`), browser pages
+  (pi-browser's `browser_take_screenshot`), or compact row rendering.
 
 ### `pi-ember-webtools`
 

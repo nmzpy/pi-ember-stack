@@ -11,6 +11,42 @@ export type PatchToolName = "apply_patch" | "edit";
 
 const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"] as const;
 
+/**
+ * Desktop observation tools owned by `pi-ember-screen`. The plugin registers
+ * them on Windows only; `setActiveTools` ignores names that are not in the
+ * registry, so listing them here is inert on other platforms.
+ */
+const SCREEN_TOOLS = ["window_list", "window_screenshot"] as const;
+
+/**
+ * Browser tools owned by the optional third-party `pi-browser` extension
+ * (Playwright over CDP). Curated to the attach/inspect/interact/screenshot
+ * core: the storage, cookie, route, and raw-coordinate mouse families stay
+ * out of the default prompt. Names are inert when pi-browser is absent.
+ */
+const BROWSER_TOOLS = [
+	"browser_navigate",
+	"browser_navigate_back",
+	"browser_reload",
+	"browser_snapshot",
+	"browser_take_screenshot",
+	"browser_click",
+	"browser_hover",
+	"browser_type",
+	"browser_press_key",
+	"browser_fill_form",
+	"browser_select_option",
+	"browser_drag",
+	"browser_wait_for",
+	"browser_evaluate",
+	"browser_tabs",
+	"browser_resize",
+	"browser_close",
+	"browser_handle_dialog",
+	"browser_console_messages",
+	"browser_network_requests",
+] as const;
+
 /** Canonical resume tool name — Codex requires `^[a-zA-Z0-9_-]+$` (no dots). */
 export const SUBAGENT_RESUME_TOOL_NAME = "subagent_resume" as const;
 
@@ -72,7 +108,19 @@ export function model_provider_of(model: { provider?: string } | undefined): str
 /** Full code-mode tool set with the correct patch/edit tool for the provider. */
 export function build_full_tools(provider: string | undefined): string[] {
 	const patch_tool = resolve_parent_editing_tool_name(provider);
-	return ["read", "bash", "write", patch_tool, "grep", "find", "ls", "quiz", ...WEB_ACCESS_TOOLS];
+	return [
+		"read",
+		"bash",
+		"write",
+		patch_tool,
+		"grep",
+		"find",
+		"ls",
+		"quiz",
+		...WEB_ACCESS_TOOLS,
+		...SCREEN_TOOLS,
+		...BROWSER_TOOLS,
+	];
 }
 
 /**

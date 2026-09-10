@@ -23,6 +23,7 @@ export type PluginId =
 	| "pi-ember-ui"
 	| "pi-ember-tps"
 	| "pi-ember-autoname"
+	| "pi-ember-screen"
 	| "pi-ember-webtools";
 
 export type StackPlugin = {

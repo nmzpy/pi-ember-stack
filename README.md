@@ -38,6 +38,7 @@ plugins under `plugins/`. Enable them globally in `PI_HOME/pi-ember-stack.json`:
     "pi-ember-fff",
     "pi-ember-ui",
     "pi-ember-tps",
+    "pi-ember-screen",
     "pi-ember-webtools"
   ]
 }
@@ -54,6 +55,7 @@ the TUI. Restart pi after changing the list. The available plugins are:
 - `pi-ember-images`: Windows/macOS clipboard image attachments with compact chat previews.
 - `pi-ember-ui`: Ember accent theme and TUI chrome.
 - `pi-ember-tps`: tokens-per-second meter.
+- `pi-ember-screen`: Windows window listing and screenshots for visual verification.
 - `pi-ember-webtools`: web search, URL fetching, and related extraction tools.
 
 ## Project setup

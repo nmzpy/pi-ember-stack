@@ -52,6 +52,51 @@ export function getLiveTps(): number {
 	return liveTps;
 }
 
+/**
+ * Manual meter driver for streams that do NOT flow through the agent's
+ * `message_*` events — e.g. compaction summarization, which runs an
+ * internal `streamSimple`/`completeSimple` call with no transcript events.
+ *
+ * The caller consumes its stream and forwards `text_delta`/`thinking_delta`
+ * deltas here (see `complete_summarization` in `stack-compaction.ts`); the
+ * meter is read by the footer on whatever natural renders already occur —
+ * the compaction status row animates via the shared gradient clock, so the
+ * footer is repainted while summarizing. This keeps the plugin free of any
+ * periodic render clock.
+ */
+export function begin_aux_stream(): void {
+	streamStartMs = now();
+	firstTokenMs = 0;
+	streamChars = 0;
+	streamThinkingChars = 0;
+	streamTokens = 0;
+	liveTps = 0;
+	lastActivityMs = streamStartMs;
+	streaming = true;
+}
+
+export function note_aux_delta(delta: string, thinking: boolean): void {
+	if (!delta) return;
+	const activity_ms = now();
+	lastActivityMs = activity_ms;
+	if (firstTokenMs === 0) firstTokenMs = activity_ms;
+	streamChars += delta.length;
+	if (thinking) streamThinkingChars += delta.length;
+	streamTokens = tokEst(streamChars);
+	liveTps = computeTps();
+	// A delta is proof the aux stream is live: re-assert visibility so a
+	// stray `agent_end`/`message_end` arriving mid-summarization cannot hide
+	// the meter while the summarizer is still emitting (callers end the span
+	// with end_aux_stream()).
+	streaming = true;
+}
+
+export function end_aux_stream(): void {
+	streaming = false;
+	// Keep the last computed liveTps/lastActivityMs; opacity returns 0 once
+	// streaming is false so the meter hides on the next natural render.
+}
+
 export default function piEmberTps(pi: ExtensionAPI): void {
 	pi.on("message_start", async (event) => {
 		if (event.message.role !== "assistant") return;

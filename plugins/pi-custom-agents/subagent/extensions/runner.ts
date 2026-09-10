@@ -770,34 +770,13 @@ export interface SubAgentResult {
  * compatibility facade over the canonical ModelRuntime, and createAgentSession
  * consumes ModelRuntime directly. Pi 0.80.6 instead ships a self-contained
  * ModelRegistry (authStorage + modelsJsonPath) and createAgentSession takes
- * modelRegistry directly. Detect which API is available so the subagent runner
- * works against either installed Pi version without copying credentials or
- * rebuilding provider catalogs.
+ * modelRegistry directly. The detection is SSOT in `model-runtime-bridge.ts`
+ * (shared with the compaction wiring) — never duplicate it here.
  */
-interface ModelRegistryRuntimeBridge {
-	readonly runtime?: unknown;
-}
-
-interface ModelRegistryLegacy {
-	readonly authStorage?: unknown;
-	readonly modelsJsonPath?: string;
-}
-
-function resolve_parent_model_runtime(model_registry: ModelRegistry): unknown {
-	const bridge = model_registry as unknown as ModelRegistryRuntimeBridge;
-	if (bridge.runtime) return bridge.runtime;
-	// Pi 0.80.6: no runtime field — createAgentSession accepts modelRegistry
-	// directly. Return undefined so the caller skips the modelRuntime option.
-	return undefined;
-}
-
-function is_legacy_model_registry(model_registry: ModelRegistry): boolean {
-	const legacy = model_registry as unknown as ModelRegistryLegacy;
-	return (
-		!(model_registry as unknown as ModelRegistryRuntimeBridge).runtime &&
-		Boolean(legacy.authStorage || legacy.modelsJsonPath !== undefined)
-	);
-}
+import {
+	is_legacy_model_registry,
+	resolve_parent_model_runtime,
+} from "../../model-runtime-bridge.ts";
 
 /**
  * Deterministic suffix appended to a retained parser-stream failure so the

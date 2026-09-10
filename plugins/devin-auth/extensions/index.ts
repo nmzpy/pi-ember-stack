@@ -30,7 +30,7 @@ import { DEFAULT_REGION } from "../src/oauth/types.js";
 const PROVIDER_ID = "devin";
 const PROVIDER_NAME = "Devin (Cognition)";
 const OAUTH_NAME = "Devin (Cognition / Windsurf)";
-const API_IDENTIFIER = "devin-cloud";
+const API_IDENTIFIER = "devin";
 // pi requires baseUrl when models are defined, even with streamSimple.
 // streamSimple ignores this — it routes internally — but the field must be present.
 const PLACEHOLDER_BASE_URL = DEFAULT_HOST;

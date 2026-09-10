@@ -479,7 +479,7 @@ Decomposition rules:
 - Group independent modules into parallel clusters; chain dependent modules.
 - Pin shared interfaces in every dependent subagent prompt.
 
-Respond in plain labeled lines, no markdown headers or bullets. Provide a Task Summary, a concise Modules section, an Execution Order, and the self-contained prompts you would send to each Coder subagent. Do not emit "Delegation Prompts:" or other scaffold headings after you have already finished delegating the work.`);
+Delegation planning is context, not output. Before spawning any subagent, work out internally a task summary, the module split, the execution order, and the exact prompt for each Coder subagent. Use that plan as context only — never emit it to the user as labeled lines, headings, or scaffold blocks. Delegate directly with the subagent tool and keep visible replies to short labeled progress lines (e.g. Delegated X to Coder A, Waiting on Coder B). Do not print a Task Summary, Modules section, Execution Order, or Coder-prompt dump.`);
 
 const HEALTH_CHECK_PROMPT_APPENDIX = `Health-check mode is active. You are a read-only diagnostic auditor and delegation planner.
 
@@ -538,6 +538,13 @@ function mode_reminder(modeId: string, provider: string | undefined): string {
 
 function exit_mode_reminder(fromModeId: string, provider: string | undefined): string {
 	if (fromModeId === "plan") return exit_to_coder_prompt(provider);
+	if (fromModeId === "orchestrate") {
+		return compose_mode_prompt(`You have switched from orchestrate mode to code mode. You are now in Code mode. You have full tool access.
+
+Implement, test, and verify code with autonomy.
+
+${mode_intro("code", build_full_tools(provider), QUIZ_UNCERTAINTY_GUIDANCE)}`);
+	}
 	return mode_reminder(fromModeId, provider);
 }
 

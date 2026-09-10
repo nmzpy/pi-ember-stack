@@ -12,6 +12,7 @@ import piEmberAutonamePlugin from "./pi-ember-autoname/index.ts";
 import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberHasheditPlugin from "./pi-ember-hashedit/index.ts";
 import piEmberImagesPlugin from "./pi-ember-images/index.ts";
+import piEmberScreenPlugin from "./pi-ember-screen/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 import piEmberWebtoolsPlugin from "./pi-ember-webtools/extensions/index.ts";
@@ -39,6 +40,7 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-ember-ui",
 	"pi-ember-tps",
 	"pi-ember-autoname",
+	"pi-ember-screen",
 	"pi-ember-webtools",
 ];
 
@@ -107,6 +109,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-ember-tps",
 		description: "Tokens-per-second meter with sparkline trend and live gauge",
 		extension: piEmberTpsPlugin,
+	},
+	{
+		id: "pi-ember-screen",
+		description: "Windows window listing and screenshots for visual verification",
+		extension: piEmberScreenPlugin,
 	},
 	{
 		id: "pi-ember-webtools",

@@ -1,4 +1,4 @@
-import { complete } from "@earendil-works/pi-ai/compat";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { extractUserText, sanitizeSessionName, shouldArmAutoNaming } from "./title.ts";
 
@@ -96,29 +96,61 @@ async function generateSessionName(
 		console.warn("[pi-ember-autoname] No API key for", model.provider, model.id);
 		return undefined;
 	}
-	const response = await complete(
-		model,
-		{
-			systemPrompt: SYSTEM_PROMPT,
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "text", text: prompt }],
-					timestamp: Date.now(),
-				},
-			],
-		},
-		{
-			apiKey: auth.apiKey,
-			headers: auth.headers,
-			maxTokens: 64,
-		},
-	);
+	const response = await completeViaProvider(model, ctx, prompt, auth.apiKey, auth.headers);
+	if (!response) return undefined;
 	const text = response.content
 		.filter((part): part is { type: "text"; text: string } => part.type === "text")
 		.map((part) => part.text)
 		.join("\n")
 		.trim();
+	return sanitizeSessionName(text);
+}
+
+/**
+ * Run a one-shot completion through the provider's own `streamSimple`,
+ * draining the event stream to the final assistant message.
+ *
+ * The autoname path cannot use `complete()` from `pi-ai/compat` because that
+ * helper dispatches on `model.api` via the builtin api-registry — and custom
+ * providers like `devin` register a `streamSimple` under a provider id whose
+ * `api` is not in that registry ("No API provider registered for api: X").
+ * Going through `getRegisteredProviderConfig(provider).streamSimple` uses the
+ * extension-supplied streamer directly, so any custom provider works.
+ */
+async function completeViaProvider(
+	model: Model<Api>,
+	ctx: ExtensionContext,
+	prompt: string,
+	apiKey: string,
+	headers: Record<string, string> | undefined,
+): Promise<AssistantMessage | undefined> {
+	const config = ctx.modelRegistry.getRegisteredProviderConfig(model.provider);
+	const streamSimple = config?.streamSimple;
+	if (!streamSimple) {
+		console.warn("[pi-ember-autoname] Provider has no streamSimple:", model.provider);
+		return undefined;
+	}
+	const context: Context = {
+		systemPrompt: SYSTEM_PROMPT,
+		messages: [
+			{
+				role: "user",
+				content: [{ type: "text", text: prompt }],
+				timestamp: Date.now(),
+			},
+		],
+	};
+	const options: SimpleStreamOptions = { apiKey, headers, maxTokens: 64 };
+	const stream = streamSimple(model, context, options);
+	try {
+		return await stream.result();
+	} catch (error) {
+		console.warn(
+			"[pi-ember-autoname] stream failed:",
+			error instanceof Error ? error.message : String(error),
+		);
+		return undefined;
+	}
 }
 
 async function resolveAutonameModel(

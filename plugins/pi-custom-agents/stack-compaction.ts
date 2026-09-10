@@ -24,6 +24,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { select_summarization_prompt, SUMMARIZATION_SYSTEM_PROMPT } from "./compaction-prompts.ts";
 import { count_tokens, trim_to_token_budget } from "./stack-compaction-tokens.ts";
+import { begin_aux_stream, end_aux_stream, note_aux_delta } from "../pi-ember-tps/index.ts";
 
 const PROMPT_SAFETY_TOKENS = 200;
 
@@ -99,11 +100,31 @@ async function complete_summarization(
 	options: ReturnType<typeof create_summarization_options>,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
-	if (!streamFn) {
-		return completeSimple(model, context, options);
+	// Drive the shared TPS meter so the footer shows the summarizer's live
+	// output rate. The summarization call emits no transcript `message_*`
+	// events, so the streaming branch observes the deltas directly. The meter
+	// is render-free — the footer reads it on the 20 FPS renders the compaction
+	// status indicator already triggers via the shared gradient clock.
+	begin_aux_stream();
+	try {
+		if (!streamFn) {
+			// Legacy Pi (no ModelRuntime facade to stream through): the deltas are
+			// unavailable, so no live TPS for this summarization.
+			return await completeSimple(model, context, options);
+		}
+		const stream = await streamFn(model, context, options);
+		// Consume the stream so every delta reaches the meter. The final result
+		// promise is resolved by the terminal event (done/error) or by `end()`,
+		// independently of iteration, so `result()` still resolves — iterating is
+		// non-destructive here and avoids an unbounded unread event queue.
+		for await (const evt of stream) {
+			if (evt.type === "text_delta") note_aux_delta(evt.delta, false);
+			else if (evt.type === "thinking_delta") note_aux_delta(evt.delta, true);
+		}
+		return await stream.result();
+	} finally {
+		end_aux_stream();
 	}
-	const stream = await streamFn(model, context, options);
-	return stream.result();
 }
 
 function extract_text_content(message: AssistantMessage): string {
