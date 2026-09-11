@@ -12,7 +12,7 @@
  */
 
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { type Component, Text } from "@earendil-works/pi-tui";
 import { BULLET, CompactGroupText, statusBulletColor } from "../pi-compact-tools/renderer.ts";
 import { DEFAULT_FORMAT } from "./encode.ts";
 
@@ -175,35 +175,30 @@ export function format_window_screenshot_row(
 }
 
 /**
- * The single shared visual for a screen tool row: a transparent shell around
- * one ANSI-aware truncating compact row. The same component instance is reused
- * across renders (and updated in place from the result slot) so a tool call
- * never grows a second row.
+ * The single shared visual for a screen tool row: one ANSI-aware truncating
+ * compact row, returned directly the way a native compact tool row is. There is
+ * no wrapping shell, so the bullet sits at column 0 with every other tool row
+ * and the row is never padded with trailing spaces. The same component instance
+ * is reused across renders (and updated in place from the result slot) so a
+ * tool call never grows a second row.
  */
-export function render_screen_row(context: ScreenRowContext, text: string): Box {
+export function render_screen_row(context: ScreenRowContext, text: string): CompactGroupText {
 	const existingText = context.state.callText;
 	const callText = existingText instanceof CompactGroupText ? existingText : new CompactGroupText();
 	callText.setText(text);
 	context.state.callText = callText;
-
-	const existingShell = context.state.callShell;
-	const shell = existingShell instanceof Box ? existingShell : new Box(1, 0, undefined);
-	context.state.callShell = shell;
-	if (shell.children.length === 0) shell.addChild(callText);
-	return shell;
+	return callText;
 }
 
 /**
  * Result slot. The shared row already carries the outcome, so the collapsed
  * result is empty; Ctrl+O expands the detail rows underneath it.
  */
-export function render_screen_details(lines: readonly string[]): Text | Box {
+export function render_screen_details(lines: readonly string[]): Component {
 	if (lines.length === 0) return new Text("", 0, 0);
 	const detail = new CompactGroupText();
 	detail.setText(lines.join("\n"));
-	const shell = new Box(1, 0, undefined);
-	shell.addChild(detail);
-	return shell;
+	return detail;
 }
 
 /** Expanded `window_list` detail rows: one compact line per window. */

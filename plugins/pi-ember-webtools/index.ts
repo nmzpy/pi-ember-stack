@@ -11,7 +11,7 @@ import type {
 	ExtensionContext,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { Box, type KeyId, truncateToWidth } from "@earendil-works/pi-tui";
+import { type KeyId, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { BULLET, CompactGroupText, statusBulletColor } from "../pi-compact-tools/renderer.ts";
 import { MUTED_COLOR, PAGE_BG } from "../pi-ember-ui/mode-colors.ts";
@@ -57,13 +57,15 @@ type WebToolTheme = {
 
 type WebToolStatus = "running" | "success" | "error";
 
-/** Transparent compact shell shared by web_search, fetch_content, and
- * get_search_content. The bullet is the state indicator; backgrounds are not. */
+/** Compact row shared by web_search, fetch_content, and get_search_content.
+ * The bullet is the state indicator and backgrounds are not. The component is
+ * returned directly — no wrapping shell — so the bullet sits at column 0 with
+ * every other tool row and the row is never padded with trailing spaces. */
 function renderWebToolBlock(
 	lines: readonly string[],
 	status: WebToolStatus,
 	theme: WebToolTheme,
-): Box {
+): CompactGroupText {
 	const isError = status === "error";
 	const bullet = statusBulletColor(isError, status === "success", theme);
 	const continuationIndent = " ".repeat(BULLET.length);
@@ -75,9 +77,7 @@ function renderWebToolBlock(
 		.join("\n");
 	const compactText = new CompactGroupText();
 	compactText.setText(text);
-	const box = new Box(1, 0, undefined);
-	box.addChild(compactText);
-	return box;
+	return compactText;
 }
 
 /** Shared collapsed/expanded renderer for an error/cancel plan produced by

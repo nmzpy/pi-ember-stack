@@ -82,9 +82,11 @@
     (`is_compact_groupable_tool`) are defined once in `renderer.ts` — never
     duplicate the membership check. Every native/groupable tool shares one
     work-bundle key (`__work__`); every `browser_*` tool shares the one
-    `Browser` key (`__browser__`). Both groups accumulate children until a
-    hard boundary (visible answer text, visible thinking, user message, a
-    different group key, or a non-groupable tool).
+    `Browser` key (`__browser__`). Both groups keep their newest five child
+    rows; older calls fold into the header until a hard boundary (visible
+    answer text, visible thinking, user message, a different group key,
+    `session_compact`, or a non-groupable tool) folds the group to
+    header-only.
   - Compact bullet-color logic (`statusBulletColor`,
     `groupBulletColorFromFlags`) is defined once in
     `pi-compact-tools/renderer.ts` — never duplicate it in another plugin.
@@ -156,7 +158,11 @@
   never wraps to multiple rows — it ellipsizes to one row. Match counts, diff
   stats, and status labels append inline to the existing call row — never on a
   separate line below. Group headers (`Exploring`/`Explored`) summarize;
-  child rows stay compact.
+  child rows stay compact. Every tool row returns its `CompactGroupText`
+  component directly from the render slot — no wrapping `Box(1, 0, …)` shell — so
+  the bullet/pipe starts in column 0 with every other row and the line is never
+  padded with leading or trailing spaces. Row padding belongs in the row text as
+  an explicit indent (`  ` continuation), never as a container inset.
 - **Dynamic Theme Is the Live Source:** `applyDynamicTheme()` rebuilds the full
   `Theme` instance from `mode-colors.ts` on every mode change. The static
   `ember.json` is the install-time seed only. Never patch individual theme fields
@@ -483,9 +489,11 @@
   `Thinking` during the wait.
   `resolve_thinking_status_host()` prefers in-message whenever
   `assistantThinkingHostReady`, not only during the pre-tool gap. Child rows
-  ACCUMULATE under the header: every new groupable tool call appends its own
-  compact row below the previous ones (no fold on the call itself), and the
-  aggregate header retains the completed history for its counts. A hard
+  COLLAPSE under the header: the newest five groupable tool calls keep their
+  rows and every older one is absorbed into the header
+  (`childAbsorbBefore = records.length - MAX_VISIBLE_GROUP_CHILDREN` in
+  `appendToGroup`), while the aggregate header retains the full history for its
+  counts. A hard
   boundary (visible assistant text, visible thinking, user message, a
   different group key, or a non-groupable tool) folds the whole group to its
   summary header via `fold_group_child_rows()` and freezes it. **Same-file diff identity remains SSOT:**
@@ -534,9 +542,9 @@
   `thinkingActive`/`agentRunPending` from `agent_end` alone and expect the status
   to stay — `agent_end` is not the end of the user's task. A HARD boundary
   (visible user-facing text, a visible thinking stream, a non-group or
-  different-group tool, or a user message) folds the accumulated child rows
-  into the summary header; `agent_end`/`agent_settled` only flip the header to
-  past tense and KEEP the accumulated rows, because the next same-key wave may
+  different-group tool, a user message, or `session_compact`) folds every child
+  row into the summary header; `agent_end`/`agent_settled` only flip the header
+  to past tense and KEEP the visible rows, because the next same-key wave may
   still append to the same group. A visible thinking stream is a hard chronological boundary: it
   calls `noteVisibleThinking()` and the following tool wave always starts a
   new header below the transcript reasoning, including during an inter-run
@@ -576,8 +584,8 @@
   on `session_start` and from `setHideThinkingBlock` (Ctrl+T) before the first
   assistant `updateContent`. `Ctrl+T` (show/hide thinking blocks)
   rebuilds the chat and can change the transcript line count — see the Running
-  / lingering children bullet in the `pi-compact-tools` grouping contract for
-  how group child rows absorb and linger independently of that toggle.
+  / newest-child bullet in the `pi-compact-tools` grouping contract for
+  how group child rows collapse and linger independently of that toggle.
   **Visible→hidden toggle merges reasoning-only splits:** a Ctrl+T while the
   turn is settled rebuilds the branch, and the flag flip happens while Pi
   constructs the first replayed assistant message — before that turn's tool
@@ -909,8 +917,8 @@ field. Keep that mechanism aligned with the actual plugin folders.
     while `currentGroup` is still held. When thinking blocks are hidden, inter-run
     inter-run gaps (`isInterRunGap()`), and real thinking/reasoning streams
     (`message_update` → `noteThinking()`) enter the thinking lane: gradient
-    `Thinking` replaces the LATEST accumulated child row (earlier rows stay
-    listed as bare `│` continuations). Same-key batches reopen via `findReopenableGroup` when
+    `Thinking` replaces the newest child row (earlier rows stay listed up to the
+    five-row cap). Same-key batches reopen via `findReopenableGroup` when
     `currentGroup` was lost so another `Explored` header is not spawned.
     **Any visible (non-empty) `text_delta` is a hard boundary**
     (`apply_assistant_stream_boundary` → `noteVisibleText()` →
@@ -930,21 +938,34 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `noteHiddenThinking()` for its in-group lane and stays reopenable (hidden
     reasoning is not a transcript block) — never `reopenClosed`. Hard group splits on visible text use non-empty `text_delta` only — bare
     `text_start` must not split.
-  - **Accumulating work-group rendering:** Under the unified work header
+  - **Collapsing work-group rendering:** Under the unified work header
     (`• Edited N files, explored M files, … +N -N`), the aggregate record list
-    retains every call for counts, results, rebuilds, and completion state, and
-    EVERY record since the last fold renders as its own child row — every row,
-    in flight or completed, on the same bare `│`. Adding a
-    groupable call — same name, different name, parallel sibling,
-    edit/write/patch repeat, or a call reopened after thinking — never
-    absorbs a prior row (`childAbsorbBefore` stays put). The whole group folds
-    to its summary header only at a HARD boundary: visible assistant text,
-    visible thinking, a user message, a non-groupable tool, or a call in a
-    different group key (`fold_group_child_rows` + `freezeGroup` /
-    `hardExitGroup`). `agent_end`/`agent_settled` keep the rows. Thinking
-    streams preserve the unified header and replace only the latest tool child
-    with in-group `│ Thinking`; earlier accumulated rows stay listed, and the
-    next tool call restores that slot.
+    retains every call for counts, results, rebuilds, and completion state, but
+    only the newest `MAX_VISIBLE_GROUP_CHILDREN` (5) records render as child
+    rows — every older call is absorbed into the header
+    (`childAbsorbBefore = records.length - 5` set in `appendToGroup`). The
+    five-row window is what keeps a long tool burst from growing a wall of
+    rows the user has to scroll past while still showing the in-flight wave.
+    Because the window is positional, a parallel burst of N running calls
+    shows all N rows until the cap pushes the oldest into the header; rows
+    fold on the cap, NOT on completion, and `groupVisibleChildren` is a plain
+    slice (`groupVisibleChildren` → `selectGroupVisibleChildren`). The whole
+    group folds to its summary header only at a HARD boundary: visible
+    assistant text, visible thinking, a user message, a non-groupable tool,
+    a call in a different group key, or `session_compact` (compaction rebuilds
+    the transcript, so the pre-compaction group must never be reopened above
+    the new summary — the next tool wave starts a fresh header)
+    (`fold_group_child_rows` + `freezeGroup` / `hardExitGroup`;
+    `hardExited` short-circuits `groupVisibleChildren` to header-only,
+    absorbing even a running row caught by the boundary).
+    `agent_end`/`agent_settled` keep the visible rows. An error row colors the
+    header bullet only while the failed call is still visible — once absorbed
+    the failure is historical and the bullet returns to `success`. Thinking
+    streams preserve the unified header and replace the newest tool child with
+    in-group `│ Thinking`; the next tool call restores that slot. The subagent
+    live tray deliberately diverges: it is a capped preview, so it sets
+    `childAbsorbBefore = records.length - 1` and shows only the newest call
+    even while earlier burst members are still in flight.
   - **Browser compat group:** Every `browser_*` tool (pi-browser family,
     detected by `is_browser_tool_name`) shares one `BROWSER_GROUP_KEY`
     (`__browser__`) group instead of rendering as a standalone foreign row.
@@ -1198,14 +1219,15 @@ field. Keep that mechanism aligned with the actual plugin folders.
   carries the subagent equivalent. A tool description that duplicates text living
   in `src/tools/*.ts` is drift — import the module's exported `*_DESCRIPTION`
   constant into the registration instead of restating it.
-- **Prompt Style:** Mode system prompts in `pi-custom-agents/index.ts` and
-  bundled subagent `.md` definitions (`coder.md`, `scout.md`) provide concise,
-  natural directives for role, tool awareness, uncertainty quiz guidance, and
-  planning requirements without forcing artificial labeled-line or key-value
-  formatting. Plan mode requires concrete single-approach plans (quiz
-  unresolved forks first; no Option A/B inside the plan; no `Open Questions:`
-  section). Subagent definitions instruct agents not to narrate their process
-  and to return results concisely.
+- **Prompt Style:** `OUTPUT_STYLE_DIRECTIVE` in `pi-custom-agents/index.ts` is the
+  single output-style SSOT appended to every parent mode prompt — there is no
+  separate plan-mode style constant. Interim and progress replies stay in plain
+  dense labeled lines; the final summary/answer message and the Plan-mode plan
+  may use markdown structure (`##`/`###` headings, bold, lists). Plan mode
+  requires concrete single-approach plans (quiz unresolved forks first; no
+  Option A/B inside the plan; no `Open Questions:` section). Subagent
+  definitions instruct agents not to narrate their process and to return
+  results concisely.
 - **Host process safety guidance:** `pi-custom-agents/host-process-safety.ts`
   exports `HOST_PROCESS_SAFETY_GUIDANCE` (SSOT) — the "do not use any command
   to kill node, that is the process we are talking through" rule. It is
@@ -1217,7 +1239,12 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Owns the plan-review flow, quiz tool, mode cycling, and
   `/subagent-model`. Registers the mode-id → label resolver
   (`setModeLabelResolver`) so the `pi-ember-ui` footer can render the active
-  mode label without duplicating the `MODES` map.
+  mode label without duplicating the `MODES` map. The `/subagent-model` agent
+  picker shows each agent's active model + effort as the row's description
+  column (`build_subagent_selector_options` → `set_extension_selector_options`,
+  rendered by the patched ExtensionSelector `updateList`). The pending options
+  state lives on `globalThis` (`Symbol.for`) in `select-list-theme.ts` so jiti
+  module duplication can't split the writer from the patched reader.
 - **Quiz "None" option:** Every question rendered by the
   quiz tool automatically appends a user-only "None" option
   (value `__none__`, description "Specify the proper answer") that is not
@@ -1264,6 +1291,38 @@ field. Keep that mechanism aligned with the actual plugin folders.
   quiz screen. Its hidden implementation directive is mode-specific: Code
   executes, while Orchestrate delegates to Coder subagents without claiming
   edit access.
+- **Absolute auto-compaction ceiling (300k):** `plugins/pi-custom-agents/auto-compact.ts`
+  is the single owner of `AUTO_COMPACT_CONTEXT_TOKENS` (300_000). Pi's own
+  threshold is purely relative (`contextTokens > contextWindow - reserveTokens`),
+  so a 1M-token model would grow to ~983k before anything is summarized. Two
+  delivery paths, one constant:
+  - **Children (subagent runner + fleet factory):**
+    `auto_compact_reserve_tokens(contextWindow)` returns
+    `max(window - 300k, DEFAULT_COMPACTION_SETTINGS.reserveTokens)` and
+    `build_subagent_settings(model)` puts it into the child's in-memory
+    `SettingsManager`, so Pi's NATIVE threshold fires at the ceiling inside
+    `session.prompt()` and the run continues (no abort, no re-prompt). Windows
+    at or below `300k + Pi's default reserve` keep Pi's own reserve: Ember never
+    shrinks the room left for the response and never duplicates Pi's `16384`
+    default (read from `DEFAULT_COMPACTION_SETTINGS`). The runner and
+    `session-factory.ts` pass their resolved model so the reserve always
+    matches that session's window.
+  - **Parent session:** Pi owns its settings and its only public trigger
+    (`ctx.compact()`) aborts the current agent operation and never continues the
+    interrupted turn, so `install_auto_compact(pi)` reads
+    `ctx.getContextUsage()` at `agent_settled` and compacts BETWEEN turns.
+    `maybe_auto_compact(ctx)` defers one macrotask (every `agent_settled` handler
+    has run by then, so an overlay that just opened is visible), then skips when
+    a quiz/Plan Review overlay is active (`isQuizActive`), output-limit recovery
+    is running (`isPlanAutoContinuing`), an agent run is pending
+    (`isAgentRunPending`), the session is not idle, or the session has no UI
+    (print/JSON runs have no next turn). One compaction at a time
+    (`compact_in_flight`, cleared by Pi's always-invoked `onComplete`/`onError`,
+    `session_compact`, and `session_shutdown`). A dismissed Plan Review with no
+    follow-up turn re-arms the check (after `showPlanReview` returns
+    `undefined`/`copy`) because the overlay suppressed the settle check. Never
+    trigger it mid-run, never call it from a render closure, and never add a
+    second threshold check or a competing reserve constant.
 - **Output-limit auto-continue:** When the model hits the maximum output
   token limit (`stopReason === "length"`) in any mode, the extension
   silently sends a hidden `pi-agents-auto-continue` custom message
@@ -1288,15 +1347,24 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `session_before_compact` (parent + subagent) and produces the structured
   checkpoint (`## Goal`, `## Progress`, `## Next Steps`,
   `<read-files>` / `<modified-files>`). Pi injects that checkpoint into LLM
-  context after compact(). **Uncapped summarizer:** the summarization request
-  is capped only by the model's own output limit
-  (`summarization_max_output_tokens` in `stack-compaction.ts`) — never by Pi's
+  context after compact(). **Uncapped summarizer:** Ember never sends an output
+  cap of its own: `summarization_max_output_tokens` in `stack-compaction.ts`
+  returns the model's own output limit, or `undefined` (the field is omitted
+  from the request) when the model declares none — never Pi's
   `min(0.8 * reserveTokens, model.maxTokens)` formula, which stopped generation
   mid-checkpoint (the checkpoint lost `## Next Steps` / `## Critical Context`).
   `summarization_output_reserve_tokens` keeps that allowance for input
-  budgeting only, so the summarizer still sees the full discarded history, and
-  `summarization_failure` rejects a `length` stop so a truncated summary is
-  never persisted as a session checkpoint. **No split-turn pass:** Pi's native
+  budgeting only, so the summarizer still sees the full discarded history.
+  A `length` stop — the provider's own generation ceiling, which Ember cannot
+  raise and which Codex never even receives as a request field — is resumed
+  instead of failing `/compact`: `generate_history_summary` appends the partial
+  text and re-prompts with `SUMMARIZATION_CONTINUE_PROMPT` (up to
+  `SUMMARIZATION_CONTINUE_MAX` passes, each sending only the partial checkpoint
+  rather than the discarded history, so the continuation keeps the largest
+  available output room) until generation ends naturally. `summarization_failure`
+  remains the single owner of the failure message and is consulted only after
+  the continuation budget is exhausted or a pass adds no text, so a truncated
+  summary is still never persisted as a session checkpoint. **No split-turn pass:** Pi's native
   split-turn
   concept (a second LLM call emitting a `**Turn Context (split turn):**` /
   `## Original Request` / `## Early Progress` block when the cut point falls
@@ -1305,6 +1373,11 @@ field. Keep that mechanism aligned with the actual plugin folders.
   Ember summary covers everything, the checkpoint's `## Progress` / `## Next
   Steps` already tells the model what's left to do, and `compaction-wiring.ts`
   fail-soft must never let Pi's native `compact()` run or that garbage block
+  is emitted. The wiring skips Ember compaction only when
+  `modelRegistry.getApiKeyAndHeaders` returns `ok: false` — a headers-only
+  result (env/command-configured key, no `apiKey`) still runs Ember's
+  summarizer, because the canonical runtime resolves the key itself and Pi's
+  native path would add the split-turn block and throw on a `length` stop.
   is emitted. Never reintroduce a `TURN_PREFIX_SUMMARIZATION_PROMPT` or a
   second summarization call. The continue message is a short non-duplicating
   resume directive built by `build_auto_continue_content` (SSOT) — it does NOT
@@ -1618,8 +1691,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
   render loop. Child sessions load a minimal extension set via
   `discoverAndLoadExtensions()`: shared Ember compaction wiring
   (`plugins/pi-custom-agents/compaction-wiring.ts` on `session_before_compact`,
-  same prompts as parent via `stack-compaction.ts`). `build_subagent_settings()` enables Pi compaction
-  (`compaction.enabled: true`) and disables retry, making Pi AgentSession the
+  same prompts as parent via `stack-compaction.ts`). `build_subagent_settings(model)`
+  enables Pi compaction (`compaction.enabled: true`), carries Ember's absolute
+  auto-compaction ceiling into `reserveTokens` for the child's window, and disables
+  retry, making Pi AgentSession the
   **sole overflow recovery owner**: its canonical overflow check classifies the
   resolved Codex overflow form (`stopReason: "error"` + `errorMessage` matching
   `isContextOverflow`) and runs bounded overflow compaction plus continuation
@@ -1722,9 +1797,9 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `SUBAGENT_LIVE_OUTPUT_MAX_ROWS`, so within a multi-call burst only the
   latest child remains visible and each new call absorbs the previous child
   into the aggregate header (`currentWaveRows` retains the full record history
-  for stats and rebuilds). This wave-fold is deliberately different from the
-  main transcript, where children accumulate until a hard boundary folds the
-  whole group — never copy either rule into the other renderer.
+  for stats and rebuilds). The main transcript uses the same rule — each new
+  call absorbs the previous child into the aggregate header — so the tray and
+  the main renderer stay consistent.
   Child rows reuse the SSOT
   `merge_group_child_rows` + `formatGroupChildRows` formatters (gradient
   verbs while running, muted past-tense when done, merged same-file
@@ -1744,11 +1819,17 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `theme.fg("text", …)` lines, ANSI-aware truncated via `truncateToWidth`,
   capped at `LIVE_TEXT_MAX_LINES` (6) per block and
   `SUBAGENT_LIVE_TEXT_MAX_CHARS` (400) per block. There are no unprefixed
-  synthetic spacer rows: in visible-thinking mode, each non-final rendered
-  work/tool segment gets exactly one `treePrefix + │` pipe-padding row, added
-  after empty segments are filtered, so the outer tree stays connected through
-  visible thinking/text boundaries. Padding never dangles at the end, and
+  synthetic spacer rows: in visible-thinking mode, every pair of adjacent
+  rendered segments gets exactly one `treePrefix + │` pipe-padding row between
+  them, added after empty segments are filtered, so the outer tree stays
+  connected through visible thinking/text boundaries and released text never
+  touches the tool rows on either side. Padding never dangles at the end, and
   hidden-thinking mode retains the compact shape above without this padding.
+  A work burst closed by a hard boundary (a following visible text or
+  thinking segment) folds to its summary header — `childAbsorbBefore =
+  records.length`, the tray equivalent of `fold_group_child_rows` — so a
+  released `│Ran …` child never lingers as a stale pipe row beside the new
+  content (a single-tool burst is already its collapsed standalone row).
   Internal visible-Markdown paragraph blanks render as pipe continuation rows
   (`│`, not bare blanks) and count toward the 15-line budget; empty markers and blank-only Markdown results are omitted.
   The tray's branch glyph marks the terminal row of the LAST chronological
@@ -1850,6 +1931,22 @@ field. Keep that mechanism aligned with the actual plugin folders.
   (`defaultProvider`/`defaultModel`) and the session (`model_change` entry) on
   every `/model`, `Ctrl+P`, and `pi.setModel()`; `pi-ember-stack.json` is the
   per-mode memory on top of that.
+- **`/compact-model` — custom summarizer model:** the same `pi-ember-stack.json`
+  persisted state carries an optional top-level `compactModel` ModelIdentity
+  (separate from `modeModels`; `writePersistedState` preserves it when the field
+  is omitted and deletes it on `null`). `/compact-model` opens the Switch Model
+  picker (`pickModelInEditor` + the OpenRouter upstream second step, same as
+  `/model`) and binds that model — plus its effort/`thinkingLevel` and pinned
+  OpenRouter upstream — to compaction instead of the session model.
+  `/compact-model clear` (or `default`/`off`/`reset`) removes the override.
+  `compaction-wiring.ts` owns the session-bound `set_compact_model`/
+  `get_compact_model` state (re-read from persisted state on `session_start`,
+  cleared on `session_shutdown`) and resolves the identity through
+  `modelRegistry.find` + `hasConfiguredAuth` + `apply_openrouter_routing` inside
+  `session_before_compact`; an unset, uncatalogued, or unauthenticated binding
+  falls back to `ctx.model` so compaction always runs. The bound
+  `thinkingLevel` is forwarded to `run_stack_compaction` as the summarizer's
+  reasoning level.
 
 ### `devin-auth`
 
@@ -2440,8 +2537,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
   silently deactivated, which is what the mode tool sets in `pi-custom-agents`
   do to every unlisted tool.
 - Rows use the shared compact contract: `statusBulletColor` + `BULLET` +
-  `CompactGroupText` from `pi-compact-tools/renderer.ts` in a transparent
-  `Box(1, 0, undefined)`, one ANSI-truncated line, updated in place from the
+  `CompactGroupText` from `pi-compact-tools/renderer.ts`, returned directly from
+  the render slot like a native compact row — no wrapping shell, so the bullet
+  starts in column 0 with every other tool row and the row is never padded with
+  leading or trailing columns. One ANSI-truncated line, updated in place from the
   result slot. Expanded detail (window rows / saved file) is for Ctrl+O only.
 - `BROWSER_TOOLS` in the same file is the matching curated activation list for
   the optional third-party `pi-browser` extension (navigate/snapshot/interact/
@@ -2472,9 +2571,10 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Runtime dependencies (`@mozilla/readability`, `linkedom`, `p-limit`,
   `turndown`, `unpdf`) are declared in the root `package.json`.
 - Web-tool call/result rows use `statusBulletColor` and `BULLET` from
-  `pi-compact-tools/renderer.ts` with a transparent `Box(1, 0, undefined)`
-  shell. The bullet is the sole success/running/error state indicator; do not
-  restore `toolSuccessBg`/`toolErrorBg` blocks in web-tool renderers.
+  `pi-compact-tools/renderer.ts` and return the `CompactGroupText` row directly —
+  no wrapping `Box`, so nothing pads a column in front of the bullet. The bullet
+  is the sole success/running/error state indicator; do not restore
+  `toolSuccessBg`/`toolErrorBg` blocks in web-tool renderers.
 - When customizing vendored files, bring them into compliance with our
   TypeScript strict mode and Biome lint rules, then remove them from the
   `tsconfig.json` and `biome.json` exclude lists.

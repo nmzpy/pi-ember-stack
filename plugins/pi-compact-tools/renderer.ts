@@ -19,13 +19,21 @@ import {
 	unsubscribe_gradient_tick as unsubscribeGradientTick,
 } from "../pi-ember-ui/gradient.ts";
 import { format_thinking_pass_elapsed_suffix } from "../pi-ember-ui/index.ts";
-import { isThinkingBlocksHidden, paint_tree_pipe } from "../pi-ember-ui/mode-colors.ts";
+import {
+	isThinkingBlocksHidden,
+	paint_tree_pipe,
+	reset_work_group_boundary_suppression,
+} from "../pi-ember-ui/mode-colors.ts";
 import { request_render } from "../pi-ember-ui/render-intent.ts";
 import { format_in_group_thinking_row } from "../pi-ember-ui/thinking-status-render.ts";
 import { bashGrepInfo } from "./bash-grep.ts";
 import { BROWSER_BULLET, BULLET, CompactGroupText } from "./compact-text.ts";
 /** Kept for test imports but no longer used — different tool names fold immediately. */
 export const GROUP_CHILD_FOLD_DEBOUNCE_MS = 0;
+
+/** Max visible child rows under a work-group header. Older calls are absorbed
+ *  into the aggregate header; a hard boundary folds the rest. */
+const MAX_VISIBLE_GROUP_CHILDREN = 5;
 
 /** Minimal theme shape used by compact rendering: fg(tag, text) and bold(text). */
 interface ThemeLike {
@@ -1531,6 +1539,9 @@ export function selectGroupVisibleChildren<T>(items: readonly T[], absorb_before
 }
 
 function groupVisibleChildren(group: DiscoveryGroup): CompactCall[] {
+	// A hard boundary folded the group to header-only: every child is absorbed
+	// including a still-running call that was in flight when the fold hit.
+	if (group.hardExited) return [];
 	return selectGroupVisibleChildren(group.records, group.childAbsorbBefore ?? 0);
 }
 
@@ -1546,11 +1557,18 @@ export function group_needs_gradient_tick(group: DiscoveryGroup): boolean {
 	return false;
 }
 
-/** Errors in folded/absorbed members are historical — only the visible wave is active. */
+/** Whether the group has a failed member still visible in the transcript.
+ *  Absorbed (collapsed) members are historical — their failure already moved
+ *  into the header summary, so only a visible or running error keeps the red
+ *  bullet. A hard boundary folds the group to header-only and clears the
+ *  active error the same way. */
 function group_has_active_error(group: DiscoveryGroup): boolean {
 	return groupVisibleChildren(group).some((r) => r.isError);
 }
 
+/** Whether this record's failure still counts as the group's active error —
+ *  i.e. it is one of the visible children. An absorbed error row is historical
+ *  and no longer paints its own error row or the red header bullet. */
 function is_active_group_error(record: CompactCall, group: DiscoveryGroup | undefined): boolean {
 	if (!record.isError) return false;
 	if (!group) return true;
@@ -2125,9 +2143,9 @@ export class CompactRenderer {
 		}
 		this.currentGroup = live;
 		this.reopenGroupKey = live.key;
-		// Merged groups behave like one continuous work group: children
-		// accumulate under the single header, so nothing is folded away.
-		live.childAbsorbBefore = 0;
+		// Merged groups behave like one continuous work group: the header
+		// carries the whole history and the newest calls keep the child rows.
+		live.childAbsorbBefore = Math.max(0, live.records.length - MAX_VISIBLE_GROUP_CHILDREN);
 		live.pendingShrink = true;
 		return true;
 	}
@@ -2298,6 +2316,9 @@ export class CompactRenderer {
 		this.pendingGroupInvalidations.clear();
 		this.thinkingLaneCount = 0;
 		this.lastTheme = undefined;
+		// A leaked boundary-suppression `begin` must not survive a session reset
+		// and permanently swallow stream boundaries in the next session.
+		reset_work_group_boundary_suppression();
 	}
 
 	/** Re-paint compact rows after a live accent/theme rebuild. */
@@ -2656,16 +2677,18 @@ export class CompactRenderer {
 
 	private appendToGroup(group: DiscoveryGroup, record: CompactCall): void {
 		for (const member of group.records) member.group = group;
-		// Children ACCUMULATE under the header: every new tool call keeps the
-		// previous child rows visible and appends its own row below them. The
-		// group is folded to its summary header only at a hard boundary
-		// (visible assistant text, visible thinking, user message, a different
-		// group key, or a non-groupable tool) — never on the next call itself.
+		// Children COLLAPSE into the header past the newest
+		// MAX_VISIBLE_GROUP_CHILDREN: a burst of N calls shows the last N rows,
+		// and every call before them is absorbed into the header's aggregate.
+		// A hard boundary (visible assistant text, visible thinking, user
+		// message, a different group key, or a non-groupable tool) still folds
+		// the group to header-only.
 		this.setThinkingChild(group, false);
 		group.holdingToolLane = false;
 		group.settled = false;
 		group.records.push(record);
 		record.group = group;
+		group.childAbsorbBefore = Math.max(0, group.records.length - MAX_VISIBLE_GROUP_CHILDREN);
 		// A new child joined — the cached header/child prefix is stale until the
 		// owner re-renders through formatGroup.
 		group.staticTextValid = false;

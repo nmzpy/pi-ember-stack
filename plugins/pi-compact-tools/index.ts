@@ -136,6 +136,17 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI, opts?: CompactToo
 		sync_compact_group_flags(renderer);
 	});
 	pi.on("tool_call", (event) => {
+		// Rewrite bash `grep` invocations to `rg` before execution so search
+		// behavior is deterministic (smart-case, git-aware, fast) instead of
+		// depending on whatever GNU/BSD grep the host happens to ship.
+		// Unknown flags bail safely and the original command runs unchanged.
+		if (event.toolName === "bash") {
+			const input = event.input as { command?: unknown } | undefined;
+			if (typeof input?.command === "string") {
+				const rewritten = rewriteGrepToRg(input.command);
+				if (rewritten !== undefined) input.command = rewritten;
+			}
+		}
 		// The model announced/started a tool call: drop the in-group
 		// `│ Thinking` lane synchronously before the call joins or replaces the
 		// work group. registerCall/appendToGroup also clears it, but announcing
@@ -158,6 +169,14 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI, opts?: CompactToo
 	// happens on thinking stream, visible assistant text, user message, or the
 	// next tool wave (appendToGroup reopen) — not on Pi turn_start/turn_end.
 	pi.on("tool_execution_end", () => {
+		sync_compact_group_flags(renderer);
+	});
+	// Compaction rebuilds the transcript: the live work group belongs to the
+	// pre-compaction transcript, so hard-exit it — the next tool wave must
+	// start a fresh header below the compaction summary, not reopen the old
+	// one above it.
+	pi.on("session_compact", () => {
+		renderer.noteInterveningToolCall();
 		sync_compact_group_flags(renderer);
 	});
 	// Reset the shared renderer on session replacement so stale call rows

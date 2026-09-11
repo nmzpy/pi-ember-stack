@@ -55,7 +55,7 @@ beforeEach(() => {
 });
 
 describe("Browser compat work group", () => {
-	test("browser calls accumulate as child rows under one Browser header", () => {
+	test("browser calls collapse to the newest child row under one Browser header", () => {
 		const r = new CompactRenderer();
 		const owner_state: Record<string, unknown> = {};
 		const owner = render_call(r, "browser-1", "browser_navigate", { url: "http://localhost:3000/" }, owner_state);
@@ -82,11 +82,12 @@ describe("Browser compat work group", () => {
 		// Live header is the compat tool name; the per-tool count summary waits
 		// for the boundary that folds the group.
 		expect(lines[0]).toBe("◇Browser");
+		// All four calls keep their child rows — the cap only absorbs calls
+		// past the newest five.
 		expect(lines).toContain("  │Navigated http://localhost:3000/");
 		expect(lines).toContain("  │Resized 1600x900");
-		// Screenshot never gains an `-ing` form; evaluate reads Interacting.
-		expect(lines.join("\n")).toContain("Screenshot");
-		expect(lines.join("\n")).toContain("Interacting");
+		expect(lines).toContain("  │Screenshot");
+		expect(lines).toContain("  │Interacting");
 		// Non-owner members never render their own rows.
 		expect(row_of(resize_state)).toEqual([]);
 		expect(row_of(shot_state)).toEqual([]);

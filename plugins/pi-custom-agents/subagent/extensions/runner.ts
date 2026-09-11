@@ -29,6 +29,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { auto_compact_reserve_tokens } from "../../auto-compact.ts";
 import { is_benign_compact_error, should_skip_compact } from "../../auto-continue.ts";
 import { HOST_PROCESS_SAFETY_GUIDANCE } from "../../host-process-safety.ts";
 import { infer_bare_agent_name } from "../../subagent-policy.ts";
@@ -118,13 +119,21 @@ const CONTEXT_PROMPT_RESERVE = 8192;
  * Ember's structured stack summary through compaction-wiring) inside
  * `session.prompt()`. Generic retry stays disabled so unrelated 401/429/
  * provider failures are never re-prompted.
+ *
+ * `reserveTokens` carries Ember's absolute auto-compaction ceiling into Pi's
+ * own threshold (`contextTokens > contextWindow - reserveTokens`), so a child
+ * compacts at AUTO_COMPACT_CONTEXT_TOKENS mid-run instead of growing to the
+ * model's window. Windows at or below the ceiling keep Pi's default reserve.
  */
-export function build_subagent_settings(): {
-	compaction: { enabled: boolean };
+export function build_subagent_settings(model?: { contextWindow?: number }): {
+	compaction: { enabled: boolean; reserveTokens: number };
 	retry: { enabled: boolean };
 } {
 	return {
-		compaction: { enabled: true },
+		compaction: {
+			enabled: true,
+			reserveTokens: auto_compact_reserve_tokens(model?.contextWindow),
+		},
 		retry: { enabled: false },
 	};
 }
@@ -1312,7 +1321,10 @@ export async function runSubAgent(options: {
 		reload: async () => {},
 	};
 
-	const settingsManager = SettingsManager.inMemory(build_subagent_settings());
+	// The child model's window sets Ember's absolute auto-compaction ceiling for
+	// this session, so a long child run compacts mid-prompt instead of growing to
+	// the model's window.
+	const settingsManager = SettingsManager.inMemory(build_subagent_settings(model));
 	const model_runtime = resolve_parent_model_runtime(modelRegistry);
 	const legacy_registry = is_legacy_model_registry(modelRegistry);
 

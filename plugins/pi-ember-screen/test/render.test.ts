@@ -152,17 +152,24 @@ describe("window_screenshot compact row", () => {
 });
 
 describe("screen row component", () => {
-	test("reuses one component and one shell across renders", () => {
+	test("reuses one component across renders and starts in column 0", () => {
 		const context = { state: {} as Record<string, unknown>, args: {} };
 		const first = render_screen_row(context, "one");
 		const second = render_screen_row(context, "two");
 		expect(second).toBe(first);
 		expect(context.state.callText).toBeInstanceOf(CompactGroupText);
-		expect(second.children.length).toBe(1);
-		const lines = second.render(60);
+		// The row component is returned directly — no wrapping shell — so the
+		// row is not padded with a leading (or trailing) column.
+		expect(second.render(60)).toEqual(["two"]);
+	});
+
+	test("the bullet starts in column 0, with no padding before it", () => {
+		const context = { state: {} as Record<string, unknown>, args: {} };
+		const row = render_screen_row(context, format_window_list_row(theme, {}, true, false, "", 13));
+		const lines = row.render(90);
 		expect(lines.length).toBe(1);
-		expect(lines[0]).toContain("two");
-		expect(lines[0]).not.toContain("one");
+		expect(lines[0].startsWith(bullet_color(theme, "success"))).toBe(true);
+		expect(visibleWidth(lines[0])).toBeLessThanOrEqual(90);
 	});
 
 	test("truncates to the width Pi supplies", () => {

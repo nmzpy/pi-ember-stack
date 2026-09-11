@@ -3,6 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { isContextOverflow } from "@earendil-works/pi-ai";
+import {
+	DEFAULT_COMPACTION_SETTINGS,
+	SettingsManager,
+	shouldCompact,
+} from "@earendil-works/pi-coding-agent";
+import { AUTO_COMPACT_CONTEXT_TOKENS } from "../../../auto-compact.ts";
 import { build_subagent_settings, load_subagent_extensions } from "../runner.ts";
 
 /** Minimal assistant message shape accepted by pi-ai's canonical overflow utility. */
@@ -20,6 +26,36 @@ describe("subagent session settings", () => {
 		const settings = build_subagent_settings();
 		expect(settings.compaction?.enabled).toBe(true);
 		expect(settings.retry?.enabled).toBe(false);
+	});
+
+	test("build_subagent_settings carries Ember's absolute auto-compaction ceiling", () => {
+		// A large-window child compacts at 300k through Pi's NATIVE threshold
+		// (contextTokens > contextWindow - reserveTokens), so the run continues
+		// instead of growing to the model's window limit.
+		const large = build_subagent_settings({ contextWindow: 1_000_000 });
+		expect(large.compaction?.reserveTokens).toBe(1_000_000 - AUTO_COMPACT_CONTEXT_TOKENS);
+		expect(1_000_000 - (large.compaction?.reserveTokens ?? 0)).toBe(AUTO_COMPACT_CONTEXT_TOKENS);
+
+		// A window at or below the ceiling is unreachable there: Pi's own default
+		// reserve governs and Ember never shrinks the room left for the response.
+		const small = build_subagent_settings({ contextWindow: 200_000 });
+		expect(small.compaction?.reserveTokens).toBe(DEFAULT_COMPACTION_SETTINGS.reserveTokens);
+		expect(build_subagent_settings().compaction?.reserveTokens).toBe(
+			DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+		);
+	});
+
+	test("Pi's own threshold fires at Ember's ceiling for a child session", () => {
+		// End-to-end through the real SettingsManager + Pi's own trigger check: the
+		// child compacts inside session.prompt() the moment it crosses 300k, and Pi
+		// keeps 20k of recent messages exactly as before.
+		const context_window = 1_000_000;
+		const settings = SettingsManager.inMemory(
+			build_subagent_settings({ contextWindow: context_window }),
+		).getCompactionSettings();
+		expect(shouldCompact(AUTO_COMPACT_CONTEXT_TOKENS, context_window, settings)).toBe(false);
+		expect(shouldCompact(AUTO_COMPACT_CONTEXT_TOKENS + 1, context_window, settings)).toBe(true);
+		expect(settings.keepRecentTokens).toBe(DEFAULT_COMPACTION_SETTINGS.keepRecentTokens);
 	});
 
 	test("child session extension set wires the real session_before_compact compaction hook", async () => {

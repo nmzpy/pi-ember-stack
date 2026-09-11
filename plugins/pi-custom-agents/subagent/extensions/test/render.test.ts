@@ -220,7 +220,7 @@ describe("SubagentLiveOutputText", () => {
 		expect(text.indexOf("Let me check the launch window.")).toBeLessThan(text.indexOf("Edit"));
 	});
 
-	test("puts one pipe pad below a tool before visible content", () => {
+	test("pads one pipe row on both sides of released text", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true }),
@@ -241,30 +241,36 @@ describe("SubagentLiveOutputText", () => {
 		expect(read_index).toBeGreaterThanOrEqual(0);
 		expect(rows[read_index + 1]).toBe("  │");
 		expect(text_index).toBe(read_index + 2);
-		expect(pad_rows).toHaveLength(1);
+		// One pad above the text AND one below it — released text never touches
+		// the tool rows on either side.
+		expect(pad_rows).toHaveLength(2);
 		expect(rows[text_index]).toContain("Checking the popover.");
-		expect(rows[text_index + 1]).toContain("[muted:Edited]");
+		expect(rows[text_index + 1]).toBe("  │");
+		expect(rows[text_index + 2]).toContain("[muted:Edited]");
 	});
 
-	test("visible multi-tool bursts pad only after the latest rendered child", () => {
+	test("a work burst closed by a hard boundary folds to header-only", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
-			toolItem("grep", { pattern: "auth" }, { toolCallId: "c2" }),
+			toolItem("grep", { pattern: "auth" }, { completed: true, toolCallId: "c2" }),
 			thinkingItem("Reasoning about the next edit."),
 		];
 		const rows = new SubagentLiveOutputText(items, "  ", true, theme)
 			.render(80)
 			.map(stripAnsi);
-		const latest_tool_index = rows.findIndex((line) => line.includes("auth"));
 		const pad_rows = rows.filter((line) => line === "  │");
 
-		expect(latest_tool_index).toBeGreaterThanOrEqual(0);
-		expect(rows[latest_tool_index + 1]).toBe("  │");
+		// The released burst collapses like the main renderer's hardExitGroup:
+		// the aggregate header stays (past-tense summary) but no stale child `│`
+		// row lingers beside the reasoning below it.
+		expect(rows[0]).toContain("Explored 1 file");
+		expect(rows[0]).toContain("1 search");
+		expect(rows.join("\n")).not.toContain("auth");
+		expect(rows.join("\n")).not.toContain("a.ts");
 		expect(pad_rows).toHaveLength(1);
 		expect(rows.at(-1)).not.toBe("  │");
 		expect(rows.at(-1)).toContain("Reasoning about the next edit.");
-		expect(rows.join("\n")).not.toContain("a.ts");
 	});
 
 	test("a later segment keeps the pipe column instead of breaking the branch", () => {
@@ -619,7 +625,7 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		// the non-empty text splits them in order.
 		expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Let me check"));
 		expect(text.indexOf("Let me check")).toBeLessThan(text.indexOf("Edit"));
-		expect(out.map(stripAnsi).filter((line) => line === "  │").length).toBe(1);
+		expect(out.map(stripAnsi).filter((line) => line === "  │").length).toBe(2);
 	});
 });
 

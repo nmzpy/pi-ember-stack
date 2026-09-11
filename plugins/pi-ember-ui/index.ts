@@ -99,6 +99,7 @@ import {
 	paint_tree_pipe,
 	PAGE_BG,
 	resetSubagentDelegation,
+	reset_work_group_boundary_suppression,
 	resetToolExecutionInFlight,
 	setAgentRunPending,
 	setGroupReopenableActive,
@@ -179,6 +180,7 @@ export {
 export {
 	cancel_pending_model_pick as cancelPendingModelPick,
 	pick_model_in_editor as pickModelInEditor,
+	pick_openrouter_provider,
 	wrap_model_picker_editor as wrapModelPickerEditor,
 } from "./model-picker.ts";
 export {
@@ -1156,6 +1158,7 @@ export function reset_thinking_header_session_state(): void {
 	setUserTurnCommitted(false);
 	resetToolExecutionInFlight();
 	set_thinking_stream_active(false);
+	reset_work_group_boundary_suppression();
 	clear_thinking_pass_timer();
 }
 
@@ -1879,15 +1882,27 @@ function render_shell_aware_editor(
  */
 export function handle_thinking_blocks_visibility_change(next_hidden: boolean): void {
 	begin_work_group_boundary_suppression();
-	const renderer = getSharedRenderer();
-	renderer.repaintAfterThinkingBlocksToggle(next_hidden, thinking_toggle_arm_lane(next_hidden));
-	sync_compact_group_flags(renderer);
+	try {
+		const renderer = getSharedRenderer();
+		renderer.repaintAfterThinkingBlocksToggle(next_hidden, thinking_toggle_arm_lane(next_hidden));
+		sync_compact_group_flags(renderer);
+	} finally {
+		// Release as soon as the synchronous structural pass completes. The
+		// suppression exists only to absorb the Ctrl+T rebuild replay's
+		// spurious stream-boundary events — it must NOT be held across the
+		// deferred paint pass, or a real post-toggle `thinking_delta` that
+		// arrives during those microtasks is swallowed and the work group
+		// keeps absorbing same-key tools instead of hard-exiting.
+		end_work_group_boundary_suppression();
+	}
+	// Deferred paint pass: re-point group visual handles at the components Pi
+	// just created. Runs after suppression is released — it only repaints and
+	// must not gate stream boundaries.
 	queueMicrotask(() => {
 		queueMicrotask(() => {
 			const live = getSharedRenderer();
 			live.repaintAfterThinkingBlocksToggle(next_hidden, thinking_toggle_arm_lane(next_hidden));
 			sync_compact_group_flags(live);
-			end_work_group_boundary_suppression();
 			request_render();
 		});
 	});

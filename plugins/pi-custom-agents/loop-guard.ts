@@ -199,6 +199,30 @@ export function resolve_settled_action(state: LoopGuardState): LoopSettledAction
 }
 
 // ---------------------------------------------------------------------------
+// Retry message content (SSOT)
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the hidden ``pi-agents-loop-retry`` message content injected on
+ * auto-retry and on a manual quiz Retry.  The message names the looping tool
+ * (parsed out of the ``tool_name:{…}`` signature when available) and gives
+ * the model a concrete escape route: stop repeating the call, take a
+ * different approach, and say so if it is stuck — a bare "call a different
+ * tool" reads as "call any other tool" and the model often just resumes
+ * the same loop.
+ */
+export function build_loop_retry_content(signature: string | undefined): string {
+	const tool_name = signature ? signature.split(":", 1)[0] : undefined;
+	const subject = tool_name ? `the '${tool_name}' tool` : "that tool";
+	return (
+		`You are stuck in a loop: you have called ${subject} repeatedly with identical ` +
+		"arguments and it is not making progress. Do NOT call it again with the same " +
+		"arguments. Stop, reconsider your approach, and either use a different tool, " +
+		"different arguments, or answer the user directly with what you have. If you " +
+		'are blocked, say so instead of retrying.'
+	);
+}
+// ---------------------------------------------------------------------------
 // Quiz outcome handling
 // ---------------------------------------------------------------------------
 

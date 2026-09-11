@@ -62,32 +62,36 @@ function format_file_operations(readFiles: string[], modifiedFiles: string[]): s
 
 function create_summarization_options(
 	model: Model<Api>,
-	maxTokens: number,
 	auth: StackCompactionAuth,
 	signal: AbortSignal | undefined,
 	thinkingLevel: AgentThinkingLevel | undefined,
 ): {
-	maxTokens: number;
+	maxTokens?: number;
 	signal?: AbortSignal;
 	apiKey?: string;
 	headers?: Record<string, string>;
 	env?: Record<string, string>;
 	reasoning?: ThinkingLevel;
 } {
+	// No explicit output cap: the request omits the field unless the model
+	// declares its own limit, which is the only ceiling Ember accepts.
+	const maxTokens = summarization_max_output_tokens(model);
 	const options: {
-		maxTokens: number;
+		maxTokens?: number;
 		signal?: AbortSignal;
 		apiKey?: string;
 		headers?: Record<string, string>;
 		env?: Record<string, string>;
 		reasoning?: ThinkingLevel;
 	} = {
-		maxTokens,
 		signal,
 		apiKey: auth.apiKey,
 		headers: auth.headers,
 		env: auth.env,
 	};
+	if (maxTokens !== undefined) {
+		options.maxTokens = maxTokens;
+	}
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel as ThinkingLevel;
 	}
@@ -180,16 +184,16 @@ export function trim_llm_messages_for_summary(
 /**
  * Output cap for the summarization request.
  *
- * Ember deliberately does NOT cap the summarizer below the model's own output
- * limit. Pi's vendored formula (`min(0.8 * reserveTokens, model.maxTokens)`)
- * stops generation mid-section on a long history: the checkpoint loses
- * `## Next Steps` / `## Critical Context`, and providers that report the
- * truncated generation as a failure (a `length` stop, or an error body) fail
- * `/compact` outright. The model's own output limit, and pi-ai's window clamp
- * that keeps input + output inside the context window, are the only ceilings.
+ * Ember never imposes an output cap of its own and never caps the summarizer
+ * below the model's own output limit. Pi's vendored formula
+ * (`min(0.8 * reserveTokens, model.maxTokens)`) stops generation mid-section on
+ * a long history: the checkpoint loses `## Next Steps` / `## Critical
+ * Context`. `undefined` means "no explicit cap" — the request omits the field
+ * and the provider applies its own default (never `Infinity`, which would
+ * serialize to JSON `null` in an OpenAI-compatible body).
  */
-export function summarization_max_output_tokens(model: Model<Api>): number {
-	return model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY;
+export function summarization_max_output_tokens(model: Model<Api>): number | undefined {
+	return model.maxTokens > 0 ? model.maxTokens : undefined;
 }
 
 /**
@@ -199,13 +203,17 @@ export function summarization_max_output_tokens(model: Model<Api>): number {
  * used so the summarizer still sees the same history.
  */
 export function summarization_output_reserve_tokens(model: Model<Api>, reserveTokens: number): number {
-	return Math.min(Math.floor(0.8 * reserveTokens), summarization_max_output_tokens(model));
+	const pi_allowance = Math.floor(0.8 * reserveTokens);
+	const model_cap = summarization_max_output_tokens(model);
+	return model_cap === undefined ? pi_allowance : Math.min(pi_allowance, model_cap);
 }
 
 /**
  * Failure message for a summarization response that must not become a
- * checkpoint. A `length` stop carries partial text — never persist it as a
- * session checkpoint (same contract as Pi's own compaction).
+ * checkpoint. `generate_history_summary` only consults this AFTER the
+ * continuation budget is used up (or a pass added no text): a `length` stop
+ * carries partial text, so it is resumed first and never persisted truncated
+ * (same contract as Pi's own compaction).
  */
 export function summarization_failure(response: AssistantMessage): string | undefined {
 	if (response.stopReason === "error") {
@@ -217,6 +225,22 @@ export function summarization_failure(response: AssistantMessage): string | unde
 	return undefined;
 }
 
+/**
+ * Continuation passes allowed after the summarizer is cut off by the model's
+ * output limit. The checkpoint is a long structured document and the provider
+ * clamps the request to the model's own output ceiling (pi-ai's window clamp
+ * can shrink it further), so one generation window is not always enough.
+ */
+export const SUMMARIZATION_CONTINUE_MAX = 5;
+
+/**
+ * Prompt for a continuation pass. Only the partial checkpoint is resent — the
+ * discarded history is already folded into it — so the continuation keeps the
+ * maximum possible output room.
+ */
+export const SUMMARIZATION_CONTINUE_PROMPT =
+	"Your checkpoint was cut off by the model's output token cap. Continue it from the exact point where it stopped. Do not repeat text you already wrote, do not restart or re-title a section, and do not comment on being cut off — resume the current section mid-stream as if the limit never happened.";
+
 async function generate_history_summary(
 	messages: AgentMessage[],
 	model: Model<Api>,
@@ -227,7 +251,6 @@ async function generate_history_summary(
 	thinkingLevel: AgentThinkingLevel | undefined,
 	streamFn?: StreamFn,
 ): Promise<string> {
-	const maxTokens = summarization_max_output_tokens(model);
 	const llmMessages = trim_llm_messages_for_summary(
 		messages,
 		model,
@@ -235,25 +258,52 @@ async function generate_history_summary(
 		build_history_summarization_prompt("", previousSummary),
 	);
 	const conversationText = serializeConversation(llmMessages);
-	const promptText = build_history_summarization_prompt(conversationText, previousSummary);
-	const summarizationMessages: Message[] = [
+	const options = create_summarization_options(model, auth, signal, thinkingLevel);
+	// The checkpoint is unbounded output: a `length` stop is resumed with a
+	// continuation pass instead of failing /compact. Only an exhausted budget (or
+	// a pass that adds nothing) reaches `summarization_failure`, so a truncated
+	// checkpoint is still never persisted.
+	let summary = "";
+	let summarizationMessages: Message[] = [
 		{
 			role: "user",
-			content: [{ type: "text", text: promptText }],
+			content: [
+				{ type: "text", text: build_history_summarization_prompt(conversationText, previousSummary) },
+			],
 			timestamp: Date.now(),
 		},
 	];
-	const response = await complete_summarization(
-		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		create_summarization_options(model, maxTokens, auth, signal, thinkingLevel),
-		streamFn,
-	);
-	const failure = summarization_failure(response);
-	if (failure) {
-		throw new Error(failure);
+	for (let pass = 0; ; pass++) {
+		const response = await complete_summarization(
+			model,
+			{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
+			options,
+			streamFn,
+		);
+		const text = extract_text_content(response);
+		summary += text;
+		const truncated = response.stopReason === "length";
+		if (!truncated || pass >= SUMMARIZATION_CONTINUE_MAX || text.trim().length === 0) {
+			const failure = summarization_failure(response);
+			if (failure) {
+				throw new Error(failure);
+			}
+			return summary;
+		}
+		// Drop the discarded history: the partial checkpoint carries it, and a
+		// small context leaves the continuation the largest available output room.
+		summarizationMessages = [
+			// Reuse the response's own message metadata: only role/content matter
+			// to a provider, and carrying the real assistant turn keeps the
+			// continuation a valid `Message` without fabricating usage/stopReason.
+			{ ...response, content: [{ type: "text", text: summary }] },
+			{
+				role: "user",
+				content: [{ type: "text", text: SUMMARIZATION_CONTINUE_PROMPT }],
+				timestamp: Date.now(),
+			},
+		];
 	}
-	return extract_text_content(response);
 }
 
 export async function run_stack_compaction(

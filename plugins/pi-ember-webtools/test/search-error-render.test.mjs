@@ -137,10 +137,12 @@ const indexSrc = readFileSync(indexPath, "utf8");
 
 test("index.ts imports buildSearchErrorPlan and wires it into the web_search error path", () => {
 	assert.match(indexSrc, /import \{[\s\S]*?buildSearchErrorPlan,[\s\S]*?type SearchErrorDetails,[\s\S]*?type SearchErrorPlan,[\s\S]*?\} from "\.\/render-search-error\.ts";/);
-	// Web-tool rows use the compact-tool bullet SSOT and a transparent one-column
-	// shell; success/error backgrounds must not return on a future refactor.
+	// Web-tool rows use the compact-tool bullet SSOT and return the compact text
+	// directly — no shell, so nothing pads a column in front of the bullet.
+	// Success/error backgrounds must not return on a future refactor.
 	assert.match(indexSrc, /statusBulletColor/);
-	assert.match(indexSrc, /new Box\(1, 0, undefined\)/);
+	assert.match(indexSrc, /return compactText;/);
+	assert.doesNotMatch(indexSrc, /new Box\(/);
 	assert.doesNotMatch(indexSrc, /theme\.bg\("tool(?:Success|Error)Bg"/);
 	// The web_search renderResult error branch must call buildSearchErrorPlan.
 	// (Mutation: reverting renderResult to `return new Text(error...)` drops this.)

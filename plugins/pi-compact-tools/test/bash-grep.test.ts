@@ -23,6 +23,32 @@ describe("bashGrepInfo", () => {
 	test("returns undefined for non-grep", () => {
 		expect(bashGrepInfo("ls -la")).toBeUndefined();
 	});
+
+	test("detects rg command (post-rewrite or model-written)", () => {
+		expect(bashGrepInfo("rg -- foo")).toEqual({ pattern: "foo", path: "." });
+		expect(bashGrepInfo("rg -n -- foo src")).toEqual({
+			pattern: "foo",
+			path: ".",
+		});
+	});
+
+	test("detects cd && rg", () => {
+		expect(bashGrepInfo("cd src && rg -i pattern")).toEqual({
+			pattern: "pattern",
+			path: "src",
+		});
+	});
+
+	test("skips flag values when finding pattern", () => {
+		expect(bashGrepInfo("rg -g '*.ts' foo")).toEqual({
+			pattern: "foo",
+			path: ".",
+		});
+		expect(bashGrepInfo("grep --include '*.ts' foo")).toEqual({
+			pattern: "foo",
+			path: ".",
+		});
+	});
 });
 
 describe("rewriteGrepToRg", () => {

@@ -44,6 +44,7 @@ import {
 	interceptShellInput,
 	modelNameHasThinkingVariant,
 	pickModelInEditor,
+	pick_openrouter_provider,
 	processShellInput,
 	refresh_footer,
 	requestShellModeVisualRefresh,
@@ -62,10 +63,11 @@ import {
 	setShellMode,
 } from "../pi-ember-ui/mode-colors.ts";
 import { format_model_effort_suffix } from "../pi-ember-ui/model-variants.ts";
-import { apply_openrouter_routing, build_openrouter_routing, live_openrouter_provider } from "../pi-ember-ui/openrouter-routing.ts";
+import { apply_openrouter_routing, build_openrouter_routing, is_openrouter_model, live_openrouter_provider, OPENROUTER_PROVIDER_AUTO } from "../pi-ember-ui/openrouter-routing.ts";
 import { set_extension_selector_options } from "../pi-ember-ui/select-list-theme.ts";
 import { with_suppressed_shell_history_sync as withSuppressedShellHistorySync } from "../pi-ember-ui/shell-mode.ts";
 import { installAgentsMdHooks } from "./agents-md.ts";
+import { install_auto_compact, maybe_auto_compact } from "./auto-compact.ts";
 import {
 	build_auto_continue_content,
 	is_benign_compact_error,
@@ -73,7 +75,7 @@ import {
 } from "./auto-continue.ts";
 import { install_bash_rules } from "./bash-rules.ts";
 import { install_bash_timeout } from "./bash-timeout.ts";
-import install_compaction_wiring from "./compaction-wiring.ts";
+import install_compaction_wiring, { get_compact_model, set_compact_model } from "./compaction-wiring.ts";
 import {
 	build_full_tools,
 	model_provider_of,
@@ -87,6 +89,7 @@ import {
 	bind_mode_model,
 	bound_identity_uses_baked_effort,
 	bound_model_matches_live,
+	canonical_model_identity,
 	canonicalize_persisted_identity,
 	get_mode_model,
 	get_pi_thinking_level,
@@ -119,13 +122,14 @@ import subagentPlugin from "./subagent/extensions/index.ts";
 import { isGenericAbortMessage } from "./subagent/extensions/runner.ts";
 import { validate_plan_mode_subagent } from "./subagent-policy.ts";
 import {
+	apply_quiz_outcome,
+	build_loop_retry_content,
 	create_loop_guard_state,
 	evaluate_tool_call,
+	type LoopGuardState,
 	reset_run_state,
 	reset_session_state,
 	resolve_settled_action,
-	apply_quiz_outcome,
-	type LoopGuardState,
 } from "./loop-guard.ts";
 
 /**
@@ -201,6 +205,8 @@ type PersistedState = {
 	/** @deprecated migrated into modeModels; stop writing */
 	readonly model?: ModelIdentity;
 	readonly modeModels?: Readonly<Partial<Record<string, ModelIdentity>>>;
+	/** `/compact-model` override — the summarizer model identity, or absent for the session model. */
+	readonly compactModel?: ModelIdentity;
 };
 
 function getPersistedStatePath(): string {
@@ -218,6 +224,7 @@ function readPersistedState(): PersistedState {
 		>;
 		const mode = typeof raw.mode === "string" ? raw.mode : undefined;
 		const modeModels = normalize_mode_models(raw.modeModels);
+		const compactModel = normalize_compact_model(raw.compactModel);
 		// Migration: if legacy top-level `model` exists and modeModels lacks an
 		// entry for the persisted mode (fallback DEFAULT_MODE/"code"), seed only
 		// that one mode. Never fan-out legacy model to all modes.
@@ -237,7 +244,7 @@ function readPersistedState(): PersistedState {
 				};
 			}
 		}
-		return { mode, modeModels };
+		return { mode, modeModels, compactModel };
 	} catch {
 		return {};
 	}
@@ -246,6 +253,8 @@ function readPersistedState(): PersistedState {
 function writePersistedState(state: {
 	readonly mode?: string;
 	readonly modeModels?: Partial<Record<string, ModelIdentity>>;
+	/** `null` clears the override; `undefined` leaves the persisted value untouched. */
+	readonly compactModel?: ModelIdentity | null;
 }): void {
 	const file = getPersistedStatePath();
 	try {
@@ -262,6 +271,8 @@ function writePersistedState(state: {
 		delete merged.model;
 		if (state.mode !== undefined) merged.mode = state.mode;
 		merged.modeModels = state.modeModels ?? {};
+		if (state.compactModel === null) delete merged.compactModel;
+		else if (state.compactModel) merged.compactModel = state.compactModel;
 		fs.writeFileSync(file, `${JSON.stringify(merged, null, "\t")}\n`);
 	} catch {
 		// best-effort persistence
@@ -345,14 +356,36 @@ function parse_configured_model_ref(
 	};
 }
 
+/** Normalize a persisted `compactModel` field into a canonical identity, or undefined. */
+function normalize_compact_model(raw: unknown): ModelIdentity | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const record = raw as Record<string, unknown>;
+	if (typeof record.provider !== "string" || typeof record.modelId !== "string") {
+		return undefined;
+	}
+	return canonicalize_persisted_identity({
+		provider: record.provider,
+		modelId: record.modelId,
+		...(typeof record.thinkingLevel === "string"
+			? { thinkingLevel: normalize_thinking_level(record.thinkingLevel) }
+			: {}),
+		...(typeof record.openRouterProvider === "string"
+			? { openRouterProvider: record.openRouterProvider }
+			: {}),
+	});
+}
 function build_subagent_selector_options(): Array<{ label: string; description: string }> {
 	const options = SUBAGENT_AGENT_KEYS.map((key) => {
 		const filePath = SUBAGENT_FILES[key];
 		const model = read_subagent_frontmatter_value(filePath, "model") ?? "inherits parent";
+		const thinking = read_subagent_frontmatter_value(filePath, "thinking");
+		// Show the active model (and effort) so the current config is visible in
+		// the picker before the user opens the model list.
+		const description = thinking && thinking !== "off" ? `${model} • ${thinking}` : model;
 		return {
 			key,
 			label: subagent_agent_label(key),
-			description: model,
+			description,
 		};
 	});
 	options.sort((a, b) => {
@@ -375,20 +408,12 @@ so batching saves round-trips and reduces latency.
 
 const OUTPUT_STYLE_DIRECTIVE = `
 
-Output template: User-facing changes in natural language. Reply in plain dense
-text. No markdown headers (#, ##, ###), no bold or italics (**, *), no
-decorative bulleted lists (-, *). Use short labeled lines (Label: value) or
-compact key: value pairs. Keep code fences only for multi-line code blocks. Be
-concise.
-`;
-
-const PLAN_OUTPUT_STYLE_DIRECTIVE = `
-
-Output template: User-facing changes in natural language. Reply in plain dense
-text. No markdown headers (#, ##, ###), no bold or italics (**, *), no
-decorative bulleted lists (-, *). Use short labeled lines (Label: value) or
-compact key: value pairs. Keep code fences only for multi-line code blocks. Be
-concise.
+Output template: User-facing changes in natural language. Keep interim and
+progress replies in plain dense text — short labeled lines (Label: value) or
+compact key: value pairs, no decorative bullets. The final summary or answer
+message (and the plan in Plan mode) may use full markdown: ## / ### section
+headings, bold, and lists where structure helps. Keep code fences only for
+multi-line code blocks. Be concise.
 `;
 
 /**
@@ -440,15 +465,9 @@ function compose_mode_prompt(body: string): string {
 ${style}`;
 }
 
-function compose_plan_prompt(body: string): string {
-	const style = PLAN_OUTPUT_STYLE_DIRECTIVE.trim();
-	return `${body}
-
-${style}`;
-}
 
 const ARCHITECT_PROMPT =
-	compose_plan_prompt(`Plan mode is active. You are now in Plan mode. You are read-only. Do not edit, write, or run mutating shell commands. You may run non-mutating shell commands (e.g. git log, find, grep) to inform the plan.
+	compose_mode_prompt(`Plan mode is active. You are now in Plan mode. You are read-only. Do not edit, write, or run mutating shell commands. You may run non-mutating shell commands (e.g. git log, find, grep) to inform the plan.
 
 ${mode_intro(
 	"plan",
@@ -467,10 +486,11 @@ Planning requirements:
 - If architecture, ownership, or persistence rules change, include an AGENTS.md (or plugin AGENTS.md) docs module that records durable rules, not patch history.
 - Keep Investigation with file:line evidence; scale section depth to change size.
 
-Output: describe user-facing changes in natural language. Use concise labeled
-lines (e.g. Task:, Investigation:, Summary:, Problems:, Behavior:, Module 1:,
-Test Plan:, Working Tree:, Acceptance Criteria:) instead of markdown headers or
-decorative bullets. Keep code fences only for multi-line code blocks.
+Output: describe user-facing changes in natural language. The plan is a
+structured markdown document — use ## / ### section headings (Task,
+Investigation, Summary, Problems, Behavior, Modules, Module N, Test Plan,
+Working Tree, Acceptance Criteria), bold, and lists where structure helps.
+Keep code fences only for multi-line code blocks.
 
 ## Quiz When Uncertain
 - If you are uncertain about a materially important requirement, tradeoff, or interpretation that would change what you do next, ask a clarifying question via the quiz tool before proceeding. Do not assume.`);
@@ -510,7 +530,7 @@ Your task:
 4. Plan fixes as self-contained modules of at most 10 files each. Spawn parallel Coder subagents to implement the fixes.
 5. Do not edit, write, or run mutating shell commands yourself.
 
-Report the file list, Scout assignments, findings, and Coder delegation plan in plain dense text. Use short labeled lines. Do not emit markdown headers or decorative bullets.`;
+Report the file list, Scout assignments, findings, and Coder delegation plan concisely. The final report may use markdown structure; interim progress stays in short labeled lines.`;
 
 function coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`Code mode is active. You are now in Code mode. You have full tool access. Implement, test, and verify code with autonomy.
@@ -655,6 +675,9 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 	install_bash_rules(pi);
 	install_bash_timeout(pi);
 	install_compaction_wiring(pi);
+	// Parent-session side of Ember's absolute auto-compaction ceiling (children
+	// get it through build_subagent_settings). Compacts between turns only.
+	install_auto_compact(pi);
 
 	let currentMode: string = DEFAULT_MODE;
 	let lastMessagedMode: string | null = null;
@@ -1169,6 +1192,58 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		},
 	});
 
+	pi.registerCommand("compact-model", {
+		description: "Set the model used for /compact summarization (default: session model)",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("compact-model requires interactive UI.", "error");
+				return;
+			}
+			const arg = args.trim().toLowerCase();
+			if (arg === "clear" || arg === "default" || arg === "off" || arg === "reset") {
+				set_compact_model(undefined);
+				writePersistedState({ mode: currentMode, modeModels: mode_models, compactModel: null });
+				ctx.ui.notify("Compaction model reset — the session model summarizes.", "info");
+				return;
+			}
+			const bound = get_compact_model();
+			const picked = await pickModelInEditor(ctx, pi, {
+				currentModel: bound
+					? { provider: bound.provider, id: bound.modelId, thinkingLevel: bound.thinkingLevel }
+					: {
+							provider: (ctx.model as { provider?: string })?.provider ?? "",
+							id: (ctx.model as { id?: string })?.id ?? "",
+						},
+			});
+			if (!picked) return;
+			const model = ctx.modelRegistry.find(picked.provider, picked.id) as Model<Api> | undefined;
+			if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
+				ctx.ui.notify(`Model not available or not authenticated: ${picked.provider}/${picked.id}`, "error");
+				return;
+			}
+			// OpenRouter marketplace models get the same upstream-provider second
+			// step as /model so the summarizer pins the chosen provider.
+			let openRouterProvider: string | undefined;
+			if (is_openrouter_model(model)) {
+				openRouterProvider = await pick_openrouter_provider(ctx, model.id);
+			}
+			const identity = canonical_model_identity(
+				{ provider: model.provider, id: model.id, name: model.name },
+				picked.thinkingLevel,
+				openRouterProvider,
+			);
+			if (!identity) return;
+			set_compact_model(identity);
+			writePersistedState({ mode: currentMode, modeModels: mode_models, compactModel: identity });
+			const effortHint = format_model_effort_suffix({ id: model.id, name: model.name }, picked.thinkingLevel);
+			const providerHint =
+				openRouterProvider && openRouterProvider !== OPENROUTER_PROVIDER_AUTO
+					? ` • via ${openRouterProvider}`
+					: "";
+			ctx.ui.notify(`Compaction model: ${model.id}${effortHint} • ${model.provider}${providerHint}`, "info");
+		},
+	});
+
 	async function copy_plan_to_clipboard(ctx: ExtensionContext): Promise<void> {
 		const plan = latest_plan_text.trim();
 		if (!plan) {
@@ -1568,7 +1643,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 				pi.sendMessage(
 					{
 						customType: "pi-agents-loop-retry",
-						content: "Stop looping. Call a different tool and continue.",
+						content: build_loop_retry_content(settled_action.signature),
 						display: false,
 					},
 					{ triggerTurn: true },
@@ -1595,7 +1670,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					pi.sendMessage(
 						{
 							customType: "pi-agents-loop-retry",
-							content: "You have been looping, back off and continue with a different tool.",
+							content: build_loop_retry_content(settled_action.signature),
 							display: false,
 						},
 						{ triggerTurn: true },
@@ -1655,9 +1730,15 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 					await handlePlanImplementFreshContext(ctx);
 				} else if (action === "copy") {
 					await copy_plan_to_clipboard(ctx);
+					maybe_auto_compact(ctx);
 				} else if (action?.action === "refine") {
 					latest_plan_text = "";
 					pi.sendUserMessage(action.instruction);
+				} else {
+					// Review dismissed with no follow-up turn: the deferred ceiling check
+					// skipped this settle while the overlay owned the transcript, so
+					// re-arm it now that the chatbox is visible again.
+					maybe_auto_compact(ctx);
 				}
 				return;
 			}
@@ -1710,6 +1791,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		// another session or by the migration on first read.
 		const persisted = readPersistedState();
 		mode_models = { ...(persisted.modeModels ?? {}) };
+		set_compact_model(persisted.compactModel);
 		await restoreMode(ctx);
 		await restore_mode_model(ctx, currentMode);
 		sync_active_tools(ctx);

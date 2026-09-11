@@ -10,17 +10,39 @@ function bash_cd_dir(command: string): string | undefined {
  */
 export function bashGrepInfo(command: string): { pattern: string; path: string } | undefined {
 	const stripped = command.replace(/^\s*cd\s+([^\s&]+)\s*&&\s*/, "");
-	if (!/^\s*grep\b/.test(stripped)) return undefined;
+	// Match both `grep` (pre-rewrite) and `rg` (post-rewrite, or a command
+	// the model wrote directly) — both are searches for grouping purposes.
+	const searchMatch = /^\s*(grep|rg)\b/.exec(stripped);
+	if (!searchMatch) return undefined;
 	const cdDir = bash_cd_dir(command);
 	const path = cdDir ?? ".";
-	const afterGrep = stripped.replace(/^\s*grep\s+/, "");
+	const afterGrep = stripped.replace(/^\s*(grep|rg)\s+/, "");
 	const cmdBeforePipe = afterGrep.split(/\s+[|>]/)[0];
 	const parts = cmdBeforePipe.trim().split(/\s+/);
 	let pattern: string | undefined;
-	for (const part of parts) {
-		if (!part.startsWith("-")) {
-			pattern = part;
-			break;
+	// rg rewrites place the pattern after `--`; grep places it as the first
+	// non-flag token. Handle both.
+	const dashDash = parts.indexOf("--");
+	if (dashDash >= 0 && dashDash + 1 < parts.length) {
+		pattern = parts[dashDash + 1];
+	} else {
+		// Flags that consume the next token as a value — skip both so the
+		// value is never mistaken for the pattern.
+		const VALUE_FLAGS = new Set([
+			"-A", "-B", "-C", "-e", "-f", "-g", "-m", "-t", "-T",
+			"--include", "--exclude", "--exclude-dir", "--glob", "--type", "--type-not",
+			"--max-count", "--regexp", "--file", "--context", "--after-context", "--before-context",
+		]);
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i];
+			if (VALUE_FLAGS.has(part)) {
+				i++;
+				continue;
+			}
+			if (!part.startsWith("-")) {
+				pattern = part;
+				break;
+			}
 		}
 	}
 	if (!pattern) return undefined;

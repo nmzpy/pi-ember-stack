@@ -388,6 +388,14 @@ export class SubagentLiveOutputText implements Component {
 				// tray's last segment and the child agent is actively reasoning
 				// with parent thinking blocks hidden.
 				const thinking_follows = !this.showText && this.isThinking && i === segments.length - 1;
+				// A burst closed by a hard boundary (visible text or visible
+				// reasoning — the only way a later segment exists) folds to its
+				// summary header, matching the main renderer's noteVisibleText →
+				// hardExitGroup → fold_group_child_rows collapse: released child
+				// rows never linger as stale `│` rows beside the new content. A
+				// single-tool burst is already its collapsed form (one bare
+				// standalone row), so only multi-call bursts fold.
+				const closed_by_boundary = i < segments.length - 1;
 				if (segment.rows.length === 1) {
 					// A single-tool burst is a bare standalone compact row — no
 					// `Explored 1 file` header. Same `records.length > 1` threshold
@@ -403,6 +411,12 @@ export class SubagentLiveOutputText implements Component {
 					rows.push({ body, header: false });
 				} else if (segment.rows.length > 1) {
 					const group = buildLiveGroup(segment.rows);
+					if (closed_by_boundary) {
+						// Fold every child into the aggregate header — the tray
+						// equivalent of fold_group_child_rows (childAbsorbBefore =
+						// records.length leaves zero visible children).
+						group.childAbsorbBefore = group.records.length;
+					}
 					// With a hidden-thinking lane below, the prior tool child collapses
 					// (the in-group `│ Thinking` lane replaces it) via buildGroupStaticText's
 					// show_thinking path (same SSOT as the main renderer). Production call
@@ -438,17 +452,17 @@ export class SubagentLiveOutputText implements Component {
 		}
 		if (segmentRows.length === 0) return [];
 
-		// Visible work/thinking segments have one explicit separator before the
-		// next chronological segment. This is segment-level state, not Markdown
-		// row state: adjacent transport deltas have already been coalesced into
-		// one visual thinking segment by buildLiveSegments(). Markdown continuation
-		// rows remain content rows and never create additional separators.
+		// Every pair of adjacent visible segments gets exactly one `│`
+		// separator between them — a work burst pads below its last row before
+		// released text, and a text/thinking segment pads below itself before the
+		// next tool wave, so streamed output never touches the tool rows around
+		// it. This is segment-level state, not Markdown row state: adjacent
+		// transport deltas have already been coalesced into one visual segment
+		// by buildLiveSegments(). Markdown continuation rows remain content rows
+		// and never create additional separators.
 		if (this.showText) {
 			for (let i = 0; i < segmentRows.length - 1; i++) {
-				const segment_kind = segmentRows[i].kind;
-				if (segment_kind === "work" || segment_kind === "thinking") {
-					segmentRows[i].rows.push({ body: "", header: false, separator: true });
-				}
+				segmentRows[i].rows.push({ body: "", header: false, separator: true });
 			}
 		}
 

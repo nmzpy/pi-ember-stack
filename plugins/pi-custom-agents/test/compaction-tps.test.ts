@@ -18,7 +18,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { end_aux_stream, getLiveTps, getLiveTpsOpacity } from "../../pi-ember-tps/index.ts";
-import install_compaction_wiring from "../compaction-wiring.ts";
+import install_compaction_wiring, { set_compact_model } from "../compaction-wiring.ts";
 import { resolve_runtime_stream_simple } from "../model-runtime-bridge.ts";
 import { run_stack_compaction } from "../stack-compaction.ts";
 
@@ -158,6 +158,145 @@ describe("session_before_compact wiring", () => {
 
 		expect(stream_calls()).toBe(1);
 		expect(result?.compaction?.summary).toContain("ship the footer TPS");
+	});
+
+	test("headers-only auth still runs Ember compaction instead of Pi's native path", async () => {
+		const { runtime, stream_calls } = fake_runtime();
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const fake_api = {
+			on(event: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) {
+				if (event === "session_before_compact") handler = fn;
+			},
+		} as unknown as ExtensionAPI;
+		install_compaction_wiring(fake_api);
+
+		const result = (await handler?.(
+			{
+				preparation: fake_preparation(),
+				branchEntries: [],
+				reason: "manual",
+				willRetry: false,
+				signal: undefined,
+			},
+			{
+				model: FAKE_MODEL,
+				modelRegistry: {
+					runtime,
+					// Env/command-configured key: no apiKey, only headers. Falling
+					// through here would hand `/compact` to Pi's native summarizer,
+					// which adds the split-turn block and throws on a `length` stop.
+					getApiKeyAndHeaders: async () => ({ ok: true, headers: { "x-env-key": "1" } }),
+				},
+			},
+		)) as { compaction?: { summary?: string } } | undefined;
+
+		expect(stream_calls()).toBe(1);
+		expect(result?.compaction?.summary).toContain("ship the footer TPS");
+		expect(stream_calls()).toBe(1);
+		expect(result?.compaction?.summary).toContain("ship the footer TPS");
+	});
+
+	test("a /compact-model override summarizes with the bound model, not the session model", async () => {
+		const OVERRIDE_MODEL = {
+			...FAKE_MODEL,
+			id: "override-summary-model",
+			provider: "override-provider",
+		} as unknown as Model<Api>;
+		const seen_models: string[] = [];
+		const { runtime, stream_calls } = fake_runtime();
+		const tracking_runtime = {
+			streamSimple(model: Model<Api>, context: unknown, opts?: unknown) {
+				seen_models.push(`${model.provider}/${model.id}`);
+				return runtime.streamSimple(model, context, opts);
+			},
+		};
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const fake_api = {
+			on(event: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) {
+				if (event === "session_before_compact") handler = fn;
+			},
+		} as unknown as ExtensionAPI;
+		install_compaction_wiring(fake_api);
+
+		set_compact_model({ provider: "override-provider", modelId: "override-summary-model" });
+		try {
+			const result = (await handler?.(
+				{
+					preparation: fake_preparation(),
+					branchEntries: [],
+					reason: "manual",
+					willRetry: false,
+					signal: undefined,
+				},
+				{
+					// The session model is FAKE_MODEL — the override must replace it.
+					model: FAKE_MODEL,
+					modelRegistry: {
+						runtime: tracking_runtime,
+						find: (provider: string, id: string) =>
+							provider === "override-provider" && id === "override-summary-model"
+								? OVERRIDE_MODEL
+								: undefined,
+						hasConfiguredAuth: () => true,
+						getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
+					},
+				},
+			)) as { compaction?: { summary?: string } } | undefined;
+
+			expect(stream_calls()).toBe(1);
+			expect(seen_models).toEqual(["override-provider/override-summary-model"]);
+			expect(result?.compaction?.summary).toContain("ship the footer TPS");
+		} finally {
+			set_compact_model(undefined);
+		}
+	});
+
+	test("an unresolvable /compact-model override falls back to the session model", async () => {
+		const seen_models: string[] = [];
+		const { runtime, stream_calls } = fake_runtime();
+		const tracking_runtime = {
+			streamSimple(model: Model<Api>, context: unknown, opts?: unknown) {
+				seen_models.push(`${model.provider}/${model.id}`);
+				return runtime.streamSimple(model, context, opts);
+			},
+		};
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const fake_api = {
+			on(event: string, fn: (event: unknown, ctx: unknown) => Promise<unknown>) {
+				if (event === "session_before_compact") handler = fn;
+			},
+		} as unknown as ExtensionAPI;
+		install_compaction_wiring(fake_api);
+
+		// Bound model is gone from the catalog (or logged out) — compaction must
+		// still run on the session model rather than skipping Ember compaction.
+		set_compact_model({ provider: "gone-provider", modelId: "gone-model" });
+		try {
+			const result = (await handler?.(
+				{
+					preparation: fake_preparation(),
+					branchEntries: [],
+					reason: "manual",
+					willRetry: false,
+					signal: undefined,
+				},
+				{
+					model: FAKE_MODEL,
+					modelRegistry: {
+						runtime: tracking_runtime,
+						find: () => undefined,
+						hasConfiguredAuth: () => false,
+						getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }),
+					},
+				},
+			)) as { compaction?: { summary?: string } } | undefined;
+
+			expect(stream_calls()).toBe(1);
+			expect(seen_models).toEqual([`${FAKE_MODEL.provider}/${FAKE_MODEL.id}`]);
+			expect(result?.compaction?.summary).toContain("ship the footer TPS");
+		} finally {
+			set_compact_model(undefined);
+		}
 	});
 });
 

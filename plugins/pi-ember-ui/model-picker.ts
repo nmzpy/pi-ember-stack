@@ -359,7 +359,7 @@ const OPENROUTER_PROVIDER_PICKER_TITLE = "OpenRouter upstream provider";
  * Auto / cancels / the fetch yields no endpoints. Never throws — a network
  * failure falls back to Auto so the model still switches.
  */
-async function pick_openrouter_provider(
+export async function pick_openrouter_provider(
 	ctx: ExtensionContext,
 	modelId: string,
 ): Promise<string> {

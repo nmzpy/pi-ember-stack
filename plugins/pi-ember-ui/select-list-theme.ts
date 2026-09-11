@@ -41,15 +41,29 @@ export type ExtensionSelectorOption = {
 	description?: string;
 };
 
-let extension_selector_options: ExtensionSelectorOption[] | undefined;
+/**
+ * jiti can duplicate this module across importer chains; store the pending
+ * options on globalThis so the patched updateList always reads the same slot
+ * the caller wrote, regardless of which module instance each side loaded.
+ */
+const EXTENSION_SELECTOR_OPTIONS_KEY = Symbol.for("pi-ember-ui:extension-selector-options");
+
+function extension_selector_options_state(): { current?: ExtensionSelectorOption[] } {
+	const g = globalThis as Record<symbol, { current?: ExtensionSelectorOption[] }>;
+	let slot = g[EXTENSION_SELECTOR_OPTIONS_KEY];
+	if (!slot) {
+		slot = {};
+		g[EXTENSION_SELECTOR_OPTIONS_KEY] = slot;
+	}
+	return slot;
+}
 
 /** Optional label+description rows for ctx.ui.select (ExtensionSelector). */
 export function set_extension_selector_options(
 	options: ExtensionSelectorOption[] | undefined,
 ): void {
-	extension_selector_options = options;
+	extension_selector_options_state().current = options;
 }
-
 /** SSOT row paint for arrow-prefix pickers with an optional description column. */
 export function format_selector_option_row_with_description(
 	live: Theme,
@@ -155,7 +169,7 @@ function patch_extension_selector_update_list(
 		this.listContainer.clear();
 		for (let i = 0; i < this.options.length; i++) {
 			const is_selected = i === this.selectedIndex;
-			const structured = extension_selector_options?.[i];
+			const structured = extension_selector_options_state().current?.[i];
 			const row =
 				structured !== undefined
 					? format_selector_option_row_with_description(

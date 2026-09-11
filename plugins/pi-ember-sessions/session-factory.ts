@@ -172,7 +172,9 @@ export function create_fleet_session_factory(
 			reload: async () => {},
 		};
 
-		const settings_manager = SettingsManager.inMemory(build_subagent_settings());
+		// Fleet conversations inherit the parent model, so they carry the same
+		// absolute auto-compaction ceiling as every other Ember session.
+		const settings_manager = SettingsManager.inMemory(build_subagent_settings(parent?.model));
 		const session_options: Record<string, unknown> = {
 			cwd,
 			resourceLoader: resource_loader,

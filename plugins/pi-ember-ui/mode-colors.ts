@@ -443,19 +443,43 @@ export function setThinkingBlocksHidden(hidden: boolean): void {
 	listener?.(hidden);
 }
 
-let work_group_boundary_suppression_depth = 0;
+/** Boundary-suppression depth — globalThis-backed so jiti module duplication
+ *  cannot split the counter (same pattern as the other Symbol.for flags here).
+ *  A duplicated module instance must share the depth or a begin in one instance
+ *  could be cancelled by an end in another, leaking or double-releasing the
+ *  suppression and letting a rebuild-replay `thinking_delta` hard-exit a live
+ *  work group mid-toggle. */
+const WORK_GROUP_BOUNDARY_SUPPRESSION_KEY = Symbol.for(
+	"pi-ember-ui:work-group-boundary-suppression",
+);
+
+function work_group_boundary_suppression_depth(): number {
+	const value = (globalThis as GlobalThis)[WORK_GROUP_BOUNDARY_SUPPRESSION_KEY];
+	return typeof value === "number" && value > 0 ? value : 0;
+}
 
 /** Suppress compact work-group stream boundaries during Ctrl+T rebuild replay. */
 export function begin_work_group_boundary_suppression(): void {
-	work_group_boundary_suppression_depth++;
+	(globalThis as GlobalThis)[WORK_GROUP_BOUNDARY_SUPPRESSION_KEY] =
+		work_group_boundary_suppression_depth() + 1;
 }
 
 export function end_work_group_boundary_suppression(): void {
-	work_group_boundary_suppression_depth = Math.max(0, work_group_boundary_suppression_depth - 1);
+	(globalThis as GlobalThis)[WORK_GROUP_BOUNDARY_SUPPRESSION_KEY] = Math.max(
+		0,
+		work_group_boundary_suppression_depth() - 1,
+	);
 }
 
 export function is_work_group_boundary_suppressed(): boolean {
-	return work_group_boundary_suppression_depth > 0;
+	return work_group_boundary_suppression_depth() > 0;
+}
+
+/** Reset the suppression depth — session/test teardown seam. A leaked `begin`
+ *  (e.g. a toggle whose deferred release was dropped on session replacement)
+ *  must never permanently swallow stream boundaries. */
+export function reset_work_group_boundary_suppression(): void {
+	(globalThis as GlobalThis)[WORK_GROUP_BOUNDARY_SUPPRESSION_KEY] = 0;
 }
 
 let planAutoContinuing = false;
