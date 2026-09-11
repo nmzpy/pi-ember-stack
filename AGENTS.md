@@ -1408,7 +1408,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   primes; the scan never blocks startup), revived from the compact
   per-project `PI_HOME/cache/sessions/` cache for instant cold starts, and
   re-read only past the bytes it has already consumed (a cold pass over 340
-  sessions costs ≈0.29 s of background read and every later pass ≈2 ms plus the
+  sessions costs ≈0.18 s of background read and every later pass ≈2 ms plus the
   turns you appended). Every hit — opening `/resume`, typing in its search
   box, submitting
   `/resume <ref>` — is answered immediately from memory or the index and NEVER
@@ -2149,7 +2149,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `refresh_session_catalog` / `peek_session_catalog` and share one catalog per
   `(cwd, sessionDir)` key.
 - **A hit never awaits a scan.** A cold scan of a busy project (340 sessions /
-  304 MB) costs ≈0.29 s in the background and every later one is a readdir +
+  304 MB) costs ≈0.18 s in the background and every later one is a readdir +
   one stat per file (≈2 ms) plus the bytes appended since, so
   `get_session_catalog` answers in O(1) from the resident catalog, else from
   the compact on-disk index, else with an empty list while
@@ -2171,27 +2171,63 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `CATALOG_VALIDATE_TTL_MS` gate — a session start is exactly when a file
   changed.
 - **The search corpus is bounded on purpose** (`CORPUS_MAX_CHARS` in
-  `session-record.ts`): opening request + newest compaction checkpoints + the
-  most recent turns, ≈0.6 MB for 340 sessions instead of 4.8 MB of whole
-  conversations. A compaction checkpoint already summarizes everything older,
-  which is why dropping the pre-checkpoint bulk costs almost no
-  searchability — measured against Pi's full corpus, the top hit agrees on
-  10 of 12 real queries, and the misses are phrases that only ever appear
-  mid-conversation in a long session (the oracle's top row still ranks #2
-  in one case, #108 in the other — a recall floor a term index would fix,
-  at the cost of bytes). Never parse conversation lines into the corpus: the
-  streaming pass counts entries and reads only the lines that carry list
-  data, the opening request is decoded inside that same pass (the line is
-  already in hand — no second read), and the recent text comes from a
-  bounded tail window parsed NEWEST-FIRST so it stops as soon as the window
-  is full instead of parsing every chat line it contains.
+  `session-record.ts`): opening request + a spread sample of EARLIER USER
+  PROMPTS + newest compaction checkpoints + the most recent turns, ≈0.7 MB for
+  340 sessions instead of 4.8 MB of whole conversations. A compaction
+  checkpoint already summarizes everything older, which is why dropping the
+  pre-checkpoint bulk costs almost no searchability — measured against Pi's
+  full corpus, the top hit agrees on **11 of 12** real queries, and the last
+  miss ranks the oracle's top row **#2** (it was #108 before the prompt
+  sample). Never parse conversation lines into the corpus: the streaming pass
+  counts entries and reads only the lines that carry list data, the opening
+  request is decoded inside that same pass (the line is already in hand — no
+  second read), and the recent text comes from a bounded tail window parsed
+  NEWEST-FIRST so it stops as soon as the window is full instead of parsing
+  every chat line it contains.
+- **Earlier-prompt sampling is the recall lever** (`SpreadSample` in
+  `session-record.ts`). User prompts are the highest-signal searchable text —
+  1.4 MB across the same 340 sessions, against 304 MB of file bytes — and they
+  are the part a session list is searched for. The sampler pushes every
+  candidate up to `EARLIER_USER_SLOTS` (16) and then THINS the kept set (drop
+  every second item, double the stride) instead of evicting the oldest, so the
+  sample keeps spanning the conversation rather than collapsing onto its end
+  (which the tail window already covers). Only lines up to
+  `USER_LINE_PARSE_MAX_BYTES` (16 KB) are parsed: a bigger user line is a paste
+  or an image payload, and parsing them (190 of 1110 real lines, 118 MB, 1.1 MB
+  of text) costs far more than their text is worth. The sample lands in
+  `SessionRecord.earlierUserText`, is persisted, and is appended to the corpus
+  by `build_corpus` — one owner, no second search path.
+- **Pi's activity rule is duplicated exactly, never approximated**:
+  `activity_timestamp()` in `session-record.ts` prefers the numeric
+  `message.timestamp` (written when the message streamed) and falls back to the
+  entry's ISO timestamp, because Pi's `buildSessionInfo` does. The two differ
+  by seconds on long turns; using the entry stamp alone made every row's
+  `modified` drift from Pi's own list (measured: 3.7-11 s across 340 sessions).
+  Same for the first user message: Pi takes the first user message that HAS
+  text, so an empty one keeps looking.
+- **The scan core stays string-based.** One `readFile`-style chunk decode plus
+  a line walk, with the entry checks as `startsWith`/`includes` on the decoded
+  line. A byte-level rewrite (one `indexOf` over the raw buffer for
+  `{"type":"`, `Buffer.compare` per match, `subarray` windows for role and
+  timestamp) was implemented and MEASURED SLOWER — 478 ms against 261 ms for
+  the same 340 files — because the needle also matches every nested typed
+  object (168 k matches against 57 k entries), and per-match memcmp plus window
+  allocation costs more than Bun's SIMD UTF-8 decode and per-LINE string
+  checks. Do not "optimize" the reader to byte-level indexOf without
+  re-measuring it end to end on a real session dir.
+- **Only complete lines are applied.** A section is scanned up to its last
+  newline, a trailing partial line (a write in flight) stays unconsumed so the
+  next scan reads it exactly once, and a line longer than the 1 MB window grows
+  the window (up to `MAX_LINE_BYTES`, 16 MB) instead of being split. A torn
+  mid-line read must never be counted: the parity tests pin count/consumedSize
+  across the torn-then-completed sequence.
 - **Startup cache, one file per project.** `PI_HOME/cache/sessions/<hash>.json`
-  holds one dir's records (row fields + the `consumedSize` cursor), ~1 MB for a
-  340-session project, never whole conversations: persisting `allMessagesText`
-  produced a 22 MB file the picker had to read. A restart answers every project
+  holds one dir's records (row fields + the `consumedSize` cursor + the bounded
+  search text), ~1.2 MB for a 340-session project, never whole conversations:
+  persisting `allMessagesText` produced a 22 MB file the picker had to read. A restart answers every project
   you have opened from its own file (measured 0.7-9 ms per project, five
   projects / 1.1 MB total) and then diffs it with a readdir + stat pass, so the
-  only slow moment is a project's very first scan. Index version 4; a file over
+  only slow moment is a project's very first scan. Index version 5; a file over
   `INDEX_MAX_BYTES` is dropped without being read. Writes are temp-file +
   rename (a killed process cannot leave a torn cache; the rename-failure
   fallback covers Windows), only DIRTY dirs are rewritten (a publish in one

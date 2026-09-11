@@ -273,6 +273,134 @@ describe("lean session record", () => {
 		expect(mine.corpus).toContain("current question");
 	});
 
+	test("uses Pi's numeric message timestamp for activity time", async () => {
+		const dir = temp_dir();
+		// Pi writes `message.timestamp` (ms) at stream time and the entry ISO stamp
+		// at write time; they differ by seconds on long turns, and Pi's list uses
+		// the message one.
+		const numeric = Date.parse("2026-09-01T10:00:05.000Z");
+		const file = write_session(dir, "session-numeric", [
+			header("session-numeric"),
+			user_message("entry stamp only"),
+			line({
+				type: "message",
+				id: "e-numeric",
+				parentId: null,
+				timestamp: "2026-09-01T10:00:20.000Z",
+				message: {
+					role: "assistant",
+					timestamp: numeric,
+					content: [{ type: "text", text: "streamed earlier than written" }],
+				},
+			}),
+		]);
+
+		const mine = await lean_record(file);
+		const theirs = (await pi_rows(dir)).get("session-numeric");
+		expect(mine.modified.getTime()).toBe(numeric);
+		expect(mine.modified.getTime()).toBe(theirs?.modified.getTime());
+	});
+
+	test("takes the first user message that has text, like Pi", async () => {
+		const dir = temp_dir();
+		const file = write_session(dir, "session-empty-first", [
+			header("session-empty-first"),
+			user_message(""),
+			user_message("the real ask"),
+		]);
+
+		const mine = await lean_record(file);
+		const theirs = (await pi_rows(dir)).get("session-empty-first");
+		expect(mine.firstMessage).toBe("the real ask");
+		expect(mine.firstMessage).toBe(theirs?.firstMessage);
+	});
+
+	test("counts entries in content text that look like entries", async () => {
+		const dir = temp_dir();
+		const decoy = '{"type":"message","id":"decoy","message":{"role":"user"}}';
+		const file = write_session(dir, "session-decoy", [
+			header("session-decoy"),
+			user_message(`look at this payload: ${decoy}`),
+			assistant_message(`and this role marker: "role":"user"`),
+		]);
+
+		const mine = await lean_record(file);
+		const theirs = (await pi_rows(dir)).get("session-decoy");
+		// The decoys live inside JSON string values, so they are escaped in the
+		// file and can neither add entries nor fake a role.
+		expect(mine.messageCount).toBe(2);
+		expect(mine.messageCount).toBe(theirs?.messageCount);
+		expect(mine.firstMessage).toContain("look at this payload");
+	});
+
+	test("reads entries larger than the read window without stalling", async () => {
+		const dir = temp_dir();
+		const file = write_session(dir, "session-giant", [
+			header("session-giant"),
+			user_message("before the giants"),
+			tool_result(`giant one ${"x".repeat(1_500_000)}`),
+			tool_result(`giant two ${"y".repeat(2_400_000)}`),
+			assistant_message("after the giants"),
+		]);
+		expect(statSync(file).size).toBeGreaterThan(3 << 20);
+
+		const mine = await lean_record(file);
+		const theirs = (await pi_rows(dir)).get("session-giant");
+		expect(mine.messageCount).toBe(4);
+		expect(mine.messageCount).toBe(theirs?.messageCount);
+		expect(mine.firstMessage).toBe("before the giants");
+		expect(mine.consumedSize).toBe(statSync(file).size);
+	});
+
+	test("a line being written is not consumed until it is complete", async () => {
+		const dir = temp_dir();
+		const file = write_session(dir, "session-partial", [
+			header("session-partial"),
+			user_message("committed ask"),
+			assistant_message("committed reply"),
+		]);
+		const complete_size = statSync(file).size;
+		// A torn write: the entry has no terminating newline yet.
+		appendFileSync(file, '{"type":"message","id":"torn","message":{"role":"user","content":[{"type":"text","text":"half');
+		const partial = await lean_record(file, await lean_record(file));
+		expect(partial.messageCount).toBe(2);
+		expect(partial.consumedSize).toBe(complete_size);
+
+		// The write lands: the same entry is now counted exactly once.
+		appendFileSync(file, ' written"}]}}\n');
+		const done = await lean_record(file, partial);
+		const theirs = (await pi_rows(dir)).get("session-partial");
+		expect(done.messageCount).toBe(theirs?.messageCount);
+		expect(done.consumedSize).toBe(statSync(file).size);
+		const fresh = await read_session_record(file);
+		expect(fresh?.messageCount).toBe(done.messageCount);
+	});
+
+	test("keeps a spread sample of earlier user prompts for search", async () => {
+		const dir = temp_dir();
+		const prompts = Array.from(
+			{ length: 60 },
+			(_value, i) => `prompt ${i} about zone markers and hashed anchors`,
+		);
+		const lines = [header("session-spread"), user_message("the opening request")];
+		for (const [index, prompt] of prompts.entries()) {
+			lines.push(user_message(`EARLY-${index} ${prompt}`));
+			lines.push(assistant_message(`reply ${index} ${"filler ".repeat(400)}`));
+		}
+		lines.push(user_message("the newest question"));
+		const file = write_session(dir, "session-spread", lines);
+
+		const mine = await lean_record(file);
+		const theirs = (await pi_rows(dir)).get("session-spread");
+		expect(mine.messageCount).toBe(theirs?.messageCount);
+		// The sample is bounded, and it still carries prompts from the middle of
+		// the conversation — the part the tail window cannot reach.
+		expect(mine.earlierUserText.length).toBeLessThanOrEqual(4_000);
+		expect(mine.earlierUserText).toContain("EARLY-");
+		expect(mine.corpus).toContain(mine.earlierUserText.slice(0, 40));
+		expect(record_to_session_info(mine).allMessagesText).toContain("EARLY-");
+	});
+
 	test("record_to_session_info exposes the row shape every consumer uses", async () => {
 		const dir = temp_dir();
 		const file = write_session(dir, "session-g", [

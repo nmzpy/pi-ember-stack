@@ -91,7 +91,7 @@ const CATALOG_MAX_DIRS_IN_MEMORY = 4;
  * dropped WITHOUT being read: the cache may never cost seconds to load (the
  * first version of this index persisted whole conversations and reached 22 MB).
  */
-const INDEX_VERSION = 4;
+const INDEX_VERSION = 5;
 const CACHE_DIR = "sessions";
 /** Superseded single-file index from before per-dir cache files. */
 const LEGACY_INDEX_FILE = "pi-ember-sessions.json";
@@ -111,6 +111,7 @@ type PersistedRecord = {
 	firstMessage: string;
 	corpus: string;
 	checkpoints?: string[];
+	earlierUserText?: string;
 	size: number;
 	consumedSize: number;
 	mtimeMs: number;
@@ -183,6 +184,7 @@ function serialize_record(record: SessionRecord): PersistedRecord {
 		firstMessage: record.firstMessage,
 		corpus: record.corpus,
 		checkpoints: record.checkpoints,
+		earlierUserText: record.earlierUserText,
 		size: record.size,
 		consumedSize: record.consumedSize,
 		mtimeMs: record.mtimeMs,
@@ -210,6 +212,7 @@ function revive_record(raw: unknown): SessionRecord | null {
 		checkpoints: Array.isArray(entry.checkpoints)
 			? entry.checkpoints.filter((value): value is string => typeof value === "string")
 			: [],
+		earlierUserText: typeof entry.earlierUserText === "string" ? entry.earlierUserText : "",
 		size: typeof entry.size === "number" ? entry.size : 0,
 		consumedSize: typeof entry.consumedSize === "number" ? entry.consumedSize : 0,
 		mtimeMs: typeof entry.mtimeMs === "number" ? entry.mtimeMs : 0,
