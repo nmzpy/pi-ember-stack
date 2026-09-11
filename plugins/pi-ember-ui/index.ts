@@ -34,7 +34,7 @@ import {
 import { BULLET, CompactGroupText } from "../pi-compact-tools/compact-text.ts";
 import { sync_compact_group_flags } from "../pi-compact-tools/group-flags.ts";
 import { getSharedRenderer } from "../pi-compact-tools/shared-renderer.ts";
-import { TREE_BRANCH_LAST, TREE_BRANCH_PIPE } from "../pi-compact-tools/renderer.ts";
+import { TREE_BRANCH_PIPE } from "../pi-compact-tools/renderer.ts";
 import {
 	apply_assistant_stream_boundary,
 	resolve_assistant_stream_boundary_event,
@@ -70,7 +70,7 @@ import {
 	buildThemeBgColors,
 	buildThemeExportColors,
 	buildThemeFgColors,
-	DIM_COLOR,
+	DIM_CHROME_COLOR,
 	end_work_group_boundary_suppression,
 	is_agent_thinking_wait,
 	isAgentRunPending,
@@ -96,6 +96,7 @@ import {
 	markToolExecutionEnded,
 	markToolExecutionStarted,
 	is_non_conventional_thinking_header,
+	paint_tree_pipe,
 	PAGE_BG,
 	resetSubagentDelegation,
 	resetToolExecutionInFlight,
@@ -499,7 +500,7 @@ export function format_thinking_pass_elapsed_suffix(theme: {
 }
 
 /** SSOT horizontal inset (columns) for the external Thinking status row —
- *  the above-editor widget and the in-message host. The in-group `└ Thinking`
+ *  the above-editor widget and the in-message host. The in-group `│ Thinking`
  *  lane is owned by the compact renderer (tree-branch prefix) and does not
  *  use this inset. */
 const THINKING_STATUS_INSET_COLUMNS = 1;
@@ -564,7 +565,7 @@ export function lingering_tool_children_visible_for_tests(): boolean {
 	return lingering_tool_children_block_thinking_header();
 }
 
-/** In-group `└ Thinking` owns the status slot when the live compact
+/** In-group `│ Thinking` owns the status slot when the live compact
  *  group is actually painting that row (renderer SSOT — not the synced flag).
  *  With blocks hidden, ANY armed/painted lane (the renderer's O(1) counter)
  *  wins the slot unconditionally — a painted lane that outlives the
@@ -583,7 +584,7 @@ export function compact_thinking_lane_owns_status(): boolean {
 /** SSOT: mutually exclusive surface for the gradient Thinking row. */
 export function resolve_thinking_status_host(): "in_message" | "widget" | null {
 	if (!thinking_status_should_show()) return null;
-	// Hidden blocks + ANY armed/painted in-group `└ Thinking` lane: the compact
+	// Hidden blocks + ANY armed/painted in-group `│ Thinking` lane: the compact
 	// group owns the slot. Defense in depth — the live renderer O(1) counter is
 	// authoritative (the renderer that paints the lane IS the renderer we
 	// query), so even a stale synced flag or jiti module duplication can never
@@ -622,7 +623,7 @@ export function is_pre_tool_wait(): boolean {
 /** Whether any Thinking host should paint a status line. */
 export function thinking_status_should_show(): boolean {
 	if (!is_agent_thinking_wait(thinkingActive)) return false;
-	// Hidden blocks + ANY armed/painted in-group `└ Thinking` lane: the compact
+	// Hidden blocks + ANY armed/painted in-group `│ Thinking` lane: the compact
 	// group owns the slot. This gate runs BEFORE the pre-tool early return so
 	// the external hosts never paint while the lane is on screen. The live
 	// renderer O(1) counter is authoritative — immune to stale synced flags and
@@ -727,7 +728,7 @@ export function thinking_status_terminal_layout(host: "widget" | "in_message" | 
 }
 
 /** Shared Thinking status row — reads the pre-baked gradient text from the
- *  20 FPS tick cache (same pattern as the in-group `└ Thinking` lane). Pi's
+ *  20 FPS tick cache (same pattern as the in-group `│ Thinking` lane). Pi's
  *  render() only truncates the cached ANSI string; the gradient
  *  colorization happens once per tick in thinking-status-tick.ts, so the
  *  external header animates at the same stable cadence as the in-group row. */
@@ -983,7 +984,7 @@ export function clear_stale_thinking_wait_blockers(): void {
 /** Re-arm Thinking after compaction_end rebuilds the transcript. */
 export function reconcile_thinking_after_transcript_rebuild(): void {
 	const renderer = getSharedRenderer();
-	// After the rebuild, re-paint the in-group `└ Thinking` lane only when a
+	// After the rebuild, re-paint the in-group `│ Thinking` lane only when a
 	// real thinking stream is active; otherwise hold the tool lane (gradient
 	// `-ing` verb) — never a premature Thinking lane.
 	if (is_thinking_stream_active()) {
@@ -1187,7 +1188,7 @@ export function arm_pre_token_thinking_status(): void {
 	setAgentRunPending(true);
 	thinkingHeaderSuppressed = false;
 	// A settled work group owns the slot. Hold the tool lane (gradient `-ing`
-	// verbs on the visible children) — the `└ Thinking` lane is NOT armed
+	// verbs on the visible children) — the `│ Thinking` lane is NOT armed
 	// until a real thinking stream arrives (apply_assistant_stream_boundary →
 	// noteHiddenThinking). A premature Thinking row would claim the slot while
 	// the model is not emitting any reasoning at all. The hold applies in both
@@ -1207,7 +1208,7 @@ export function arm_pre_token_thinking_status(): void {
 		return;
 	}
 	// If the current wave is still being finalized, the real thinking
-	// stream appends the in-group `└ Thinking` lane after lingering tool
+	// stream appends the in-group `│ Thinking` lane after lingering tool
 	// rows — thinking never folds prior tool children. A settled group
 	// was armed above and intentionally keeps its children lingering.
 	// The external header may only paint for a real thinking stream or the
@@ -1631,9 +1632,11 @@ function is_horizontal_rule_line(line: string): boolean {
 /** Ember bash transcript rows — no top/bottom rules, with a dim vertical pipe
  *  connecting the flush bullet header to the latest output row. Leading empty
  *  rows (the stock component's Spacer) are skipped so the header is never
- *  branch-prefixed; following rows carry `│ ` / `└ ` at column 2, below the
- *  `R` of `Ran` (the `• ` bullet occupies columns 0-1). The `└` only appears
- *  on the last real output row once the command is complete; status hints
+ *  branch-prefixed; every following output row carries `│ ` at column 2, below
+ *  the `R` of `Ran` (the `• ` bullet occupies columns 0-1), running and
+ *  completed alike — the tree never draws a `└` corner. The `running` flag is
+ *  retained for call-site compatibility and no longer changes the tree glyph.
+ *  Status hints
  *  (`... N more lines (ctrl+o to expand)`, exit codes, cancellation, and
  *  truncation notices) are indented to align with output but carry no branch
  *  glyph. When a live theme is supplied every content row — plus one blank
@@ -1644,7 +1647,7 @@ function is_horizontal_rule_line(line: string): boolean {
 export function format_ember_bash_transcript_lines(
 	rawLines: string[],
 	width: number,
-	running: boolean,
+	_running: boolean,
 	theme?: Theme,
 ): string[] {
 	const contentLines: string[] = [];
@@ -1665,8 +1668,7 @@ export function format_ember_bash_transcript_lines(
 	// column. Strip it so the bullet sits flush and branches align exactly.
 	const stripMargin = (line: string): string => (line.startsWith(" ") ? line.slice(1) : line);
 	const indent = "  ";
-	const branchPipe = colorize(TREE_BRANCH_PIPE, MUTED_COLOR);
-	const branchLast = colorize(TREE_BRANCH_LAST, MUTED_COLOR);
+	const branchPipe = paint_tree_pipe(TREE_BRANCH_PIPE);
 	const bgFn = theme
 		? (text: string): string =>
 				theme.bg("userMessageBg", text + " ".repeat(Math.max(0, width - visibleWidth(text))))
@@ -1677,8 +1679,8 @@ export function format_ember_bash_transcript_lines(
 	if (header) result.push(bgFn ? bgFn(fit_terminal_content_line(header, width)) : header);
 
 	// Separate real output rows from trailing status/hint rows. The BashExecutionComponent
-	// appends status lines after the output preview, and we must not place the `└`
-	// on a hint row like `... 151 more lines (ctrl+o to expand)`.
+	// appends status lines after the output preview, and a hint row like
+	// `... 151 more lines (ctrl+o to expand)` must not look like piped output.
 	const bodyLines = contentLines.slice(headerIndex + 1);
 	const outputLines: string[] = [];
 	const statusLines: string[] = [];
@@ -1692,15 +1694,13 @@ export function format_ember_bash_transcript_lines(
 	}
 
 	for (let i = 0; i < outputLines.length; i++) {
-		const isLastOutput = i === outputLines.length - 1;
-		const branch = !running && isLastOutput ? branchLast : branchPipe;
-		const prefix = `${indent}${branch}`;
+		const prefix = `${indent}${branchPipe}`;
 		const row = fit_terminal_content_line(`${prefix}${stripMargin(outputLines[i] ?? "")}`, width);
 		result.push(bgFn ? bgFn(row) : row);
 	}
 
 	// Status hints are not part of the output tree; indent them so their text
-	// aligns with the output content (column 4) but do not draw `│`/`└`.
+	// aligns with the content (column 4) but draw no pipe glyph.
 	const statusPrefix = `${indent}  `;
 	for (const line of statusLines) {
 		const row = fit_terminal_content_line(`${statusPrefix}${stripMargin(line)}`, width);
@@ -1866,7 +1866,7 @@ function render_shell_aware_editor(
  * The compact renderer keeps its live records across Pi's chat rebuild, so a
  * visible→hidden toggle must merge work groups that were split only by a
  * visible reasoning block (no visible text between them) and re-arm the
- * in-group `└ Thinking` lane; hidden→visible drops the lane.
+ * in-group `│ Thinking` lane; hidden→visible drops the lane.
  *
  * Two passes, deliberately:
  *   1. structural, synchronously — the Ctrl+T flag flip happens from the first
@@ -1912,7 +1912,7 @@ export function apply_thinking_blocks_hidden(next_hidden: boolean): void {
 	if (prev_hidden !== next_hidden) handle_thinking_blocks_visibility_change(next_hidden);
 }
 
-/** Re-arm the in-group `└ Thinking` lane only when a real thinking stream is
+/** Re-arm the in-group `│ Thinking` lane only when a real thinking stream is
  *  active; without one the group enters the tool-lane hold (gradient `-ing`
  *  verbs) instead. */
 function thinking_toggle_arm_lane(next_hidden: boolean): boolean {
@@ -2489,10 +2489,10 @@ function installBashExecutionPatch(): void {
 			status === "running"
 				? render_gradient("Running", MUTED_GROUP_GRADIENT_PRESET, get_gradient_phase())
 				: status === "error"
-					? theme.fg("muted", theme.bold("Failed"))
+					? theme.fg("muted", "Failed")
 					: status === "cancelled"
-						? theme.fg("muted", theme.bold("Cancelled"))
-						: theme.fg("muted", theme.bold("Ran"));
+						? theme.fg("muted", "Cancelled")
+						: theme.fg("muted", "Ran");
 		return `${theme.fg(bulletColor, BULLET)}${label} ${theme.fg("text", this.command ?? "")}`;
 	}
 
@@ -2538,16 +2538,17 @@ function installBashExecutionPatch(): void {
 		if (!theme) return originalRender?.call(this, width) ?? [];
 
 		// Reserve 4 columns for the `"  " + branch` prefix (2-col indent plus
-		// `│ `/`└ `), so stripped rows never overflow the terminal width.
+		// `│ `), so stripped rows never overflow the terminal width.
 		const innerWidth = Math.max(1, width - 4);
 		const rawLines = (originalRender?.call(this, innerWidth) ?? []) as string[];
 		return format_ember_bash_transcript_lines(rawLines, width, running, theme);
 	};
 }
 
-/** Chatbox-style horizontal-rule color: DIM_COLOR at 40% opacity over PAGE_BG (60% less opaque than dim). */
+/** Chatbox-style horizontal-rule color — the shared dim chrome (see
+ *  `DIM_CHROME_COLOR` in mode-colors.ts), the same weight as every tree pipe. */
 export function chatboxBorderColor(text: string): string {
-	return colorize(text, blendToHex(DIM_COLOR, PAGE_BG, 0.4));
+	return colorize(text, DIM_CHROME_COLOR);
 }
 
 /**
@@ -3131,7 +3132,7 @@ export default function piEmberUiPlugin(pi: ExtensionAPI): void {
 			);
 			setTurnToolTranscriptActive(true);
 			// The model announced the next tool call: hide the external Thinking
-			// header deterministically and drop the in-group `└ Thinking` lane
+			// header deterministically and drop the in-group `│ Thinking` lane
 			// synchronously so they never coexist for a single tool wave.
 			thinkingHeaderSuppressed = true;
 			getSharedRenderer().announceToolCall();

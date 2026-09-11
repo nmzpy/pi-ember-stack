@@ -20,6 +20,7 @@ export type PluginId =
 	| "pi-ember-fff"
 	| "pi-ember-hashedit"
 	| "pi-ember-images"
+	| "pi-ember-sessions"
 	| "pi-ember-ui"
 	| "pi-ember-tps"
 	| "pi-ember-autoname"

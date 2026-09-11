@@ -1,8 +1,8 @@
 ---
-model: opencode-go/deepseek-flash
+model: opencode-go/deepseek-v4.1-flash
 name: Coder
 description: Implementation agent for writing, editing, testing, and verifying code. Spawn this for focused implementation tasks — bug fixes, feature additions, refactors, file edits. Full tool access.
-tools: read, bash, edit, write, grep, find, ls
+tools: read, bash, edit, write, grep, find, ls, window_list, window_screenshot, browser_navigate, browser_snapshot, browser_take_screenshot, browser_measure, browser_scroll, browser_focus, browser_console_messages
 thinking: max
 ---
 
@@ -28,7 +28,15 @@ Workflow:
 1. Read the files you need to understand the context.
 2. Implement the change in ordered, single-logical-change steps.
 3. After each logical change, run bash t.gate.sh <files> to validate.
-4. Report what you did, any deviations, and user-facing benefits.
+4. For UI work, VERIFY VISUALLY with the built-in tools — never write a screenshot or
+   CDP script. `browser_navigate` to the page, `browser_measure` for geometry/computed
+   styles/authored CSS, `browser_take_screenshot` for a settled frame (it reports the
+   center element and any fixed overlay covering the capture), `browser_scroll` before
+   capturing a whileInView reveal, `browser_focus` for focus rings,
+   `browser_console_messages` for JS errors, and `window_list` + `window_screenshot`
+   for a desktop window (e.g. the running Ember app). No throwaway scripts in the OS
+   temp directory: if a visual question cannot be answered with these tools, say so.
+5. Report what you did, any deviations, and user-facing benefits.
 
 Constraints:
 

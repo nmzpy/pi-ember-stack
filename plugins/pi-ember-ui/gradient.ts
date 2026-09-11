@@ -45,7 +45,7 @@ export const GRADIENT_TICK_MS = 50;
 
 /**
  * External Thinking rows repaint at the shared 20 FPS clock cadence — the
- * same rate as in-group `└ Thinking` and compact group child verbs — so the
+ * same rate as in-group `│ Thinking` and compact group child verbs — so the
  * standalone/widget/in-message header animates as smoothly as the in-group
  * lane. The staged ANSI row still advances on every clock tick; the
  * identical-text guard in thinking-status-tick.ts suppresses redundant
@@ -211,6 +211,12 @@ export type Colorizer = (rgb: Rgb, text: string) => string;
 
 const default_colorizer: Colorizer = (rgb, text) => chalk.rgb(rgb[0], rgb[1], rgb[2])(text);
 
+/** Bold face wrapper for gradient labels (Thinking headers). Composed around the
+ *  active colorizer output so injected test colorizers keep flowing through. */
+function bold_wrap(text: string): string {
+	return chalk.bold(text);
+}
+
 let colorize_fn: Colorizer = default_colorizer;
 
 /** Inject a deterministic colorizer for tests. */
@@ -227,12 +233,21 @@ export function reset_gradient_colorizer(): void {
 // Gradient rendering
 // ---------------------------------------------------------------------------
 
+/** Optional render_gradient styling flags. */
+export type GradientRenderOptions = { bold?: boolean };
+
 /**
  * Render a Gaussian gradient sweep across `text` at the given `phase`.
  * Uses code-point iteration ([...text]) for correct Unicode handling.
- * Empty/short labels are safe (no division by zero).
+ * Empty/short labels are safe (no division by zero). `opts.bold` adds the bold
+ * face around the joined gradient (Thinking headers) without touching the palette.
  */
-export function render_gradient(text: string, preset: GradientPreset, phase: number): string {
+export function render_gradient(
+	text: string,
+	preset: GradientPreset,
+	phase: number,
+	opts?: GradientRenderOptions,
+): string {
 	const chars = [...text];
 	const len = chars.length;
 	if (len === 0) return "";
@@ -245,7 +260,8 @@ export function render_gradient(text: string, preset: GradientPreset, phase: num
 		const rgb = sample_palette(palette, intensity);
 		result.push(colorize_fn(rgb, chars[i]));
 	}
-	return result.join("");
+	const joined = result.join("");
+	return opts?.bold ? bold_wrap(joined) : joined;
 }
 
 // ---------------------------------------------------------------------------

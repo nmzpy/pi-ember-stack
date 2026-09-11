@@ -23,6 +23,11 @@ timers, or Kitty image bookkeeping.
 - Editor/chatbox content rows use `fit_terminal_content_line()` — truncate only,
   never pad with trailing spaces (that caused rectangular mouse selection in the
   terminal). Full-width padding is reserved for structural border/rule lines.
+- Dim chrome has one SSOT: `DIM_CHROME_COLOR` (`DIM_COLOR` at
+  `DIM_CHROME_OPACITY` over `PAGE_BG`) in `mode-colors.ts`. Paint tree pipes
+  with `paint_tree_pipe()` and horizontal rules/borders with
+  `chatboxBorderColor()`; never `theme.fg("dim")` for a pipe (the dim token is
+  the muted-label grey and reads as bright as the tool-call header text).
 - Component render overrides may call the original component render and return
   width-safe rows. They must not request renders, access terminal state, or
   perform synchronous session scans or filesystem work.
@@ -39,7 +44,7 @@ timers, or Kitty image bookkeeping.
   `sync_thinking_status_tick()`.
 - The external Thinking tick resolves the mutually-exclusive widget or
   in-message host and invalidates only that host. A compact group's own
-  gradient subscriber owns in-group `└ Thinking`; the external Thinking tick
+  gradient subscriber owns in-group `│ Thinking`; the external Thinking tick
   must not invalidate both external hosts or run while the compact lane owns
   the status slot.
 - Do not re-anchor the viewport on slash/autocomplete exit, editor keystrokes,

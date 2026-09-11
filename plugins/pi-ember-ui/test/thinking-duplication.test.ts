@@ -235,7 +235,7 @@ describe("full event sequence: duplicate Thinking hunt", () => {
 
 		// agent_end (inter-run gap): no thinking stream yet — the settled group
 		// HOLDS the tool lane (gradient `-ing` verb) instead of painting a
-		// premature `└ Thinking` lane.
+		// premature `│ Thinking` lane.
 		sim.agent_end();
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.includes("Thinking")).toBe(false);
@@ -420,14 +420,16 @@ describe("full event sequence: duplicate Thinking hunt", () => {
 
 		// The tick wrote through the static-prefix cache; the row must still be
 		// byte-identical to a full formatGroup rebuild (cache is faithful).
-		// The aggregate header retains all commands; the prior tool child
-		// collapses when the in-group Thinking lane arms, so only the header
-		// and the `└ Thinking` lane remain.
+		// The aggregate header retains all commands and every accumulated child
+		// row stays listed; the in-group Thinking lane replaces only the LATEST
+		// child row.
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Ran 15 commands");
 		expect(row).toContain("Thinking");
 		expect(row).not.toContain("f15.py");
-		expect(row).not.toContain("f1.py");
-		expect(row.split("\n")).toHaveLength(2); // header + lane
+		expect(row).toContain("f1.py");
+		expect(row).toContain("f14.py");
+		// header + 14 accumulated children + the Thinking lane
+		expect(row.split("\n")).toHaveLength(16);
 	});
 });

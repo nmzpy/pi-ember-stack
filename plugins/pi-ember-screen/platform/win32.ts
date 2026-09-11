@@ -17,9 +17,10 @@
  *     variant and would otherwise block forever on a wedged window.
  */
 
+import { dlopen, FFIType, JSCallback, ptr, toArrayBuffer } from "bun:ffi";
 import { basename } from "node:path";
 import { type CaptureFormat, encode_with, format_extension } from "../encode.ts";
-import { dlopen, FFIType, JSCallback, ptr, toArrayBuffer } from "bun:ffi";
+import { pack_int32_pair, wgc_capture_window, wgc_unload } from "./win32-wgc.ts";
 
 const PW_RENDERFULLCONTENT = 2;
 const WM_GETTEXT = 0x000d;
@@ -62,7 +63,14 @@ export interface CaptureInfo {
 	process: string;
 	title: string;
 	selection: string;
-	method: "printwindow" | "screen-copy";
+	/**
+	 * Which rung of the capture ladder produced the pixels: the owning app
+	 * painted them (printwindow), the compositor handed over the window's own
+	 * composition surface (wgc — works while covered, GPU-composited, or wedged),
+	 * or they were read off the screen (screen-copy — only truthful while the
+	 * window is the one on top).
+	 */
+	method: "printwindow" | "wgc" | "screen-copy";
 	format: CaptureFormat;
 	source_width: number;
 	source_height: number;
@@ -85,7 +93,15 @@ function bindings_open() {
 		GetWindowThreadProcessId: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
 		GetWindowTextW: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
 		SendMessageTimeoutW: {
-			args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr],
+			args: [
+				FFIType.ptr,
+				FFIType.u32,
+				FFIType.ptr,
+				FFIType.ptr,
+				FFIType.u32,
+				FFIType.u32,
+				FFIType.ptr,
+			],
 			returns: FFIType.ptr,
 		},
 		PrintWindow: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.bool },
@@ -93,7 +109,7 @@ function bindings_open() {
 		ReleaseDC: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
 		GetForegroundWindow: { args: [], returns: FFIType.ptr },
 		GetSystemMetrics: { args: [FFIType.i32], returns: FFIType.i32 },
-		WindowFromPoint: { args: [FFIType.ptr], returns: FFIType.ptr },
+		WindowFromPoint: { args: [FFIType.i64], returns: FFIType.ptr },
 		GetAncestor: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.ptr },
 		SetProcessDPIAware: { args: [], returns: FFIType.bool },
 	});
@@ -105,7 +121,17 @@ function bindings_open() {
 		},
 		SelectObject: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
 		BitBlt: {
-			args: [FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.u32],
+			args: [
+				FFIType.ptr,
+				FFIType.i32,
+				FFIType.i32,
+				FFIType.i32,
+				FFIType.i32,
+				FFIType.ptr,
+				FFIType.i32,
+				FFIType.i32,
+				FFIType.u32,
+			],
 			returns: FFIType.bool,
 		},
 		DeleteObject: { args: [FFIType.ptr], returns: FFIType.bool },
@@ -150,6 +176,7 @@ export function win32_load(): void {
 export function win32_unload(): void {
 	bindings?.close();
 	bindings = null;
+	wgc_unload();
 }
 
 function lib() {
@@ -218,7 +245,9 @@ function process_name(pid: number): string {
 
 	const { k } = lib();
 	let name = "";
-	const handle = address(k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) as bigint | null);
+	const handle = address(
+		k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) as bigint | null,
+	);
 	if (handle) {
 		try {
 			const buffer = new Uint16Array(1024);
@@ -312,14 +341,27 @@ function describe(entry: EnumeratedWindow, withTitle: boolean): WindowInfo {
 	};
 }
 
-export function list_windows(options: { limit: number; minSize: number; includeMinimized?: boolean }): {
+/**
+ * Largest first: an app's real window beats the helper popups and tool windows
+ * it also owns, so both substring and pid targeting land on the visible one.
+ */
+function largest_first(windows: EnumeratedWindow[]): EnumeratedWindow[] {
+	return windows.filter((entry) => entry.visible).sort((a, b) => b.area - a.area);
+}
+
+export function list_windows(options: {
+	limit: number;
+	minSize: number;
+	includeMinimized?: boolean;
+	pid?: number;
+}): {
 	count: number;
 	hung_count: number;
 	windows: WindowInfo[];
 } {
-	const candidates = listable_windows(options.minSize, options.includeMinimized ?? false).sort(
-		(a, b) => b.area - a.area,
-	);
+	const candidates = listable_windows(options.minSize, options.includeMinimized ?? false)
+		.filter((entry) => options.pid === undefined || entry.pid === options.pid)
+		.sort((a, b) => b.area - a.area);
 	const shown = candidates.slice(0, Math.max(1, options.limit));
 	return {
 		count: candidates.length,
@@ -328,7 +370,7 @@ export function list_windows(options: { limit: number; minSize: number; includeM
 	};
 }
 
-function resolve_target(options: { handle?: number; match?: string }): {
+function resolve_target(options: { handle?: number; match?: string; pid?: number }): {
 	entry: EnumeratedWindow;
 	selection: string;
 } {
@@ -345,17 +387,35 @@ function resolve_target(options: { handle?: number; match?: string }): {
 		return { entry, selection: `handle=${options.handle}` };
 	}
 
+	// A pid names the process the caller just started, so the window is found
+	// without listing anything first. Console-only apps have no window of their
+	// own: the terminal hosting them does.
+	if (options.pid && options.pid > 0) {
+		const entry = largest_first(all.filter((candidate) => candidate.pid === options.pid))[0];
+		if (!entry) {
+			const name = process_name(options.pid);
+			const target = name ? `'${name}' (pid ${options.pid})` : `pid ${options.pid}`;
+			throw new Win32Error(
+				`${target} has no visible top-level window — the process may have exited, its window may belong to a child process it started, or it may be console-only (a console app's window belongs to the terminal hosting it). Call window_list to see what is on screen.`,
+			);
+		}
+		return { entry, selection: `pid=${options.pid}` };
+	}
+
 	if (options.match) {
 		const needle = options.match.toLowerCase();
-		const matches = all
-			.filter(
+		const matches = largest_first(
+			all.filter(
 				(entry) =>
-					entry.visible &&
-					(entry.process.toLowerCase().includes(needle) || entry.title.toLowerCase().includes(needle)),
-			)
-			.sort((a, b) => b.area - a.area);
+					entry.process.toLowerCase().includes(needle) ||
+					entry.title.toLowerCase().includes(needle),
+			),
+		);
 		const entry = matches[0];
-		if (!entry) throw new Win32Error(`No window matched '${options.match}'. Call window_list to see available windows.`);
+		if (!entry)
+			throw new Win32Error(
+				`No window matched '${options.match}'. Call window_list to see available windows.`,
+			);
 		return { entry, selection: `match=${options.match}` };
 	}
 
@@ -389,7 +449,8 @@ function bgra_to_rgba(pixels: Buffer): void {
 	const view = new Uint32Array(pixels.buffer, pixels.byteOffset, Math.floor(pixels.byteLength / 4));
 	for (let i = 0; i < view.length; i++) {
 		const value = view[i] as number;
-		const swapped = ((value & 0xff00ff00) | ((value & 0x000000ff) << 16) | ((value >>> 16) & 0x000000ff)) >>> 0;
+		const swapped =
+			((value & 0xff00ff00) | ((value & 0x000000ff) << 16) | ((value >>> 16) & 0x000000ff)) >>> 0;
 		view[i] = (swapped | 0xff000000) >>> 0;
 	}
 }
@@ -430,7 +491,9 @@ function clamp_to_screen(
 	const visibleWidth = Math.max(0, sourceRight - sourceLeft);
 	const visibleHeight = Math.max(0, sourceBottom - sourceTop);
 	if (visibleWidth <= 0 || visibleHeight <= 0) {
-		throw new Win32Error("Window is entirely off-screen, so nothing can be copied from the screen.");
+		throw new Win32Error(
+			"Window is entirely off-screen, so nothing can be copied from the screen.",
+		);
 	}
 	return {
 		destX: sourceLeft - left,
@@ -447,12 +510,21 @@ function clamp_to_screen(
  * nothing is covering it there. A screen-region copy is only trustworthy under
  * that condition, so it decides whether the fallback may run.
  */
-function visible_at_center(entry: { handle: number; left: number; top: number; width: number; height: number }): boolean {
+function visible_at_center(entry: {
+	handle: number;
+	left: number;
+	top: number;
+	width: number;
+	height: number;
+}): boolean {
 	const { u } = lib();
-	const point = new Int32Array(2);
-	point[0] = entry.left + Math.floor(entry.width / 2);
-	point[1] = entry.top + Math.floor(entry.height / 2);
-	const atPoint = address(u.WindowFromPoint(ptr(point)) as bigint | null);
+	// A POINT travels by value: packing it into the pointer argument asks about a
+	// nonsense coordinate (the address itself) and always finds nothing.
+	const point = pack_int32_pair(
+		entry.left + Math.floor(entry.width / 2),
+		entry.top + Math.floor(entry.height / 2),
+	);
+	const atPoint = address(u.WindowFromPoint(point as unknown as bigint) as bigint | null);
 	if (!atPoint) return false;
 	// GA_ROOT: compare against the top-level window, not a child control.
 	const root = address(u.GetAncestor(as_ptr(atPoint), 2) as bigint | null);
@@ -484,37 +556,57 @@ function fullscreen_owner(): string {
 }
 
 /**
- * Explain why a background window produced no pixels, naming the actual cause:
- * a fullscreen application is up (Windows stops rendering covered windows and
- * no user-space API can read them back), the window is minimized, or another
- * window is simply on top of it.
+ * Explain why a window produced no pixels, naming the actual cause: a
+ * fullscreen application is up (Windows stops compositing every other window in
+ * that state), the window is minimized, the app is not answering, or the
+ * compositor had no frame and another window is on top.
+ *
+ * `compositor_reason` carries whatever Windows.Graphics.Capture reported, so a
+ * failure that is not about z-order or a fullscreen owner is never mislabeled.
  */
 export function blocker_message(target: {
 	process: string;
 	handle: number;
 	minimized: boolean;
+	hung: boolean;
 	/** Name of the fullscreen app owning the display, or "". */
 	fullscreen: string;
+	/** Why the compositor handed over no frame, or "". */
+	compositor_reason: string;
 }): string {
+	const compositor = target.compositor_reason
+		? ` Compositor capture failed too: ${target.compositor_reason}`
+		: "";
 	if (target.fullscreen) {
-		return `Windows returned no pixels for '${target.process}' (handle ${target.handle}): the fullscreen window '${target.fullscreen}' owns the display, and Windows does not render covered windows in that state. No user-space API can read them back — capture the fullscreen window itself, close it, or switch it to windowed/borderless mode.`;
+		return `Windows returned no pixels for '${target.process}' (handle ${target.handle}): the fullscreen window '${target.fullscreen}' owns the display, and Windows stops compositing every other window in that state.${compositor} Capture the fullscreen window itself, close it, or switch it to windowed/borderless mode.`;
 	}
 	if (target.minimized) {
-		return `Window '${target.process}' (handle ${target.handle}) is minimized and Windows returned no pixels for it. Restore it and retry.`;
+		return `Window '${target.process}' (handle ${target.handle}) is minimized, so neither the app nor the compositor has a current surface for it.${compositor} Restore it and retry.`;
 	}
-	return `Windows returned no pixels for '${target.process}' (handle ${target.handle}) and another window is covering it, so nothing can be copied from the screen. Bring it to the front and retry.`;
+	if (target.hung) {
+		return `Window '${target.process}' (handle ${target.handle}) is not responding to Windows messages and the compositor has no frame for it.${compositor} Wait for the application to recover, then retry.`;
+	}
+	return `Windows returned no pixels for '${target.process}' (handle ${target.handle}) and another window is covering it, so a screen copy would return the wrong pixels.${compositor} Bring it to the front and retry.`;
 }
 
-function background_capture_blocker(entry: { process: string; handle: number; minimized: boolean }): string {
+function background_capture_blocker(
+	entry: { process: string; handle: number; minimized: boolean; hung: boolean },
+	compositor_reason: string,
+): string {
 	return blocker_message({
 		process: entry.process,
 		handle: entry.handle,
 		minimized: entry.minimized,
+		hung: entry.hung,
 		fullscreen: fullscreen_owner(),
+		compositor_reason,
 	});
 }
 
-function dib_create(width: number, height: number): {
+function dib_create(
+	width: number,
+	height: number,
+): {
 	dc: number;
 	bitmap: number;
 	previous: number;
@@ -531,7 +623,9 @@ function dib_create(width: number, height: number): {
 
 	const bitsOut = new Uint8Array(8);
 	const dc = address(g.CreateCompatibleDC(0n) as bigint | null);
-	const bitmap = address(g.CreateDIBSection(as_ptr(dc), ptr(info), DIB_RGB_COLORS, ptr(bitsOut), 0n, 0) as bigint | null);
+	const bitmap = address(
+		g.CreateDIBSection(as_ptr(dc), ptr(info), DIB_RGB_COLORS, ptr(bitsOut), 0n, 0) as bigint | null,
+	);
 	const previous = address(g.SelectObject(as_ptr(dc), as_ptr(bitmap)) as bigint | null);
 	// toArrayBuffer wants a number, and a DIB section address is always a real
 	// user-space pointer, so narrowing it here is exact.
@@ -550,9 +644,109 @@ function dib_dispose(dib: { dc: number; bitmap: number; previous: number }): voi
 	if (dib.dc) g.DeleteDC(as_ptr(dib.dc));
 }
 
+/** One window's pixels plus the rung of the ladder that produced them. */
+interface CapturedSurface {
+	/** BGRA with the GDI DIB layout for every method, so the caller's single
+	 * BGRA→RGBA pass applies to all of them. */
+	pixels: Buffer;
+	width: number;
+	height: number;
+	method: CaptureInfo["method"];
+}
+
+/**
+ * Screen-region copy of the window rect. The screen device context can be
+ * momentarily unavailable while the display switches modes (a game going
+ * exclusive fullscreen, for example), so one immediate retry covers the
+ * transient case.
+ */
+function dib_screen_copy(dib: { dc: number; bits: number }, entry: EnumeratedWindow): boolean {
+	let copied = false;
+	for (let attempt = 0; attempt < 2 && !copied; attempt++) {
+		const screenDc = address(lib().u.GetDC(0n) as bigint | null);
+		if (!screenDc) continue;
+		try {
+			const source = clamp_to_screen(entry.left, entry.top, entry.width, entry.height);
+			copied = lib().g.BitBlt(
+				as_ptr(dib.dc),
+				source.destX,
+				source.destY,
+				source.width,
+				source.height,
+				as_ptr(screenDc),
+				source.left,
+				source.top,
+				SRCCOPY | CAPTUREBLT,
+			);
+		} finally {
+			lib().u.ReleaseDC(0n, as_ptr(screenDc));
+		}
+	}
+	return copied;
+}
+
+/**
+ * The Windows capture ladder, cheapest rung first:
+ *   1. PrintWindow — the owning app paints itself. Fast and exact, but blank
+ *      for a GPU-composited surface, and it has no timeout variant, so a window
+ *      the shell already reports as hung skips it: that window would never
+ *      answer and the call would block forever.
+ *   2. Windows.Graphics.Capture — DWM hands over the window's own composition
+ *      surface (`win32-wgc.ts`). This is the rung that keeps working while the
+ *      window is covered by another window or its app stopped pumping messages.
+ *   3. Screen-region copy — only truthful while the window is the one drawn at
+ *      its own centre; otherwise it would return whatever is on top of it, so it
+ *      refuses instead of lying.
+ * A minimized window stops at PrintWindow: the compositor has no current surface
+ * for it, and its last composed frame would be a stale picture presented as the
+ * live UI.
+ */
+function capture_surface(entry: EnumeratedWindow): CapturedSurface {
+	const dib = dib_create(entry.width, entry.height);
+	let compositor_reason = "";
+	try {
+		if (!entry.hung) {
+			const painted = lib().u.PrintWindow(
+				as_ptr(entry.handle),
+				as_ptr(dib.dc),
+				PW_RENDERFULLCONTENT,
+			);
+			const pixels = dib_pixels(dib.bits, entry.width * entry.height * 4);
+			if (painted && !looks_blank(pixels, entry.width, entry.height)) {
+				return { pixels, width: entry.width, height: entry.height, method: "printwindow" };
+			}
+		}
+		if (!entry.minimized) {
+			try {
+				const frame = wgc_capture_window(entry.handle);
+				return { pixels: frame.pixels, width: frame.width, height: frame.height, method: "wgc" };
+			} catch (error) {
+				compositor_reason = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const is_foreground = address(lib().u.GetForegroundWindow() as bigint | null) === entry.handle;
+		if (!is_foreground && !visible_at_center(entry)) {
+			throw new Win32Error(background_capture_blocker(entry, compositor_reason));
+		}
+		if (!dib_screen_copy(dib, entry)) {
+			throw new Win32Error(
+				"Screen copy failed for this window. The desktop may be switching display modes; retry once it settles.",
+			);
+		}
+		return {
+			pixels: dib_pixels(dib.bits, entry.width * entry.height * 4),
+			width: entry.width,
+			height: entry.height,
+			method: "screen-copy",
+		};
+	} finally {
+		dib_dispose(dib);
+	}
+}
 export async function capture_window(options: {
 	handle?: number;
 	match?: string;
+	pid?: number;
 	out?: string;
 	scale: number;
 	maxWidth: number;
@@ -562,72 +756,17 @@ export async function capture_window(options: {
 	win32_load();
 	const { entry, selection } = resolve_target(options);
 
-	// A minimized window is attempted rather than refused: PrintWindow asks the
-	// owning app to paint, which usually still works, and a blank result is
-	// reported with a minimized-specific message below.
-	if (entry.hung) {
+	if (entry.width <= 0 || entry.height <= 0) {
 		throw new Win32Error(
-			`Window '${entry.process}' (handle ${entry.handle}) is not responding to Windows messages, so it cannot be captured. Wait for the application to recover, then retry.`,
+			`Window '${entry.process}' has an empty area (${entry.width} x ${entry.height}).`,
 		);
 	}
-	if (entry.width <= 0 || entry.height <= 0) {
-		throw new Win32Error(`Window '${entry.process}' has an empty area (${entry.width} x ${entry.height}).`);
-	}
+	const surface = capture_surface(entry);
+	bgra_to_rgba(surface.pixels);
 
-	const width = entry.width;
-	const height = entry.height;
-	const dib = dib_create(width, height);
-	let raw: Buffer;
-	let method: CaptureInfo["method"] = "printwindow";
-	try {
-		const captured = lib().u.PrintWindow(as_ptr(entry.handle), as_ptr(dib.dc), PW_RENDERFULLCONTENT);
-		raw = dib_pixels(dib.bits, width * height * 4);
-		if (!captured || looks_blank(raw, width, height)) {
-			// PrintWindow is refused for some composited surfaces (DWM, exclusive
-			// DirectX). A screen-region copy only returns the right pixels while the
-			// window is the foreground one — otherwise it would silently return
-			// whatever is drawn on top of it, so refuse instead of lying.
-			const is_foreground = address(lib().u.GetForegroundWindow() as bigint | null) === entry.handle;
-			if (!is_foreground && !visible_at_center(entry)) {
-				throw new Win32Error(background_capture_blocker(entry));
-			}
-			method = "screen-copy";
-			// The screen device context can be momentarily unavailable while the
-			// display switches modes (a game going exclusive fullscreen, for
-			// example), so one immediate retry covers the transient case.
-			let copied = false;
-			for (let attempt = 0; attempt < 2 && !copied; attempt++) {
-				const screenDc = address(lib().u.GetDC(0n) as bigint | null);
-				if (!screenDc) continue;
-				try {
-					const source = clamp_to_screen(entry.left, entry.top, width, height);
-					copied = lib().g.BitBlt(
-						as_ptr(dib.dc),
-						source.destX,
-						source.destY,
-						source.width,
-						source.height,
-						as_ptr(screenDc),
-						source.left,
-						source.top,
-						SRCCOPY | CAPTUREBLT,
-					);
-				} finally {
-					lib().u.ReleaseDC(0n, as_ptr(screenDc));
-				}
-			}
-			if (!copied) {
-				throw new Win32Error(
-					"Screen copy failed for this window. The desktop may be switching display modes; retry once it settles.",
-				);
-			}
-			raw = dib_pixels(dib.bits, width * height * 4);
-		}
-	} finally {
-		dib_dispose(dib);
-	}
-
-	bgra_to_rgba(raw);
+	const width = surface.width;
+	const height = surface.height;
+	const method = surface.method;
 
 	const outPath =
 		options.out && options.out.length > 0
@@ -635,18 +774,25 @@ export async function capture_window(options: {
 			: `${process.env.TEMP ?? process.env.TMP ?? "."}\\pi-ember-screen-${entry.process}-${stamp()}.${format_extension(options.format)}`;
 
 	const { default: sharp } = await import("sharp");
-	let pipeline = sharp(raw, { raw: { width, height, channels: 4 } });
+	let pipeline = sharp(surface.pixels, { raw: { width, height, channels: 4 } });
 	let finalWidth = width;
 	let finalHeight = height;
 	const scale = options.scale > 0 ? options.scale : 1;
-	const targetWidth = options.maxWidth > 0 && width * scale > options.maxWidth ? options.maxWidth : Math.round(width * scale);
+	const targetWidth =
+		options.maxWidth > 0 && width * scale > options.maxWidth
+			? options.maxWidth
+			: Math.round(width * scale);
 	if (scale < 1 || (options.maxWidth > 0 && width * scale > options.maxWidth)) {
 		if (targetWidth !== width) {
 			finalWidth = Math.max(1, targetWidth);
 			finalHeight = Math.max(1, Math.round((height * finalWidth) / width));
-			pipeline = sharp(raw, { raw: { width, height, channels: 4 } }).resize(finalWidth, finalHeight, {
-				kernel: "cubic",
-			});
+			pipeline = sharp(surface.pixels, { raw: { width, height, channels: 4 } }).resize(
+				finalWidth,
+				finalHeight,
+				{
+					kernel: "cubic",
+				},
+			);
 		}
 	}
 	await encode_with(pipeline, options.format, options.quality).toFile(outPath);

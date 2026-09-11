@@ -128,9 +128,9 @@ export function format_patch_error_row(
 	const failure_reason = compact_patch_failure_reason(details);
 
 	if (fail_n === 0) {
-		return `${bullet}${theme.fg("muted", theme.bold("Patched"))} ${theme.fg("text", `${ok_n} file${ok_n === 1 ? "" : "s"}`)}`;
+		return `${bullet}${theme.fg("muted", "Patched")} ${theme.fg("text", `${ok_n} file${ok_n === 1 ? "" : "s"}`)}`;
 	}
-	const summary = `${bullet}${theme.fg("muted", theme.bold("Patched"))} ${theme.fg("text", `${ok_n}/${total} ok`)} ${theme.fg("error", `${fail_n} failed`)}`;
+	const summary = `${bullet}${theme.fg("muted", "Patched")} ${theme.fg("text", `${ok_n}/${total} ok`)} ${theme.fg("error", `${fail_n} failed`)}`;
 	if (!failure_reason) return summary;
 	return `${summary} ${theme.fg("error", failure_reason)}`;
 }

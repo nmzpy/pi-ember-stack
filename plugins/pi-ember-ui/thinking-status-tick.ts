@@ -20,7 +20,7 @@ let build_thinking_row_fn: ((host: "widget" | "in_message") => string) | undefin
 /**
  * Pre-baked gradient text for the external Thinking status row. The 20 FPS
  * gradient tick colorizes the label here (same pattern as the in-group
- * `└ Thinking` lane writing into a group's `CompactGroupText`), so Pi's
+ * `│ Thinking` lane writing into a group's `CompactGroupText`), so Pi's
  * `render()` only truncates this cached string instead of re-running the
  * ANSI gradient colorization on every frame.
  */

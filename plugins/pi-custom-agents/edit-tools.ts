@@ -16,13 +16,17 @@ const WEB_ACCESS_TOOLS = ["web_search", "fetch_content", "get_search_content"] a
  * them on Windows only; `setActiveTools` ignores names that are not in the
  * registry, so listing them here is inert on other platforms.
  */
-const SCREEN_TOOLS = ["window_list", "window_screenshot"] as const;
+export const SCREEN_TOOLS = ["window_list", "window_screenshot", "window_screenshot_timer"] as const;
 
 /**
  * Browser tools owned by the optional third-party `pi-browser` extension
- * (Playwright over CDP). Curated to the attach/inspect/interact/screenshot
- * core: the storage, cookie, route, and raw-coordinate mouse families stay
- * out of the default prompt. Names are inert when pi-browser is absent.
+ * (Playwright over CDP). Curated to the attach/inspect/measure/interact/
+ * screenshot core: the storage, cookie, route, and raw-coordinate mouse
+ * families stay out of the default prompt. `browser_measure` (geometry +
+ * computed styles + authored rules), `browser_scroll` (settled scroll for
+ * whileInView reveals), and `browser_focus` (focus-visible inspection) are the
+ * deterministic visual-verification set added alongside the screenshot tool.
+ * Names are inert when pi-browser is absent.
  */
 const BROWSER_TOOLS = [
 	"browser_navigate",
@@ -30,6 +34,9 @@ const BROWSER_TOOLS = [
 	"browser_reload",
 	"browser_snapshot",
 	"browser_take_screenshot",
+	"browser_measure",
+	"browser_scroll",
+	"browser_focus",
 	"browser_click",
 	"browser_hover",
 	"browser_type",
@@ -45,6 +52,27 @@ const BROWSER_TOOLS = [
 	"browser_handle_dialog",
 	"browser_console_messages",
 	"browser_network_requests",
+] as const;
+
+/**
+ * Visual-verification core: looking at a rendered UI without writing a throwaway
+ * script. This is the exact set an implementation agent needs to answer "what does
+ * this page actually look like" and "why is this element invisible/wrong":
+ * open it, measure it, scroll a reveal into place, inspect focus, read its console,
+ * screenshot it — plus desktop window capture for non-browser windows.
+ *
+ * Shared SSOT by the parent modes (code, orchestrate) and the implementation
+ * subagents (Coder), so no agent is left with only `bash` for visual checks.
+ */
+export const VISUAL_TOOLS = [
+  ...SCREEN_TOOLS,
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_take_screenshot",
+  "browser_measure",
+  "browser_scroll",
+  "browser_focus",
+  "browser_console_messages",
 ] as const;
 
 /** Canonical resume tool name — Codex requires `^[a-zA-Z0-9_-]+$` (no dots). */
@@ -141,12 +169,19 @@ export function with_provider_patch_tool(tools: string[], provider: string | und
 	return [...filtered, patch_tool];
 }
 
+/**
+ * Default implementation-agent tool set. `VISUAL_TOOLS` is part of the base so an
+ * implementation agent can LOOK at what it built (page geometry, computed styles,
+ * authored CSS rules, a screenshot, a desktop window) instead of falling back to
+ * throwaway CDP/screenshot scripts in the OS temp directory.
+ */
 export const DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS = [
-	"read",
-	"bash",
-	"edit",
-	"write",
-	"grep",
-	"find",
-	"ls",
+  "read",
+  "bash",
+  "edit",
+  "write",
+  "grep",
+  "find",
+  "ls",
+  ...VISUAL_TOOLS,
 ] as const;

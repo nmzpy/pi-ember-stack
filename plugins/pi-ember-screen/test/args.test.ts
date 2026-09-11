@@ -21,6 +21,7 @@ describe("screen helper arguments", () => {
 		expect(options.maxWidth).toBe(0);
 		expect(options.match).toBeUndefined();
 		expect(options.handle).toBeUndefined();
+		expect(options.pid).toBeUndefined();
 	});
 
 	test("list and diagnose flags", () => {
@@ -37,6 +38,37 @@ describe("screen helper arguments", () => {
 	test("handle is truncated to an integer address", () => {
 		expect(parse_screen_args(["--handle", "131742"]).handle).toBe(131742);
 		expect(parse_screen_args(["--handle", "131742.9"]).handle).toBe(131742);
+	});
+
+	test("a pid names the window to capture or list", () => {
+		expect(parse_screen_args(["--pid", "23144"]).pid).toBe(23144);
+		expect(parse_screen_args(["--pid", "23144.7"]).pid).toBe(23144);
+		expect(parse_screen_args(["--list", "--pid", "7"]).pid).toBe(7);
+	});
+
+	test("the timer flags are millisecond values with defaults", () => {
+		const options = parse_screen_args(["--pid", "9", "--frames", "8", "--interval-ms", "120"]);
+		expect(options.frames).toBe(8);
+		expect(options.intervalMs).toBe(120);
+		expect(options.delayMs).toBe(0);
+		// No timer asked for: a single capture, never an accidental burst.
+		expect(parse_screen_args([]).frames).toBe(1);
+	});
+
+	test("an out-of-range timer is rejected instead of silently clamped", () => {
+		expect(() => parse_screen_args(["--frames", "0"])).toThrow(ScreenArgsError);
+		expect(() => parse_screen_args(["--frames", "25"])).toThrow(ScreenArgsError);
+		expect(() => parse_screen_args(["--interval-ms", "10"])).toThrow(ScreenArgsError);
+		expect(() => parse_screen_args(["--interval-ms", "abc"])).toThrow(ScreenArgsError);
+		expect(() => parse_screen_args(["--delay-ms", "-1"])).toThrow(ScreenArgsError);
+	});
+
+	test("a nonsensical pid is rejected instead of matching nothing", () => {
+		// 0 / negative would silently select no window and look like a crash.
+		expect(() => parse_screen_args(["--pid", "0"])).toThrow(ScreenArgsError);
+		expect(() => parse_screen_args(["--pid", "-1"])).toThrow(ScreenArgsError);
+		expect(() => parse_screen_args(["--pid", "abc"])).toThrow(ScreenArgsError);
+		expect(() => parse_screen_args(["--pid"])).toThrow(ScreenArgsError);
 	});
 
 	test("scaling flags feed one resize decision", () => {

@@ -338,7 +338,7 @@ const GROUP_THINKING_CHILD_ACTIVE_KEY = Symbol.for("pi-ember-ui:group-thinking-c
  *  GlobalThis-backed: written by pi-compact-tools lifecycle flag syncs, read
  *  by the pi-ember-ui Thinking predicates — jiti module duplication must not
  *  split the writer from the reader or the external Thinking header paints
- *  beside the in-group `└ Thinking` lane. */
+ *  beside the in-group `│ Thinking` lane. */
 export function isGroupThinkingChildActive(): boolean {
 	return (globalThis as GlobalThis)[GROUP_THINKING_CHILD_ACTIVE_KEY] === true;
 }
@@ -412,7 +412,7 @@ export function resetSubagentDelegation(): void {
  *  (`pi-compact-tools/renderer.ts`), and `assistant-stream-boundary.ts` import
  *  this module through different importer chains; a module-level `let` would let
  *  one instance hide blocks while another keeps painting the in-group
- *  `└ Thinking` lane or the external header for the whole gradient tick cadence.
+ *  `│ Thinking` lane or the external header for the whole gradient tick cadence.
  */
 const THINKING_BLOCKS_HIDDEN_KEY = Symbol.for("pi-ember-ui:thinking-blocks-hidden");
 const THINKING_BLOCKS_VISIBILITY_LISTENER_KEY = Symbol.for(
@@ -484,6 +484,29 @@ export function mutedBullet(): string {
 	return colorize(MUTED_BULLET_COLOR, "\u2022");
 }
 
+/**
+ * Opacity of the shared dim chrome over PAGE_BG: the chatbox horizontal rules,
+ * the editor border rules, and every tree pipe (`│`) in the transcript. One
+ * value so all dim chrome reads at exactly the same weight.
+ */
+export const DIM_CHROME_OPACITY = 0.4;
+
+/**
+ * Shared dim chrome foreground — `DIM_COLOR` at {@link DIM_CHROME_OPACITY} over
+ * `PAGE_BG` (about 60% darker than the `dim` theme token). Fixed neutral, not
+ * accent-derived: tree chrome never picks up the active mode color.
+ */
+export const DIM_CHROME_COLOR = blendToHex(DIM_COLOR, PAGE_BG, DIM_CHROME_OPACITY);
+
+/**
+ * Paint a compact-tree pipe (`│` gutter for work-group children, subagent
+ * trays, and bash output rows) in the shared dim chrome color. Deliberately
+ * ignores the live theme's `dim` token: that token is the muted-label grey
+ * and reads as bright as the tool-call header text beside the pipe.
+ */
+export function paint_tree_pipe(text: string): string {
+	return colorize(DIM_CHROME_COLOR, text);
+}
 // --- Color math for dynamic theme ---
 
 export function hexToRgbTriplet(hex: string): [number, number, number] {

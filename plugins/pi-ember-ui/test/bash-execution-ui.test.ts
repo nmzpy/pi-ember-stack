@@ -56,7 +56,9 @@ describe("user bash integrated UI helpers", () => {
 
 		expect(complete.filter((line) => line.includes("\u2500"))).toHaveLength(0);
 		expect(complete.some((line) => line.includes("$ bash foo"))).toBe(true);
-		expect(complete[complete.length - 1]?.includes("\u2514")).toBe(true);
+		// The tree is pipe-only: the last output row keeps `\u2502`, never `\u2514`.
+		expect(complete[complete.length - 1]?.includes("\u2502")).toBe(true);
+		expect(complete[complete.length - 1]?.includes("\u2514")).toBe(false);
 	});
 
 	test("format_ember_bash_transcript_lines keeps the pipe open while running", () => {
@@ -75,20 +77,23 @@ describe("user bash integrated UI helpers", () => {
 		const pipe = rows[1]?.replace(/\x1b\[[0-9;]*m/g, "");
 		const last = rows[2]?.replace(/\x1b\[[0-9;]*m/g, "");
 
-		// `• ` occupies columns 0-1, so the `│`/`└` sits below the `R` of `Ran`.
+		// `• ` occupies columns 0-1, so every output row's `\u2502` sits below the
+		// `R` of `Ran` — the terminal row included (no `\u2514` corner).
 		expect(pipe?.indexOf("\u2502")).toBe(2);
-		expect(last?.indexOf("\u2514")).toBe(2);
+		expect(last?.indexOf("\u2502")).toBe(2);
+		expect(last?.includes("\u2514")).toBe(false);
 	});
 
-	test("format_ember_bash_transcript_lines puts the corner on the last output row, not the hint", () => {
+	test("format_ember_bash_transcript_lines keeps the pipe on every output row, never on the hint", () => {
 		const width = 80;
 		const raw = [ruleLine(78), "header", ruleLine(78), "output one", "output two", "... 151 more lines (ctrl+o to expand)"];
 		const rows = format_ember_bash_transcript_lines(raw, width, false);
 
-		// The last output row should carry the `└`; the hint row should not.
+		// Output rows carry the pipe (no `\u2514` terminator); the hint row carries none.
 		const outputRow = rows.find((r) => r.includes("output two"))?.replace(/\x1b\[[0-9;]*m/g, "");
 		const hintRow = rows.find((r) => r.includes("more lines"))?.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(outputRow?.includes("\u2514")).toBe(true);
+		expect(outputRow?.includes("\u2502")).toBe(true);
+		expect(outputRow?.includes("\u2514")).toBe(false);
 		expect(hintRow?.includes("\u2514")).toBe(false);
 		expect(hintRow?.includes("\u2502")).toBe(false);
 	});
@@ -101,7 +106,8 @@ describe("user bash integrated UI helpers", () => {
 		// The leading Spacer row is dropped, so the header is the first row,
 		// the stock Text paddingX=1 margin is stripped, and it carries no branch.
 		expect(header).toBe("• Ran foo");
-		expect(rows[1]?.includes("\u2514")).toBe(true);
+		expect(rows[1]?.includes("\u2502")).toBe(true);
+		expect(rows[1]?.includes("\u2514")).toBe(false);
 	});
 
 	test("format_ember_bash_transcript_lines wraps rows in userMessageBg when a theme is supplied", () => {

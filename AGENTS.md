@@ -76,11 +76,15 @@
     switches update the in-memory Theme only; `reassertLiveTheme` +
     `scheduleThemeReassert` reclaim the global theme after any
     install-time write races the watcher.
-  - Grouping keys (`WORK_GROUP_KEY` / `groupKey`) and groupable tool sets
-    (`GROUPABLE_TOOLS`) are defined once in `renderer.ts` — never duplicate
-    the membership check. All groupable tools share one work-bundle key
-    (`__work__`) until a hard boundary (visible answer text, user message,
-    non-groupable tool).
+  - Grouping keys (`WORK_GROUP_KEY` / `BROWSER_GROUP_KEY` / `groupKey`), the
+    groupable tool sets (`GROUPABLE_TOOLS`), the browser-family predicate
+    (`is_browser_tool_name`) and the lifecycle gate
+    (`is_compact_groupable_tool`) are defined once in `renderer.ts` — never
+    duplicate the membership check. Every native/groupable tool shares one
+    work-bundle key (`__work__`); every `browser_*` tool shares the one
+    `Browser` key (`__browser__`). Both groups accumulate children until a
+    hard boundary (visible answer text, visible thinking, user message, a
+    different group key, or a non-groupable tool).
   - Compact bullet-color logic (`statusBulletColor`,
     `groupBulletColorFromFlags`) is defined once in
     `pi-compact-tools/renderer.ts` — never duplicate it in another plugin.
@@ -137,7 +141,14 @@
 - **Token-First Theming:** All UI colors must flow through theme tokens (`theme.fg`,
   `theme.bg`) or the shared `mode-colors.ts` helpers. Never embed raw hex or ANSI
   escape sequences directly in renderer or component code. The live accent color is
-  the single authority for mode-derived visuals.
+  the single authority for mode-derived visuals. Dim chrome is the one fixed
+  exception with its own SSOT: `DIM_CHROME_COLOR` in `mode-colors.ts` (DIM_COLOR
+  at `DIM_CHROME_OPACITY` = 40% over `PAGE_BG`) is painted through
+  `paint_tree_pipe()` for every tree pipe (`│`) and `chatboxBorderColor()` for
+  the chatbox horizontal rules and editor border — one value, so rules, borders,
+  and pipes read at exactly the same weight. Tree pipes deliberately do NOT use
+  `theme.fg("dim")`: the dim token is the muted-label grey (#666666) and reads
+  as bright as the tool-call header (#808080) beside it.
 - **Compact Rendering Is Authoritative:** Tool call rows are single-line, bullet-led,
   and never dump raw content. Both standalone and grouped call rows use the
   `CompactGroupText` component (ANSI-aware `truncateToWidth` at the TUI's
@@ -275,10 +286,10 @@
   render_thinking_gradient_label() + elapsed + rightPad` via the bound
   `build_thinking_status_row_text` builder and stages it in the cache before
   invalidating the host, so Pi's `render()` only truncates the pre-baked ANSI
-  string — the same pattern as the in-group `└ Thinking` lane writing into a
+  string — the same pattern as the in-group `│ Thinking` lane writing into a
   group's `CompactGroupText`. The external host repaints at the shared 20 FPS
   clock cadence (`EXTERNAL_THINKING_RENDER_INTERVAL_MS` = `GRADIENT_TICK_MS` =
-  50 ms), matching the in-group `└ Thinking` lane and compact group child
+  50 ms), matching the in-group `│ Thinking` lane and compact group child
   verbs so standalone/widget/in-message Thinking animates as smoothly as the
   in-group lane. The tick skips `host.invalidate()` when the staged text is
   identical to the last frame (clock stopped / no phase change) so no redundant
@@ -329,7 +340,7 @@
   wait directly below the user row once the assistant bubble exists; the
   above-editor `ember-thinking` widget owns post-tool inter-run gaps. Both
   external hosts are inset by `THINKING_STATUS_INSET_COLUMNS` = 1 column on
-  each side (`build_thinking_status_row_text` SSOT); the in-group `└ Thinking`
+  each side (`build_thinking_status_row_text` SSOT); the in-group `│ Thinking`
   lane is owned by the compact renderer (tree-branch prefix) and does not use
   this inset. `thinking_status_terminal_layout` (SSOT) keeps both external
   hosts rendering `[blank][Thinking][blank]` in the same terminal rows so the
@@ -354,7 +365,7 @@
   children alone no longer suppress), when a delegated subagent tool call is
   active, when a visible thinking block is actively streaming (`thinkingActive`
   with `!isThinkingBlocksHidden()` — the transcript owns reasoning), or when
-  in-group `└ Thinking` owns the slot (`isGroupThinkingChildActive()`). The
+  in-group `│ Thinking` owns the slot (`isGroupThinkingChildActive()`). The
   `groupThinkingChildActive` flag is **O(1) counter-backed and globalThis-stored**
   (`Symbol.for("pi-ember-ui:group-thinking-child-active")`, same pattern as
   `isThinkingBlocksHidden`/`agentRunPending` — jiti module duplication across
@@ -373,7 +384,7 @@
   `Thinking` placeholder still appears in the pre-token wait and in-message
   pre-output wait while blocks are visible, until the model begins emitting
   visible text or a thinking stream. Nested
-  subagent `└ Thinking` rows are separate (`render.ts`) and still paint while
+  subagent `│ Thinking` rows are separate (`render.ts`) and still paint while
   blocks are visible. Bare
   `text_start` and empty `text_delta` never suppress via
   `should_suppress_thinking_header_for_stream_event()`. The SSOT wait predicate `is_agent_thinking_wait()` in
@@ -389,7 +400,7 @@
   above-editor host via `arm_pre_token_thinking_status()`.
   `clear_blockers` runs on visible user `message_start`, `session_compact`,
   and `compaction_end` transcript rebuild (`reconcile_thinking_after_transcript_rebuild()`).
-  In-group `└ Thinking` is painted ONLY by a real thinking stream
+  In-group `│ Thinking` is painted ONLY by a real thinking stream
   (`message_update` → `apply_assistant_stream_boundary` in
   `assistant-stream-boundary.ts`, SSOT → `noteHiddenThinking()`); the wait arm
   never paints it prematurely. During a post-tool wait with NO thinking stream,
@@ -406,12 +417,23 @@
   pre-thinking wait still reads as ongoing work); `settleGroups` keeps the
   hold's 20 FPS gradient tick alive through `agent_end` so the `-ing` verbs
   keep animating until a thinking stream or `agent_settled` takes over. Active
-  compact child rows and the in-group Thinking frontier use the bare `├`/`└`
-  glyph with no horizontal `─` connector; completed prior children use the bare
-  `│` continuation with no connector-width trailing pad, so their body sits
-  flush against the pipe. When the in-group `└ Thinking` lane arms, the prior
-  tool child collapses (the lane replaces it instead of sitting beside it);
-  earlier completed children, when present, stay as bare `│` continuations.
+  compact group child rows follow ONE branch rule (`format_compact_group_child_prefix`
+  in `pi-compact-tools/renderer.ts` is its SSOT): every visible child row —
+  running `-ing` verb, tool-lane hold, in-group Thinking lane, a completed row,
+  and the group's terminal row — carries the bare `│` continuation with no
+  connector-width trailing pad so its body sits flush against the pipe. The `└`
+  corner and the `├` tee are never drawn anywhere in the tree (a settled `Ran`/
+  `Read` row keeps exactly the same gutter as the wave that is still running).
+  No horizontal `─` connector anywhere. The pipe is painted with
+  `paint_tree_pipe()` from `pi-ember-ui/mode-colors.ts` — the shared dim chrome
+  (`DIM_CHROME_COLOR`) that the chatbox horizontal rules and the editor border
+  also use, never `theme.fg("dim")` (the dim token is the muted-label grey and
+  reads as bright as the tool-call header beside the pipe). When the in-group
+  `│ Thinking` lane arms,
+  horizontal `─` connector anywhere. When the in-group `│ Thinking` lane arms,
+  the prior tool child collapses (the lane replaces it instead of sitting
+  beside it); earlier completed children, when present, stay as bare `│`
+  continuations.
   `format_compact_group_child_prefix` in `pi-compact-tools/renderer.ts` is the
   one owner for both main and nested-subagent work-group prefixes. Inter-run planning
   `text_delta` holds the lane the same way (no fake Thinking).
@@ -452,7 +474,7 @@
   settled work group HOLDS the tool lane — the visible children of the current
   wave keep their
   gradient `-ing` verbs (Reading/Searching/…) and edit/write snap to
-  Edited/Wrote; the in-group `└ Thinking` lane is NOT painted (a premature lane
+  Edited/Wrote; the in-group `│ Thinking` lane is NOT painted (a premature lane
   would claim the slot while the model is not emitting reasoning). When a real
   thinking or inter-run planning stream arrives (blocks hidden),
   `noteThinking()`/`noteHiddenThinking()` paints the lane from the hold and
@@ -461,15 +483,17 @@
   `Thinking` during the wait.
   `resolve_thinking_status_host()` prefers in-message whenever
   `assistantThinkingHostReady`, not only during the pre-tool gap. Child rows
-  are folded immediately via `fold_group_child_rows()` on every new groupable
-  tool call, regardless of tool name, so the aggregate header retains the
-  completed history while only the latest call remains visible. Hard boundaries
-  still fold and freeze the group. **Same-file diff identity remains SSOT:**
+  ACCUMULATE under the header: every new groupable tool call appends its own
+  compact row below the previous ones (no fold on the call itself), and the
+  aggregate header retains the completed history for its counts. A hard
+  boundary (visible assistant text, visible thinking, user message, a
+  different group key, or a non-groupable tool) folds the whole group to its
+  summary header via `fold_group_child_rows()` and freezes it. **Same-file diff identity remains SSOT:**
   `merge_group_child_rows` and `merged_child_diff_stats` retain normalized
   same-file merge behavior for the shared child formatter and subagent live
-  waves, but the main work group absorbs the prior visible row before the
-  next call, so it never displays a stack of prior children. Thinking uses
-  that same single child slot instead of appending beside retained tool rows.
+  waves, so repeated edits/writes/patches to one file show as ONE accumulated
+  child row instead of a stack. Thinking uses the latest child slot instead of
+  appending beside retained tool rows.
   Same-key batches reopen the latest
   settled group (`findReopenableGroup`) instead of spawning another
   `Explored`/`Edited`/… header. The elapsed suffix is ONE shared turn pass
@@ -478,7 +502,7 @@
   / `startThinkingAnimation` / `resume_thinking_header_for_think_stream`,
   cleared only by `clear_thinking_pass_timer()` at hard boundaries: visible
   text, visible thinking, `agent_settled`, and session shutdown) read by the
-  widget, the in-message host, AND the in-group `└ Thinking` lane — SSOT,
+  widget, the in-message host, AND the in-group `│ Thinking` lane — SSOT,
   never reset per pass or when the thinking stream arrives; total turn time
   still notifies once on `agent_settled`. Tool boundaries
   (`tool_call`, `tool_execution_start`, `toolcall_start`) suppress the
@@ -508,23 +532,25 @@
   append (rebuild already paints the row). Escape-to-cancel remains
   wired by Pi's `compaction_start` editor handler. Never clear
   `thinkingActive`/`agentRunPending` from `agent_end` alone and expect the status
-  to stay — `agent_end` is not the end of the user's task. When the group
-  settles (visible user-facing text, a thinking stream, a non-group or
-  different-group tool, a user message, or `agent_end`), child rows collapse to
-  the header. A visible thinking stream is a hard chronological boundary: it
+  to stay — `agent_end` is not the end of the user's task. A HARD boundary
+  (visible user-facing text, a visible thinking stream, a non-group or
+  different-group tool, or a user message) folds the accumulated child rows
+  into the summary header; `agent_end`/`agent_settled` only flip the header to
+  past tense and KEEP the accumulated rows, because the next same-key wave may
+  still append to the same group. A visible thinking stream is a hard chronological boundary: it
   calls `noteVisibleThinking()` and the following tool wave always starts a
   new header below the transcript reasoning, including during an inter-run
   gap. Hidden thinking uses `noteHiddenThinking()` to paint the in-group
-  `└ Thinking` lane and keeps the group reopenable — hidden reasoning is NOT
-  a separate transcript block, so the next tool wave folds prior children
-  (different tool name) and reopens under the same header instead of spawning
+  `│ Thinking` lane and keeps the group reopenable — hidden reasoning is NOT
+  a separate transcript block, so the next tool wave (different tool name)
+  appends another child row under the same header instead of spawning
   a fresh `Explored`/`Edited`/… row. **Any visible (non-empty) `text_delta`
   is a hard boundary** — `apply_assistant_stream_boundary` in
   `assistant-stream-boundary.ts` collapses the work group to header-only via
   `noteVisibleText()` → `hardExitGroup()`, whether the text is inter-run
   narration (OpenAI/Codex commentary between batches) or the final answer, and
   whether the agent is still pending. Streamed text owns the transcript slot: a
-  stale in-group `└ Thinking` lane with a running elapsed timer never lingers
+  stale in-group `│ Thinking` lane with a running elapsed timer never lingers
   over it, and `should_suppress_thinking_header_for_stream_event()` suppresses
   the external Thinking header for every non-empty `text_delta`. The next tool
   wave starts a fresh header below the streamed text — there is no
@@ -621,7 +647,12 @@
   (`format_ember_bash_transcript_lines`), and the slash-command / model-picker
   middle separator all use chatbox-style horizontal rules (`──`) colored by
   the single `chatboxBorderColor(text)` helper in `pi-ember-ui/index.ts`,
-  which applies the `DIM_COLOR` token (SSOT in `mode-colors.ts`). No call site
+  which paints `DIM_CHROME_COLOR` (SSOT in `mode-colors.ts`). The finished-bash
+  output tree uses `paint_tree_pipe()` for the same color: every output row
+  carries `│` (running and completed alike — no `└` corner), and status hints
+  (`... N more lines (ctrl+o to expand)`, exit codes, cancellation) are indented
+  with no glyph at all; the `running` parameter is retained for call-site
+  compatibility and no longer changes the tree. No call site
   uses `TEXT_COLOR`, `colorWithOpacity`, or a per-site hex for these rules.
   The `chatboxBorderContainer(content, paddingX)` helper wraps content with a
   top and bottom `DynamicBorder` (using `chatboxBorderColor`) and a
@@ -726,6 +757,9 @@ Pi
     │   └── Codex-style apply_patch tool (openai-codex provider only)
     ├── plugins/pi-ember-images/
     │   └── Cross-platform clipboard/path image attachments and compact previews
+    ├── plugins/pi-ember-sessions/
+    │   ├── session catalog (SSOT for /resume) + on-disk index cache
+    │   └── background conversation fleet (/fleet)
     ├── plugins/pi-custom-agents/
     │   ├── primary modes, plans, quiz
     │   ├── hierarchical AGENTS.md auto-loader (agents-md.ts)
@@ -768,7 +802,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Every standalone tool-call row uses the compact bullet prefix: `• ` via
   `statusBulletColor` (SSOT): static `muted` while running, `success` when
   done without error, `error` on failure. Running animation lives in gradient
-  child verbs, not the bullet.
+  child verbs, not the bullet. Font weight is swapped: tool rows and group
+  headers carry the REGULAR face (`paint_compact_tool_label` and the group
+  header painters never apply `theme.bold`), while the Thinking gradient
+  label carries the BOLD face via `render_gradient(..., { bold: true })` —
+  one bold wrapper composed over the active colorizer in `gradient.ts`
+  (`GradientRenderOptions.bold`), consumed by `render_thinking_gradient_label`
+  so every Thinking surface (external host, in-message, in-group lane,
+  subagent tray) inherits it. Never re-bold tool rows or re-thin Thinking.
 - Edit calls show `+N | -N` inline on the same row as the filename. While
   the model streams `oldText`/`newText` (before the edit runs), the counts
   are live: `streamingEditStats` computes a running line-level diff
@@ -838,9 +879,13 @@ field. Keep that mechanism aligned with the actual plugin folders.
     rest of the group's lifetime. Ownership never migrates to later calls.
     New same-type calls append as child rows under the existing header.
   - **Single live group:** The renderer tracks one `currentGroup` at a
-    time. All groupable tools share `WORK_GROUP_KEY` (`__work__`), so
+    time. All native groupable tools share `WORK_GROUP_KEY` (`__work__`), so
     discovery, edit, write, bash, and patch calls in one burst accumulate
-    under one header instead of splitting by tool family. A non-groupable
+    under one header instead of splitting by tool family; `browser_*` tools
+    share the one `BROWSER_GROUP_KEY` (`__browser__`) group. Switching
+    between the two keys is a hard boundary: the previous group folds to its
+    summary and is frozen (`hardExited`) so it can never be reopened above the
+    intervening block. A non-groupable
     tool or hard boundary settles/clears the group. Soft settles (hidden
     thinking via `noteThinking`, `agent_end` via `settleAllGroups`) keep
     `currentGroup` so a later groupable call reopens via `appendToGroup`
@@ -864,14 +909,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
     while `currentGroup` is still held. When thinking blocks are hidden, inter-run
     inter-run gaps (`isInterRunGap()`), and real thinking/reasoning streams
     (`message_update` → `noteThinking()`) enter the thinking lane: gradient
-    `Thinking` replaces the lingering `Searching`/`Reading` child in the single
-    `└` pipe row. Same-key batches reopen via `findReopenableGroup` when
+    `Thinking` replaces the LATEST accumulated child row (earlier rows stay
+    listed as bare `│` continuations). Same-key batches reopen via `findReopenableGroup` when
     `currentGroup` was lost so another `Explored` header is not spawned.
     **Any visible (non-empty) `text_delta` is a hard boundary**
     (`apply_assistant_stream_boundary` → `noteVisibleText()` →
     `hardExitGroup()`), including OpenAI/Codex narration between batches and the
     final answer — streamed text never renders below an open work group or a
-    stale `└ Thinking` lane. **Final answer text**
+    stale `│ Thinking` lane. **Final answer text**
     (`text_delta` after the agent is no longer pending), user message, different
     group key, or hard non-groupable tool
     (`subagent`, `quiz`, … via `noteInterveningToolCall`) →
@@ -885,33 +930,59 @@ field. Keep that mechanism aligned with the actual plugin folders.
     `noteHiddenThinking()` for its in-group lane and stays reopenable (hidden
     reasoning is not a transcript block) — never `reopenClosed`. Hard group splits on visible text use non-empty `text_delta` only — bare
     `text_start` must not split.
-  - **Latest-child work-group rendering:** Under the unified work header
+  - **Accumulating work-group rendering:** Under the unified work header
     (`• Edited N files, explored M files, … +N -N`), the aggregate record list
-    retains every call for counts, results, rebuilds, and completion state, but
-    only the newest call renders as the single `└`/`├` child row. Every new
-    groupable call advances `childAbsorbBefore` immediately, including
-    same-name calls, parallel siblings, edit/write/patch repeats, and calls
-    reopened after thinking. Prior rows never linger beside
-    the newest row. Thinking streams preserve the
-    unified header and may replace the latest tool child with in-group
-    `└ Thinking`; the next tool call replaces that slot again. Hard boundaries
-    (`noteUserMessage`, `noteVisibleText`) still freeze and clear the group.
+    retains every call for counts, results, rebuilds, and completion state, and
+    EVERY record since the last fold renders as its own child row — every row,
+    in flight or completed, on the same bare `│`. Adding a
+    groupable call — same name, different name, parallel sibling,
+    edit/write/patch repeat, or a call reopened after thinking — never
+    absorbs a prior row (`childAbsorbBefore` stays put). The whole group folds
+    to its summary header only at a HARD boundary: visible assistant text,
+    visible thinking, a user message, a non-groupable tool, or a call in a
+    different group key (`fold_group_child_rows` + `freezeGroup` /
+    `hardExitGroup`). `agent_end`/`agent_settled` keep the rows. Thinking
+    streams preserve the unified header and replace only the latest tool child
+    with in-group `│ Thinking`; earlier accumulated rows stay listed, and the
+    next tool call restores that slot.
+  - **Browser compat group:** Every `browser_*` tool (pi-browser family,
+    detected by `is_browser_tool_name`) shares one `BROWSER_GROUP_KEY`
+    (`__browser__`) group instead of rendering as a standalone foreign row.
+    The live header reads `◇Browser`; once the group collapses the header reads
+    `◇Browser: Navigated N times, Took N screenshots, Interacted once, Resized
+    N times, …` (`formatBrowserGroupHeader` /
+    `format_browser_group_segments` SSOT). Browser rows use the `◇` diamond
+    marker with NO trailing space (`BROWSER_BULLET` in `compact-text.ts`,
+    painted by `standaloneCallBulletColor` / `groupHeaderBullet` — same
+    color ladder as `statusBulletColor`), so the label sits one column left
+    of every `• ` bullet row. Child verbs come from
+    `BROWSER_TOOL_LABELS` (`Navigating`/`Navigated`, `Interacting`/`Interacted`,
+    `Resize`/`Resized`, `Screenshot` with no `-ing` form for
+    `browser_take_screenshot`, …); an unlisted browser tool falls back to the
+    `browser_`-stripped tool name for both states. `browser_navigate` shows its
+    URL, `browser_resize` shows `WxH`, and `browser_evaluate` /
+    `browser_take_screenshot` show no argument detail.
+  - **Foreign-tool rows delegate, they never block grouping:** the
+    `foreign-tool-row.ts` patch substitutes only Pi's fallback renderer for
+    tools that define neither `renderCall` nor `renderResult`; it calls the
+    shared `CompactRenderer` entry points, so a foreign tool that is browser-
+    or work-groupable joins the same group machinery.
   - **Group child gradient tick:** While visible child rows render, the
     owner's `invalidate` is subscribed to the shared gradient tick via
     `subscribeGradientTick`/`unsubscribeGradientTick`
     (exported from `pi-ember-ui/index.ts`, backed by the single 20 FPS
     clock in `gradient.ts`). Child verbs use `render_gradient` with the
     muted→text `actionGroup` preset at the same `GRADIENT_TICK_MS` cadence
-    as the Thinking widget. The tick is dropped when child rows collapse
-    (settle, soft/hard thinking handoff, or session reset). Subscriptions
-    are removed on settle and session reset. The subscription uses a stable
+    as the Thinking widget. The tick is dropped when its last visible child
+    completes and the lane/hold ends (agent settle, fold at a hard boundary,
+    or session reset). Subscriptions
     callback identity with a mutable invalidate target so Pi rebuilds (which
     provide fresh invalidate closures) rebind the target without churning the
     subscriber Set. **The tick rebuilds only the dynamic lane:** the group's
     header + child rows are cached as `group.staticText` (refreshed by every
     full `formatGroup` call and invalidated by `fold_group_child_rows`/
     `appendToGroup`), so `refreshActiveGroupText` re-bakes just the
-    `└ Thinking` lane (gradient label + elapsed suffix) per 50 ms tick —
+    `│ Thinking` lane (gradient label + elapsed suffix) per 50 ms tick —
     never the whole block. `hasAnyGroupThinkingChild()` is O(1) (a
     `thinkingLaneCount` counter maintained by `setThinkingChild()`), so the
     20 FPS render path can query it live without an O(calls) scan.
@@ -968,6 +1039,24 @@ field. Keep that mechanism aligned with the actual plugin folders.
   do not make `hasActiveGroups()` true. The `isToolGroupActive` flag in
   flag in `pi-ember-ui/mode-colors.ts` is driven from this plugin's
   lifecycle handlers via `hasActiveGroups()`.
+- **Foreign-tool compact rows:** `foreign-tool-row.ts` (SSOT) installs one
+  `ToolExecutionComponent.prototype` patch that routes any tool defining
+  NEITHER `renderCall` NOR `renderResult` through the shared `CompactRenderer`
+  — Pi's raw fallback (bold tool name + full result dump in a colored shell)
+  is what third-party tools rendered, e.g. pi-browser's `browser_*` rows.
+  They now render as the same bullet-led, single-row, `ctrl+o`-expandable
+  rows as every Ember tool call (`◇browser_navigate url <target>`), via the
+  renderer's SSOT bullet helpers (browser rows get the `◇` diamond, the rest
+  keep `statusBulletColor`), its standalone row formatter, and
+  the `self` render shell (no fallback background box). The substituted
+  renderers delegate to Pi's original getters for every tool that defines
+  either renderer, never request a render, never write terminal output, and
+  never mutate Pi's differential state. The foreign tool keeps its owner:
+  the extension still owns the schema, execution, and result; only the
+  fallback presentation changes. The one-line argument summary for such
+  tools lives in `renderer.ts` (`foreign_arg_summary` /
+  `FOREIGN_ARG_SUMMARY_MAX_CHARS`) — never add a second foreign-tool name map
+  or a per-extension renderer.
 
 ### `pi-ember-images`
 
@@ -1075,6 +1164,40 @@ field. Keep that mechanism aligned with the actual plugin folders.
   these helpers — never hardcode both tools into a mode allowlist. Switching models in code mode
   refreshes the active tool set and sends a hidden `pi-agents-tool-access`
   reminder when the patch tool changes.
+- **Visual verification is a tool, not a script:** `edit-tools.ts` `VISUAL_TOOLS` is
+  the SSOT for "an agent can look at a rendered UI" — `window_list` +
+  `window_screenshot` (pi-ember-screen) plus `browser_navigate`,
+  `browser_snapshot`, `browser_take_screenshot`, `browser_measure`,
+  `browser_scroll`, `browser_focus`, `browser_console_messages` (pi-browser). It
+  is spread into code mode, `ORCHESTRATE_TOOLS` (the orchestrator verifies what it
+  delegates, with no editing tool), and `DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS`;
+  `coder.md` also lists it explicitly. `scout.md` stays read-only without it.
+  Subagent child sessions load `pi-ember-screen` (repo-relative) and the optional
+  user-local `pi-browser` extension discovered from `getAgentDir()`
+  (`visual_extension_paths()` in `subagent/extensions/runner.ts`) — never a
+  hardcoded user path — so a delegated Coder can measure a page instead of writing
+  a throwaway CDP/screenshot script. An agent must never respond to a visual
+  question by writing a screenshot script; it uses these tools or says it cannot.
+- **One browser tab per agent:** the subagent runner names every child session
+  after its agent (`sessionManager.appendSessionInfo(agentName)` immediately
+  after the session is created, which is the lettered label in parallel/chain
+  mode). Pi hands that name to every extension context of the session, and
+  pi-browser keys tab ownership on the session id while titling the tab with the
+  name, so a delegated Coder tests in its own tab instead of navigating the page
+  the parent (or a sibling Coder) is measuring. Never drop the name — agent tabs
+  become anonymous — and never move the call after the first prompt.
+- **Runtime context is the delivery mechanism, not the README:** a model only learns
+  a tool exists from the prompt it is sent. Three layers, each with one owner:
+  (1) `VISUAL_VERIFICATION_GUIDANCE` in `index.ts` is the SSOT text injected into
+  every mode prompt whose tool set contains `VISUAL_TOOLS` (code, orchestrate, and
+  the orchestrate→code exit) via `mode_reminder`/`exit_mode_reminder` — never
+  duplicate this text in another prompt; (2) each tool registration owns its
+  model-visible `description`, `promptSnippet` (the only way a tool appears in the
+  system prompt's Available tools list) and `promptGuidelines` (flat bullets that
+  must name their tool, since they are appended with no prefix); (3) `coder.md`
+  carries the subagent equivalent. A tool description that duplicates text living
+  in `src/tools/*.ts` is drift — import the module's exported `*_DESCRIPTION`
+  constant into the registration instead of restating it.
 - **Prompt Style:** Mode system prompts in `pi-custom-agents/index.ts` and
   bundled subagent `.md` definitions (`coder.md`, `scout.md`) provide concise,
   natural directives for role, tool awareness, uncertainty quiz guidance, and
@@ -1083,6 +1206,14 @@ field. Keep that mechanism aligned with the actual plugin folders.
   unresolved forks first; no Option A/B inside the plan; no `Open Questions:`
   section). Subagent definitions instruct agents not to narrate their process
   and to return results concisely.
+- **Host process safety guidance:** `pi-custom-agents/host-process-safety.ts`
+  exports `HOST_PROCESS_SAFETY_GUIDANCE` (SSOT) — the "do not use any command
+  to kill node, that is the process we are talking through" rule. It is
+  appended to every parent mode system prompt in `index.ts`
+  `build_system_prompt` and every subagent system prompt in
+  `subagent/extensions/runner.ts` `fullSystemPrompt`, so no agent can kill
+  the host Node process that runs the session. Never duplicate this text in
+  another plugin or another prompt builder.
 - Owns the plan-review flow, quiz tool, mode cycling, and
   `/subagent-model`. Registers the mode-id → label resolver
   (`setModeLabelResolver`) so the `pi-ember-ui` footer can render the active
@@ -1157,7 +1288,16 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `session_before_compact` (parent + subagent) and produces the structured
   checkpoint (`## Goal`, `## Progress`, `## Next Steps`,
   `<read-files>` / `<modified-files>`). Pi injects that checkpoint into LLM
-  context after compact(). **No split-turn pass:** Pi's native split-turn
+  context after compact(). **Uncapped summarizer:** the summarization request
+  is capped only by the model's own output limit
+  (`summarization_max_output_tokens` in `stack-compaction.ts`) — never by Pi's
+  `min(0.8 * reserveTokens, model.maxTokens)` formula, which stopped generation
+  mid-checkpoint (the checkpoint lost `## Next Steps` / `## Critical Context`).
+  `summarization_output_reserve_tokens` keeps that allowance for input
+  budgeting only, so the summarizer still sees the full discarded history, and
+  `summarization_failure` rejects a `length` stop so a truncated summary is
+  never persisted as a session checkpoint. **No split-turn pass:** Pi's native
+  split-turn
   concept (a second LLM call emitting a `**Turn Context (split turn):**` /
   `## Original Request` / `## Early Progress` block when the cut point falls
   mid-turn) is deleted from the Ember path. `run_stack_compaction` folds any
@@ -1259,6 +1399,26 @@ field. Keep that mechanism aligned with the actual plugin folders.
   and is reused by plan-fresh-session; unbind does not clear prior handlers).
   Each
   `session_start` re-binds from the live runner's `createCommandContext()`.
+  **`/resume` session catalog is built off the picker path and answered from
+  memory** (`pi-ember-sessions/session-index.ts`, SSOT; `model-picker.ts` owns
+  only the `(cwd, sessionDir)` key and the picker UI): reading every session
+  file in the project dir with Pi's parser costs ≈0.85 s of main-thread work and
+  keeps ~5 MB of conversation text (340 sessions / 304 MB here), so the catalog
+  is warmed in the background at `session_start` (`bind_model_picker_session`
+  primes; the scan never blocks startup), revived from the compact
+  per-project `PI_HOME/cache/sessions/` cache for instant cold starts, and
+  re-read only past the bytes it has already consumed (a cold pass over 340
+  sessions costs ≈0.29 s of background read and every later pass ≈2 ms plus the
+  turns you appended). Every hit — opening `/resume`, typing in its search
+  box, submitting
+  `/resume <ref>` — is answered immediately from memory or the index and NEVER
+  awaits the scan, not even the first one of a process; the picker repaints when
+  a background scan publishes (`subscribe_session_catalog`), and the catalog is
+  keyed by `(cwd, sessionDir)`, so a switch into another project never serves
+  the old dir's list. It stays warm across session replacement and is never
+  reset on `session_shutdown`. Never reintroduce a forced re-list, an awaited
+  rebuild, or a second parser on the picker path; the per-session
+  fuzzy-search corpus is memoized in a WeakMap for the same reason.
   When capture is temporarily missing, `/resume` falls back to the editor's
   native `submitValue` (per-instance, not the slash intercept). Session
   completions via `ctx.ui.addAutocompleteProvider`. Selection with
@@ -1362,7 +1522,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   for terminal rows; `renderAgentLabel` never renders it for running rows) —
   never render a live ticking elapsed on subagent rows.
   Parallel/chain mode renders each task/step as its own direct block (no
-  `Subagents` header, no `└ agent` children). No
+  `Subagents` header, no nested child rows). No
   `⏳`, `[scope]`, or `parallel (N tasks)` labels. Chain mode only shows
   running + completed steps (pending steps hidden until they start).
   `subagent-group.ts` `SubagentGroupRenderer` is now a **per-call record
@@ -1523,7 +1683,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
   When thinking blocks are visible (`!isThinkingBlocksHidden()`), a running
   subagent renders its live child activity directly below the agent name via
   `SubagentLiveOutputText` (a multi-line `Component` defined in `render.ts`),
-  replacing the single latest-tool / `└ Thinking` preview row. Visible child
+  replacing the single latest-tool / `│ Thinking` preview row. Visible child
   reasoning is a chronological Markdown sibling of compact tool bursts, built
   only through `create_live_thinking_markdown` in `pi-ember-ui/index.ts`
   (the canonical CachedMarkdown/live-theme/thinking-style pipeline): never
@@ -1534,14 +1694,17 @@ field. Keep that mechanism aligned with the actual plugin folders.
   so the vertical branch never visually breaks mid-segment (only trailing
   blanks past the last visible header remain unprefixed). When blocks
   are hidden, a running subagent shows only ONE single row below the agent
-  header: the latest tool call row (`  └[Tool]`), the gradient Thinking row
-  (`  └Thinking [elapsed]`), or the transient gradient Finishing row
-  (`  └Finishing`). Child `agent_end` sets the transient `SubAgentResult.isFinishing`
+  header: the latest tool call row (`  │[Tool]`), the gradient Thinking row
+  (`  │Thinking [elapsed]`), or the transient gradient Finishing row
+  (`  │Finishing`). `childPrefix()` in `render.ts` is their SSOT (flush
+  1-column `  │`, no trailing space) and they are painted with
+  `paint_tree_pipe()` like every other tree pipe. Child `agent_end` sets the transient `SubAgentResult.isFinishing`
   state; `agent_start`/`turn_start` clear it for retries and follow-ups;
   `agent_settled` clears it authoritatively. It is status-only, not a
   `liveItems` entry, so retained explicit child thinking cannot be evicted;
   visible parent thinking blocks never render Finishing.
-  The tray mirrors the main agent's `pi-compact-tools` work bundle: the
+  The tray reuses the main agent's `pi-compact-tools` row formatters and
+  `WORK_GROUP_KEY` grouping state, but keeps its own BOUNDED wave folding: the
   chronological `liveItems` buffer splits at visible assistant text and, in
   visible-thinking mode, at visible reasoning (each is a hard transcript
   boundary, like the main agent's `noteVisibleText()`). Each compact tool
@@ -1555,19 +1718,25 @@ field. Keep that mechanism aligned with the actual plugin folders.
   `records.length > 1` threshold as the main conversation's
   `renderCallInner`), with the leading `•` bullet stripped because the outer
   tray branch already marks the block: no `Explored 1 file` header for one
-  call. Within a multi-call burst, only the latest child remains visible;
-  each new call absorbs the previous child into the aggregate header, while
-  `currentWaveRows` retains the full record history for stats and rebuilds.
+  call. The tray is a live preview capped at
+  `SUBAGENT_LIVE_OUTPUT_MAX_ROWS`, so within a multi-call burst only the
+  latest child remains visible and each new call absorbs the previous child
+  into the aggregate header (`currentWaveRows` retains the full record history
+  for stats and rebuilds). This wave-fold is deliberately different from the
+  main transcript, where children accumulate until a hard boundary folds the
+  whole group — never copy either rule into the other renderer.
   Child rows reuse the SSOT
   `merge_group_child_rows` + `formatGroupChildRows` formatters (gradient
   verbs while running, muted past-tense when done, merged same-file
   `edit`/`write`/`apply_patch` rows with accumulated `+N -N`). Only
-  hidden-thinking mode paints the in-group `└ Thinking` lane (shared 20 FPS
+  hidden-thinking mode paints the in-group `│ Thinking` lane (shared 20 FPS
   gradient clock) after the child's latest tool wave; visible reasoning is
-  never a compact tool child. When the in-group lane is painted under a tray
+  never a compact tool child. The lane is in-flight reasoning and keeps the
+  bare vertical pipe; a grouped tray child row keeps that same `│` whether it
+  is running or completed (the shared `format_compact_group_child_prefix`
+  pipe-only SSOT — there is no `└` corner). When the in-group lane is painted under a tray
   work segment, the prior tool child collapses (the lane replaces it) and any
-  earlier completed children stay as bare `│` continuations — only the
-  Thinking lane owns the terminal `└`. The tray sets `group.thinkingChild` before
+  earlier completed children stay as bare `│` continuations. The tray sets `group.thinkingChild` before
   `buildGroupStaticText` so the SSOT show_thinking path derives those
   prefixes exactly like the main renderer (production keeps
   `isThinkingBlocksHidden()` true whenever the tray is in hidden mode). Streamed assistant messages
@@ -1584,15 +1753,18 @@ field. Keep that mechanism aligned with the actual plugin folders.
   (`│`, not bare blanks) and count toward the 15-line budget; empty markers and blank-only Markdown results are omitted.
   The tray's branch glyph marks the terminal row of the LAST chronological
   segment: a trailing multi-row work block marks its group header (its child
-  rows keep their own inner `└`), every other trailing segment marks its last
-  visible row. Anchoring on the last group header of the whole tray instead
+  rows keep their own inner prefix), every other trailing segment marks its
+  last visible row. Anchoring on the last group header of the whole tray instead
   stripped the pipe — and the branch line — from every row of a later segment:
   visible reasoning after a tool burst rendered as unpiped text with bare blank
-  gaps, and a trailing single-tool row lost its `└` (2026-08-10 regression).
-  No top horizontal rule; a bottom `──` rule (via
+  gaps, and a trailing single-tool row lost its branch glyph (2026-08-10
+  regression). Every tray row up to and including that terminal row keeps the
+  one vertical pipe — running and settled alike; there is no `└` terminator
+  (`SUBAGENT_TRAY_LAST` is gone) and the bottom `──` rule below
+  is the only completion marker. No top horizontal rule; a bottom `──` rule (via
   `chatboxBorderColor`) appears only
-  when the agent settles. When more than one subagent is shown, the agent tree
-  stays continuous (`│` / `├` / `└`) and no extra horizontal rule is inserted
+  when the agent settles. When more than one subagent is shown, the agent blocks
+  stay continuous (`│` only) and no extra horizontal rule is inserted
   between consecutive agent blocks. The live buffer
   (`SubAgentResult.liveItems`, `SubagentLiveItem[]` — one `tool` item per
   child call keyed by its `toolCallId` so running rows complete in place
@@ -1967,6 +2139,104 @@ field. Keep that mechanism aligned with the actual plugin folders.
   bare-content contract explicitly.
 - **Quiet output defaults:** auto-read is OFF by default (`DEFAULT_CONFIG.autoRead = false` in `config.ts`, mirrored by the module-level `autoRead = false` in `index.ts`). A successful `replace` returns one confirmation line — `Successfully replaced in {path}. Added N line(s), removed M line(s). Lines X–Y changed.` — and nothing else; the model calls `read` explicitly (with offset/limit) when it needs fresh anchors. The `/toggle-auto-read` command still flips it live for sessions that want the post-edit delta diff. When auto-read IS enabled, the post-edit diff is delta-only (`genDiff` context 0): just the changed `+/-` rows with hashes, no surrounding context block and no `...` ellipsis — a two-line change returns two rows, not 40. The `RangeStaleError` and undo diff use the same delta-only mode. Never re-enable auto-read by default or restore the full-context post-edit diff — the noise was the top friction report.
 
+### `pi-ember-sessions`
+
+- **Session catalog SSOT:** `session-index.ts` is the only place that scans a
+  session dir (through `session-record.ts`; Pi's `SessionManager.list` is the
+  parity oracle in tests, never the reader on the catalog path). Consumers
+  (`/resume` in `pi-ember-ui/model-picker.ts`, the fleet view, future session
+  browsers) call `get_session_catalog` / `prime_session_catalog` /
+  `refresh_session_catalog` / `peek_session_catalog` and share one catalog per
+  `(cwd, sessionDir)` key.
+- **A hit never awaits a scan.** A cold scan of a busy project (340 sessions /
+  304 MB) costs ≈0.29 s in the background and every later one is a readdir +
+  one stat per file (≈2 ms) plus the bytes appended since, so
+  `get_session_catalog` answers in O(1) from the resident catalog, else from
+  the compact on-disk index, else with an empty list while
+  the scan runs behind it — it never returns the scan promise. The picker
+  repaints when the scan publishes (`subscribe_session_catalog` in
+  `bind_resume_catalog_repaint`), so a cold start fills its rows in place
+  instead of freezing the TUI. Never reintroduce an await on the build path:
+  a hit landing inside the startup parse was a measured 550 ms stall and the
+  whole reason the catalog exists.
+- **Per-file size/mtime decides what to re-read** (`session-record.ts`).
+  session files are append-only, so a grown file is read from its stored
+  `consumedSize` cursor to EOF and its record is updated in place (count, name,
+  checkpoint, recent text); an unchanged file returns the very same record
+  object, so a warm scan publishes nothing and the catalog keeps its array
+  identity. A shrunk or same-size-rewritten file is re-read whole. Never go
+  back to a dir-wide signature gate: one appended line in the session you are
+  in used to invalidate every file in the project.
+  `prime_session_catalog` (session start) ignores the hit-path
+  `CATALOG_VALIDATE_TTL_MS` gate — a session start is exactly when a file
+  changed.
+- **The search corpus is bounded on purpose** (`CORPUS_MAX_CHARS` in
+  `session-record.ts`): opening request + newest compaction checkpoints + the
+  most recent turns, ≈0.6 MB for 340 sessions instead of 4.8 MB of whole
+  conversations. A compaction checkpoint already summarizes everything older,
+  which is why dropping the pre-checkpoint bulk costs almost no
+  searchability — measured against Pi's full corpus, the top hit agrees on
+  10 of 12 real queries, and the misses are phrases that only ever appear
+  mid-conversation in a long session (the oracle's top row still ranks #2
+  in one case, #108 in the other — a recall floor a term index would fix,
+  at the cost of bytes). Never parse conversation lines into the corpus: the
+  streaming pass counts entries and reads only the lines that carry list
+  data, the opening request is decoded inside that same pass (the line is
+  already in hand — no second read), and the recent text comes from a
+  bounded tail window parsed NEWEST-FIRST so it stops as soon as the window
+  is full instead of parsing every chat line it contains.
+- **Startup cache, one file per project.** `PI_HOME/cache/sessions/<hash>.json`
+  holds one dir's records (row fields + the `consumedSize` cursor), ~1 MB for a
+  340-session project, never whole conversations: persisting `allMessagesText`
+  produced a 22 MB file the picker had to read. A restart answers every project
+  you have opened from its own file (measured 0.7-9 ms per project, five
+  projects / 1.1 MB total) and then diffs it with a readdir + stat pass, so the
+  only slow moment is a project's very first scan. Index version 4; a file over
+  `INDEX_MAX_BYTES` is dropped without being read. Writes are temp-file +
+  rename (a killed process cannot leave a torn cache; the rename-failure
+  fallback covers Windows), only DIRTY dirs are rewritten (a publish in one
+  project never rewrites the others' files), and writes are rate-limited to one
+  per `INDEX_WRITE_MIN_INTERVAL_MS` (5 s) — the first write of a process is
+  immediate, later publishes only mark the dir dirty, and `flush_session_cache`
+  (awaited on `session_shutdown`) carries the rest. Rewriting a ~1 MB file on
+  every turn was pure churn: the in-memory catalog is always current and only
+  the startup read uses the file. `sweep_session_cache` runs once per process at
+  the first prime: it drops files older than `CACHE_MAX_AGE_MS` (14 days), trims
+  the dir to `CACHE_MAX_FILES` (16) newest — always keeping the current project
+  — and deletes the superseded single-file `pi-ember-sessions.json` index. In
+  memory at most `CATALOG_MAX_DIRS_IN_MEMORY` (4) record sets stay resident. An
+  unreadable/missing dir never publishes (an empty catalog must not overwrite a
+  good one), and the catalog is NOT reset on `session_shutdown` — it is inert
+  session-dir data that the next session reuses while its dir check runs.
+  Display helpers (`format_session_age`, `session_label`,
+  `session_search_text`) live here too — never re-implement a session row's
+  age, label, or search corpus in a consumer.
+- **Fleet (background conversations):** `fleet.ts` is the registry,
+  `session-factory.ts` is the production runtime factory (SDK). A fleet
+  conversation is a normal Pi `AgentSession` running in-process on the main
+  thread — same building blocks as a subagent (`load_subagent_extensions`,
+  `build_subagent_settings`, `DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS`, the
+  parent `ModelRuntime` through `model-runtime-bridge.ts`) — but long-lived and
+  addressable by name. Its session file is a real project session, so `/resume`
+  lists it and `switchSession` opens it. Commands: `/fleet`, `/fleet new
+  <name> [message]`, `/fleet send <name> <message>`, `/fleet switch <name>`,
+  `/fleet stop <name>`, `/fleet forget <name>`, `/fleet list`.
+- **One writer per session file:** a conversation is owned by either the fleet
+  or the TUI, never both. `release_fleet_session` aborts and disposes the fleet
+  runtime before `ctx.switchSession` opens the file; a session that never ran
+  has no file yet (Pi defers session-file creation to the first assistant
+  message) and refuses to open. Never add a path that lets the TUI and a fleet
+  handle write one session file.
+- **The fleet outlives session replacement:** `session_shutdown` drops only the
+  parent binding; running conversations keep streaming and the next
+  `session_start` revives the list from `PI_HOME/fleet.json` (read-merge-write
+  of the same file the plugin registry owns, never a second state file).
+  `reset_fleet({ dispose: true })` exists for tests only.
+- **Render boundary:** this plugin never paints and starts no timer. The fleet
+  list goes through Pi's own `ctx.ui.select`; background status lands in the
+  registry and notifies subscribers (no TUI writes, no render scheduler).
+  Status text is one line per session (`format_fleet_row`) — activity clears on
+  settle/error so a finished run never leaves a stale `sending…`/text row.
 ### `pi-ember-tps`
 
 - Owns the live tokens-per-second metric. TPS color thresholds and alpha
@@ -2016,7 +2286,7 @@ field. Keep that mechanism aligned with the actual plugin folders.
 
 ### `pi-ember-screen`
 
-- Owns two cross-platform desktop tools for visual verification from inside pi:
+- Owns three cross-platform desktop tools for visual verification from inside pi:
   `window_list` (enumerate visible top-level windows with process, title, size,
   pid, and handle) and `window_screenshot` (capture one window to a PNG and
   return it as image content so the model inspects a real running UI instead of
@@ -2026,8 +2296,9 @@ field. Keep that mechanism aligned with the actual plugin folders.
 - Registered only when `process.platform` is `win32` or `darwin`, so other
   platforms never see tools they cannot fulfil.
 - **Bun owns all native work.** `helper.ts` is a Bun program spawned by the
-  plugin; `platform/win32.ts` and `platform/darwin.ts` bind user32/gdi32 and
-  CoreGraphics through `bun:ffi`. pi itself runs on Node and Node has no FFI,
+  plugin; `platform/win32.ts` (user32/gdi32/kernel32/shell32),
+  `platform/win32-wgc.ts` (combase/d3d11 plus the COM/WinRT vtables) and
+  `platform/darwin.ts` (CoreGraphics) bind native code through `bun:ffi`. pi itself runs on Node and Node has no FFI,
   so the helper is a child process by design: a wedged `PrintWindow` /
   CoreGraphics call must be killable, and a blocked thread is not. Bun is
   resolved from `PI_EMBER_SCREEN_BUN` / `BUN_BIN` (then `~/.bun/bin/bun.exe`,
@@ -2037,25 +2308,76 @@ field. Keep that mechanism aligned with the actual plugin folders.
   compact row (`render.ts`); `args.ts` is the argv contract shared with the
   helper. The helper writes exactly one JSON object to stdout and keeps
   diagnostics on stderr; failures return `ok: false` with a message.
-- Capture uses `PrintWindow` with `PW_RENDERFULLCONTENT` on Windows so
-  DWM-composited Qt/Chromium windows render even when occluded. When Windows
-  returns no pixels for a window (it paints through the compositor) the
-  screen-region fallback runs ONLY while that window is the foreground window —
-  otherwise it would return whatever is drawn on top of it — and reports
-  `method: "screen-copy"`. On macOS pixels come from Apple's `screencapture -x
-  -o -l <windowid>`, which owns the Screen Recording permission flow.
-- Background capture has a hard Windows limit: while a fullscreen application owns
-  the display, Windows stops rendering covered windows, so PrintWindow returns an
-  empty surface for every occluded window and a screen-region copy would return
-  the wrong pixels. No user-space API can read them back (DXGI duplication has no
-  composed frames in that state either). The tool detects it with
-  `SHQueryUserNotificationState` (QUNS_BUSY / QUNS_RUNNING_D3D_FULL_SCREEN),
-  names the blocking app, and `blocker_message` selects the message: fullscreen
-  owner > minimized > covering window. The fullscreen app itself and the desktop
-  still capture normally. Never silently return a screen-region copy of a covered
-  window — refusing is the correct behavior.
+- **Capture ladder (Windows).** `capture_surface` in `platform/win32.ts` walks
+  three rungs, cheapest first, and reports which one produced the pixels as
+  `method`:
+  1. `printwindow` — `PrintWindow(PW_RENDERFULLCONTENT)`: the owning app paints
+     itself. Fast and exact, but blank for a GPU-composited surface, and it has
+     no timeout variant, so a window the shell already reports as hung skips it
+     (it would never answer and the call would block).
+  2. `wgc` — `Windows.Graphics.Capture` via `platform/win32-wgc.ts`, which owns
+     the WinRT/D3D11 FFI. DWM hands over the window's own composition surface,
+     so this rung works while the window is covered by another window, is drawn
+     by DirectComposition/flip-model (Qt, Chromium, WinUI), or its app stopped
+     pumping messages (the last composed frame is what is on screen).
+  3. `screen-copy` — a screen-region `BitBlt` for the window rect, allowed only
+     while the window is the foreground window or `visible_at_center` finds it at
+     its own centre point; otherwise it would return whatever is on top of it, so
+     it refuses instead of lying.
+  `platform/win32-wgc.ts` is the single owner of the WGC IIDs (Windows Runtime
+  IDL), the ABI vtable slots (Windows SDK headers), and the Win64 by-value
+  packing (`pack_int32_pair`) — never re-derive them elsewhere. `WindowFromPoint`
+  and `GraphicsCaptureItem::Size` both take an 8-byte value, not a pointer: the
+  packing helper is what makes `visible_at_center` correct.
+  On macOS pixels come from Apple's `screencapture -x -o -l <windowid>`, which
+  owns the Screen Recording permission flow.
+- Background capture has one hard Windows limit: while an *exclusive-fullscreen*
+  application owns the display, Windows stops composing every other window, so
+  neither PrintWindow nor the compositor has a frame to hand over. The tool
+  detects it with `SHQueryUserNotificationState` (QUNS_BUSY /
+  QUNS_RUNNING_D3D_FULL_SCREEN), names the blocking app, and `blocker_message`
+  selects the message: fullscreen owner > minimized > not responding > covering
+  window, appending the compositor's own failure reason when there is one. The
+  fullscreen app itself and the desktop still capture normally. Never silently
+  return a screen-region copy of a covered window — refusing is the correct
+  behavior.
+- A window that is not responding is capturable: the compositor rung needs no
+  message pump, and if DWM has already swapped the window for a ghost bitmap the
+  screen-copy rung reads the ghost while the window is on top. Only a minimized
+  window is a hard stop (the compositor has no current surface for it, and its
+  last frame would be stale pixels presented as the live UI).
+- **Pid targeting:** `window_list {pid}` and `window_screenshot {pid}` take the pid of
+  a process the caller started (`myapp & echo $!`), so a window is found without
+  listing the desktop or matching a title. `--pid` is part of the `args.ts` helper
+  contract; `resolve_target` on both platforms resolves handle → pid → substring and
+  shares one largest-visible-window ranking between pid and substring targeting, so an
+  app's real window beats the tool/helper windows it also owns. A pid with no visible
+  window explains itself instead of guessing: the process may have exited, its window
+  may belong to a child process it spawned (an app that forks a helper), or it may be
+  console-only, whose window belongs to the terminal hosting it. Never fall back to the
+  foreground window when a pid was given.
+- **Screenshot timer:** `window_screenshot_timer` captures one window on a
+  millisecond cadence and returns every frame as a single numbered contact
+  sheet, so an agent can see motion instead of one still. `sequence.ts` is the
+  SSOT for the cadence, the bounds, the grid math, the sheet, and the parent's
+  deadline; the loop runs INSIDE the helper process, because a per-frame helper
+  spawn costs more than the interval itself. Frames are captured at contact-sheet
+  tile size (the capture takes `maxWidth` = cell width): on a 3000x2000 window that
+  is the difference between a 1.3 s and a ~300 ms cadence, and it makes the tiles
+  exact instead of resampled twice. The cadence is a fixed schedule, not
+  capture-plus-sleep, so a slow frame eats its own slot and the reported
+  `offset_ms` values are the truth about when each frame was taken. The tool sets
+  `executionMode: "parallel"` on purpose: the burst belongs in the same batch as
+  the interaction that drives the app, which is the whole point of a timer.
+  `window_screenshot_timer` is in `SCREEN_TOOLS` (and therefore `VISUAL_TOOLS`,
+  code mode, orchestrate, and `DEFAULT_SUBAGENT_IMPLEMENTATION_TOOLS`). Each tile
+  is labelled with its frame number — reading a grid by position alone is where
+  models miscount — and the per-frame files are listed in the tool result so a
+  specific moment can be opened at tile size, with `window_screenshot` for full
+  resolution.
 - Minimized windows are attempted rather than refused (PrintWindow usually still
-  paints them); a blank result reports a minimized-specific message. The
+  paints them) but skip the compositor rung — a minimized window has no current
+  composition surface — so a blank result reports a minimized-specific message. The
   `--include-minimized` helper flag backs the `include_minimized` tool parameter,
   which the helper would otherwise filter away before the tool could honor it.
 - Retina/DPI: `SetProcessDPIAware` on Windows; macOS reports the backing-pixel

@@ -170,7 +170,7 @@ describe("thinking blocks visibility transition", () => {
 		render_read(renderer, make_context("t-a", {}), "a.ts", theme);
 		render_grep(renderer, make_context("t-b", {}), "x", "b.ts", theme);
 		renderer.settleAllGroups();
-		// Hidden reasoning owns the in-group `└ Thinking` lane.
+		// Hidden reasoning owns the in-group `│ Thinking` lane.
 		apply_assistant_stream_boundary(renderer, {
 			type: "thinking_delta",
 			delta: "hidden reasoning between tool waves",

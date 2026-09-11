@@ -85,8 +85,14 @@ function bindings_open() {
 		CFArrayGetValueAtIndex: { args: [FFIType.ptr, FFIType.i64], returns: FFIType.ptr },
 		CFDictionaryGetValue: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
 		CFNumberGetValue: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr], returns: FFIType.bool },
-		CFStringGetCString: { args: [FFIType.ptr, FFIType.ptr, FFIType.i64, FFIType.u32], returns: FFIType.bool },
-		CFStringCreateWithCString: { args: [FFIType.ptr, FFIType.cstring, FFIType.u32], returns: FFIType.ptr },
+		CFStringGetCString: {
+			args: [FFIType.ptr, FFIType.ptr, FFIType.i64, FFIType.u32],
+			returns: FFIType.bool,
+		},
+		CFStringCreateWithCString: {
+			args: [FFIType.ptr, FFIType.cstring, FFIType.u32],
+			returns: FFIType.ptr,
+		},
 		CFRelease: { args: [FFIType.ptr], returns: FFIType.void },
 	});
 	return {
@@ -123,7 +129,10 @@ function dict_string(dict: CfRef, key: CfRef): string {
 	const value = lib().c.CFDictionaryGetValue(dict, key);
 	if (!value) return "";
 	const buffer = new Uint8Array(STRING_BUFFER_BYTES);
-	if (!lib().c.CFStringGetCString(value, ptr(buffer), STRING_BUFFER_BYTES, K_CF_STRING_ENCODING_UTF8)) return "";
+	if (
+		!lib().c.CFStringGetCString(value, ptr(buffer), STRING_BUFFER_BYTES, K_CF_STRING_ENCODING_UTF8)
+	)
+		return "";
 	const end = buffer.indexOf(0);
 	return Buffer.from(buffer.subarray(0, end < 0 ? buffer.length : end)).toString("utf8");
 }
@@ -224,13 +233,14 @@ export function enumerate_windows(): WindowInfo[] {
 	return found;
 }
 
-export function list_windows(options: { limit: number; minSize: number }): {
+export function list_windows(options: { limit: number; minSize: number; pid?: number }): {
 	count: number;
 	hung_count: number;
 	windows: WindowInfo[];
 } {
 	const candidates = enumerate_windows()
 		.filter((entry) => entry.width >= options.minSize && entry.height >= options.minSize)
+		.filter((entry) => options.pid === undefined || entry.pid === options.pid)
 		.sort((a, b) => b.width * b.height - a.width * a.height);
 	const shown = candidates.slice(0, Math.max(1, options.limit));
 	if (!screen_recording_allowed() && candidates.some((entry) => !entry.title)) {
@@ -241,20 +251,40 @@ export function list_windows(options: { limit: number; minSize: number }): {
 	return { count: candidates.length, hung_count: 0, windows: shown };
 }
 
-function resolve_target(options: { handle?: number; match?: string }): { entry: WindowInfo; selection: string } {
+function resolve_target(options: { handle?: number; match?: string; pid?: number }): {
+	entry: WindowInfo;
+	selection: string;
+} {
 	const all = enumerate_windows();
 	if (options.handle && options.handle > 0) {
 		const entry = all.find((candidate) => candidate.handle === options.handle);
 		if (!entry) throw new DarwinError(`No top-level window with handle ${options.handle}.`);
 		return { entry, selection: `handle=${options.handle}` };
 	}
+	// A pid names the process the caller just started, so no listing is needed.
+	if (options.pid && options.pid > 0) {
+		const entry = [...all]
+			.filter((candidate) => candidate.pid === options.pid)
+			.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+		if (!entry) {
+			throw new DarwinError(
+				`pid ${options.pid} has no window — the process may have exited, its window may belong to a child process it started, or it may be console-only (a console app's window belongs to the terminal hosting it). Call window_list to see what is on screen.`,
+			);
+		}
+		return { entry, selection: `pid=${options.pid}` };
+	}
+
 	if (options.match) {
 		const needle = options.match.toLowerCase();
 		const entry = all.find(
 			(candidate) =>
-				candidate.process.toLowerCase().includes(needle) || candidate.title.toLowerCase().includes(needle),
+				candidate.process.toLowerCase().includes(needle) ||
+				candidate.title.toLowerCase().includes(needle),
 		);
-		if (!entry) throw new DarwinError(`No window matched '${options.match}'. Call window_list to see available windows.`);
+		if (!entry)
+			throw new DarwinError(
+				`No window matched '${options.match}'. Call window_list to see available windows.`,
+			);
 		return { entry, selection: `match=${options.match}` };
 	}
 	const entry = [...all].sort((a, b) => b.width * b.height - a.width * a.height)[0];
@@ -265,6 +295,7 @@ function resolve_target(options: { handle?: number; match?: string }): { entry: 
 export async function capture_window(options: {
 	handle?: number;
 	match?: string;
+	pid?: number;
 	out?: string;
 	scale: number;
 	maxWidth: number;
@@ -290,14 +321,17 @@ export async function capture_window(options: {
 	// below; capture into a scratch file rather than the caller's path.
 	const scratch = `${outPath}.capture-${stamp()}.png`;
 	const captureArgs = ["-x", "-o", "-l", String(entry.handle)];
-	const capture = Bun.spawnSync([
-		"screencapture",
-		...captureArgs,
-		options.format === "png" && !options.maxWidth && options.scale >= 1 ? outPath : scratch,
-	], {
-		stdout: "pipe",
-		stderr: "pipe",
-	});
+	const capture = Bun.spawnSync(
+		[
+			"screencapture",
+			...captureArgs,
+			options.format === "png" && !options.maxWidth && options.scale >= 1 ? outPath : scratch,
+		],
+		{
+			stdout: "pipe",
+			stderr: "pipe",
+		},
+	);
 	if (capture.exitCode !== 0) {
 		const detail = capture.stderr.toString().trim();
 		throw new DarwinError(
@@ -305,7 +339,9 @@ export async function capture_window(options: {
 		);
 	}
 
-	const captured = Bun.file(options.format === "png" && !options.maxWidth && options.scale >= 1 ? outPath : scratch);
+	const captured = Bun.file(
+		options.format === "png" && !options.maxWidth && options.scale >= 1 ? outPath : scratch,
+	);
 	if (!(await captured.exists()) || captured.size === 0) {
 		throw new DarwinError(
 			`screencapture produced no image for window ${entry.handle}. Check Screen Recording permission for your terminal.`,

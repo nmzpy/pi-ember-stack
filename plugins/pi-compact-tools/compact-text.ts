@@ -3,6 +3,9 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 
 export const BULLET = "• ";
 
+/** Browser tool calls use the diamond marker with no trailing space — the
+ *  label sits one column left of every `• ` bullet row. */
+export const BROWSER_BULLET = "◇";
 /** ANSI-aware multi-line tool row — truncates each line to viewport width. */
 export class CompactGroupText implements Component {
 	text = "";

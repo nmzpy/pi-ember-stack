@@ -47,8 +47,13 @@ export interface ScreenRowArgs {
 	limit?: number;
 	window?: string;
 	handle?: number;
+	pid?: number;
 	max_width?: number;
 	scale?: number;
+	/** window_screenshot_timer only. */
+	frames?: number;
+	interval_ms?: number;
+	delay_ms?: number;
 }
 
 export interface ScreenRowContext {
@@ -81,9 +86,18 @@ function list_extras(args: ScreenRowArgs): string[] {
 /** Capture target description: handle, window match, or the foreground window. */
 function capture_target(args: ScreenRowArgs): string {
 	if (typeof args.handle === "number" && args.handle > 0) return `hwnd ${Math.trunc(args.handle)}`;
+	if (typeof args.pid === "number" && args.pid > 0) return `pid ${Math.trunc(args.pid)}`;
 	const match = one_line(args.window);
 	if (match) return `"${match}"`;
 	return "foreground";
+}
+
+function plural(count: number, noun: string): string {
+	return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function seconds(ms: number): string {
+	return `${ms < 10_000 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000)}s`;
 }
 
 /** First non-empty text part of a tool result — the failure message when a call errored. */
@@ -115,17 +129,17 @@ export function format_window_list_row(
 	const extras = list_extras(args).map((extra) => theme.fg("dim", ` ${extra}`));
 	if (isError) {
 		const reason = truncate_chars(one_line(errorText, "failed"), MAX_ROW_MESSAGE_CHARS);
-		return `${bullet}${theme.fg("error", theme.bold("List"))}${theme.fg("dim", ` ${reason}`)}`;
+		return `${bullet}${theme.fg("error", "List")}${theme.fg("dim", ` ${reason}`)}`;
 	}
 	if (!completed) {
-		return `${bullet}${theme.fg("muted", theme.bold("Listing"))}${extras.join("")}`;
+		return `${bullet}${theme.fg("muted", "Listing")}${extras.join("")}`;
 	}
 	let summary = "windows";
 	if (windowCount !== null) {
 		summary = `${windowCount} window${windowCount === 1 ? "" : "s"}`;
 		if (hungCount > 0) summary += `, ${hungCount} not responding`;
 	}
-	return `${bullet}${theme.fg("muted", theme.bold("Listed"))}${theme.fg("text", ` ${summary}`)}${extras.join("")}`;
+	return `${bullet}${theme.fg("muted", "Listed")}${theme.fg("text", ` ${summary}`)}${extras.join("")}`;
 }
 
 /**
@@ -143,10 +157,10 @@ export function format_window_screenshot_row(
 	const bullet = statusBulletColor(isError, completed, theme);
 	if (isError) {
 		const reason = truncate_chars(one_line(errorText, "failed"), MAX_ROW_MESSAGE_CHARS);
-		return `${bullet}${theme.fg("error", theme.bold("Capture"))}${theme.fg("dim", ` ${reason}`)}`;
+		return `${bullet}${theme.fg("error", "Capture")}${theme.fg("dim", ` ${reason}`)}`;
 	}
 	if (!completed || !captured) {
-		return `${bullet}${theme.fg("muted", theme.bold("Capturing"))}${theme.fg("dim", ` ${capture_target(args)}`)}`;
+		return `${bullet}${theme.fg("muted", "Capturing")}${theme.fg("dim", ` ${capture_target(args)}`)}`;
 	}
 	const process = one_line(captured.process, "window");
 	const size =
@@ -157,7 +171,7 @@ export function format_window_screenshot_row(
 	// The default encoding is not worth row space; an override is.
 	const format =
 		captured.format && captured.format !== DEFAULT_FORMAT ? theme.fg("dim", ` ${captured.format}`) : "";
-	return `${bullet}${theme.fg("muted", theme.bold("Captured"))}${theme.fg("text", ` ${process}${size}`)}${format}${method}`;
+	return `${bullet}${theme.fg("muted", "Captured")}${theme.fg("text", ` ${process}${size}`)}${format}${method}`;
 }
 
 /**
@@ -226,7 +240,90 @@ export function window_screenshot_detail_lines(
 	return lines;
 }
 
+/**
+ * `window_screenshot_timer` row. Running: `Timing pid 1234 6 frames / 250ms`.
+ * Completed: `Timed 6 frames in 1.4s brave 1599x1010 sheet`.
+ */
+export function format_window_frames_row(
+	theme: ScreenTheme,
+	args: ScreenRowArgs,
+	completed: boolean,
+	isError: boolean,
+	errorText = "",
+	burst: WindowFramesSummary | null = null,
+): string {
+	const bullet = statusBulletColor(isError, completed, theme);
+	const requested = [
+		typeof args.frames === "number" && args.frames > 0 ? plural(Math.floor(args.frames), "frame") : "",
+		typeof args.interval_ms === "number" && args.interval_ms > 0
+			? `/${Math.floor(args.interval_ms)}ms`
+			: "",
+	]
+		.filter(Boolean)
+		.join(" ");
+
+	if (isError) {
+		const reason = truncate_chars(one_line(errorText, "failed"), MAX_ROW_MESSAGE_CHARS);
+		return `${bullet}${theme.fg("error", "Timer")}${theme.fg("dim", ` ${reason}`)}`;
+	}
+	if (!completed || !burst) {
+		return `${bullet}${theme.fg("muted", "Timing")}${theme.fg("dim", ` ${capture_target(args)} ${requested}`)}`;
+	}
+	const count = burst.frames ?? 0;
+	const took = typeof burst.duration_ms === "number" ? ` in ${seconds(burst.duration_ms)}` : "";
+	const size =
+		typeof burst.width === "number" && typeof burst.height === "number"
+			? ` ${burst.width}x${burst.height}`
+			: "";
+	return `${bullet}${theme.fg("muted", "Timed")}${theme.fg("text", ` ${plural(count, "frame")}${took}`)}${theme.fg("dim", ` ${one_line(burst.process, "window")}${size} sheet`)}`;
+}
+
+export interface WindowFramesSummary {
+	frames?: number;
+	duration_ms?: number;
+	interval_ms?: number;
+	process?: string;
+	width?: number;
+	height?: number;
+}
+
+/** Expanded `window_screenshot_timer` detail rows: the sheet, then each frame. */
+export function window_frames_detail_lines(
+	theme: ScreenTheme,
+	burst: {
+		sheet?: { path?: string; width?: number; height?: number };
+		frames?: Array<{ path?: string; offset_ms?: number; width?: number; height?: number }>;
+		selection?: string;
+		interval_ms?: number;
+		delay_ms?: number;
+	},
+): string[] {
+	const lines: string[] = [];
+	const sheet = burst.sheet ?? {};
+	if (sheet.path) {
+		const size =
+			typeof sheet.width === "number" && typeof sheet.height === "number"
+				? ` ${sheet.width}x${sheet.height}`
+				: "";
+		lines.push(theme.fg("dim", `  sheet${size} ${sheet.path}`));
+	}
+	if (typeof burst.interval_ms === "number") {
+		const delay = burst.delay_ms ? ` after ${burst.delay_ms} ms` : "";
+		lines.push(
+			theme.fg(
+				"dim",
+				`  every ${burst.interval_ms} ms${delay}${burst.selection ? ` (${burst.selection})` : ""}`,
+			),
+		);
+	}
+	for (const frame of burst.frames ?? []) {
+		const offset = typeof frame.offset_ms === "number" ? `${frame.offset_ms} ms` : "?";
+		lines.push(theme.fg("dim", `  ${offset.padStart(7)}  ${frame.path ?? ""}`));
+	}
+	return lines;
+}
+
 /** Bullet-only row used when a screen tool is registered but cannot run here. */
 export function format_unavailable_row(theme: ScreenTheme, label: string, reason: string): string {
-	return `${theme.fg("muted", BULLET)}${theme.fg("muted", theme.bold(label))}${theme.fg("dim", ` ${reason}`)}`;
+	return `${theme.fg("muted", BULLET)}${theme.fg("muted", label)}${theme.fg("dim", ` ${reason}`)}`;
 }

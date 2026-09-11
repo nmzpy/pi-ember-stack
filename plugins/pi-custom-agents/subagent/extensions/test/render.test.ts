@@ -20,10 +20,9 @@ import {
 	BULLET,
 	formatCompactChildRow,
 	formatGroupChildRows,
-	TREE_BRANCH_TEE,
-	TREE_NESTED_LAST,
-	TREE_NESTED_PIPE,
-	TREE_SINGLE_TOOL,
+	format_compact_group_child_prefix,
+	GROUP_CHILD_PIPE,
+	TREE_BRANCH_PIPE,
 } from "../../../../pi-compact-tools/renderer.ts";
 import { set_gradient_colorizer, reset_gradient_colorizer, type Rgb } from "../../../../pi-ember-ui/gradient.ts";
 import { THINKING_GRADIENT_PRESET } from "../../../../pi-ember-ui/thinking-status-render.ts";
@@ -235,16 +234,16 @@ describe("SubagentLiveOutputText", () => {
 		const rows = new SubagentLiveOutputText(items, "  ", true, theme)
 			.render(80)
 			.map(stripAnsi);
-		const read_index = rows.findIndex((line) => line.includes("[muted:*Read*]"));
+		const read_index = rows.findIndex((line) => line.includes("[muted:Read]"));
 		const text_index = rows.findIndex((line) => line.includes("Checking the popover."));
-		const pad_rows = rows.filter((line) => line === "  [dim:│]");
+		const pad_rows = rows.filter((line) => line === "  │");
 
 		expect(read_index).toBeGreaterThanOrEqual(0);
-		expect(rows[read_index + 1]).toBe("  [dim:│]");
+		expect(rows[read_index + 1]).toBe("  │");
 		expect(text_index).toBe(read_index + 2);
 		expect(pad_rows).toHaveLength(1);
 		expect(rows[text_index]).toContain("Checking the popover.");
-		expect(rows[text_index + 1]).toContain("[muted:*Edited*]");
+		expect(rows[text_index + 1]).toContain("[muted:Edited]");
 	});
 
 	test("visible multi-tool bursts pad only after the latest rendered child", () => {
@@ -258,12 +257,12 @@ describe("SubagentLiveOutputText", () => {
 			.render(80)
 			.map(stripAnsi);
 		const latest_tool_index = rows.findIndex((line) => line.includes("auth"));
-		const pad_rows = rows.filter((line) => line === "  [dim:│]");
+		const pad_rows = rows.filter((line) => line === "  │");
 
 		expect(latest_tool_index).toBeGreaterThanOrEqual(0);
-		expect(rows[latest_tool_index + 1]).toBe("  [dim:│]");
+		expect(rows[latest_tool_index + 1]).toBe("  │");
 		expect(pad_rows).toHaveLength(1);
-		expect(rows.at(-1)).not.toBe("  [dim:│]");
+		expect(rows.at(-1)).not.toBe("  │");
 		expect(rows.at(-1)).toContain("Reasoning about the next edit.");
 		expect(rows.join("\n")).not.toContain("a.ts");
 	});
@@ -282,15 +281,17 @@ describe("SubagentLiveOutputText", () => {
 		];
 		const rows = new SubagentLiveOutputText(items, "  ", true, theme).render(80).map(stripAnsi);
 
-		// The trailing single-tool row owns the tray's terminal branch glyph.
-		expect(rows.at(-1)?.startsWith("  [dim:└]")).toBe(true);
-		// Every earlier row keeps the pipe: the group header, its child, both
-		// reasoning paragraphs, and the Markdown paragraph gap.
-		for (const row of rows.slice(0, -1)) {
-			expect(row.startsWith("  [dim:│]")).toBe(true);
+		// The tray is still running (`running === true`), so even its trailing
+		// row keeps the single vertical pipe; the bottom rule, not a `└`, marks a
+		// settled tray.
+		expect(rows.at(-1)?.startsWith("  │")).toBe(true);
+		// Every other row keeps the same pipe column: the group header, its child,
+		// both reasoning paragraphs, and the Markdown paragraph gap.
+		for (const row of rows) {
+			expect(row.startsWith("  │")).toBe(true);
 		}
 		// Two segment separators plus the in-paragraph gap — never a bare blank.
-		expect(rows.filter((row) => row === "  [dim:│]")).toHaveLength(3);
+		expect(rows.filter((row) => row === "  │")).toHaveLength(3);
 		expect(rows).not.toContain("");
 		expect(rows.join("\n")).toContain("Second paragraph after the gap.");
 	});
@@ -334,7 +335,7 @@ describe("SubagentLiveOutputText", () => {
 		const out = comp.render(80);
 		const text = stripAnsi(out.join("\n"));
 		// The nested tray header must not double-mark the work group with a
-		// `•` — the outer `└` branch is the row marker (see renderLiveWorkHeader).
+		// `•` — the outer tray branch glyph is the row marker (see renderLiveWorkHeader).
 		expect(text.split("\u2022").length - 1).toBe(0);
 		expect(text).toContain("Working");
 		expect(text).not.toContain("Running");
@@ -351,7 +352,7 @@ describe("SubagentLiveOutputText", () => {
 		const out = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1", false).render(60);
 		const text = stripAnsi(out.join("\n"));
 		expect(text).toContain("Thinking");
-		expect(stripAnsi(out[out.length - 1])).toContain("[dim:└]Thinking");
+		expect(stripAnsi(out[out.length - 1])).toContain("│Thinking");
 	});
 
 	test("renders visible thinking content without a tool burst", () => {
@@ -386,7 +387,7 @@ describe("SubagentLiveOutputText", () => {
 		const rows = new SubagentLiveOutputText(items, "  ", true, theme)
 			.render(80)
 			.map(stripAnsi);
-		const pipe = "  [dim:│]";
+		const pipe = "  │";
 		const second_paragraph_index = rows.findIndex((line) => line.includes("Second paragraph."));
 
 		expect(second_paragraph_index).toBeGreaterThanOrEqual(0);
@@ -432,10 +433,10 @@ describe("SubagentLiveOutputText", () => {
 		// explicit separator is immediately before the next tool, and the
 		// paragraph break between the coalesced deltas stays on the tree as a
 		// pipe continuation (no unprefixed blank cuts the vertical branch).
-		expect(rows[tool_index - 1]).toBe("  [dim:│]");
-		expect(rows.filter((line) => line === "  [dim:│]").length).toBeGreaterThanOrEqual(1);
+		expect(rows[tool_index - 1]).toBe("  │");
+		expect(rows.filter((line) => line === "  │").length).toBeGreaterThanOrEqual(1);
 		expect(rows[tool_index - 2]).toContain("Second reasoning delta.");
-		expect(rows.at(-1)).not.toBe("  [dim:│]");
+		expect(rows.at(-1)).not.toBe("  │");
 		expect(rows.join("\n")).toContain("First reasoning delta.");
 		expect(rows.join("\n")).toContain("Second reasoning delta.");
 	});
@@ -453,15 +454,15 @@ describe("SubagentLiveOutputText", () => {
 		const read_index = rows.findIndex((line) => line.includes("a.ts"));
 		const thinking_index = rows.findIndex((line) => line.includes("Reasoning before"));
 		const tool_index = rows.findIndex((line) => line.includes("b.ts"));
-		const pad_rows = rows.filter((line) => line === "  [dim:│]");
+		const pad_rows = rows.filter((line) => line === "  │");
 
 		expect(read_index).toBeGreaterThanOrEqual(0);
 		expect(thinking_index).toBeGreaterThan(read_index);
 		expect(tool_index).toBeGreaterThan(thinking_index);
-		expect(rows[read_index + 1]).toBe("  [dim:│]");
-		expect(rows[thinking_index + 1]).toBe("  [dim:│]");
+		expect(rows[read_index + 1]).toBe("  │");
+		expect(rows[thinking_index + 1]).toBe("  │");
 		expect(pad_rows).toHaveLength(2);
-		expect(rows.at(-1)).not.toBe("  [dim:│]");
+		expect(rows.at(-1)).not.toBe("  │");
 	});
 
 	test("visible thinking and following tools stay within the fifteen-row tray cap", () => {
@@ -475,7 +476,7 @@ describe("SubagentLiveOutputText", () => {
 			.map(stripAnsi);
 
 		expect(rows.length).toBeLessThanOrEqual(15);
-		expect(rows.at(-1)).not.toBe("  [dim:│]");
+		expect(rows.at(-1)).not.toBe("  │");
 		expect(rows.join("\n")).toContain("f7.ts");
 	});
 
@@ -575,10 +576,10 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		// row, NO blank line — the exact row shape of the main message
 		// surface (header + children contiguous).
 		expect(stripped).toEqual([
-			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*]",
-			"   [dim:\u2514][muted:*Edited*][muted: b.ts][muted:  ][muted:+1]",
+			"  \u2502[muted:Edited 1 file, Explored 1 file]",
+			"   \u2502[muted:Edited][muted: b.ts][muted:  ][muted:+1]",
 		]);
-		expect(stripped.some((line) => line === "" || line.trim() === "[dim:\u2502]")).toBe(false);
+		expect(stripped.some((line) => line === "" || line.trim() === "\u2502")).toBe(false);
 	});
 
 	test("whitespace-only text blocks never split a work burst", () => {
@@ -596,8 +597,8 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
 		expect(stripped).toEqual([
-			"  [dim:\u2514][muted:*Edited 1 file, Explored 1 file*]",
-			"   [dim:\u2514][muted:*Edited*][muted: b.ts][muted:  ][muted:+1]",
+			"  \u2502[muted:Edited 1 file, Explored 1 file]",
+			"   \u2502[muted:Edited][muted: b.ts][muted:  ][muted:+1]",
 		]);
 	});
 
@@ -618,7 +619,7 @@ describe("subagent live work-burst boundary (empty text SSOT)", () => {
 		// the non-empty text splits them in order.
 		expect(text.indexOf("Read")).toBeLessThan(text.indexOf("Let me check"));
 		expect(text.indexOf("Let me check")).toBeLessThan(text.indexOf("Edit"));
-		expect(out.map(stripAnsi).filter((line) => line === "  [dim:│]").length).toBe(1);
+		expect(out.map(stripAnsi).filter((line) => line === "  │").length).toBe(1);
 	});
 });
 
@@ -633,12 +634,12 @@ describe("nested tray tree composition (regression)", () => {
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
 		// ONE tool, no Thinking: bare standalone row (no `Explored 1 file`
-		// header) with the normal last-item outer `└` — same threshold as
-		// the main conversation's renderCallInner `records.length > 1` rule.
-		expect(stripped).toEqual(["  [dim:└][muted:*Read*][muted: a.ts]"]);
+		// header) on the tray pipe. Same threshold as the main
+		// conversation's renderCallInner `records.length > 1` rule.
+		expect(stripped).toEqual(["  │[muted:Read][muted: a.ts]"]);
 	});
 
-	test("ONE tool with hidden Thinking below: standalone row uses `│`, only Thinking owns `└`", () => {
+	test("ONE tool with hidden Thinking below: standalone row uses `│`, the live lane follows with `│`", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
@@ -647,10 +648,11 @@ describe("nested tray tree composition (regression)", () => {
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
 		// No work header; the standalone tool row continues with the outer
-		// pipe `│` and the in-group lane owns the sole `└`.
+		// pipe `│` and the in-group lane is in-flight reasoning, so it keeps the
+		// vertical pipe too — the tree never draws a `└`.
 		expect(stripped).toEqual([
-			"  [dim:│][muted:*Read*][muted: a.ts]",
-			"   [dim:└]Thinking",
+			"  │[muted:Read][muted: a.ts]",
+			"   │Thinking",
 		]);
 	});
 
@@ -663,10 +665,10 @@ describe("nested tray tree composition (regression)", () => {
 		const out = new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1", false).render(80);
 		const text = stripAnsi(out.join("\n"));
 		// The prior tool child collapses when the in-group Thinking lane arms,
-		// so only the aggregate header and the `└ Thinking` lane remain.
-		expect(text).not.toContain("[dim:│][muted:*Read*]");
-		expect(text).toContain("[dim:└]Thinking");
-		expect(text).not.toContain("[dim:└][muted:*Read*]");
+		// so only the aggregate header and the in-flight `│ Thinking` lane remain.
+		expect(text).not.toContain("│[muted:Read]");
+		expect(text).toContain("│Thinking");
+		expect(text).not.toContain("Read");
 	});
 
 	test("visible thinking is a Markdown sibling rather than a compact tool child", () => {
@@ -696,7 +698,7 @@ describe("nested tray tree composition (regression)", () => {
 		const text = stripAnsi(out.join("\n"));
 		expect(text).toContain("Explored 2 files");
 		expect(text).not.toContain("Thinking");
-		expect(out.map(stripAnsi).some((line) => /\[dim:[│└]\]$/.test(line))).toBe(false);
+		expect(out.map(stripAnsi).some((line) => /\[dim:│\]$/.test(line))).toBe(false);
 	});
 
 	test("tool to trailing agent text keeps one connected pipe pad", () => {
@@ -710,12 +712,12 @@ describe("nested tray tree composition (regression)", () => {
 			.map(stripAnsi);
 		const text_index = rows.findIndex((line) => line.includes("Let me check the launch window."));
 
-		expect(rows[text_index]).toContain("[dim:└]Let me check the launch window.");
-		expect(rows[text_index - 1]).toBe("  [dim:│]");
-		expect(rows.filter((line) => line === "  [dim:│]")).toHaveLength(1);
+		expect(rows[text_index]).toContain("│Let me check the launch window.");
+		expect(rows[text_index - 1]).toBe("  │");
+		expect(rows.filter((line) => line === "  │")).toHaveLength(1);
 	});
 
-	test("running tray without Thinking keeps only the latest child", () => {
+	test("running tray without Thinking keeps only the latest child on the in-flight pipe", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { toolCallId: "c1" }),
@@ -724,14 +726,15 @@ describe("nested tray tree composition (regression)", () => {
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
-		// No thinking lane: only the latest child remains and owns `└`.
+		// No thinking lane: only the latest child remains. It is still running,
+		// so its group child prefix is the vertical pipe that every row keeps.
 		expect(stripped).toEqual([
-			"  [dim:\u2514][muted:*Exploring*]",
-			"   [dim:\u2514]Reading[text: b.ts]",
+			"  \u2502[muted:Exploring]",
+			"   \u2502Reading[text: b.ts]",
 		]);
 	});
 
-	test("completed burst keeps only the latest child with └", () => {
+	test("completed burst keeps only the latest child on the bare pipe", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
@@ -741,14 +744,16 @@ describe("nested tray tree composition (regression)", () => {
 		const comp = new SubagentLiveOutputText(items, "  ", true, theme);
 		const out = comp.render(80);
 		const stripped = out.map((l) => stripAnsi(l));
-		// The aggregate header keeps all three files; only c.ts is visible.
+		// The aggregate header keeps all three files and stays on the tray pipe;
+		// the visible child's tool call completed and still uses the same bare
+		// `│` group child prefix.
 		expect(stripped).toEqual([
-			"  [dim:\u2514][muted:*Explored 3 files*]",
-			"   [dim:\u2514][muted:*Read*][muted: c.ts]",
+			"  \u2502[muted:Explored 3 files]",
+			"   \u2502[muted:Read][muted: c.ts]",
 		]);
 	});
 
-	test("hidden Thinking lane remains terminal after completed children", () => {
+	test("hidden Thinking lane keeps the in-flight pipe after completed children", () => {
 		const theme = makeTheme() as any;
 		const items = [
 			toolItem("read", { path: "a.ts" }, { completed: true, toolCallId: "c1" }),
@@ -757,9 +762,9 @@ describe("nested tray tree composition (regression)", () => {
 		const text = stripAnsi(
 			new SubagentLiveOutputText(items, "  ", true, theme, true, "call-1", false).render(80).join("\n"),
 		);
-		// The prior tool child collapses; only the header + `└ Thinking` lane.
-		expect(text).not.toContain("[dim:│][muted:*Read*]");
-		expect(text).toContain("[dim:└]Thinking");
+		// The prior tool child collapses; only the header + in-flight `│ Thinking`.
+		expect(text).not.toContain("│[muted:Read]");
+		expect(text).toContain("│Thinking");
 	});
 });
 
@@ -1133,15 +1138,15 @@ describe("subagent elapsed time", () => {
 		try {
 			arm_subagent_thinking_pass(id);
 			now += 2500;
-			// Single-mode rows use the flush `  └` prefix (no trailing space),
-			// so the Thinking lane renders `  └Thinking` with the dim elapsed
+			// Single-mode rows use the flush `  │` prefix (no trailing space),
+			// so the Thinking lane renders `  │Thinking` with the dim elapsed
 			// suffix from the armed SSOT thinking-pass timer.
-			const out = renderSubagentThinkingRow(theme, "  \u2514", id);
-			// The fake theme wraps the prefix in one tag: `[dim:  └]` followed
+			const out = renderSubagentThinkingRow(theme, "  \u2502", id);
+			// The fake theme wraps the prefix in one tag: `  │` followed
 			// immediately by the gradient Thinking label proves the flush
 			// single-mode prefix (no trailing space inside the tag).
-			expect(stripAnsi(out)).toContain("[dim:  \u2514]Thinking");
-			expect(stripAnsi(out)).not.toContain("[dim:  \u2514 ]Thinking");
+			expect(stripAnsi(out)).toContain("  \u2502Thinking");
+			expect(stripAnsi(out)).not.toContain("  \u2502 Thinking");
 			expect(stripAnsi(out)).toContain("Thinking");
 			expect(out).toContain("[dim: 2s]");
 		} finally {
@@ -1361,23 +1366,24 @@ describe("renderSubagentLayout (string)", () => {
 		expect(lines.length).toBe(2);
 		expect(stripAnsi(lines[0])).toContain("\u2022");
 		expect(stripAnsi(lines[0])).toContain("Coder");
-		expect(stripAnsi(lines[1])).toContain("\u2514");
+		expect(stripAnsi(lines[1])).toContain("\u2502");
 		expect(stripAnsi(lines[1])).toContain("Read");
 		expect(stripAnsi(lines[1])).toContain("plugins/render.ts");
 		expect(lines[1]).toContain("\u001b[38;2;");
 	});
 
-	test("single-mode tool row prefix is flush: `  └Read …` with no gap", () => {
+	test("single-mode tool row prefix is flush: `  │Read …` with no gap", () => {
 		const theme = makeTheme() as any;
 		const running = makeResult("Coder", -1);
 		running.latestToolCall = { name: "read", args: { path: "a.ts" } };
 		const out = renderSubagentLayout({ agent: "Coder", task: "do stuff" }, [running], theme);
 		const toolLine = out.split("\n")[1];
-		// Single-mode child rows use the flush `  └` prefix: the fake theme
-		// wraps the whole prefix in one tag, so the └ is the last char inside
-		// the tag (no trailing space) and the body sits flush against it.
-		expect(stripAnsi(toolLine).startsWith("[dim:  \u2514]")).toBe(true);
-		expect(stripAnsi(toolLine)).not.toContain("[dim:  \u2514 ]");
+		// Single-mode child rows use the flush `  │` prefix (the only gutter glyph
+		// the renderer draws): the fake theme wraps the whole
+		// prefix in one tag, so the glyph is the last char inside the tag (no
+		// trailing space) and the body sits flush against it.
+		expect(stripAnsi(toolLine).startsWith("  \u2502")).toBe(true);
+		expect(stripAnsi(toolLine)).not.toContain("  \u2502 ");
 	});
 
 	test("running parallel agents show Thinking until a tool starts", () => {
@@ -1532,16 +1538,27 @@ describe("renderSubagentLayout (string)", () => {
 		expect(matches).toBe(1);
 	});
 
-	test("tool row └ sits on the agent name column", () => {
-		// Per-agent blocks have no header: the agent name and its nested └ both
-		// start at column 2 (bullet-width indent). The TREE_* constants below
-		// stay SSOT for the compact renderer's grouped trees and the subagent
-		// live tray, which still branch at the deeper columns they encode.
-		expect(TREE_BRANCH_TEE.length).toBe(2);
-		expect(TREE_NESTED_PIPE.indexOf("\u2514")).toBe(3);
-		expect(TREE_NESTED_LAST.indexOf("\u2514")).toBe(3);
+	test("nested tool row keeps one bare pipe and no tree corner", () => {
+		const theme = makeTheme() as any;
+		const running = makeResult("Coder A", -1);
+		running.latestToolCall = { name: "read", args: { path: "README.md" } };
+		const out = renderSubagentLayout({ agent: "Coder", task: "a" }, [running], theme);
+		const nested = stripAnsi(out.split("\n")[1] ?? "");
+		// Per-agent blocks have no header glyph: the nested child row carries one
+		// bare `  │` and never draws a `└` or `├`.
+		expect(nested).toContain("  \u2502");
+		expect(nested.indexOf("  \u2502")).toBeLessThan(nested.indexOf("Read"));
+		expect(nested).not.toContain("\u2514");
+		expect(nested).not.toContain("\u251c");
 		expect(BULLET.length).toBe(2);
-		expect(TREE_SINGLE_TOOL.indexOf("\u2514")).toBe(2);
+		// The shared compact-group tree vocabulary is pipe-only.
+		expect(TREE_BRANCH_PIPE).toBe("\u2502 ");
+		expect(GROUP_CHILD_PIPE).toBe("  \u2502");
+		for (const indent of [undefined, ""]) {
+			const prefix = format_compact_group_child_prefix(indent);
+			expect(prefix).not.toContain("\u2514");
+			expect(prefix).not.toContain("\u251c");
+		}
 	});
 
 	test("running parallel mode renders two direct agent blocks with nested tool rows", () => {
@@ -1558,12 +1575,12 @@ describe("renderSubagentLayout (string)", () => {
 		expect(stripAnsi(out)).not.toContain("Subagents");
 		expect(stripAnsi(lines[0])).toContain("\u2022");
 		expect(stripAnsi(lines[0])).toContain("Coder A");
-		expect(stripAnsi(lines[1])).toContain("  \u2514");
+		expect(stripAnsi(lines[1])).toContain("  \u2502");
 		expect(stripAnsi(lines[1])).toContain("Search");
 		expect(lines[2]).toBe("");
 		expect(stripAnsi(lines[3])).toContain("\u2022");
 		expect(stripAnsi(lines[3])).toContain("Scout A");
-		expect(stripAnsi(lines[4])).toContain("  \u2514");
+		expect(stripAnsi(lines[4])).toContain("  \u2502");
 		expect(stripAnsi(lines[4])).toContain("Read");
 	});
 
@@ -2032,7 +2049,7 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		const lines = stripAnsi(renderComponent(component)).trimEnd().split("\n");
 		expect(lines.length).toBe(2);
 		expect(lines[0]).toContain("Coder");
-		expect(lines[1]).toContain("[dim:  └]Thinking");
+		expect(lines[1]).toContain("  │Thinking");
 		expect(lines[1]).not.toContain("Explored");
 		expect(lines[1]).not.toContain("a.ts");
 		expect(lines[1]).not.toContain("hidden child narration");
@@ -2061,7 +2078,7 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		const lines = stripAnsi(renderComponent(component)).trimEnd().split("\n");
 		expect(lines.length).toBe(2);
 		expect(lines[0]).toContain("Coder");
-		expect(lines[1]).toContain("[dim:  └]Thinking");
+		expect(lines[1]).toContain("  │Thinking");
 		expect(lines[1]).not.toContain("first.ts");
 		expect(lines[1]).not.toContain("second.ts");
 		expect(lines[1]).not.toContain("hidden boundary");
@@ -2089,7 +2106,7 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 			false,
 		);
 		const tray = renderComponent(component).split("\n").slice(1).map(stripAnsi);
-		expect(tray).toEqual(["[dim:  └]Finishing"]);
+		expect(tray).toEqual(["  │Finishing"]);
 		expect(tray.join("\n")).not.toContain("src/a.ts");
 		expect(tray.join("\n")).not.toContain("reasoning");
 		expect(tray.join("\n")).not.toContain("narration");
@@ -2196,7 +2213,7 @@ describe("buildSubagentLayoutComponent live output tray", () => {
 		const lines = stripAnsi(out).split("\n");
 		expect(lines.length).toBe(2);
 		expect(lines[0]).toContain("Scout B"); // Pos 0: •, Pos 2: S
-		expect(lines[1]).toContain("└"); // L pipe
+		expect(lines[1]).toContain("│"); // in-flight pipe under column 2
 		expect(lines[1]).not.toContain("\u2022"); // No bullet point
 	});
 });

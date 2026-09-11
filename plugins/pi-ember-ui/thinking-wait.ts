@@ -58,7 +58,7 @@ export function reconcile_thinking_wait_ui(options?: {
 /**
  * Arm external Thinking UI (widget / in-message) when the SSOT wait predicate
  * passes. When a settled compact work group owns the transcript slot, the
- * arm callback paints its in-group `└ Thinking` row immediately; a real
+ * arm callback paints its in-group `│ Thinking` row immediately; a real
  * thinking stream still enters/reuses that lane through
  * (`apply_assistant_stream_boundary` → `noteThinking()`).
  *

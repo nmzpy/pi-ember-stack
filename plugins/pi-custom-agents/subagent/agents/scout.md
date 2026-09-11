@@ -1,6 +1,6 @@
 ---
 thinking: max
-model: opencode-go/deepseek-flash
+model: opencode-go/deepseek-v4.1-flash
 name: Scout
 description: Fast agent specialized for exploring codebases. Use when you need to quickly find files by patterns, search code for keywords, or answer questions about the codebase.
 tools: read, bash, grep, find, ls

@@ -177,6 +177,46 @@ export function trim_llm_messages_for_summary(
 	});
 }
 
+/**
+ * Output cap for the summarization request.
+ *
+ * Ember deliberately does NOT cap the summarizer below the model's own output
+ * limit. Pi's vendored formula (`min(0.8 * reserveTokens, model.maxTokens)`)
+ * stops generation mid-section on a long history: the checkpoint loses
+ * `## Next Steps` / `## Critical Context`, and providers that report the
+ * truncated generation as a failure (a `length` stop, or an error body) fail
+ * `/compact` outright. The model's own output limit, and pi-ai's window clamp
+ * that keeps input + output inside the context window, are the only ceilings.
+ */
+export function summarization_max_output_tokens(model: Model<Api>): number {
+	return model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Output room reserved while budgeting the summarizer's INPUT. This is never
+ * the request cap (see `summarization_max_output_tokens`): it only decides how
+ * much discarded history fits, and matches the allowance Pi native compact()
+ * used so the summarizer still sees the same history.
+ */
+export function summarization_output_reserve_tokens(model: Model<Api>, reserveTokens: number): number {
+	return Math.min(Math.floor(0.8 * reserveTokens), summarization_max_output_tokens(model));
+}
+
+/**
+ * Failure message for a summarization response that must not become a
+ * checkpoint. A `length` stop carries partial text — never persist it as a
+ * session checkpoint (same contract as Pi's own compaction).
+ */
+export function summarization_failure(response: AssistantMessage): string | undefined {
+	if (response.stopReason === "error") {
+		return `Summarization failed: ${response.errorMessage || "Unknown error"}`;
+	}
+	if (response.stopReason === "length") {
+		return "Summarization failed: generation hit the token cap and the summary is incomplete";
+	}
+	return undefined;
+}
+
 async function generate_history_summary(
 	messages: AgentMessage[],
 	model: Model<Api>,
@@ -187,14 +227,11 @@ async function generate_history_summary(
 	thinkingLevel: AgentThinkingLevel | undefined,
 	streamFn?: StreamFn,
 ): Promise<string> {
-	const maxTokens = Math.min(
-		Math.floor(0.8 * reserveTokens),
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	);
+	const maxTokens = summarization_max_output_tokens(model);
 	const llmMessages = trim_llm_messages_for_summary(
 		messages,
 		model,
-		maxTokens,
+		summarization_output_reserve_tokens(model, reserveTokens),
 		build_history_summarization_prompt("", previousSummary),
 	);
 	const conversationText = serializeConversation(llmMessages);
@@ -212,8 +249,9 @@ async function generate_history_summary(
 		create_summarization_options(model, maxTokens, auth, signal, thinkingLevel),
 		streamFn,
 	);
-	if (response.stopReason === "error") {
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
+	const failure = summarization_failure(response);
+	if (failure) {
+		throw new Error(failure);
 	}
 	return extract_text_content(response);
 }

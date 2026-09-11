@@ -93,7 +93,7 @@ export function format_compacted_row(
 	const bullet = statusBulletColor(is_error, !is_error, theme);
 	const before = tokens_before.toLocaleString();
 	const after = Math.ceil(summary_length / 4).toLocaleString();
-	const label = theme.fg("muted", theme.bold("Compacted"));
+	const label = theme.fg("muted", "Compacted");
 	const stats = theme.fg("muted", ` ${before} tokens into ~${after}.`);
 	return bullet + label + stats;
 }

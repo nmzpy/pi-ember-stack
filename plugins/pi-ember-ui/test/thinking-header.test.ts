@@ -684,7 +684,7 @@ describe("thinking header visibility", () => {
 			setGroupThinkingChildActive(renderer.hasGroupThinkingChild());
 			expect(renderer.hasGroupThinkingChild()).toBe(true);
 			// Thinking never folds prior tool children — they linger beside the
-			// in-group `└ Thinking` lane.
+			// in-group `│ Thinking` lane.
 			expect(renderer.hasVisibleGroupChildren()).toBe(true);
 			expect(compact_thinking_lane_owns_status()).toBe(true);
 		} finally {
@@ -833,7 +833,7 @@ describe("thinking header visibility", () => {
 			renderer.settleAllGroups();
 			arm_pre_token_thinking_status();
 			// No thinking stream yet: the group HOLDS the tool lane (gradient
-			// `-ing` verb) — never a premature `└ Thinking` lane.
+			// `-ing` verb) — never a premature `│ Thinking` lane.
 			expect(renderer.hasGroupThinkingChild()).toBe(false);
 			expect(thinking_status_should_show()).toBe(false);
 			expect(resolve_thinking_status_host()).toBe(null);

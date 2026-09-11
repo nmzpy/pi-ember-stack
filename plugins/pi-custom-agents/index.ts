@@ -80,7 +80,9 @@ import {
 	resolve_patch_tool_name,
 	SUBAGENT_DELEGATION_TOOLS,
 	SUBAGENT_RESUME_TOOL_NAME,
+	VISUAL_TOOLS,
 } from "./edit-tools.ts";
+import { HOST_PROCESS_SAFETY_GUIDANCE } from "./host-process-safety.ts";
 import {
 	bind_mode_model,
 	bound_identity_uses_baked_effort,
@@ -284,13 +286,19 @@ const READONLY_DELEGATING_TOOLS = [...BASE_RESEARCH_TOOLS, ...SUBAGENT_DELEGATIO
  * Canonical Orchestrate allowlist — single source for the mode tool set, the
  * enter prompt, and the plan-implement orchestrate prompt. Quiz is present so
  * Orchestrate can resolve material uncertainty before delegating.
+ *
+ * `VISUAL_TOOLS` is present so the orchestrator can VERIFY the work it delegates
+ * (measure a rendered page, read its console, screenshot it) instead of trusting a
+ * subagent summary or falling back to throwaway screenshot scripts. It stays
+ * read-only-looking: no editing, no mouse/keyboard driving. Browser tool names are
+ * inert when pi-browser is absent.
  */
 export const ORCHESTRATE_TOOLS = [
-	"quiz",
-
-	"subagent",
-	SUBAGENT_RESUME_TOOL_NAME,
-	...WEB_ACCESS_TOOLS,
+  "quiz",
+  "subagent",
+  SUBAGENT_RESUME_TOOL_NAME,
+  ...WEB_ACCESS_TOOLS,
+  ...VISUAL_TOOLS,
 ];
 
 /**
@@ -389,6 +397,16 @@ concise.
  */
 export const QUIZ_UNCERTAINTY_GUIDANCE = `If you are uncertain about a materially important requirement, tradeoff, or interpretation that would change what you do next, ask a clarifying question via the quiz tool before proceeding. Do not quiz for trivial or low-risk choices; make those autonomously.`;
 
+/**
+ * Canonical visual-verification guidance. Injected into every parent mode prompt
+ * whose tool set contains `VISUAL_TOOLS` (code, orchestrate), so the model knows
+ * from the first turn that looking at a rendered UI is a tool call — not a script
+ * it has to invent. The browser tools self-provision a browser, so no setup step is
+ * needed first. Never duplicate this text elsewhere; the subagent equivalent lives
+ * in `coder.md`.
+ */
+export const VISUAL_VERIFICATION_GUIDANCE = `When a question is visual — layout, spacing, alignment, an element that is missing, invisible, clipped, covered or wrong-looking, a screenshot to compare against a design, focus rings, page errors — use the browser and window tools instead of writing a screenshot, CDP or geometry script: browser_navigate opens the page (reusing the tab that already has it), browser_measure returns real geometry, computed styles and the authored CSS rule behind each value, browser_take_screenshot returns a settled frame plus what is painted at its center and any overlay covering it, browser_scroll settles a scroll-based reveal, browser_focus reports :focus-visible, browser_console_messages shows page errors, and window_screenshot captures a desktop window. No setup is required: the browser tools start a browser on first use. If those tools cannot answer the question, say so instead of scripting around them.`;
+
 const SUBAGENT_AWARENESS_PROMPT = `
 
 Available subagents:
@@ -468,7 +486,9 @@ export const ORCHESTRATOR_PROMPT =
 ${mode_intro(
 	"orchestrate",
 	ORCHESTRATE_TOOLS,
-	`Subagent delegation is your primary mechanism for getting work done. ${QUIZ_UNCERTAINTY_GUIDANCE}
+`Subagent delegation is your primary mechanism for getting work done. ${QUIZ_UNCERTAINTY_GUIDANCE}
+
+You can inspect anything visual yourself and should do so to verify delegated UI work. ${VISUAL_VERIFICATION_GUIDANCE}
 
 When you have a ready plan and you have asked clarifying questions about unknowns, spawn implementation Coder subagents directly. Do not wait for explicit user confirmation before delegating work.`,
 )}${SUBAGENT_AWARENESS_PROMPT}
@@ -495,13 +515,13 @@ Report the file list, Scout assignments, findings, and Coder delegation plan in 
 function coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`Code mode is active. You are now in Code mode. You have full tool access. Implement, test, and verify code with autonomy.
 
-${mode_intro("code", build_full_tools(provider), QUIZ_UNCERTAINTY_GUIDANCE)}`);
+${mode_intro("code", build_full_tools(provider), `${QUIZ_UNCERTAINTY_GUIDANCE} ${VISUAL_VERIFICATION_GUIDANCE}`)}`);
 }
 
 function exit_to_coder_prompt(provider: string | undefined): string {
 	return compose_mode_prompt(`You are now in Code mode. You have switched from {mode} mode to code mode. You now have full tool access.
 
-${mode_intro("code", build_full_tools(provider))}`);
+${mode_intro("code", build_full_tools(provider), VISUAL_VERIFICATION_GUIDANCE)}`);
 }
 
 function plan_implement_prompt(
@@ -523,7 +543,8 @@ Follow the plan modules in order. Implement, test, and verify each module before
 ${mode_intro("code", build_full_tools(provider), "")}`);
 }
 
-function mode_reminder(modeId: string, provider: string | undefined): string {
+/** Enter message for a mode. Exported so tests can pin the injected text. */
+export function mode_reminder(modeId: string, provider: string | undefined): string {
 	switch (modeId) {
 		case "plan":
 			return ARCHITECT_PROMPT;
@@ -536,14 +557,15 @@ function mode_reminder(modeId: string, provider: string | undefined): string {
 	}
 }
 
-function exit_mode_reminder(fromModeId: string, provider: string | undefined): string {
+/** Exit message for a mode change. Exported so tests can pin the injected text. */
+export function exit_mode_reminder(fromModeId: string, provider: string | undefined): string {
 	if (fromModeId === "plan") return exit_to_coder_prompt(provider);
 	if (fromModeId === "orchestrate") {
 		return compose_mode_prompt(`You have switched from orchestrate mode to code mode. You are now in Code mode. You have full tool access.
 
 Implement, test, and verify code with autonomy.
 
-${mode_intro("code", build_full_tools(provider), QUIZ_UNCERTAINTY_GUIDANCE)}`);
+${mode_intro("code", build_full_tools(provider), `${QUIZ_UNCERTAINTY_GUIDANCE} ${VISUAL_VERIFICATION_GUIDANCE}`)}`);
 	}
 	return mode_reminder(fromModeId, provider);
 }
@@ -1373,7 +1395,7 @@ export default async function piCustomAgentsPlugin(pi: ExtensionAPI): Promise<vo
 		if (currentMode === "orchestrate" && is_health_check_prompt(event.prompt)) {
 			reminder = `${reminder}\n\n${HEALTH_CHECK_PROMPT_APPENDIX}`;
 		}
-		return `${event.systemPrompt}${PARALLEL_TOOL_CALL_GUIDANCE}\n\n${reminder}`;
+		return `${event.systemPrompt}${PARALLEL_TOOL_CALL_GUIDANCE}${HOST_PROCESS_SAFETY_GUIDANCE}\n\n${reminder}`;
 	}
 
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: ExtensionContext) => {

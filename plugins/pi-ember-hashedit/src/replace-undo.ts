@@ -125,7 +125,7 @@ function renderUndoRow(
 	const token = successful ? "muted" : "text";
 	const pathSeparator = BULLET.length > 1 ? " " : "";
 	callText.setText(
-		`${statusBulletColor(isError, successful, theme)}${theme.fg(token, theme.bold(label))}${pathSeparator}${theme.fg(token, undoPath(args))}`,
+		`${statusBulletColor(isError, successful, theme)}${theme.fg(token, label)}${pathSeparator}${theme.fg(token, undoPath(args))}`,
 	);
 	return callText;
 }

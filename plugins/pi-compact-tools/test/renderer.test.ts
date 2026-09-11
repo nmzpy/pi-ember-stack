@@ -25,6 +25,15 @@ function stripAnsi(s: string): string {
 	return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+/**
+ * `makeTheme()` wraps every painted segment as `[tag:text]`, so a phrase that
+ * spans two segments (e.g. a verb and its path) is not a literal substring.
+ * Keep the text, drop the markers, for phrase assertions.
+ */
+function plainThemeText(s: string): string {
+	return stripAnsi(s).replace(/\[[a-z]+:([^\]]*)\]/g, "$1");
+}
+
 function makeTheme() {
 	const fg = mock((tag: string, text: string) => `[${tag}:${text}]`);
 	return { fg, bold: mock((s: string) => `*${s}*`) };
@@ -269,10 +278,101 @@ describe("CompactRenderer streaming write stats", () => {
 		expect(row).not.toContain("+0");
 		expect(row).not.toContain("-0");
 	});
+
+});
+
+/**
+ * The shared group row is a cached string rebuilt by the owner's render and by
+ * the 20 FPS group tick. A running child wave must re-bake it every tick so a
+ * streaming `write` / `replace` / `apply_patch` shows its path and live +N -N
+ * while the model is still generating args — never only when args complete.
+ * Regression: an inverted `all_visible_completed` condition treated the cached
+ * prefix as valid whenever the `│ Thinking` lane was inactive, freezing every
+ * running child row at its first-frame text.
+ */
+describe("CompactRenderer group tick live child args", () => {
+	afterEach(() => setThinkingBlocksHidden(false));
+
+	test("streaming write child updates the group row path and +N every tick", () => {
+		setThinkingBlocksHidden(false);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const child_state: Record<string, any> = {};
+		const owner_ctx = makeContext("live-owner-w", owner_state) as any;
+		const child_ctx = makeContext("live-child-w", child_state) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall("write", { path: "b.ts", content: "x" }, theme, child_ctx);
+		// Pi re-renders the owner through its invalidate cycle when a member
+		// joins; that pass rebuilds the group row and subscribes the tick.
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		expect(plainThemeText((owner_state.callText as any).text)).toContain("Writing b.ts");
+
+		// The child streams more content; only the group tick can repaint the
+		// shared row because the child is not the group owner.
+		r.renderCall(
+			"write",
+			{ path: "b.ts", content: "x\n1\n2\n3" },
+			theme,
+			child_ctx,
+		);
+		dispatch_gradient_tick();
+
+		const row = plainThemeText((owner_state.callText as any).text);
+		expect(row).toContain("Writing b.ts");
+		expect(row).toContain("+4");
+	});
+
+	test("streaming replace and apply_patch children refresh live stats", () => {
+		setThinkingBlocksHidden(false);
+		const r = new CompactRenderer();
+		const theme = makeTheme() as any;
+		const owner_state: Record<string, any> = {};
+		const replace_state: Record<string, any> = {};
+		const patch_state: Record<string, any> = {};
+		const owner_ctx = makeContext("live-owner-r", owner_state) as any;
+		const replace_ctx = makeContext("live-child-r", replace_state) as any;
+		const patch_ctx = makeContext("live-child-p", patch_state) as any;
+
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		r.renderCall(
+			"replace",
+			{ path: "b.ts", replacement_lines: ["one"] },
+			theme,
+			replace_ctx,
+		);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		expect(plainThemeText((owner_state.callText as any).text)).toContain("Replacing b.ts");
+
+		r.renderCall(
+			"replace",
+			{ path: "b.ts", replacement_lines: ["one", "two", "three"] },
+			theme,
+			replace_ctx,
+		);
+		dispatch_gradient_tick();
+		expect(stripAnsi((owner_state.callText as any).text)).toContain("+3");
+
+		const partial_patch = [
+			"*** Begin Patch",
+			"*** Update File: c.ts",
+			"@@",
+			"-old",
+			"+new",
+		].join("\n");
+		r.renderCall("apply_patch", { input: partial_patch }, theme, patch_ctx);
+		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
+		dispatch_gradient_tick();
+		const patch_row = plainThemeText((owner_state.callText as any).text);
+		expect(patch_row).toContain("Patching c.ts");
+		expect(patch_row).toContain("+1");
+		expect(patch_row).toContain("-1");
+	});
 });
 
 describe("CompactRenderer group child visibility", () => {
-	test("completed children stay visible until the next tool call absorbs them", async () => {
+	test("completed children accumulate under the header until a hard boundary folds them", async () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -302,15 +402,15 @@ describe("CompactRenderer group child visibility", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		// Both complete: the header keeps the aggregate, but only the latest
-		// child remains visible.
+		// Both complete: the header keeps the aggregate and BOTH child rows
+		// stay visible beneath it — nothing folds on the next tool call.
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Read");
-		expect(row).not.toContain("a.ts");
+		expect(row).toContain("a.ts");
 		expect(row).toContain("b.ts");
 
-		// Every new call immediately replaces the previous visible child.
+		// A new call appends its own row below the completed rows.
 		const baby_state: Record<string, any> = {};
 		const baby_ctx = makeContext("g3", baby_state) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, baby_ctx);
@@ -318,14 +418,11 @@ describe("CompactRenderer group child visibility", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("c.ts");
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("b.ts");
+		expect(row).toContain("a.ts");
 		await flush_group_child_fold_debounce();
-		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
-		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("c.ts");
-		expect(row).not.toContain("b.ts");
 
-		// A different tool name is handled by the same immediate replacement rule.
+		// A second tool name appends as well — the bundle keeps every call.
 		r.settleAllGroups();
 		const next_state: Record<string, any> = {};
 		const next_ctx = makeContext("g4", next_state) as any;
@@ -334,11 +431,19 @@ describe("CompactRenderer group child visibility", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Searching");
 		expect(row).toContain("d.ts");
+		expect(row).toContain("c.ts");
+
+		// Visible assistant text is the hard boundary: the group folds to its
+		// aggregate header and only the summary row remains.
+		r.noteVisibleText();
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row.toLowerCase()).toContain("explored");
+		expect(row).not.toContain("d.ts");
 		expect(row).not.toContain("c.ts");
 		expect(row).not.toContain("b.ts");
 	});
 
-	test("beginTurn keeps lingering tool children until thinking or tool-wave reopen", async () => {
+	test("beginTurn and new tool waves keep every accumulated child visible", async () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -371,6 +476,7 @@ describe("CompactRenderer group child visibility", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("b.ts");
 
+		// A new tool wave appends; the prior grep child is never absorbed.
 		const wave_ctx = makeContext("noop-turn3", {}) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, wave_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
@@ -378,7 +484,8 @@ describe("CompactRenderer group child visibility", () => {
 		await flush_group_child_fold_debounce();
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("b.ts");
+		expect(row).toContain("c.ts");
 	});
 
 	test("endTurn keeps completed tool children visible until thinking folds them", () => {
@@ -416,7 +523,7 @@ describe("CompactRenderer group child visibility", () => {
 		expect(row).not.toContain("Thinking");
 	});
 
-	test("parallel burst keeps only the latest child visible", async () => {
+	test("parallel burst keeps every child row visible", async () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -443,14 +550,14 @@ describe("CompactRenderer group child visibility", () => {
 			r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		}
 		const row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("burst-3.ts");
-		for (const id of wave2.slice(0, -1)) {
-			expect(row).not.toContain(`${id}.ts`);
+		// Every call in the parallel wave keeps its own row under the header.
+		for (const id of wave2) {
+			expect(row).toContain(`${id}.ts`);
 		}
-		expect(row).not.toContain("a.ts");
+		expect(row).toContain("a.ts");
 	});
 
-	test("new tool wave folds prior completed children immediately", () => {
+	test("new tool waves append below prior completed children", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -477,8 +584,8 @@ describe("CompactRenderer group child visibility", () => {
 			{ ...child_ctx, isError: false },
 		);
 
-		// A different tool name (read after grep) folds the prior grep wave
-		// immediately so only the fresh read wave is visible.
+		// A different tool name (read after grep) is appended, never folded:
+		// the bundle keeps the completed grep row above the fresh read.
 		const wave2_ctx = makeContext("wave-fold3", {}) as any;
 		r.renderCall("read", { path: "c.ts" }, theme, wave2_ctx);
 		// Re-render the owner to refresh the shared group block.
@@ -486,14 +593,15 @@ describe("CompactRenderer group child visibility", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("c.ts");
-		expect(row).not.toContain("b.ts");
-		// Same-name reads also replace the previous child immediately.
+		expect(row).toContain("b.ts");
+		// Same-name reads append as well.
 		const wave2_ctx2 = makeContext("wave-fold4", {}) as any;
 		r.renderCall("read", { path: "d.ts" }, theme, wave2_ctx2);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("d.ts");
-		expect(row).not.toContain("c.ts");
+		expect(row).toContain("c.ts");
+		expect(row).toContain("b.ts");
 	});
 
 	test("completed tools stay visible after settle without thinking stream", () => {
@@ -525,11 +633,12 @@ describe("CompactRenderer group child visibility", () => {
 		);
 		r.settleAllGroups();
 
-		// After settle, the prior completed read and grep are folded into the
-		// unified work header so the transcript stays compact.
+		// Settle only flips the header to past tense: the completed read and
+		// grep rows stay visible until a hard boundary folds them.
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
-		expect(row).not.toContain("a.ts");
+		expect(row).toContain("a.ts");
+		expect(row).toContain("b.ts");
 		expect(r.hasGroupThinkingChild()).toBe(false);
 	});
 
@@ -689,7 +798,7 @@ describe("CompactRenderer group child visibility", () => {
 		expect(r.renderCall("read", { path: "c.ts" }, theme, latest_ctx).render(80)).toHaveLength(0);
 	});
 
-	test("noteThinking appends in-group Thinking after lingering tool rows", () => {
+	test("noteThinking replaces the latest child with the in-group Thinking lane", () => {
 		setThinkingBlocksHidden(true);
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
@@ -721,8 +830,9 @@ describe("CompactRenderer group child visibility", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
-		// The prior tool child collapses when the in-group Thinking lane arms.
-		expect(row).not.toContain("a.ts");
+		// The lane only replaces the LATEST child row; earlier accumulated
+		// completed children stay listed above it.
+		expect(row).toContain("a.ts");
 		expect(row).not.toContain("b.ts");
 		expect(r.hasGroupThinkingChild()).toBe(true);
 
@@ -732,8 +842,10 @@ describe("CompactRenderer group child visibility", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("c.ts");
-		// Same-name calls also replace prior children immediately.
-		expect(row).not.toContain("b.ts");
+		// The new wave appends below the accumulated children too.
+		expect(row).toContain("b.ts");
+		expect(row).toContain("a.ts");
+		expect(row).not.toContain("Thinking");
 		expect(r.hasGroupThinkingChild()).toBe(false);
 	});
 
@@ -771,12 +883,13 @@ describe("CompactRenderer group child visibility", () => {
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).not.toContain("Thinking");
 		expect(r.hasGroupThinkingChild()).toBe(false);
-		// The latest completed child keeps its gradient `-ing` verb; the prior
-		// grep wave folded into the header summary when `read` joined.
+		// The latest completed child keeps its gradient `-ing` verb; the earlier
+		// completed grep keeps its own row above it in the past tense.
 		expect(row).toContain("Reading");
 		expect(row).toContain("b.ts");
 		expect(row).toContain("1 search");
-		expect(row).not.toContain("Search");
+		expect(row).toContain("Search");
+		expect(row).toContain("a.ts");
 		expect(r.hasActiveGroups()).toBe(false);
 	});
 
@@ -834,7 +947,10 @@ describe("CompactRenderer group child visibility", () => {
 		expect(row.split("Searching").length - 1).toBe(1);
 		expect(row).toContain("Search");
 		expect(row).not.toContain("├─");
-		expect(row).toContain("└");
+		// The held latest child is still in flight, so the row keeps the vertical
+		// pipe and never settles on the `└` terminal corner.
+		expect(row).toContain("│")
+		expect(row).not.toContain("└")
 		expect(row).not.toContain("└─");
 		expect(row).not.toContain("├Search");
 	});
@@ -1019,7 +1135,7 @@ describe("CompactRenderer group child visibility", () => {
 });
 
 describe("CompactRenderer same-file child merge", () => {
-	test("a new edit immediately replaces the prior child row", () => {
+	test("same-file edits merge into one accumulated child row", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -1036,13 +1152,15 @@ describe("CompactRenderer same-file child merge", () => {
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Editing");
 		expect(row).toContain("a.ts");
-		expect(row).toContain("+1");
-		expect(row).not.toContain("+3");
-		// Only the newest edit owns the single visible child slot.
-		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+		// One merged row per file carries the accumulated live +N of all three
+		// edits — nothing is absorbed by the next edit.
+		expect(row).toContain("+3");
+		expect(row).not.toContain("+1");
+		// A single in-flight child row keeps the vertical pipe, never the `└`.
+		expect(row.match(/│/g) ?? []).toHaveLength(1);
 	});
 
-	test("different files still leave only the newest child visible", () => {
+	test("different files each keep their own child row", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -1057,8 +1175,12 @@ describe("CompactRenderer same-file child merge", () => {
 
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("a.ts");
-		expect(row).not.toContain("b.ts");
-		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+		expect(row).toContain("b.ts");
+		// Both in-flight rows stay listed, each on its own bare vertical pipe —
+		// no `├` tee and no `└` corner.
+		expect((row.match(/│/g) ?? [])).toHaveLength(2);
+		expect(row).not.toContain("├");
+		expect(row).not.toContain("└");
 	});
 
 	test("completed same-file edits accumulate authoritative diff stats", () => {
@@ -1101,14 +1223,21 @@ describe("CompactRenderer same-file child merge", () => {
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Edited");
 		expect(row).toContain("a.ts");
-		// The header carries prior completed totals; the visible child carries
-		// only the newest edit's own diff.
-		expect(row).toContain("+3");
-		expect(row).toContain("+1");
-		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+		// The visible merged child carries the accumulated diff of every edit to
+		// that file (+2 +1 +1), and the header does NOT double count it.
+		expect(row).toContain("+4");
+		expect(row).toContain("  │");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(0);
+
+		// Folding at a hard boundary moves the same total into the header.
+		r.noteVisibleText();
+		const folded = stripAnsi((owner_state.callText as any).text);
+		expect(folded).toContain("Edited 1 file");
+		expect(folded).toContain("+4");
+		expect(folded).not.toContain("a.ts");
 	});
 
-	test("write to the same file keeps only the newest child row", () => {
+	test("write to the same file keeps one accumulated child row", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -1124,9 +1253,11 @@ describe("CompactRenderer same-file child merge", () => {
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Writing");
 		expect(row).toContain("a.ts");
-		expect(row).toContain("+1");
-		expect(row).not.toContain("+4");
-		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+		// One merged row per file with the accumulated live +N of all writes.
+		expect(row).toContain("+4");
+		// Running write child: vertical pipe, no `└`.
+		expect((row.match(/│/g) ?? [])).toHaveLength(1);
+		expect(row).not.toContain("└");
 	});
 
 	test("same-file read calls keep only the newest row", () => {
@@ -1145,10 +1276,12 @@ describe("CompactRenderer same-file child merge", () => {
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Reading");
 		expect(row).toContain("a.ts");
-		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+		// Running read children: one bare vertical pipe each, no corners.
+		expect(row).toContain("  │");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(0);
 	});
 
-	test("pure apply_patch run keeps only the newest file row visible", () => {
+	test("pure apply_patch run lists every patched file", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -1167,8 +1300,12 @@ describe("CompactRenderer same-file child merge", () => {
 		const row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Patching");
 		expect(row).toContain("src/a.ts");
-		expect(row).not.toContain("src/b.ts");
-		expect((row.match(/[└├]/g) ?? [])).toHaveLength(1);
+		// Every touched file keeps a row; same-file hunks accumulate.
+		expect(row).toContain("src/b.ts");
+		expect(row).toContain("+4");
+		// Running patch children: one bare vertical pipe each, no corners.
+		expect(row).toContain("  │");
+		expect((row.match(/[└├]/g) ?? [])).toHaveLength(0);
 	});
 });
 
@@ -1363,8 +1500,9 @@ describe("CompactRenderer thinking collapse", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
-		// The prior tool child collapses when the in-group Thinking lane arms.
-		expect(row).not.toContain("Search");
+		// The lane replaces only the latest tool child; the earlier accumulated
+		// row stays listed above it.
+		expect(row).toContain("a.ts");
 		expect(row).not.toContain("b.ts");
 
 		const baby_state: Record<string, any> = {};
@@ -1374,8 +1512,9 @@ describe("CompactRenderer thinking collapse", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Searching");
 		expect(row).toContain("c.ts");
-		// Same-name calls immediately replace prior children.
-		expect(row).not.toContain("b.ts");
+		// The new wave appends below the accumulated children.
+		expect(row).toContain("b.ts");
+		expect(row).toContain("a.ts");
 		expect(baby_state.callText).toBeUndefined();
 	});
 
@@ -1509,13 +1648,13 @@ describe("CompactRenderer thinking collapse", () => {
 		);
 
 		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).toContain("└");
+		expect(row).toContain("  │");
 		expect(row).toContain("other.ts");
 
 		r.settleAllGroups();
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Edited");
-		expect(row).toContain("└");
+		expect(row).toContain("  │");
 		expect(row).toContain("other.ts");
 
 		const baby_ctx = makeContext("edit-collapse3", {}) as any;
@@ -1524,12 +1663,14 @@ describe("CompactRenderer thinking collapse", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Editing");
 		expect(row).toContain("next.ts");
-		expect(row).not.toContain("other.ts");
+		// The new batch appends; the earlier completed rows stay listed.
+		expect(row).toContain("other.ts");
+		expect(row).toContain("runner.ts");
 		await flush_group_child_fold_debounce();
 		r.renderCall("edit", { file_path: "runner.ts", oldText: "a", newText: "b" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		// Re-rendering an existing call does not restore absorbed children.
-		expect(row).not.toContain("other.ts");
+		// Re-rendering an existing call never drops the listed children.
+		expect(row).toContain("other.ts");
 	});
 
 	test("agent_end lifecycle shows Thinking child then reopens with folded prior batch", async () => {
@@ -1567,8 +1708,10 @@ describe("CompactRenderer thinking collapse", () => {
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row.toLowerCase()).toContain("explored");
 		expect(row).toContain("Thinking");
-		// The prior tool child collapses when the in-group Thinking lane arms.
-		expect(row).not.toContain("Search");
+		// The lane replaces only the latest tool child; the earlier accumulated
+		// row stays listed above it.
+		expect(row).toContain("a.ts");
+		expect(row).not.toContain("b.ts");
 		expect(r.hasActiveGroups()).toBe(true);
 		expect(r.hasGroupThinkingChild()).toBe(true);
 
@@ -1578,8 +1721,8 @@ describe("CompactRenderer thinking collapse", () => {
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Searching");
 		expect(row).toContain("c.ts");
-		// Same-name calls immediately replace prior children.
-		expect(row).not.toContain("b.ts");
+		// The reopened batch appends; nothing was absorbed.
+		expect(row).toContain("b.ts");
 		expect(row).not.toMatch(/explored[\s\S]*explored/i);
 	});
 
@@ -1750,7 +1893,7 @@ describe("CompactRenderer thinking collapse", () => {
 
 		r.noteThinking();
 		// One-member groups never spawn a compact group header or in-group
-		// `└ Thinking` lane. The thinking surface for a single call belongs to
+		// `│ Thinking` lane. The thinking surface for a single call belongs to
 		// the external widget/in-message host, not the transcript.
 		expect(r.hasGroupThinkingChild()).toBe(false);
 		const row = stripAnsi((owner_state.callText as any).text);
@@ -1825,7 +1968,7 @@ describe("CompactRenderer thinking collapse", () => {
 		);
 
 		// Hidden reasoning (blocks hidden) arms the in-group Thinking lane.
-		// The prior tool child collapses when the in-group `└ Thinking` lane
+		// The prior tool child collapses when the in-group `│ Thinking` lane
 		// arms, so the lane replaces the latest tool row instead of lingering.
 		r.noteHiddenThinking();
 		expect(r.hasGroupThinkingChild()).toBe(true);
@@ -1926,13 +2069,14 @@ describe("CompactRenderer thinking collapse", () => {
 		r.renderCall("grep", { pattern: "z", path: "c.ts" }, theme, repeat_ctx);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		let row = stripAnsi((owner_state.callText as any).text);
-		expect(row).not.toContain("b.ts");
+		// Same-name calls append too — the earlier children are never absorbed.
+		expect(row).toContain("b.ts");
 		expect(row).toContain("c.ts");
 
 		await flush_group_child_fold_debounce();
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		row = stripAnsi((owner_state.callText as any).text);
-		expect(row).not.toContain("b.ts");
+		expect(row).toContain("b.ts");
 		expect(row).toContain("c.ts");
 	});
 
@@ -2039,7 +2183,7 @@ describe("CompactRenderer thinking collapse", () => {
 		const owner_ctx = makeContext("batch-hidden1", owner_state) as any;
 
 		// Tool wave 1: at least two calls so a real compact group forms.
-		// One-member groups never get an in-group `└ Thinking` lane.
+		// One-member groups never get an in-group `│ Thinking` lane.
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		r.renderResult(
 			"read",
@@ -2344,11 +2488,11 @@ describe("CompactRenderer apply_patch grouping", () => {
 
 		let row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Patching 2 files");
-		expect(row).toContain("+2");
-		expect(row).not.toContain("first.ts");
+		expect(row).not.toContain("+2");
+		// Both patch calls keep their per-file child row under the header.
+		expect(row).toContain("first.ts");
 		expect(row).toContain("second.ts");
 		expect(second_ctx.state.callText).toBeUndefined();
-
 		r.renderResult(
 			"apply_patch",
 			{ input: first_input },
@@ -2380,13 +2524,22 @@ describe("CompactRenderer apply_patch grouping", () => {
 
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Patched 2 files");
-		expect(row).toContain("+2");
-		expect(row).not.toContain("first.ts");
+		expect(row).toContain("first.ts");
 		expect(row).toContain("second.ts");
-
+		// The visible per-file rows carry their own +1; the header never double
+		// counts a diff the transcript already shows.
+		expect(row).not.toContain("+2");
 		r.settleAllGroups();
 		row = stripAnsi((owner_state.callText as any).text);
 		expect(row).toContain("Patched 2 files");
+		// Settle keeps the accumulated child rows — only a hard boundary folds.
+		expect(row).toContain("first.ts");
+		expect(row).toContain("second.ts");
+
+		r.noteVisibleText();
+		row = stripAnsi((owner_state.callText as any).text);
+		expect(row).toContain("Patched 2 files");
+		expect(row).toContain("+2");
 		expect(row).not.toContain("first.ts");
 		expect(row).not.toContain("second.ts");
 	});
@@ -2506,6 +2659,8 @@ describe("unified work header", () => {
 			],
 			type: "work",
 			key: "__work__",
+			// Folded group: every record is absorbed into the header summary.
+			childAbsorbBefore: 4,
 		} as any;
 		const header = stripAnsi(formatUnifiedWorkHeader(group, theme));
 		expect(header).toContain("Edited 1 file");
@@ -2537,6 +2692,8 @@ describe("unified work header", () => {
 			],
 			type: "work",
 			key: "__work__",
+			// Folded group: every record is absorbed into the header summary.
+			childAbsorbBefore: 2,
 		} as any;
 		const header = stripAnsi(formatUnifiedWorkHeader(group, theme));
 		expect(header).toContain("+279");
@@ -2570,6 +2727,8 @@ describe("unified work header", () => {
 			],
 			type: "work",
 			key: "__work__",
+			// Folded group: every record is absorbed into the header summary.
+			childAbsorbBefore: 3,
 		} as any;
 		const header = stripAnsi(formatUnifiedWorkHeader(group, theme));
 		expect(header).toContain("Edited 1 file");
@@ -2692,8 +2851,17 @@ describe("unified work header", () => {
 		// Re-render the owner so the shared group block reflects the new wave.
 		r.renderCall("bash", { command: "npm test" }, theme, owner_ctx);
 		row = (owner_state.callText as any).text as string;
+		// The failed bash row is still listed, so the active-error bullet stays.
+		expect(row).toContain("[error:• ]");
+		expect(row).toContain("b.ts");
+
+		// Only a hard boundary folds the group away; then the historical failure
+		// no longer colors the header bullet.
+		r.noteVisibleText();
+		row = (owner_state.callText as any).text as string;
 		expect(row).not.toContain("[error:• ]");
 		expect(row).toContain("[success:• ]");
+		expect(row).not.toContain("b.ts");
 	});
 
 	test("grouped edit child stats use muted diff colors", () => {
@@ -2725,21 +2893,31 @@ describe("unified work header", () => {
 		const row = (owner_state.callText as any).text as string;
 		expect(row).toContain("Edited 2 files");
 		expect(row).toContain("Edited");
+		// Both child rows stay listed with muted diff colors; the header never
+		// duplicates their stats.
 		expect(row).not.toContain("[success:+1]");
-		expect(row).toContain("[error:-1]");
+		expect(row).toContain("[muted:-1]");
 		expect(row).toContain("[muted:+1]");
-		expect(row).not.toContain("a.ts");
+		expect(row).toContain("a.ts");
 		expect(row).toContain("b.ts");
 	});
 });
 
 describe("resolve_compact_group_type", () => {
-	test("routes bash grep into discovery and other bash into bashing", async () => {
-		const { resolve_compact_group_type } = await import("../renderer.ts");
+	test("routes bash grep into discovery, browser tools into the browser bucket", async () => {
+		const { is_compact_groupable_tool, resolve_compact_group_type } = await import("../renderer.ts");
 		expect(resolve_compact_group_type("bash", { command: "grep -r foo ." })).toBe("discovery");
 		expect(resolve_compact_group_type("bash", { command: "npm test" })).toBe("bashing");
 		expect(resolve_compact_group_type("read", { path: "a.ts" })).toBe("discovery");
 		expect(resolve_compact_group_type("edit", { file_path: "a.ts" })).toBe("editing");
+		// Every `browser_*` tool is its own group bucket, and the browser family
+		// plus every native groupable tool pass the lifecycle gate.
+		expect(resolve_compact_group_type("browser_navigate")).toBe("browser");
+		expect(resolve_compact_group_type("browser_cookie_set")).toBe("browser");
+		expect(resolve_compact_group_type("undo_last_replace")).toBeUndefined();
+		expect(is_compact_groupable_tool("browser_mouse_wheel")).toBe(true);
+		expect(is_compact_groupable_tool("read")).toBe(true);
+		expect(is_compact_groupable_tool("undo_last_replace")).toBe(false);
 	});
 });
 
@@ -2751,7 +2929,7 @@ describe("compact tool row colors", () => {
 		const ctx = makeContext("color1", state) as any;
 
 		r.renderCall("read", { path: "a.ts" }, theme, ctx);
-		expect((state.callText as any).text).toContain("[text:*Read*]");
+		expect((state.callText as any).text).toContain("[text:Read]");
 		expect((state.callText as any).text).toContain("[text: a.ts]");
 
 		r.renderResult(
@@ -2762,7 +2940,7 @@ describe("compact tool row colors", () => {
 			theme,
 			{ ...ctx, isError: false },
 		);
-		expect((state.callText as any).text).toContain("[muted:*Read*]");
+		expect((state.callText as any).text).toContain("[muted:Read]");
 		expect((state.callText as any).text).toContain("[muted: a.ts]");
 	});
 
@@ -2794,7 +2972,7 @@ describe("compact tool row colors", () => {
 		);
 		r.renderCall("read", { path: "a.ts" }, theme, owner_ctx);
 		const row = (owner_state.callText as any).text as string;
-		expect(row).toContain("[muted:*Search*]");
+		expect(row).toContain("[muted:Search]");
 		expect(row).toContain("[muted: x]");
 	});
 
@@ -3390,8 +3568,9 @@ describe("running_work_label via formatUnifiedWorkHeader", () => {
 	function headerLabel(group: any): string {
 		const theme = makeTheme() as any;
 		const raw = formatUnifiedWorkHeader(group, theme);
-		// Strip both ANSI codes and the mock theme format `[tag:*text*]`
-		return stripAnsi(raw).replace(/^\[[^:]+:\*/, "").replace(/\*\]$/, "");
+		// Strip both ANSI codes and the mock theme format `[tag:text]` (labels are
+		// no longer bold-wrapped after the Thinking/tool weight swap).
+		return stripAnsi(raw).replace(/^\[[^:]+:/, "").replace(/\]$/, "");
 	}
 
 	test("Exploring when all running records are discovery type (read, ls)", () => {
@@ -3573,8 +3752,9 @@ describe("formatCompactChildRow (native SSOT)", () => {
 		const lines = group_text.split("\n");
 		const child_line = lines[lines.length - 1];
 		expect(child_line).toContain("Reading");
-		// Strip the dim tree-prefix wrapper around the trailing glyph (`[dim:  └]`).
-		const body = child_line.replace(/^\[dim:[^\]]*\]/, "");
+		// Strip the bare tree prefix (`  │`) — the pipe is painted with a fixed
+		// truecolor escape (removed by stripAnsi), not the fake theme's token tag.
+		const body = child_line.replace(/^\s*│/, "");
 		const native = stripAnsi(
 			formatCompactChildRow("read", { path: "c.ts" }, false, undefined, theme),
 		);
@@ -3583,7 +3763,7 @@ describe("formatCompactChildRow (native SSOT)", () => {
 });
 
 describe("CompactRenderer latest visible child prefix", () => {
-	test("only the newest child owns the terminal prefix", () => {
+	test("each accumulated child carries its own branch prefix", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -3612,12 +3792,15 @@ describe("CompactRenderer latest visible child prefix", () => {
 
 		const row = stripAnsi((owner_state.callText as any).text);
 		const lines = row.split("\n");
-		// Header is line 0; only the newest child remains.
-		expect(lines.length).toBe(2);
-		expect(lines[1]).toContain("└");
-		expect(lines[1]).not.toContain("└─");
-		expect(lines[1]).toContain("b.ts");
-		expect(lines[1]).not.toContain("a.ts");
+		// Header is line 0; both children stay listed on the same bare pipe —
+		// there is no `└` corner and no `├` tee.
+		expect(lines.length).toBe(3);
+		expect(lines[1]).toContain("a.ts");
+		expect(lines[1]).toContain("│");
+		expect(lines[2]).toContain("│");
+		expect(lines[2]).toContain("b.ts");
+		expect(row).not.toContain("└");
+		expect(row).not.toContain("├");
 	});
 
 	test("latest child remains the terminal row", () => {
@@ -3659,13 +3842,15 @@ describe("CompactRenderer latest visible child prefix", () => {
 
 		const row = stripAnsi((owner_state.callText as any).text);
 		const lines = row.split("\n");
-		expect(lines.length).toBe(2);
-		// Only the latest c.ts child remains, with the terminal prefix.
-		expect(lines[1]).toContain("└");
-		expect(lines[1]).not.toContain("└─");
-		expect(lines[1]).toContain("c.ts");
-		expect(lines[1]).not.toContain("a.ts");
-		expect(lines[1]).not.toContain("b.ts");
+		expect(lines.length).toBe(4);
+		// Every accumulated child keeps its own row on the same bare pipe,
+		// terminal row included.
+		expect(lines[3]).toContain("  │");
+		expect(row).not.toContain("└");
+		expect(row).not.toContain("├");
+		expect(lines[3]).toContain("c.ts");
+		expect(lines[1]).toContain("a.ts");
+		expect(lines[2]).toContain("b.ts");
 	});
 
 	test("Thinking lane follows the sole latest child", () => {
@@ -3699,18 +3884,20 @@ describe("CompactRenderer latest visible child prefix", () => {
 		r.noteThinking();
 		const row = stripAnsi((owner_state.callText as any).text);
 		const lines = row.split("\n");
-		// Header and the Thinking lane only — the prior tool child collapses
-		// so the Thinking lane replaces it instead of sitting beside it.
-		expect(lines.length).toBe(2);
+		// Header, the earlier accumulated child, then the Thinking lane — the
+		// lane replaces only the LATEST tool child row.
+		expect(lines.length).toBe(3);
+		expect(lines[1]).toContain("a.ts");
 		expect(lines[1]).not.toContain("b.ts");
-		expect(lines[1]).not.toContain("a.ts");
-		// Thinking lane: `└` is the only terminal branch (no `─` connector).
-		expect(lines[1]).toContain("└");
-		expect(lines[1]).not.toContain("└─");
-		expect(lines[1]).toContain("Thinking");
+		expect(lines[2]).not.toContain("b.ts");
+		// Live reasoning keeps the same bare vertical pipe as every other child
+		// row (`│`-only policy: no `─` connector, no `└` corner, no `├` tee).
+		expect(lines[2]).toContain("│");
+		expect(lines[2]).not.toContain("└");
+		expect(lines[2]).toContain("Thinking");
 	});
 
-	test("still-running latest child keeps the terminal prefix", () => {
+	test("still-running latest child keeps the in-flight pipe", () => {
 		const r = new CompactRenderer();
 		const theme = makeTheme() as any;
 		const owner_state: Record<string, any> = {};
@@ -3742,14 +3929,15 @@ describe("CompactRenderer latest visible child prefix", () => {
 
 		const row = stripAnsi((owner_state.callText as any).text);
 		const lines = row.split("\n");
-		expect(lines.length).toBe(2);
-		// Running c.ts is the only visible child and owns `└`.
-		expect(lines[1]).toContain("└");
-		expect(lines[1]).not.toContain("└─");
-		expect(lines[1]).toContain("Reading");
-		expect(lines[1]).toContain("c.ts");
-		expect(lines[1]).not.toContain("a.ts");
-		expect(lines[1]).not.toContain("b.ts");
+		expect(lines.length).toBe(4);
+		// Running c.ts is the accumulated terminal child and keeps the in-flight
+		// pipe; the completed rows above it also keep bare pipes.
+		expect(lines[3]).toContain("│");
+		expect(lines[3]).not.toContain("└");
+		expect(lines[3]).toContain("Reading");
+		expect(lines[3]).toContain("c.ts");
+		expect(lines[1]).toContain("a.ts");
+		expect(lines[2]).toContain("b.ts");
 	});
 
 	test("pure apply_patch group keeps only the latest file child", () => {
@@ -3795,12 +3983,14 @@ describe("CompactRenderer latest visible child prefix", () => {
 
 		const row = stripAnsi((owner_state.callText as any).text);
 		const lines = row.split("\n");
-		// Header plus only the latest visible patch file.
-		expect(lines.length).toBe(2);
-		expect(lines[1]).toContain("└");
-		expect(lines[1]).not.toContain("└─");
-		expect(lines[1]).toContain("second.ts");
-		expect(lines[1]).not.toContain("first.ts");
+		// Header plus every patched file, all on the same bare pipe.
+		expect(lines.length).toBe(3);
+		expect(lines[1]).toContain("first.ts");
+		expect(lines[2]).toContain("  │");
+		expect(lines[2]).toContain("second.ts");
+		expect(row).not.toContain("└");
+		expect(row).not.toContain("├");
+		expect(lines[2]).toContain("second.ts");
 	});
 
 	test("merged row is completed only when all source records are completed", () => {
@@ -3838,10 +4028,10 @@ describe("CompactRenderer latest visible child prefix", () => {
 		const lines = row.split("\n");
 		// Header + one merged child row (terminal, still running).
 		expect(lines.length).toBe(2);
-		// Merged row has a running member → not completed → uses `└` (terminal).
-		expect(lines[1]).toContain("└");
-		expect(lines[1]).not.toContain("└─");
-		expect(lines[1]).not.toContain("│");
+		// Merged row has a running member → not completed → keeps the pipe and
+		// never settles on the `└` corner.
+		expect(lines[1]).toContain("│");
+		expect(lines[1]).not.toContain("└");
 		expect(lines[1]).toContain("Editing");
 	});
 });

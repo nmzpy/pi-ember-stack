@@ -87,7 +87,7 @@ export function fmtCall(
 		typeof path === "string" && path.length > 0
 			? theme.fg("accent", path)
 			: theme.fg("toolOutput", "...");
-	let text = `${theme.fg("toolTitle", theme.bold("replace"))} ${pathDisplay}`;
+	let text = `${theme.fg("toolTitle", "replace")} ${pathDisplay}`;
 
 	if (!state.preview) {
 		return text;

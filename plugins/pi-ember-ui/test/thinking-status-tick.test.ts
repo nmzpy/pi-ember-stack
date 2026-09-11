@@ -87,7 +87,7 @@ describe("thinking status tick lifecycle", () => {
 			now += 50;
 			dispatch_gradient_tick();
 			// External hosts repaint at the shared 20 FPS cadence (every 50 ms
-			// tick), matching the in-group `└ Thinking` lane. The identical-text
+			// tick), matching the in-group `│ Thinking` lane. The identical-text
 			// guard suppresses redundant renders when the phase produced no
 			// visible change; here each tick stages distinct text.
 			expect(invalidate_calls).toBe(3);

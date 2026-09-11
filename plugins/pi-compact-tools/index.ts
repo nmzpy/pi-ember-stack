@@ -12,8 +12,9 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { bashGrepInfo, rewriteGrepToRg } from "./bash-grep.ts";
+import { install_foreign_tool_row_patch } from "./foreign-tool-row.ts";
 import { sync_compact_group_flags } from "./group-flags.ts";
-import { type CompactRenderer, GROUPABLE_TOOLS } from "./renderer.ts";
+import { type CompactRenderer, is_compact_groupable_tool } from "./renderer.ts";
 import { getSharedRenderer } from "./shared-renderer.ts";
 import {
 	setGroupReopenableActive,
@@ -92,6 +93,10 @@ export type CompactToolsOptions = { excludeTools?: readonly string[] };
 
 export default function piCompactToolsPlugin(pi: ExtensionAPI, opts?: CompactToolsOptions): void {
 	const renderer = getSharedRenderer();
+	// Foreign tools (third-party extensions that define no renderer of their
+	// own, e.g. pi-browser's browser_*) render through the same compact row
+	// path instead of Pi's raw content dump. See foreign-tool-row.ts.
+	install_foreign_tool_row_patch();
 	unsubscribe_theme_refresh?.();
 	unsubscribe_theme_refresh = subscribe_theme_refresh((theme) => {
 		renderer.refreshThemeColors(theme);
@@ -132,12 +137,15 @@ export default function piCompactToolsPlugin(pi: ExtensionAPI, opts?: CompactToo
 	});
 	pi.on("tool_call", (event) => {
 		// The model announced/started a tool call: drop the in-group
-		// `└ Thinking` lane synchronously before the call joins or replaces the
+		// `│ Thinking` lane synchronously before the call joins or replaces the
 		// work group. registerCall/appendToGroup also clears it, but announcing
 		// first repaints the shared row text in this same update instead of
 		// waiting on the scheduled microtask invalidation.
 		renderer.announceToolCall();
-		const is_groupable = GROUPABLE_TOOLS.has(event.toolName) || TOOL_FACTORIES[event.toolName];
+		// Browser tools join the shared `Browser` group; every other groupable
+		// tool joins the unified work bundle. A non-groupable tool is a hard
+		// boundary that freezes the live group here.
+		const is_groupable = is_compact_groupable_tool(event.toolName);
 		if (is_groupable) {
 			setTurnToolTranscriptActive(true);
 			renderer.registerCall(event.toolName, event.toolCallId, event.input);

@@ -139,13 +139,13 @@ export function format_quiz_call_row(
 ): string {
 	if (options.hidden) return "";
 	if (options.cancelled) {
-		return statusBulletColor(true, false, theme) + theme.fg("dim", theme.bold("Quiz cancelled"));
+		return statusBulletColor(true, false, theme) + theme.fg("dim", "Quiz cancelled");
 	}
 	const count = args.questions?.length ?? 0;
 	const count_text = theme.fg("muted", `${count} question${count === 1 ? "" : "s"}`);
 	if (options.completed) {
 		return (
-			statusBulletColor(false, true, theme) + theme.fg("muted", theme.bold("Quiz ")) + count_text
+			statusBulletColor(false, true, theme) + theme.fg("muted", "Quiz ") + count_text
 		);
 	}
 	return (

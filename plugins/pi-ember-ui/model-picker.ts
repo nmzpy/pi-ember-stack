@@ -7,7 +7,6 @@ import {
 	type ExtensionContext,
 	ExtensionRunner,
 	type SessionInfo,
-	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type AutocompleteItem,
@@ -36,6 +35,16 @@ import {
 	sync_slash_command_active,
 } from "./layout.ts";
 import { find_exact_model_reference } from "./model-reference.ts";
+import {
+	format_session_age,
+	get_session_catalog,
+	prime_session_catalog,
+	session_catalog_key,
+	session_label,
+	session_search_text,
+	subscribe_session_catalog,
+	type SessionCatalogKey,
+} from "../pi-ember-sessions/session-index.ts";
 import {
 	OPENROUTER_PROVIDER_AUTO,
 	apply_openrouter_routing,
@@ -180,7 +189,6 @@ export const AUTOCOMPLETE_MAX_VISIBLE = 7;
 
 const MODEL_PREFIX = "/model";
 const RESUME_PREFIX = "/resume";
-const SESSION_CACHE_TTL_MS = 5_000;
 
 export type ModelPickResult =
 	| {
@@ -253,10 +261,49 @@ type EditorTabCompletionInternals = {
 /** Pre-patch Editor.submitValue fallback when instance key is missing. */
 let native_editor_submit_value: ((this: Editor) => void) | undefined;
 
-/** Cached session list for /resume argument completions (refreshed on open + TTL). */
-let session_cache: SessionInfo[] | null = null;
-let session_cache_at = 0;
-let session_cache_loading: Promise<SessionInfo[]> | null = null;
+/**
+ * Session directory the live TUI session reads its `/resume` list from.
+ * The catalog itself lives in `pi-ember-sessions/session-index.ts` (SSOT): it
+ * parses every session file once per changed dir, answers from memory
+ * afterwards, and survives across session replacement.
+ */
+function resume_catalog_key(): SessionCatalogKey | undefined {
+	const sm = model_picker_ctx?.sessionManager;
+	const cwd = typeof sm?.getCwd === "function" ? sm.getCwd() : (model_picker_ctx?.cwd as string | undefined);
+	if (!cwd) return undefined;
+	const sessionDir = typeof sm?.getSessionDir === "function" ? sm.getSessionDir() : undefined;
+	return { cwd, sessionDir };
+}
+
+/**
+ * Repaint the open `/resume` list when a background scan replaces the
+ * catalog. A picker hit never waits for a scan, so a cold start (or a dir
+ * whose file set just changed) opens with whatever is cached and fills in
+ * here — the user never retypes a search term to see the rows.
+ */
+let resume_catalog_unsubscribe: (() => void) | undefined;
+
+function is_resume_picker_open(): boolean {
+	const text = (live_editor as { getText?: () => string } | undefined)?.getText?.() ?? "";
+	const trimmed = text.trim();
+	return trimmed === RESUME_PREFIX || trimmed.startsWith(`${RESUME_PREFIX} `);
+}
+
+function bind_resume_catalog_repaint(): void {
+	if (resume_catalog_unsubscribe) return;
+	resume_catalog_unsubscribe = subscribe_session_catalog((key) => {
+		const live = resume_catalog_key();
+		if (session_catalog_key(live) !== session_catalog_key(key)) return;
+		if (!live_editor || !is_resume_picker_open()) return;
+		trigger_slash_argument_autocomplete(live_editor);
+		request_editor_render(live_editor);
+	});
+}
+
+function unbind_resume_catalog_repaint(): void {
+	resume_catalog_unsubscribe?.();
+	resume_catalog_unsubscribe = undefined;
+}
 
 export function cancel_pending_model_pick(): void {
 	if (!pending_pick) return;
@@ -298,7 +345,9 @@ function open_slash_autocomplete(
 
 /** Open /resume session argument autocomplete (chat-pill). */
 export function open_resume_autocomplete(editor: ModelPickerEditor, initialSearch = ""): void {
-	void refresh_session_cache({ force: true });
+	// Catalog is primed at session_start — this is a no-op when it is already
+	// warm (safety net for a session that never primed). Never a forced re-list.
+	prime_session_catalog(resume_catalog_key());
 	open_slash_autocomplete(editor, RESUME_PREFIX, initialSearch);
 }
 const OPENROUTER_PROVIDER_PICKER_TITLE = "OpenRouter upstream provider";
@@ -648,7 +697,8 @@ function handle_resume_command_text(editor: ModelPickerEditor, text: string): bo
 export async function apply_resume_from_term(searchTerm: string): Promise<void> {
 	const ctx = model_picker_ctx;
 	if (!ctx) return;
-	const sessions = await load_sessions_for_ctx(ctx);
+	// Resolve from the primed catalog — a /resume submit never re-lists sessions.
+	const sessions = await get_session_catalog(resume_catalog_key());
 	const match = find_session_reference(searchTerm, sessions);
 	if (!match) {
 		ctx.ui.notify(`Session not found: ${searchTerm}`, "error");
@@ -756,6 +806,16 @@ export function bind_live_editor_for_tests(editor: unknown): void {
 /** Test seam: bind ctx for /resume tests. */
 export function bind_model_picker_ctx_for_tests(ctx: unknown): void {
 	model_picker_ctx = ctx as ExtensionContext | undefined;
+}
+
+/** Test seam: the /resume session catalog exactly as the completions read it. */
+export function get_resume_sessions_for_tests(): Promise<SessionInfo[]> {
+	return get_session_catalog(resume_catalog_key());
+}
+
+/** Test seam: the session dir /resume resolves its catalog for. */
+export function resume_catalog_key_for_tests(): SessionCatalogKey | undefined {
+	return resume_catalog_key();
 }
 
 /** Route shared slash overrides before Pi's overlay selectors. */
@@ -929,41 +989,6 @@ export function wrap_model_picker_editor(
 	};
 }
 
-function format_session_age(date: Date): string {
-	const diffMs = Date.now() - date.getTime();
-	const diffMins = Math.floor(diffMs / 60_000);
-	const diffHours = Math.floor(diffMs / 3_600_000);
-	const diffDays = Math.floor(diffMs / 86_400_000);
-	if (diffMins < 1) return "now";
-	if (diffMins < 60) return `${diffMins}m`;
-	if (diffHours < 24) return `${diffHours}h`;
-	if (diffDays < 7) return `${diffDays}d`;
-	if (diffDays < 30) return `${Math.floor(diffDays / 7)}w`;
-	if (diffDays < 365) return `${Math.floor(diffDays / 30)}mo`;
-	return `${Math.floor(diffDays / 365)}y`;
-}
-
-function session_label(session: SessionInfo): string {
-	const named = session.name?.trim();
-	if (named) return named;
-	const first = session.firstMessage?.replace(/\s+/g, " ").trim() ?? "";
-	if (first) {
-		return first.replace(/\x1b\[48;2;38;38;38m/g, "");
-	}
-	return session.id;
-}
-
-function session_search_text(session: SessionInfo): string {
-	return [
-		session.path,
-		session.id,
-		session.name ?? "",
-		session.firstMessage ?? "",
-		session.cwd ?? "",
-		session.allMessagesText ?? "",
-	].join(" ");
-}
-
 function session_to_autocomplete_item(session: SessionInfo): AutocompleteItem {
 	const age = format_session_age(session.modified);
 	const msgs = session.messageCount;
@@ -973,37 +998,6 @@ function session_to_autocomplete_item(session: SessionInfo): AutocompleteItem {
 		description: `${age} · ${msgs} msg${msgs === 1 ? "" : "s"}`,
 	};
 }
-
-async function load_sessions_for_ctx(ctx: ExtensionContext): Promise<SessionInfo[]> {
-	const sm = ctx?.sessionManager;
-	const cwd = typeof sm?.getCwd === "function" ? sm.getCwd() : (ctx?.cwd as string | undefined);
-	if (!cwd) return [];
-	const sessionDir = typeof sm?.getSessionDir === "function" ? sm.getSessionDir() : undefined;
-	try {
-		return await SessionManager.list(cwd, sessionDir);
-	} catch {
-		return [];
-	}
-}
-
-async function refresh_session_cache(options?: { force?: boolean }): Promise<SessionInfo[]> {
-	const now = Date.now();
-	if (!options?.force && session_cache && now - session_cache_at < SESSION_CACHE_TTL_MS) {
-		return session_cache;
-	}
-	if (session_cache_loading) return session_cache_loading;
-	if (!model_picker_ctx) return session_cache ?? [];
-
-	session_cache_loading = (async () => {
-		const sessions = await load_sessions_for_ctx(model_picker_ctx);
-		session_cache = sessions;
-		session_cache_at = Date.now();
-		session_cache_loading = null;
-		return sessions;
-	})();
-	return session_cache_loading;
-}
-
 /** Resolve a /resume argument to a session path (path, id, or unique name/fuzzy). */
 export function find_session_reference(
 	reference: string,
@@ -1034,7 +1028,7 @@ export function find_session_reference(
 async function get_resume_argument_completions(
 	argumentPrefix: string,
 ): Promise<AutocompleteItem[] | null> {
-	const sessions = await refresh_session_cache();
+	const sessions = await get_session_catalog(resume_catalog_key());
 	if (sessions.length === 0) return null;
 	const prefix = argumentPrefix.trim();
 	const filtered = prefix ? fuzzyFilter(sessions, prefix, session_search_text) : sessions;
@@ -1220,14 +1214,19 @@ export function bind_model_picker_session(ctx: ExtensionContext, pi: ExtensionAP
 	if (ctx.mode !== "tui" || !ctx.hasUI) return;
 	model_picker_ctx = ctx;
 	model_picker_pi = pi;
-	session_cache = null;
-	session_cache_at = 0;
-	session_cache_loading = null;
+	// Warm the /resume catalog in the background — on the first bind it revives
+	// the on-disk index, and every bind re-checks the dir's file set off the
+	// picker path. Picker opens are then pure memory: a hit never lists the
+	// session dir and never waits for a scan, not even the first one.
+	prime_session_catalog(resume_catalog_key());
 	// Inject /resume session completions into the chat-pill autocomplete stack.
 	ctx.ui.addAutocompleteProvider?.(create_resume_autocomplete_provider);
+	// A background scan that lands while the picker is open refreshes its rows.
+	bind_resume_catalog_repaint();
 }
 
 export function reset_model_picker_session(): void {
+	unbind_resume_catalog_repaint();
 	cancel_pending_model_pick();
 	close_model_picker(live_editor);
 	uninstall_model_picker_input_listener();
@@ -1236,9 +1235,10 @@ export function reset_model_picker_session(): void {
 	model_picker_pi = undefined;
 	live_editor = undefined;
 	// switchSession is sticky in command-context-capture — survives shutdown/rebind races.
-	session_cache = null;
-	session_cache_at = 0;
-	session_cache_loading = null;
+	// The /resume catalog is inert session-dir data (no ctx/TUI references), so it
+	// deliberately survives session replacement: the next session_start serves it
+	// unchanged while its background rebuild runs. An in-flight build is left
+	// alone — it publishes only for the live dir.
 }
 
 /**

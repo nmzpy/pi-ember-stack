@@ -13,6 +13,7 @@ import piEmberFffPlugin from "./pi-ember-fff/index.ts";
 import piEmberHasheditPlugin from "./pi-ember-hashedit/index.ts";
 import piEmberImagesPlugin from "./pi-ember-images/index.ts";
 import piEmberScreenPlugin from "./pi-ember-screen/index.ts";
+import piEmberSessionsPlugin from "./pi-ember-sessions/index.ts";
 import piEmberTpsPlugin from "./pi-ember-tps/index.ts";
 import piEmberUiPlugin from "./pi-ember-ui/index.ts";
 import piEmberWebtoolsPlugin from "./pi-ember-webtools/extensions/index.ts";
@@ -34,6 +35,7 @@ const DEFAULT_PLUGIN_IDS: readonly PluginId[] = [
 	"pi-cursor-auth",
 	"pi-novita-auth",
 	"pi-ember-images",
+	"pi-ember-sessions",
 	"pi-custom-agents",
 	"pi-ember-fff",
 	"pi-ember-hashedit",
@@ -79,6 +81,11 @@ const PLUGINS: readonly StackPlugin[] = [
 		id: "pi-ember-images",
 		description: "Windows/macOS clipboard images with compact chat previews",
 		extension: piEmberImagesPlugin,
+	},
+	{
+		id: "pi-ember-sessions",
+		description: "Session catalog (fast /resume) and background conversation fleet",
+		extension: piEmberSessionsPlugin,
 	},
 	{
 		id: "pi-custom-agents",

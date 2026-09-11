@@ -9,12 +9,16 @@ export const THINKING_GRADIENT_PRESET: GradientPreset = "thinking";
 /** Shared visibility threshold for the elapsed Thinking suffix. */
 export const THINKING_ELAPSED_MIN_MS = 1000;
 
-/** Live gradient `Thinking` label at the current sweep phase. */
+/** Live bold gradient `Thinking` label at the current sweep phase. Thinking
+ *  headers carry the bold face that compact tool rows used before the weight
+ *  swap (see AGENTS.md — Thinking bold, completed tools regular). */
 export function render_thinking_gradient_label(): string {
-	return render_gradient(THINKING_STATUS_LABEL, THINKING_GRADIENT_PRESET, get_gradient_phase());
+	return render_gradient(THINKING_STATUS_LABEL, THINKING_GRADIENT_PRESET, get_gradient_phase(), {
+		bold: true,
+	});
 }
 
-/** Render an in-group `└ Thinking` body using the exact same clock phase and
+/** Render an in-group `│ Thinking` body using the exact same clock phase and
  *  duration as the external Thinking header. This must stay render-pure:
  *  changing an offset on every render would make Pi's normal invalidation
  *  frequency change the animation speed. */

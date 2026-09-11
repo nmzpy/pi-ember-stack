@@ -20,6 +20,7 @@ import {
 	buildGroupStaticText,
 	formatCompactChildRow,
 	formatStandaloneCallRow,
+	standaloneCallBulletColor,
 	format_compact_group_child_prefix,
 	groupBulletColorFromFlags,
 	statusBulletColor,
@@ -34,6 +35,7 @@ import {
 	formatElapsed,
 	renderLiveGradient,
 } from "../../../pi-ember-ui/index.ts";
+import { paint_tree_pipe } from "../../../pi-ember-ui/mode-colors.ts";
 import {
 	format_in_group_thinking_row,
 	THINKING_GRADIENT_PRESET,
@@ -85,8 +87,10 @@ export class SubagentToolText implements Component {
 	}
 }
 
-/** Single source for subagent tree branch color — must always be `dim`. */
-const SUBAGENT_TREE_COLOR = "dim";
+/** Lateral gutter for the nested tray rows (two plain spaces). Not a tree
+ *  glyph: the visible pipes are painted by `paint_tree_pipe()` from
+ *  pi-ember-ui/mode-colors.ts, so no color is applied to whitespace. */
+const SUBAGENT_TRAY_INDENT = "  ";
 
 /** Detect rendered content after Markdown's ANSI styles are removed. */
 const ANSI_SGR_PATTERN = new RegExp(`${String.fromCharCode(27, 92, 91)}[0-9;]*m`, "g");
@@ -99,27 +103,31 @@ function hasVisibleTrayContent(text: string): boolean {
  * Outer subagent-tray branch. Inner work-group child prefixes are built by
  * `format_compact_group_child_prefix()` from pi-compact-tools so completed
  * rows and live Thinking lanes share the main renderer's one spacing policy.
+ * The outer branch is one bare vertical pipe for every row — a settled tray
+ * keeps the same gutter as a running one (no `└` terminator; only the bottom
+ * rule marks completion).
  */
-const SUBAGENT_TRAY_PIPE = "\u2502"; // │ — outer branch continuation
-const SUBAGENT_TRAY_LAST = "\u2514"; // └ — outer branch terminator (latest tool-call block)
+const SUBAGENT_TRAY_PIPE = "\u2502"; // │ — outer branch continuation (running and settled)
 const SUBAGENT_TRAY_GAP = " "; // outer-branch slot for trailing Thinking/status rows
 
 /**
  * Flush 1-column tree glyph for single-mode subagent child rows (no header).
- * No trailing space, so `  └Thinking` and `  └bash -c …` sit flush against
+ * No trailing space, so `  │Thinking` and `  │bash -c …` sit flush against
  * the content — the shared compact-tools TREE_BRANCH_* constants carry a
  * trailing space for compact group children and stay untouched. Subagent-only
  * composition seam, like the SUBAGENT_TRAY_* flush glyphs above.
+ *
+ * SSOT mirror of pi-compact-tools `format_compact_group_child_prefix`: every
+ * child row — in flight or completed — keeps the bare vertical pipe.
  */
-const SUBAGENT_BRANCH_LAST = "\u2514"; // └
-
+const SUBAGENT_BRANCH_PIPE = "\u2502"; // │
 /** Render the transient hidden-mode finalization row with Thinking's gradient. */
 function renderLiveFinishingRow(
 	theme: ThemeLike,
-	treePrefix = `  ${SUBAGENT_BRANCH_LAST}`,
+	treePrefix = `  ${SUBAGENT_BRANCH_PIPE}`,
 ): string {
 	return (
-		theme.fg(SUBAGENT_TREE_COLOR, treePrefix) +
+		paint_tree_pipe(treePrefix) +
 		renderLiveGradient("Finishing", THINKING_GRADIENT_PRESET)
 	);
 }
@@ -135,7 +143,7 @@ type TrayRow = {
 	/** Explicit outer-tree separator between two chronological segments. */
 	separator?: boolean;
 	/** Force the outer tray branch glyph instead of deriving it from the header index. */
-	outer?: typeof SUBAGENT_TRAY_PIPE | typeof SUBAGENT_TRAY_LAST | typeof SUBAGENT_TRAY_GAP;
+	outer?: typeof SUBAGENT_TRAY_PIPE | typeof SUBAGENT_TRAY_GAP;
 };
 
 /**
@@ -239,11 +247,13 @@ function buildLiveGroup(rows: SubagentLiveToolRow[]): DiscoveryGroup {
 /**
  * In-group Thinking lane row body — shared by the single-tool and grouped
  * burst paths so the lane is identical whether the burst has one or many rows.
+ * The lane carries the same bare vertical pipe as every other child row (SSOT
+ * prefix policy in pi-compact-tools/renderer.ts — no `└` corner, no `├` tee).
  */
 function renderLiveThinkingLane(theme: ThemeLike, toolCallId?: string): string {
 	const elapsed = format_subagent_thinking_elapsed_suffix(theme, toolCallId);
 	return (
-		theme.fg(SUBAGENT_TREE_COLOR, format_compact_group_child_prefix("last", "")) +
+		paint_tree_pipe(format_compact_group_child_prefix("")) +
 		format_in_group_thinking_row(elapsed)
 	);
 }
@@ -374,7 +384,7 @@ export class SubagentLiveOutputText implements Component {
 					rows.push({ body, header: false });
 				}
 			} else if (segment.kind === "work") {
-				// In-group `└ Thinking` owns the slot only when this burst is the
+				// In-group `│ Thinking` owns the slot only when this burst is the
 				// tray's last segment and the child agent is actively reasoning
 				// with parent thinking blocks hidden.
 				const thinking_follows = !this.showText && this.isThinking && i === segments.length - 1;
@@ -382,17 +392,19 @@ export class SubagentLiveOutputText implements Component {
 					// A single-tool burst is a bare standalone compact row — no
 					// `Explored 1 file` header. Same `records.length > 1` threshold
 					// as the main conversation's renderCallInner. The SSOT formatter
-					// owns verb + path + stats; only the leading `•` bullet is
-					// stripped because the outer tray branch already marks the block.
+					// owns verb + path + stats; only the leading bullet is stripped
+					// because the outer tray branch already marks the block. The
+					// SSOT helper picks the same prefix the formatter just painted
+					// (browser rows carry the `◇` diamond instead of `• `).
 					const record = liveRowToCall(segment.rows[0], 0);
 					const standalone = formatStandaloneCallRow(record, theme);
-					const bullet = statusBulletColor(record.isError, record._completed === true, theme);
+					const bullet = standaloneCallBulletColor(record, theme);
 					const body = standalone.startsWith(bullet) ? standalone.slice(bullet.length) : standalone;
 					rows.push({ body, header: false });
 				} else if (segment.rows.length > 1) {
 					const group = buildLiveGroup(segment.rows);
 					// With a hidden-thinking lane below, the prior tool child collapses
-					// (the in-group `└ Thinking` lane replaces it) via buildGroupStaticText's
+					// (the in-group `│ Thinking` lane replaces it) via buildGroupStaticText's
 					// show_thinking path (same SSOT as the main renderer). Production call
 					// sites pass thinkingBlocksVisible = !isThinkingBlocksHidden(), so the
 					// global flag is true whenever this tray is in hidden mode (showText === false).
@@ -405,12 +417,12 @@ export class SubagentLiveOutputText implements Component {
 				}
 				if (thinking_follows) {
 					// The thinking lane renders below the work block with only its
-					// own `└` prefix: the outer tray branch must not add a second
-					// terminal `└`, so force the gap outer slot.
+					// own inner `│` prefix, so the outer tray branch must not add a
+					// second gutter glyph; force the gap outer slot.
 					rows.push({
 						body: renderLiveThinkingLane(theme, this.toolCallId),
 						header: false,
-						// The gap slot keeps the inner `└` the only terminal marker.
+						// The gap slot keeps the inner `│` the only gutter glyph.
 						outer: SUBAGENT_TRAY_GAP,
 					});
 				}
@@ -454,11 +466,15 @@ export class SubagentLiveOutputText implements Component {
 		}
 		// The tray's branch glyph marks the terminal row of the LAST chronological
 		// segment: a trailing multi-row work block marks its group header (its child
-		// rows keep their own inner `└`), every other trailing segment marks its last
-		// visible row. Anchoring on the last group header of the whole tray instead
-		// stripped the pipe — and the branch line itself — from every row of a later
-		// segment: visible reasoning after a tool burst rendered as bare gaps and
-		// unpiped text, and a trailing single-tool row lost its `└`.
+		// rows keep their own inner prefix), every other trailing segment marks its
+		// last visible row. Anchoring on the last group header of the whole tray
+		// instead stripped the pipe — and the branch line itself — from every row of
+		// a later segment: visible reasoning after a tool burst rendered as bare gaps
+		// and unpiped text, and a trailing single-tool row lost its branch glyph.
+		//
+		// Every row up to and including that terminal row keeps the one vertical
+		// pipe — running and settled alike. There is no `└` terminator; the bottom
+		// rule below is the only completion marker.
 		const lastSegment = segmentRows[segmentRows.length - 1];
 		const trailing_group_block = lastSegment.kind === "work" && lastSegment.rows.length > 1;
 		let lastHeaderIndex = -1;
@@ -488,7 +504,7 @@ export class SubagentLiveOutputText implements Component {
 				if (!has_following_content) continue;
 				out.push(
 					truncateToWidth(
-						this.treePrefix + fg(SUBAGENT_TREE_COLOR, SUBAGENT_TRAY_PIPE),
+						this.treePrefix + paint_tree_pipe(SUBAGENT_TRAY_PIPE),
 						Math.max(1, width),
 					),
 				);
@@ -496,13 +512,8 @@ export class SubagentLiveOutputText implements Component {
 			}
 			const body = rows[i].body;
 			const outer =
-				rows[i].outer ??
-				(i < lastHeaderIndex
-					? SUBAGENT_TRAY_PIPE
-					: i === lastHeaderIndex
-						? SUBAGENT_TRAY_LAST
-						: SUBAGENT_TRAY_GAP);
-			const outerStyled = outer === SUBAGENT_TRAY_GAP ? outer : fg(SUBAGENT_TREE_COLOR, outer);
+				rows[i].outer ?? (i <= lastHeaderIndex ? SUBAGENT_TRAY_PIPE : SUBAGENT_TRAY_GAP);
+			const outerStyled = outer === SUBAGENT_TRAY_GAP ? outer : paint_tree_pipe(outer);
 			const prefix = this.treePrefix + outerStyled;
 			if (hasVisibleTrayContent(body)) {
 				out.push(truncateToWidth(`${prefix}${body}`, Math.max(1, width)));
@@ -516,7 +527,7 @@ export class SubagentLiveOutputText implements Component {
 				// visible header) remain unprefixed.
 				out.push(
 					truncateToWidth(
-						this.treePrefix + fg(SUBAGENT_TREE_COLOR, SUBAGENT_TRAY_PIPE),
+						this.treePrefix + paint_tree_pipe(SUBAGENT_TRAY_PIPE),
 						Math.max(1, width),
 					),
 				);
@@ -722,7 +733,7 @@ export function renderSingleResult(
 
 	if (expanded) {
 		const container = new Container();
-		let header = `${icon} ${theme.fg("dim", theme.bold(result.agent))}`;
+		let header = `${icon} ${theme.fg("dim", result.agent)}`;
 		if (isError && result.stopReason) {
 			const reasonColor = result.stopReason === "timeout" ? "warning" : "error";
 			header += ` ${theme.fg(reasonColor, `[${result.stopReason}]`)}`;
@@ -765,7 +776,7 @@ export function renderSingleResult(
 	}
 
 	// Collapsed
-	let text = `${icon} ${theme.fg("toolTitle", theme.bold(result.agent))}`;
+	let text = `${icon} ${theme.fg("toolTitle", result.agent)}`;
 	if (isError && result.stopReason) {
 		const reasonColor = result.stopReason === "timeout" ? "warning" : "error";
 		text += ` ${theme.fg(reasonColor, `[${result.stopReason}]`)}`;
@@ -918,9 +929,8 @@ export function renderSubagentThinkingRow(
 	treePrefix: string,
 	toolCallId?: string,
 ): string {
-	const fg = theme.fg.bind(theme);
 	const elapsed = format_subagent_thinking_elapsed_suffix(theme, toolCallId);
-	return fg(SUBAGENT_TREE_COLOR, treePrefix) + format_in_group_thinking_row(elapsed);
+	return paint_tree_pipe(treePrefix) + format_in_group_thinking_row(elapsed);
 }
 
 function renderSubagentChildRow(
@@ -949,11 +959,10 @@ function renderLatestToolRow(
 	if (!row.result?.latestToolCall) return undefined;
 	const { name, args } = row.result.latestToolCall;
 	const completed = row.status !== "running";
-	const fg = theme.fg.bind(theme);
 	// DRY with the compact group child row formatter: running agents get the
 	// gradient verb, completed/failed agents get the muted past-tense form.
 	const body = formatCompactChildRow(name, args, completed, undefined, theme);
-	return `${fg(SUBAGENT_TREE_COLOR, treePrefix)}${body}`;
+	return `${paint_tree_pipe(treePrefix)}${body}`;
 }
 
 const DELEGATING_LABEL = "Delegating";
@@ -1017,9 +1026,13 @@ interface AgentRowDescriptor {
 	toolCallId?: string;
 }
 
-/** Flush child prefix for the nested latest-tool/Thinking row under an agent. */
+/**
+	 * Flush child prefix for the nested latest-tool / Thinking / Finishing row
+	 * under an agent header — one bare vertical pipe, the only gutter glyph this
+	 * renderer draws.
+	 */
 function childPrefix(): string {
-	return `  ${SUBAGENT_BRANCH_LAST}`;
+	return `  ${SUBAGENT_BRANCH_PIPE}`;
 }
 
 /**
@@ -1063,7 +1076,7 @@ function addAgentBlockToContainer(
 			container.addChild(
 				new SubagentLiveOutputText(
 					liveItems,
-					theme.fg(SUBAGENT_TREE_COLOR, "  "),
+					SUBAGENT_TRAY_INDENT,
 					row.status === "running",
 					theme,
 					row.result?.isThinking === true,

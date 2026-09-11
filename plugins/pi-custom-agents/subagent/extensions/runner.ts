@@ -30,6 +30,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { is_benign_compact_error, should_skip_compact } from "../../auto-continue.ts";
+import { HOST_PROCESS_SAFETY_GUIDANCE } from "../../host-process-safety.ts";
 import { infer_bare_agent_name } from "../../subagent-policy.ts";
 import { strip_think_tags } from "../../../pi-ember-ui/mode-colors.ts";
 import {
@@ -128,14 +129,39 @@ export function build_subagent_settings(): {
 	};
 }
 
+/**
+ * Extension paths every implementation agent needs in order to LOOK at what it
+ * built. Without these, a Coder asked to verify a UI has only `bash` and starts
+ * writing throwaway CDP/screenshot scripts — the pattern this exists to kill.
+ *
+ * - `pi-ember-screen` (in this repo) provides `window_list`/`window_screenshot`.
+ * - `pi-browser` is an optional user-local extension: it is discovered from Pi's
+ *   agent directory and silently skipped when the user does not have it, so a
+ *   machine without it is unaffected. Never hardcode a user home path — Pi's
+ *   `getAgentDir()` is the SSOT for the location.
+ */
+export function visual_extension_paths(): string[] {
+  const paths: string[] = [];
+  const screen = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../pi-ember-screen/index.ts");
+  if (fs.existsSync(screen)) paths.push(screen);
+  try {
+    const browser = path.join(getAgentDir(), "extensions", "pi-browser", "index.ts");
+    if (fs.existsSync(browser)) paths.push(browser);
+  } catch {
+    // No agent dir (unusual environment): browser tools simply stay unavailable.
+  }
+  return paths;
+}
+
 export async function load_subagent_extensions(cwd: string): Promise<LoadExtensionsResult> {
-	// The compaction-wiring extension makes native reason=overflow/threshold
-	// compaction use Ember's structured stack summary (session_before_compact hook)
-	// instead of Pi's default summarizer. The bash-rules extension enforces the
-	// same git checkout/stash/restore (and user-defined) bashRules on child
-	// sessions that the parent session uses.
-	const paths = [COMPACTION_WIRING_PATH, SUBAGENT_BASH_RULES_PATH];
-	return discoverAndLoadExtensions(paths, cwd);
+  // The compaction-wiring extension makes native reason=overflow/threshold
+  // compaction use Ember's structured stack summary (session_before_compact hook)
+  // instead of Pi's default summarizer. The bash-rules extension enforces the
+  // same git checkout/stash/restore (and user-defined) bashRules on child
+  // sessions that the parent session uses. The visual extensions give the child
+  // the visual-verification tools listed in its tool set.
+  const paths = [COMPACTION_WIRING_PATH, SUBAGENT_BASH_RULES_PATH, ...visual_extension_paths()];
+  return discoverAndLoadExtensions(paths, cwd);
 }
 
 async function compact_subagent_session(
@@ -1248,7 +1274,8 @@ export async function runSubAgent(options: {
 		contextFiles.length > 0
 			? `${contextFiles.map((f) => f.content).join("\n\n---\n\n")}\n\n---\n\n`
 			: "";
-	const fullSystemPrompt = contextPrefix + systemPrompt + PARALLEL_TOOL_CALL_GUIDANCE;
+	const fullSystemPrompt =
+		contextPrefix + systemPrompt + PARALLEL_TOOL_CALL_GUIDANCE + HOST_PROCESS_SAFETY_GUIDANCE;
 
 	const result: SubAgentResult = {
 		agent: agentName,
@@ -1359,6 +1386,13 @@ export async function runSubAgent(options: {
 		} else {
 			sessionManager = SessionManager.inMemory(cwd);
 		}
+
+		// Name the child session after its agent ("Coder A", "scout", ...). Pi hands
+		// that name to every extension context of the session, so the agent stays
+		// identifiable wherever a bare session id would not be — pi-browser titles
+		// the browser tab it assigns this agent with it. A resumed session simply
+		// re-asserts the name it was created with.
+		sessionManager.appendSessionInfo(agentName);
 
 		if (combinedSignal) {
 			if (combinedSignal.aborted) {
